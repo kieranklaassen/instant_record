@@ -41,6 +41,12 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_21_000102) do
     t.datetime "updated_at", null: false
   end
 
+  create_table "instant_record_sync_metadata", primary_key: "key", id: :string, force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.string "value"
+  end
+
   create_table "issues", id: :string, force: :cascade do |t|
     t.datetime "created_at", null: false
     t.integer "server_version", default: 0, null: false

@@ -12,14 +12,13 @@ module InstantRecord
       before_create :assign_instant_record_uuid
 
       if InstantRecord.browser?
-        before_save { self.sync_state = "pending" }
-        before_destroy { true } # keep callback order stable across runtimes
+        before_save { self.sync_state = "pending" unless InstantRecord::Client.applying_remote? }
 
         # after_create/update/destroy run INSIDE the wrapping transaction
         # (unlike after_commit), which is what gives us write+outbox atomicity.
-        after_create  { record_outbox_mutation("create") }
-        after_update  { record_outbox_mutation("update") }
-        after_destroy { record_outbox_mutation("destroy") }
+        after_create  { record_outbox_mutation("create") unless InstantRecord::Client.applying_remote? }
+        after_update  { record_outbox_mutation("update") unless InstantRecord::Client.applying_remote? }
+        after_destroy { record_outbox_mutation("destroy") unless InstantRecord::Client.applying_remote? }
       end
     end
 

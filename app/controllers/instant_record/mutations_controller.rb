@@ -1,5 +1,11 @@
 module InstantRecord
   class MutationsController < ActionController::API
+    before_action :set_cors_headers
+
+    def preflight
+      head :no_content
+    end
+
     # Accepts a batch of client mutations. Each mutation is applied in its own
     # transaction: record write + version bump + change-log row + ledger row.
     # Replayed mutation ids return their original result (R7).
@@ -12,6 +18,14 @@ module InstantRecord
     end
 
     private
+
+    # The demo PWA is served from a different origin (Vite dev server) than
+    # the Rails sync server; auth is out of scope for the spike.
+    def set_cors_headers
+      headers["Access-Control-Allow-Origin"] = "*"
+      headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+      headers["Access-Control-Allow-Headers"] = "Content-Type, Last-Event-ID"
+    end
 
     def apply_mutation(mutation)
       if (existing = AppliedMutation.find_by(mutation_id: mutation[:id]))

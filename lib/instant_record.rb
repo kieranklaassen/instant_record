@@ -26,4 +26,6 @@ end
 ActiveSupport.on_load(:active_record) do
   require "instant_record/syncable"
   require "instant_record/outbox_mutation"
+  require "instant_record/sync_metadata"
+  require "instant_record/client"
 end
