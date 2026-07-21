@@ -1,0 +1,12 @@
+*.gem
+Gemfile.lock
+.bundle/
+pkg/
+tmp/
+log/
+demo/tmp/
+demo/log/
+demo/storage/
+demo/public/wasm/
+demo/node_modules/
+.DS_Store
