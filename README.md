@@ -144,6 +144,44 @@ Useful helpers:
 - `server_only { ... }` / `browser_only { ... }` — runtime-scoped model rules
 - `InstantRecord.browser?` — the underlying runtime check, for anywhere else
 
+#### Server-only controller behavior: auth and scoping
+
+Controllers load in both runtimes too — the browser runs them against local data, the server against Postgres. Anything that depends on sessions, cookies, or secrets exists only on the server, so scope it there:
+
+```ruby
+class IssuesController < ApplicationController
+  extend InstantRecord::RuntimeScoped
+
+  server_only do
+    before_action :authenticate_user!   # sessions and secrets: server only
+  end
+
+  browser_only do
+    skip_forgery_protection             # no CSRF secrets in the local runtime
+  end
+
+  def index
+    @issues = issues_scope.order(created_at: :desc)
+  end
+
+  private
+
+  def issues_scope
+    # Server: enforce per-user scoping. Browser: the local database already
+    # holds only what the server synced to this client, so Issue.all IS the
+    # scoped set.
+    InstantRecord.browser? ? Issue.all : current_user.issues
+  end
+end
+```
+
+**Where authorization actually lives:** browser-side checks are UX, never enforcement — the user owns the client and everything in it. Real enforcement has exactly two places, both on the server:
+
+1. **The mutations endpoint** — server-side validations and `server_only` model rules reject writes the client wasn't allowed to make; the client rolls back.
+2. **What you sync down** — a client can only render what the change stream delivered to it. (Per-user scoping of the stream itself — `syncable_to` — is on the roadmap; today the PoC syncs every registered model to every client.)
+
+A `server_only` controller filter protects the server-rendered surface; it cannot and need not protect the browser's local rendering.
+
 ### 5. Sync just happens
 
 The sync loop is Ruby, configured in Ruby:

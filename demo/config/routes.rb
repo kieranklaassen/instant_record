@@ -11,7 +11,9 @@ Rails.application.routes.draw do
   # get "manifest" => "rails/pwa#manifest", as: :pwa_manifest
   # get "service-worker" => "rails/pwa#service_worker", as: :pwa_service_worker
 
-  resources :issues, only: [:create, :update, :destroy]
+  # index is routed explicitly too: the deployed PWA's static index.html
+  # shadows root when served from public/ (ActionDispatch::Static wins).
+  resources :issues, only: [:index, :create, :update, :destroy]
 
   # Defines the root path route ("/")
   root "issues#index"

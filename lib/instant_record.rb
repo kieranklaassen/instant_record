@@ -1,5 +1,6 @@
 require "instant_record/version"
 require "instant_record/configuration"
+require "instant_record/runtime_scoped"
 require "wasmify-rails" # browser build tasks + PGlite adapter; inert outside wasm builds
 require "instant_record/engine" if defined?(Rails::Engine)
 
