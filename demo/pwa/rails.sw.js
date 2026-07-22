@@ -109,12 +109,26 @@ const installApp = async () => {
   await initVM(progress);
 };
 
+// Stamped by instant_record:build with the app.wasm digest. A rebuild
+// changes this constant, which changes the service worker's bytes, which
+// makes the browser install the new worker on the next navigation — that is
+// the whole update mechanism for already-installed clients.
+const BUILD_VERSION = "0f0724680b7f";
+
 self.addEventListener("activate", (event) => {
-  console.log("[rails-web] Activate Service Worker");
+  console.log(`[rails-web] Activate Service Worker (build ${BUILD_VERSION})`);
+  // Take over open tabs immediately and reload them onto the new bundle;
+  // without this, old tabs keep the previous worker's VM forever.
+  event.waitUntil(
+    self.clients.claim().then(async () => {
+      const clients = await self.clients.matchAll({ type: "window" });
+      clients.forEach((client) => client.postMessage({ type: "sw_updated" }));
+    }),
+  );
 });
 
 self.addEventListener("install", (event) => {
-  console.log("[rails-web] Install Service Worker");
+  console.log(`[rails-web] Install Service Worker (build ${BUILD_VERSION})`);
   event.waitUntil(installApp().then(() => self.skipWaiting()));
 });
 

@@ -31,10 +31,12 @@
     <%= yield %>
 
     <script>
-      // Every demo reloads when the service worker applies synced changes.
+      // Every demo reloads when the service worker applies synced changes,
+      // and when a newly built service worker takes over (sw_updated).
       if ("serviceWorker" in navigator) {
         navigator.serviceWorker.addEventListener("message", (event) => {
-          if (event.data && event.data.type === "records_changed") {
+          const type = event.data && event.data.type;
+          if (type === "records_changed" || type === "sw_updated") {
             window.location.reload();
           }
         });
