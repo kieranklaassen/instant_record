@@ -1,9 +1,11 @@
 require "json"
+require "instant_record/client/transport"
+require "instant_record/client/notifier"
 
 module InstantRecord
-  # Browser-side sync client. All entry points take/return JSON strings so the
-  # JavaScript bridge (service worker) can call them via evalAsync and shuttle
-  # payloads to fetch/EventSource, which Ruby cannot own in wasm.
+  # Browser-side sync client. Ruby owns the whole sync loop — transport
+  # included — via JS fetch interop; the service worker shim only schedules
+  # `InstantRecord.tick` (wasm Ruby cannot sleep without blocking the VM).
   module Client
     class << self
       # Applying remote state must never enqueue new outbox mutations.
@@ -14,12 +16,60 @@ module InstantRecord
       ensure
         @applying_remote = false
       end
+
+      # Seams: real implementations are JS-interop-backed and browser-only;
+      # tests inject doubles so the loop runs under CRuby.
+      attr_writer :transport, :notifier
+
+      def transport
+        @transport ||= Transport::JsFetch.new
+      end
+
+      def notifier
+        @notifier ||= Notifier::JsClients.new
+      end
+
+      # Outbox up. Returns true when anything was sent and applied.
+      def drain
+        mutations = JSON.parse(InstantRecord.pending_mutations_json)
+        return false if mutations.empty?
+
+        body = transport.post_json("/mutations", { mutations: mutations })
+        InstantRecord.apply_results(JSON.generate(body["results"]))
+        true
+      rescue Transport::Error => e
+        InstantRecord.log_sync_failure("drain", e)
+        false
+      end
+
+      # Changes down. Returns true when any remote change was applied.
+      def poll_changes
+        changed = false
+
+        transport.each_event("/events?after=#{InstantRecord.cursor}") do |event|
+          InstantRecord.apply_change(JSON.generate(event))
+          changed = true
+        end
+
+        changed
+      rescue Transport::Error => e
+        InstantRecord.log_sync_failure("poll", e)
+        changed || false
+      end
+
+      def notify_records_changed
+        notifier.records_changed
+      end
     end
   end
 
   class << self
     def pending_count
       OutboxMutation.count
+    end
+
+    def log_sync_failure(phase, error)
+      warn "[instant_record] #{phase} failed (offline?): #{error.message}"
     end
 
     def cursor

@@ -1,4 +1,5 @@
 require "instant_record/version"
+require "instant_record/configuration"
 require "wasmify-rails" # browser build tasks + PGlite adapter; inert outside wasm builds
 require "instant_record/engine" if defined?(Rails::Engine)
 
@@ -7,6 +8,47 @@ module InstantRecord
     # True when running inside the browser (ruby.wasm).
     def browser?
       RUBY_PLATFORM.include?("wasm")
+    end
+
+    def config
+      @config ||= Configuration.new
+    end
+
+    def configure
+      yield config
+    end
+
+    # Begin background sync (browser runtime only; a no-op on the server).
+    # The gem's service worker shim schedules `tick` on config.sync_interval.
+    def start
+      return false unless browser?
+
+      @started = true
+    end
+
+    def started? = !!@started
+
+    # One sync pass: drain the outbox up, poll changes down, notify tabs.
+    # Single-flight: a tick that arrives while one is in flight is skipped.
+    def tick
+      return :not_started unless started?
+      return :busy if @ticking
+
+      @ticking = true
+      begin
+        changed = Client.drain
+        changed = Client.poll_changes || changed
+        Client.notify_records_changed if changed
+        :ok
+      ensure
+        @ticking = false
+      end
+    end
+
+    # Manual one-shot sync, usable before/without `start`.
+    def sync_now
+      @started = true
+      tick
     end
 
     # Optional explicit allowlist of syncable models. Without it, any model
