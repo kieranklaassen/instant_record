@@ -27,11 +27,14 @@ APP_BYTES=$(stat -f%z pwa/public/app.wasm)
 CORE_BYTES=$(stat -f%z tmp/wasmify/ruby-core.wasm 2>/dev/null || echo -1)
 
 # Gate 1: the same config packed for wasmtime boots and serves a request.
+# (Capture output, then match — grep -q on a live pipe + pipefail turns an
+# early exit into a spurious failure via SIGPIPE.)
 bin/rails wasmify:pack:core > tmp/measure_packcore.log 2>&1 || fail "pack:core failed"
-if bin/rails wasmify:pack:core:verify 2>&1 | grep -q '^200$'; then BOOT=1; else BOOT=0; fi
+VERIFY_OUT=$(bin/rails wasmify:pack:core:verify 2>&1 || true)
+case "$VERIFY_OUT" in *"200"*) BOOT=1;; *) BOOT=0;; esac
 
 # Gate 2: the instant_record gem is inside the bundle.
-if strings pwa/public/app.wasm 2>/dev/null | grep -qm1 "instant_record/syncable"; then GEM=1; else GEM=0; fi
+GEM=$(strings pwa/public/app.wasm 2>/dev/null | grep -cm1 "InstantRecord::Syncable" || true)
 
 GZIP_BYTES=$(gzip -c pwa/public/app.wasm | wc -c | tr -d ' ')
 

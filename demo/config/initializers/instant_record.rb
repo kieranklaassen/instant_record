@@ -4,10 +4,15 @@ InstantRecord.configure do |config|
   # Served any other way (the Rails app itself, a tunnel, production), the
   # same-origin default ("/instant_record") is already right.
   if InstantRecord.browser?
-    require "js"
-    location = JS.global[:location]
-    if location[:port].to_s == "5173"
-      config.endpoint = "http://#{location[:hostname]}:3000/instant_record"
+    begin
+      require "js"
+      location = JS.global[:location]
+      if location[:port].to_s == "5173"
+        config.endpoint = "http://#{location[:hostname]}:3000/instant_record"
+      end
+    rescue LoadError
+      # wasm without a JS host (e.g. wasmtime/WASI verify builds): the js gem
+      # is excluded there; the same-origin default applies.
     end
   end
 end
