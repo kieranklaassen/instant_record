@@ -23,13 +23,16 @@ module InstantRecord
       after_destroy { record_outbox_mutation("destroy") if instant_record_local_write? }
 
       # Server-originated writes (jobs, console, seeds) are change-logged so
-      # they stream to clients like any other change. Client mutations are
-      # excluded — MutationApplier versions and logs those itself.
+      # they stream to clients like any other change. Creates and updates from
+      # client mutations are excluded — MutationApplier versions and logs those
+      # itself. Destroys are logged even while a client mutation is applied:
+      # cascaded dependent: :destroy rows fire only here, and skipping them
+      # would leave other clients holding orphaned child rows.
       before_create { self.server_version = 1 if instant_record_server_write? }
       before_update { self.server_version += 1 if instant_record_server_write? }
       after_create  { record_server_change("create") if instant_record_server_write? }
       after_update  { record_server_change("update") if instant_record_server_write? }
-      after_destroy { record_server_change("destroy") if instant_record_server_write? }
+      after_destroy { record_server_change("destroy") unless InstantRecord.browser? }
     end
 
     class_methods do

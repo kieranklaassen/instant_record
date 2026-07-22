@@ -65,8 +65,13 @@ module InstantRecord
         end
       when "destroy"
         record = model.find_by(id: @mutation[:record_id])
-        record&.destroy!
-        log_destroy(model)
+        if record
+          # Syncable's after_destroy logs this destroy and every cascaded
+          # dependent: :destroy row; logging here would duplicate the parent.
+          record.destroy!
+        else
+          log_destroy(model)
+        end
         { status: "applied" }
       else
         { status: "rejected", reason: "unknown operation" }
