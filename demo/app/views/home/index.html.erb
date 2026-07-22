@@ -1,0 +1,39 @@
+<% content_for(:title, "InstantRecord Demos") %>
+
+<div class="page home">
+  <header class="page-header">
+    <p class="micro-label">InstantRecord</p>
+    <h1>Rails models that run in the&nbsp;browser.</h1>
+    <p class="lede">
+      These demos are ordinary Rails controllers and views — compiled to WebAssembly
+      and rendered inside a service worker, backed by Postgres-in-the-browser.
+      Writes commit locally and instantly, queue in a durable outbox, and sync to the
+      server when you're online. Everyone else's changes stream back down over
+      server-sent events. Go offline; keep working.
+    </p>
+    <p class="meta">
+      Runtime: <strong><%= InstantRecord.browser? ? "browser (ruby.wasm + PGlite)" : "server (CRuby + Postgres)" %></strong>
+    </p>
+  </header>
+
+  <ul class="demo-index">
+    <li>
+      <%= link_to todo_root_path, class: "demo-card" do %>
+        <p class="micro-label">Demo 01</p>
+        <h2>Todo</h2>
+        <p>Optimistic local writes, sync badges, and a server-only validation that
+        rejects a title after the browser already accepted it.</p>
+        <span class="go">Open →</span>
+      <% end %>
+    </li>
+    <li>
+      <%= link_to slack_root_path, class: "demo-card" do %>
+        <p class="micro-label">Demo 02</p>
+        <h2>Swiss Slack</h2>
+        <p>Channels, DMs, and fake users who reply from the server — watch their
+        messages arrive over SSE without touching a WebSocket. Swag as we wack.</p>
+        <span class="go">Open →</span>
+      <% end %>
+    </li>
+  </ul>
+</div>

@@ -18,8 +18,17 @@ Rails.application.routes.draw do
     root "issues#index" # /todo
   end
 
-  # Note: the deployed PWA's static index.html shadows root when served from
-  # public/ (ActionDispatch::Static wins); in the browser runtime all fetches
-  # go through Rack, so this root is what visitors see.
-  root "todo/issues#index"
+  namespace :slack do
+    resources :channels, only: [:show]
+    resources :messages, only: [:create]
+    post "reset", to: "resets#create"
+    root "channels#index" # /slack
+  end
+
+  # The deployed PWA's static index.html (boot splash) shadows root when
+  # served from public/ (ActionDispatch::Static wins). In the browser runtime
+  # all fetches go through Rack, so this root is what visitors see there;
+  # /home reaches the same page on the server.
+  get "home", to: "home#index"
+  root "home#index"
 end
