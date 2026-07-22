@@ -29,10 +29,12 @@ module InstantRecord
       end
 
       # One full pass: outbox up, changes down, tabs notified when anything
-      # moved. Called under InstantRecord.tick's single-flight guard.
+      # moved. Called under InstantRecord.tick's single-flight guard. A client
+      # that has never synced hydrates from the bootstrap snapshot instead of
+      # replaying the whole change log from cursor 0.
       def sync_pass
         changed = drain
-        changed = poll_changes || changed
+        changed = (bootstrapped? ? poll_changes : bootstrap) || changed
         notifier.records_changed if changed
         changed
       end
@@ -51,6 +53,31 @@ module InstantRecord
 
       def cursor=(value)
         SyncMetadata.set("cursor", value)
+      end
+
+      # nil-aware on purpose: cursor 0 (bootstrapped against an empty change
+      # log) and "never synced" must not be conflated — `cursor` alone would
+      # report 0 for both.
+      def bootstrapped?
+        !SyncMetadata.get("cursor").nil?
+      end
+
+      # First-sync hydration: windowed current state + cursor in one response.
+      # The server captures the cursor BEFORE reading rows, so any overlap
+      # with subsequent events re-applies idempotently. Returns true when the
+      # snapshot applied.
+      def bootstrap
+        body = transport.get_json("/bootstrap")
+        Array(body["records"]).each { |record| apply_change(record) }
+
+        # Cursor written last: a crash mid-apply leaves it nil, so the next
+        # tick re-bootstraps; upserts make the retry idempotent. A failure
+        # never falls through to a cursor-0 poll of the full change log.
+        self.cursor = body["cursor"]
+        true
+      rescue Transport::Error => e
+        log_failure("bootstrap", e)
+        false
       end
 
       # Outbox up. Returns true when anything was sent and applied.

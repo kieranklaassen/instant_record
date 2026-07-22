@@ -1,0 +1,46 @@
+module InstantRecord
+  # First-sync hydration: current state (windowed per model when a sync_window
+  # is declared) plus the change-log cursor, so a fresh client never replays
+  # the whole change log. The cursor is read BEFORE the rows, inside one
+  # transaction: events committed between cursor and response re-apply
+  # idempotently client-side, whereas the reverse order would skip them.
+  class BootstrapsController < ActionController::API
+    before_action { headers.merge!(InstantRecord::CORS_HEADERS) }
+
+    def show
+      payload = ActiveRecord::Base.transaction do
+        cursor = Change.maximum(:id) || 0
+        { cursor: cursor, records: bootstrap_models.flat_map { |model| serialize_rows(model) } }
+      end
+      render json: payload
+    end
+
+    private
+
+    # Mirrors how InstantRecord.synced_model resolves: the explicit allowlist
+    # when set, otherwise every loaded Syncable includer (eager-loading first
+    # so development doesn't miss lazily-loaded models).
+    def bootstrap_models
+      return InstantRecord.synced_models if InstantRecord.synced_models.any?
+
+      Rails.application.eager_load! unless Rails.application.config.eager_load
+      ActiveRecord::Base.descendants.select do |model|
+        !model.abstract_class? && model.name &&
+          model.respond_to?(:instant_record_syncable?) && model.instant_record_syncable?
+      end
+    end
+
+    def serialize_rows(model)
+      window = model.instant_record_sync_window
+      scope = window ? window.in_window : model.all
+      scope.map do |record|
+        {
+          type: model.name,
+          id: record.id,
+          version: record[:server_version],
+          attributes: record.attributes.except("sync_state")
+        }
+      end
+    end
+  end
+end
