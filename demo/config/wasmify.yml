@@ -14,6 +14,15 @@ pack_directories:
 # Usually, you want to specify the gems with native extensions that are
 # not currently Wasm-compatible.
 exclude_gems:
+  # Rails sub-frameworks this app never requires (see config/application.rb):
+  - actionmailbox
+  - actionmailer
+  - actiontext
+  - activestorage
+  - mail
+  - net-imap
+  - net-pop
+  - net-smtp
   - bigdecimal # remove on Ruby 3.4+
   - nio4r
   - io-console
