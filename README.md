@@ -77,17 +77,148 @@ end
 
 `InstantRecord::Syncable` is inert on the server beyond shared conventions (UUID ids, `server_version`, `sync_state`). In the browser it intercepts every write.
 
-## How a write flows
+## The Full Loop, With Code
 
-1. You submit the form; the service worker routes it to browser Rails.
-2. `Issue.create!` runs in wasm: **one local PGlite transaction** writes the row *and* an outbox mutation — a crash can never lose an unsent write.
-3. The page re-renders from local data instantly. The issue shows a `pending` badge.
-4. The service worker drains the outbox: `POST /instant_record/mutations` to the real server, with client-generated mutation UUIDs.
-5. The server applies each mutation in **one Postgres transaction**: record write, `server_version` bump, change-log row, idempotency-ledger row. Replays return the original result. Conflicts resolve last-write-wins by `updated_at`.
-6. The change streams to every connected client over SSE; the change-log id is the event id, so a reconnecting client resumes from a cursor instead of refetching.
-7. Ack flips the badge to `synced`. A rejection removes the mutation from the outbox and reconciles the local row to server state (a rejected create is rolled back entirely).
+Life of a todo, from empty browser to two synced clients. All snippets are (condensed) real code from this repo.
 
-Offline is not a special mode: steps 1–3 work with no server; steps 4–7 happen whenever connectivity returns. Local data and the outbox survive tab reloads via IndexedDB.
+### 1. First load: the local database hydrates itself
+
+A brand-new client has an empty PGlite. It doesn't call a REST API to fill it — it replays the server's **change log**. The server keeps one append-only log of every accepted change, and streams it over SSE with the log id as the event id:
+
+```ruby
+# app/controllers/instant_record/events_controller.rb (engine — runs on the SERVER)
+cursor = (request.headers["Last-Event-ID"] || params[:after] || 0).to_i
+
+Change.after(cursor).each do |change|
+  response.stream.write("id: #{change.id}\n")
+  response.stream.write("event: change\n")
+  response.stream.write("data: #{change.as_event.to_json}\n\n")
+end
+```
+
+The browser applies each event to its local Postgres and advances a persisted cursor:
+
+```ruby
+# lib/instant_record/client.rb (gem — runs IN THE BROWSER VM)
+def apply_change(json)
+  event = JSON.parse(json)
+  model = synced_model(event["type"])          # e.g. Issue
+
+  Client.applying_remote do                    # never re-enqueues to the outbox
+    upsert_from_server(model, event["attributes"], event["version"])
+  end
+
+  self.cursor = event["cursor"]                # survives reloads (stored in PGlite)
+end
+```
+
+A fresh client connects with cursor `0` and receives the whole history; from then on the rows, the cursor, and the database itself live in **IndexedDB**, so the next visit paints instantly from local data and only replays the delta since its cursor. (Replaying the full log as bootstrap is PoC-grade — a server-seeded snapshot is the roadmap fix.)
+
+### 2. Rendering: it's just Rails, reading the local database
+
+The service worker intercepts the tab's requests and hands them to Rails running in wasm. A page render is a normal controller + ERB pass — except `Issue.order(...)` reads PGlite *in your tab*, so there is no network and no loading state:
+
+```ruby
+# demo/app/controllers/issues_controller.rb — executes IN THE BROWSER
+def index
+  @issues = Issue.order(created_at: :desc)   # local Postgres read, ~instant
+end
+```
+
+```erb
+<%# demo/app/views/issues/index.html.erb %>
+<% @issues.each do |issue| %>
+  <li>
+    <%= issue.title %>
+    <span class="badge"><%= issue.sync_state %></span>  <%# pending / synced %>
+  </li>
+<% end %>
+```
+
+Server-rendered HTML, where the server is your tab.
+
+### 3. A write: commit locally, queue durably — one transaction
+
+Submitting the form runs `Issue.create!` in the browser VM. The `Syncable` concern makes every write also record an outbox mutation **inside the same local transaction** — commit both or neither, so a crash or closed tab can never lose an unsent write:
+
+```ruby
+# lib/instant_record/syncable.rb (gem) — write interception, browser only
+before_save { self.sync_state = "pending" }
+
+# after_create runs INSIDE the wrapping transaction (unlike after_commit):
+after_create { record_outbox_mutation("create") }
+
+def record_outbox_mutation(operation)
+  InstantRecord::OutboxMutation.create!(
+    record_type: self.class.name,
+    record_id: id,
+    operation: operation,
+    changes_payload: attributes.except("sync_state"),
+    base_version: self[:server_version] || 0
+  )
+end
+```
+
+The redirect re-renders from local data immediately — the new todo is on screen with a `pending` badge before any network happens. If you're offline, it simply stays `pending`.
+
+### 4. Background drain: the outbox goes up
+
+The service worker periodically (and right after every write) ships pending mutations to the real server. This is the only JavaScript in the loop — Ruby owns the semantics, JS just moves JSON, because wasm Ruby can't own `fetch`:
+
+```js
+// demo/pwa/rails.sw.js (service worker)
+const pending = (await vm.evalAsync("InstantRecord.pending_mutations_json")).toString();
+const mutations = JSON.parse(pending);
+if (mutations.length === 0) return;
+
+const res = await fetch(`${SYNC_SERVER}/mutations`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ mutations }),
+});
+
+const { results } = await res.json();
+// hand the verdicts back to Ruby: ack -> synced, rejection -> rollback
+await resultsProc.callAsync("call", vm.wrap(JSON.stringify(results)));
+```
+
+The server applies each mutation in **one Postgres transaction** — record write, version bump, change-log row, idempotency-ledger row (replaying the same mutation UUID returns the original result instead of applying twice):
+
+```ruby
+# app/controllers/instant_record/mutations_controller.rb (engine — SERVER)
+ActiveRecord::Base.transaction do
+  record.assign_attributes(changes.except("id", "server_version"))
+  record.server_version += 1
+  record.save!                                # server validations run here
+  Change.create!(record_type:, record_id:, operation: "update",
+                 version: record.server_version, attributes_payload: record.attributes)
+end
+```
+
+An ack flips the local badge to `synced`. A rejection (failed server validation) removes the mutation from the outbox and reconciles the local row back to server state — a rejected create disappears entirely.
+
+### 5. Fan-out: everyone else re-renders
+
+That change-log row immediately streams to every other connected client (step 1's SSE endpoint). Each client applies it to its local PGlite — with a last-write-wins guard so a stale remote change never clobbers a newer local one — and tells its open tabs:
+
+```js
+// demo/pwa/rails.sw.js — for each SSE event:
+await applyProc.callAsync("call", vm.wrap(JSON.stringify(event)));  // Ruby applies it locally
+clients.forEach((c) => c.postMessage({ type: "records_changed" }));
+```
+
+```html
+<script>
+  // the page: something changed locally -> re-render from local data
+  navigator.serviceWorker.addEventListener("message", (event) => {
+    if (event.data.type === "records_changed") window.location.reload();
+  });
+</script>
+```
+
+The reload re-runs step 2 — browser Rails renders from local PGlite — so the other window shows the new todo about a second later, without ever fetching data from a server in its render path.
+
+That's the whole trick: **the UI only ever talks to the local database; the network only ever moves the change log.**
 
 ## Running the demo
 
