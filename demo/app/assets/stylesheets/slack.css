@@ -81,12 +81,14 @@
   border-color: var(--red);
 }
 
-/* Conversation column */
+/* Conversation column: the message list scrolls, the chrome stays put —
+   infinite scroll needs one stable scroll container to anchor against. */
 .demo-slack .conversation {
   display: flex;
   flex-direction: column;
   padding: 1.5rem 2rem 2rem;
   max-width: 860px;
+  height: calc(100vh - 45px);
 }
 
 .demo-slack .conversation-header {
@@ -96,11 +98,34 @@
 
 .demo-slack .conversation-header .hash { color: var(--red); }
 
+.demo-slack .message-scroll {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
 .demo-slack ol.messages {
   list-style: none;
   margin: 0;
   padding: 1rem 0;
-  flex: 1;
+}
+
+.demo-slack .history-sentinel {
+  min-height: 1.75rem;
+  padding: 0.4rem 0;
+  font-size: 0.7rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  text-align: center;
+}
+
+.demo-slack .history-sentinel[data-state="offline"] { color: var(--red); }
+
+.demo-slack .beginning-marker {
+  padding: 0.6rem 0;
+  border-bottom: 2px solid var(--rule);
+  text-align: center;
 }
 
 .demo-slack ol.messages li {

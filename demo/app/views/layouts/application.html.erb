@@ -31,13 +31,22 @@
     <%= yield %>
 
     <script>
-      // Every demo reloads when the service worker applies synced changes,
-      // and when a newly built service worker takes over (sw_updated).
+      // Demos reload when the service worker applies synced changes and when
+      // a newly built worker takes over (sw_updated). Pages that declare a
+      // data-instant-refresh root morph themselves in place instead of
+      // reloading (see slack_conversation.js) — but a new worker build still
+      // reloads everything onto the new bundle.
       if ("serviceWorker" in navigator) {
         navigator.serviceWorker.addEventListener("message", (event) => {
           const type = event.data && event.data.type;
-          if (type === "records_changed" || type === "sw_updated") {
+          if (type === "sw_updated") {
             window.location.reload();
+          } else if (type === "records_changed") {
+            if (document.querySelector("[data-instant-refresh]")) {
+              window.dispatchEvent(new CustomEvent("instant-record:records-changed"));
+            } else {
+              window.location.reload();
+            }
           }
         });
       }
