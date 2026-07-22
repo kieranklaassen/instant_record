@@ -49,5 +49,15 @@ module InstantRecord
       assert_response :success
       assert_equal "", response.body
     end
+
+    test "polling releases its database connection (idle streams pin nothing)" do
+      # A fresh thread has no leased connection; after fetch_changes the lease
+      # must be gone, or every idle SSE stream would pin a pool connection.
+      Thread.new do
+        InstantRecord::EventsController.fetch_changes(0)
+        refute InstantRecord::Change.connection_pool.active_connection?,
+          "fetch_changes must release its connection between polls"
+      end.join
+    end
   end
 end

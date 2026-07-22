@@ -1,35 +1,52 @@
 module InstantRecord
   class EventsController < ActionController::Base
-    include ActionController::Live
+    # SSE change stream as a Rack 3 streaming body (not ActionController::Live:
+    # Live runs a child thread per stream, which holds a server thread and
+    # bypasses the fiber scheduler — see docs/plans/...-003-...-plan.md KTD1).
+    # Under Falcon each stream is a fiber and `sleep` yields; under Puma the
+    # body holds the request thread, same ceiling as before.
+    #
+    # The change-log row id is the event id, which doubles as the client's
+    # cursor: catch-up from ?after= (or the Last-Event-ID reconnect header),
+    # then tail for a bounded window and close — EventSource reconnects.
+    EVENT_STREAM_HEADERS = {
+      "content-type" => "text/event-stream",
+      "cache-control" => "no-cache",
+      "x-accel-buffering" => "no",
+      "access-control-allow-origin" => "*"
+    }.freeze
 
-    # SSE change stream. The change-log row id is the event id, which doubles
-    # as the client's cursor (R9). Streams catch-up from ?after= (or the
-    # Last-Event-ID reconnect header), then tails new changes for a bounded
-    # window and closes — EventSource reconnects with the last id it saw.
     def index
-      response.headers["Content-Type"] = "text/event-stream"
-      response.headers["Cache-Control"] = "no-cache"
-      response.headers["X-Accel-Buffering"] = "no"
-      response.headers["Access-Control-Allow-Origin"] = "*"
-
       cursor = (request.headers["Last-Event-ID"] || params[:after] || 0).to_i
       deadline = Time.current + window_seconds
 
-      loop do
-        Change.after(cursor).each do |change|
-          cursor = change.id
-          response.stream.write("id: #{change.id}\n")
-          response.stream.write("event: change\n")
-          response.stream.write("data: #{change.as_event.to_json}\n\n")
-        end
+      body = proc do |stream|
+        loop do
+          self.class.fetch_changes(cursor).each do |change|
+            cursor = change.id
+            stream.write("id: #{change.id}\n")
+            stream.write("event: change\n")
+            stream.write("data: #{change.as_event.to_json}\n\n")
+          end
 
-        break if Time.current >= deadline
-        sleep 0.5
+          break if Time.current >= deadline
+          sleep 0.5
+        end
+      rescue IOError, Errno::EPIPE
+        # client went away; nothing to do
+      ensure
+        stream&.close
       end
-    rescue IOError, ActionController::Live::ClientDisconnected
-      # client went away; nothing to do
-    ensure
-      response.stream.close
+
+      self.response = Rack::Response[200, EVENT_STREAM_HEADERS.dup, body]
+    end
+
+    # Block-scoped connection checkout: an idle stream must not pin a database
+    # connection while it sleeps (pool exhaustion is the ceiling after threads).
+    def self.fetch_changes(cursor)
+      Change.connection_pool.with_connection do
+        Change.after(cursor).to_a
+      end
     end
 
     private
