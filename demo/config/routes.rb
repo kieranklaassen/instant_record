@@ -1,5 +1,5 @@
 Rails.application.routes.draw do
-  mount InstantRecord::Engine, at: "/instant_record" unless InstantRecord.browser?
+  # InstantRecord::Engine auto-mounts at /instant_record (see the gem's railtie).
 
   # Define your application routes per the DSL in https://guides.rubyonrails.org/routing.html
 

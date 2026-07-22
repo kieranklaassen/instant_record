@@ -9,7 +9,8 @@ module InstantRecord
       RUBY_PLATFORM.include?("wasm")
     end
 
-    # Server-side registration: the allowlist of models the engine will sync.
+    # Optional explicit allowlist of syncable models. Without it, any model
+    # that includes InstantRecord::Syncable is syncable.
     def sync(*models)
       @synced_models = models.flatten
     end
@@ -19,7 +20,10 @@ module InstantRecord
     end
 
     def synced_model(record_type)
-      synced_models.find { |model| model.name == record_type }
+      return synced_models.find { |model| model.name == record_type } if synced_models.any?
+
+      klass = record_type.to_s.safe_constantize
+      klass if klass.respond_to?(:instant_record_syncable?) && klass.instant_record_syncable?
     end
   end
 end

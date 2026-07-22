@@ -82,23 +82,17 @@ class Issue < ApplicationRecord
 end
 ```
 
-### 3. Mount the sync server
+There's no server setup: the sync engine auto-mounts at `/instant_record` on the server — `POST /mutations` (batched, idempotent writes) and `GET /events` (SSE change stream) — and every model that includes `Syncable` is syncable. Two optional knobs:
 
 ```ruby
-# config/routes.rb
-mount InstantRecord::Engine, at: "/instant_record" unless InstantRecord.browser?
+# config/application.rb — move or disable the mount
+config.instant_record.mount_path = "/sync"    # or false to mount manually
+
+# config/initializers/instant_record.rb — restrict syncing to an explicit allowlist
+InstantRecord.sync(Issue, Todo)
 ```
 
-```ruby
-# config/initializers/instant_record.rb
-Rails.application.config.to_prepare do
-  InstantRecord.sync(Issue)   # allowlist of models clients may sync
-end
-```
-
-That gives you `POST /instant_record/mutations` (batched, idempotent writes) and `GET /instant_record/events` (SSE change stream) — the engine handles both.
-
-### 4. Build the browser bundle
+### 3. Build the browser bundle
 
 Your app compiles to a wasm module that boots in a service worker:
 
@@ -118,7 +112,7 @@ wasm:
 
 The generated `pwa/` shell boots the VM, opens the PGlite database, and runs the sync loop. The PoC's working version lives in `demo/pwa/` — copy it.
 
-### 5. Write your app like it's normal Rails
+### 4. Write your app like it's normal Rails
 
 No special APIs in your controllers or views. When the page is served by the service worker, this code executes **in the browser**, reading and writing the local database:
 
@@ -151,7 +145,7 @@ Useful helpers:
 - `server_only { ... }` / `browser_only { ... }` — runtime-scoped model rules
 - `InstantRecord.browser?` — the underlying runtime check, for anywhere else
 
-### 6. Sync just happens
+### 5. Sync just happens
 
 You don't write sync code. Behind the scenes:
 
