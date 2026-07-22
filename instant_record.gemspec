@@ -20,4 +20,5 @@ Gem::Specification.new do |spec|
   spec.files = Dir["{app,config,lib}/**/*", "CHANGELOG.md", "LICENSE.txt", "README.md"]
 
   spec.add_dependency "rails", ">= 8.0"
+  spec.add_dependency "wasmify-rails", "~> 0.5"
 end

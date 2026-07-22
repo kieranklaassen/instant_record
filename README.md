@@ -46,8 +46,9 @@ flowchart LR
 ```ruby
 # Gemfile
 gem "instant_record"
-gem "wasmify-rails", group: [:development, :wasm]   # builds the browser bundle
 ```
+
+[wasmify-rails](https://github.com/palkan/wasmify-rails) comes along as a dependency — it provides the browser build tasks and the PGlite database adapter.
 
 ### 2. Make a model syncable
 

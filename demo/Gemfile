@@ -4,11 +4,9 @@ ruby "3.3.3" unless RUBY_PLATFORM =~ /wasm/
 
 gem "rails", "~> 8.1.3", group: [:default, :wasm]
 
-# InstantRecord: the gem under development (this repo's root)
+# InstantRecord: the gem under development (this repo's root).
+# Brings wasmify-rails along as a dependency (build tasks + PGlite adapter).
 gem "instant_record", path: "..", group: [:default, :wasm]
-
-# Wasm build tooling and browser database adapters
-gem "wasmify-rails", group: [:development, :wasm]
 
 # The modern asset pipeline for Rails [https://github.com/rails/propshaft]
 gem "propshaft", group: [:default, :wasm]

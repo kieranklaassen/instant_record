@@ -3,6 +3,7 @@ PATH
   specs:
     instant_record (0.1.0)
       rails (>= 8.0)
+      wasmify-rails (~> 0.5)
 
 GEM
   remote: https://rubygems.org/
@@ -263,7 +264,6 @@ DEPENDENCIES
   thruster
   turbo-rails
   tzinfo-data
-  wasmify-rails
   web-console
 
 RUBY VERSION
