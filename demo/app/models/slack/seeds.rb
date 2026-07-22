@@ -25,7 +25,7 @@ module Slack
     module_function
 
     def apply
-      visitor = ChatUser.find_or_create_by!(id: ChatUser::VISITOR_ID) do |u|
+      ChatUser.find_or_create_by!(id: ChatUser::VISITOR_ID) do |u|
         u.name = "You"
         u.handle = "you"
         u.bot = false
@@ -69,8 +69,6 @@ module Slack
           m.body = "This is our DM. Say something and I will reply — even if you post it offline."
         end
       end
-
-      visitor
     end
 
     def seed_ids

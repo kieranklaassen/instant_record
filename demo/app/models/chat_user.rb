@@ -7,9 +7,5 @@ class ChatUser < ApplicationRecord
 
   scope :bots, -> { where(bot: true) }
 
-  def self.visitor
-    find(VISITOR_ID)
-  end
-
   def visitor? = id == VISITOR_ID
 end
