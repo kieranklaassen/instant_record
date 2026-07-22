@@ -2,140 +2,148 @@
 
 Rails models that run in the browser, sync to your server, and keep working offline.
 
-InstantRecord boots real Active Record inside the browser with [ruby.wasm](https://github.com/ruby/ruby.wasm) and [wasmify-rails](https://github.com/palkan/wasmify-rails), persists to [PGlite](https://pglite.dev) — Postgres compiled to Wasm — and writes optimistically through a durable outbox that syncs to a Rails + Postgres server. The same model classes run on both sides, against the same Postgres dialect on both sides.
+:construction: **This is a proof of concept.** The core loop is built and demonstrated: instant optimistic writes, offline-durable outbox, two clients converging over SSE, and server rejections rolling back cleanly. See [What's proven](#whats-proven) for measured results and [Roadmap ideas](#roadmap-ideas) for the parts that are still sketches.
 
-:construction: This is a spike. The API below is the target, not a promise.
+## The Two Runtimes
 
-## Installation
+The whole idea of InstantRecord is that **the same model file loads into two different Ruby runtimes**. There is no JavaScript data layer and no API client — it's Active Record in both places, backed by a different Postgres in each:
 
-Add this line to your application's Gemfile:
+|  | In the browser | On the server |
+|---|---|---|
+| Ruby | CRuby compiled to WebAssembly, running inside a **service worker** | CRuby + Puma |
+| Rails | The full app, booted from an `app.wasm` bundle | The same app, `rails server` |
+| Database | [PGlite](https://pglite.dev) — Postgres-in-wasm, persisted to IndexedDB | PostgreSQL |
+| `app/models/issue.rb` | Loaded — writes are **optimistic**: local commit + outbox row in one transaction | Loaded — writes are **authoritative**: applied via the sync endpoint |
+| Role in sync | Drains its outbox up over HTTP; applies changes coming down over SSE | Validates, versions, appends a change log, streams it out over SSE |
 
-```ruby
-gem "instant_record"
+```mermaid
+flowchart LR
+  subgraph tab [Your browser tab]
+    UI[Demo UI] -->|fetch, intercepted| SW[Service worker]
+    SW --> VM["Rails on ruby.wasm"]
+    VM --> PG[(PGlite + IndexedDB)]
+    VM --> OB[(Outbox)]
+  end
+  SW -->|POST /instant_record/mutations| S[Rails server]
+  S --> P[(Postgres + change log)]
+  S -->|SSE, cursor = change id| SW
 ```
 
-The browser bundle — ruby.wasm, PGlite, and your syncable models — is built by wasmify-rails:
+## Where does the browser Ruby actually run?
+
+Not in the JS console. The service worker hosts a Ruby VM booted from `app.wasm`. When the demo tab requests a page, the service worker intercepts the fetch and hands it to **Rails running inside your browser** — routing, controller, Active Record, view render, all local, zero network.
+
+So when this controller action runs:
+
+```ruby
+# demo/app/controllers/issues_controller.rb
+def create
+  Issue.create!(issue_params)   # <- executes in the browser's Ruby VM
+  redirect_to root_path
+end
+```
+
+`Issue.create!` commits to PGlite in your tab and the redirect re-renders from local data — the whole round trip happens on your machine. The **same file** also runs on the server at `localhost:3000`, where `Issue.create!` writes to real Postgres instead.
+
+The model is one file, two runtimes:
+
+```ruby
+# demo/app/models/issue.rb — loaded by BOTH runtimes
+class Issue < ApplicationRecord
+  include InstantRecord::Syncable
+
+  validates :title, presence: true
+
+  # Server-only rule: the browser accepts this write optimistically,
+  # the server rejects it, and the client rolls back on reconcile.
+  unless InstantRecord.browser?
+    validates :title, exclusion: { in: ["reject me"] }
+  end
+end
+```
+
+`InstantRecord::Syncable` is inert on the server beyond shared conventions (UUID ids, `server_version`, `sync_state`). In the browser it intercepts every write.
+
+## How a write flows
+
+1. You submit the form; the service worker routes it to browser Rails.
+2. `Issue.create!` runs in wasm: **one local PGlite transaction** writes the row *and* an outbox mutation — a crash can never lose an unsent write.
+3. The page re-renders from local data instantly. The issue shows a `pending` badge.
+4. The service worker drains the outbox: `POST /instant_record/mutations` to the real server, with client-generated mutation UUIDs.
+5. The server applies each mutation in **one Postgres transaction**: record write, `server_version` bump, change-log row, idempotency-ledger row. Replays return the original result. Conflicts resolve last-write-wins by `updated_at`.
+6. The change streams to every connected client over SSE; the change-log id is the event id, so a reconnecting client resumes from a cursor instead of refetching.
+7. Ack flips the badge to `synced`. A rejection removes the mutation from the outbox and reconciles the local row to server state (a rejected create is rolled back entirely).
+
+Offline is not a special mode: steps 1–3 work with no server; steps 4–7 happen whenever connectivity returns. Local data and the outbox survive tab reloads via IndexedDB.
+
+## Running the demo
+
+Requirements: Ruby 3.3.3 (the known-good version for wasm builds), Node, PostgreSQL, [wasmtime](https://wasmtime.dev) and [wasi-vfs](https://github.com/kateinoigakukun/wasi-vfs) for build verification.
 
 ```sh
-bundle exec rails instant_record:build
+# Gem tests
+bundle install && bundle exec rake test
+
+# Server side
+cd demo
+bundle install
+bin/rails db:prepare
+bin/rails test
+bin/rails server                  # sync server on :3000
+
+# Browser side (one-time build, ~5 min: compiles ruby.wasm + packs the app)
+bin/rails wasmify:build:core
+bin/rails wasmify:pack            # writes pwa/public/app.wasm (~83 MB)
+cd pwa && yarn install && yarn dev --host
 ```
 
-## How It Works
+Open http://localhost:5173/boot.html, wait for **Service Worker Ready**, then open http://localhost:5173/ — that page is rendered by Rails in your browser.
 
-The same `app/models/issue.rb` loads in two places:
+Things to try:
 
-- **In the browser**, under ruby.wasm, against a PGlite database persisted locally
-- **On the server**, under CRuby, against Postgres
+- **Instant writes** — create an issue; it appears immediately with a `pending` badge that flips to `synced`.
+- **Two clients** — open http://127.0.0.1:5173/ too (different origin = separate service worker + separate PGlite). Changes propagate between the windows through the server's SSE stream. A fresh client catches up from the change log automatically.
+- **Offline** — stop the Rails server, create issues (they stay `pending`), reload the tab (still there), restart the server and watch them drain.
+- **Rejection** — create an issue titled `reject me`. It appears optimistically, the server refuses it, and it disappears on reconcile.
 
-A `Syncable` concern gives models an id that is stable across both, records every local change to an outbox in the same transaction as the write, and replays that outbox to the server. The server streams changes back over [SSE](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events). Reads and writes in the browser are local; the network is never in the hot path.
+## What's proven
 
-## Getting Started
+Measured on the demo (Chrome, M-series MacBook):
 
-Make a model syncable. This is the whole opt-in:
+- Rails 8.1.3 boots under wasm32-wasi with the full gem bundle, including this gem.
+- Warm boot — VM init plus PGlite schema prepare — in **~1.8 seconds**; the `app.wasm` module is **82.7 MB** raw.
+- Instant optimistic create with local persistence across reloads.
+- Two independent clients converging through POST + SSE, including fresh-client catch-up from cursor 0.
+- Server rejection reconciled by rolling the local record back.
+- 28 tests (gem + demo) covering the atomic outbox, idempotent apply, LWW both ways, cursor resume, and rejection reconcile.
 
-```ruby
-class Issue < ApplicationRecord
-  include InstantRecord::Syncable
-end
-```
+## What the gem provides today
 
-In the browser, use it like Active Record, because it is:
+- `InstantRecord::Syncable` — UUID ids, `sync_state`, and browser-side write interception with an atomic outbox.
+- `InstantRecord::Engine` — mount it for `POST /mutations` (idempotent, batched) and `GET /events` (SSE with cursor resume).
+- `InstantRecord.sync Issue, ...` — the server-side allowlist of syncable models.
+- `InstantRecord.browser?` — runtime check, used for things like server-only validations.
+- Browser sync primitives the service worker drives: `InstantRecord.pending_count`, `pending_mutations_json`, `apply_results(json)`, `apply_change(json)`, and a persisted SSE cursor.
 
-```ruby
-issue = Issue.create!(title: "Ship the spike", state: "open")
+In the PoC, the sync *loop* (when to drain, when to reconnect) lives in the service worker JavaScript — Ruby owns all sync semantics; JS only moves JSON across the network, since wasm Ruby cannot own `fetch` or `EventSource`.
 
-issue.update!(state: "closed")
+## Roadmap ideas
 
-Issue.where(state: "open").order(created_at: :desc).to_a
-```
-
-Every write commits to local PGlite immediately and enqueues a mutation. Your UI renders from the local database and never waits on the server.
-
-## The Outbox
-
-Each write records the change and a mutation in one local transaction:
-
-```ruby
-Issue.transaction do
-  issue.update!(state: "closed")
-  # InstantRecord writes the outbox row here, atomically
-end
-```
-
-If the tab closes before the mutation syncs, it is still on disk on reload. The outbox drains in order when the connection returns:
+Sketched but **not built**:
 
 ```ruby
-InstantRecord.sync            # drain the outbox, then catch up on remote changes
-InstantRecord.pending_count   # mutations not yet acknowledged
-```
+# A Ruby-facing sync API instead of the JS-driven loop
+InstantRecord.configure { |c| c.endpoint = "https://example.com/instant_record" }
+InstantRecord.start
 
-## Sync
-
-Point the client at your server and start the stream:
-
-```ruby
-InstantRecord.configure do |config|
-  config.endpoint = "https://example.com/instant_record"
-  config.models = [Issue, Todo]
-end
-
-InstantRecord.start   # POSTs the outbox, opens the SSE stream, applies remote changes
-```
-
-Writes go up as HTTP POST. Changes come down over a single SSE stream with a cursor, so a dropped connection resumes from the last change it saw instead of refetching everything.
-
-On the server, mount the engine and expose the syncable models:
-
-```ruby
-# config/routes.rb
-mount InstantRecord::Engine, at: "/instant_record"
-```
-
-```ruby
-# config/initializers/instant_record.rb
-InstantRecord.sync Issue, Todo
-```
-
-## Conflicts
-
-The default is last-write-wins by `updated_at`. The most recent write for a row wins; older writes for that row are discarded on both sides. No configuration required.
-
-```ruby
-class Issue < ApplicationRecord
-  include InstantRecord::Syncable
-  # last-write-wins by default
-end
-```
-
-A model-level DSL for smarter merges is sketched but out of scope for the spike:
-
-```ruby
-# Not implemented yet
+# Model-level conflict resolution beyond last-write-wins
 class Issue < ApplicationRecord
   include InstantRecord::Syncable
   resolves_conflict_on :state, prefer: :closed
 end
 ```
 
-## What's Not Included
-
-The spike is deliberately narrow. Out of scope, on purpose:
-
-- CRDTs and operational transforms — last-write-wins is the only strategy
-- Postgres logical replication — sync is application-level, over HTTP and SSE
-- Multi-tab leader election — one tab owns the database for now
-- Attachments and large blobs
-- Authentication and authorization on the sync endpoint
-
-## Reference
-
-The spike is a bet on three things, in order of risk:
-
-1. **Boot.** Full Active Record plus PGlite under ruby.wasm in a Worker has to load fast enough and small enough to be usable. PGlite is async-only, so Ruby runs on an asyncified build through `evalAsync`. This is the first kill-gate — if it fails, nothing downstream matters.
-2. **Persistence.** PGlite survives reloads and holds a real schema.
-3. **Sync.** The outbox, POST, and SSE cursor round-trip correctly, and the shared model classes behave identically against browser PGlite and server Postgres.
-
-PGlite in the browser means one Postgres dialect end-to-end. If its async-only execution or bundle size bites, [SQLite Wasm](https://sqlite.org/wasm) via wasmify-rails' `sqlite3_wasm` adapter is the escape hatch — named here so the decision is visible, not chosen.
+Also out of scope for the PoC, on purpose: CRDTs, Postgres logical replication, multi-tab leader election, attachments, and authentication/authorization on the sync endpoints. An Inertia-compatible layer (server-seeded props hydrating the local database, plus a JS read surface via PGlite live queries) is captured as a follow-up direction in `docs/plans/`.
 
 ## History
 
