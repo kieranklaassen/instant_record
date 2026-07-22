@@ -50,6 +50,18 @@ module InstantRecord
       assert_equal "", response.body
     end
 
+    test "polling sees changes committed after the first poll despite the query cache" do
+      # The request executor enables the AR query cache; an in-request polling
+      # loop must bypass it or every poll returns the first result forever.
+      ActiveRecord::Base.cache do
+        before = InstantRecord::EventsController.fetch_changes(0).size
+        create_change!("late arrival")
+        after = InstantRecord::EventsController.fetch_changes(0).size
+
+        assert_equal before + 1, after, "later polls must see newly committed changes"
+      end
+    end
+
     test "polling releases its database connection (idle streams pin nothing)" do
       # A fresh thread has no leased connection; after fetch_changes the lease
       # must be gone, or every idle SSE stream would pin a pool connection.

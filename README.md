@@ -194,6 +194,36 @@ Things to try:
 - **Offline** — stop the Rails server, create issues (they stay `pending`), reload the tab (still there), restart the server and watch them drain.
 - **Rejection** — create an issue titled `reject me`. It appears optimistically, the server refuses it, and it disappears on reconcile.
 
+## Scaling the SSE stream
+
+Every client holds one persistent SSE connection, so concurrent streams scale with open tabs — plan your server accordingly. The engine's stream endpoint is a plain Rack streaming body (no `ActionController::Live`, no thread per stream) that releases its database connection between polls, so it runs well on both servers; the ceiling is the server's concurrency model. Measured on the demo (M-series MacBook, dev mode):
+
+| Server | Concurrent SSE clients | Result |
+|---|---|---|
+| Puma (3 threads default) | 2 | Works — p50 delivery 103ms |
+| Puma (3 threads default) | 3 | Streams consumed every thread; the sync write itself starved — 0 delivered |
+| Puma (3 threads default) | 50 | Server unresponsive for minutes (rails/rails#55762's failure mode) |
+| Falcon (fiber per request) | 200 | 200/200 delivered, p50 442ms, 0 errors |
+| Falcon (fiber per request) | 500 | 500/500 delivered, p50 378ms, ~13 MB RSS, 0 errors |
+
+**Recommendation:** Puma is fine for development and a handful of clients. For SSE-heavy deployments, run [Falcon](https://github.com/socketry/falcon) — streams become fibers, `sleep` and `pg` yield to the scheduler, and thousands of idle connections are cheap:
+
+```ruby
+# Gemfile
+gem "falcon", require: false
+```
+
+```ruby
+# config/application.rb — fiber-scoped execution state under Falcon only
+config.active_support.isolation_level = :fiber if defined?(Falcon)
+```
+
+```sh
+bundle exec falcon serve --bind http://localhost:3000
+```
+
+Delivery latency is bounded by the 0.5s change-log poll, not the server. Reproduce the numbers with `demo/script/sse_load_spike.rb`.
+
 ## What's proven
 
 Measured on the demo (Chrome, M-series MacBook):
