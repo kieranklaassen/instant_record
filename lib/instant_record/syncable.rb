@@ -21,6 +21,15 @@ module InstantRecord
       after_create  { record_outbox_mutation("create") if instant_record_local_write? }
       after_update  { record_outbox_mutation("update") if instant_record_local_write? }
       after_destroy { record_outbox_mutation("destroy") if instant_record_local_write? }
+
+      # Server-originated writes (jobs, console, seeds) are change-logged so
+      # they stream to clients like any other change. Client mutations are
+      # excluded — MutationApplier versions and logs those itself.
+      before_create { self.server_version = 1 if instant_record_server_write? }
+      before_update { self.server_version += 1 if instant_record_server_write? }
+      after_create  { record_server_change("create") if instant_record_server_write? }
+      after_update  { record_server_change("update") if instant_record_server_write? }
+      after_destroy { record_server_change("destroy") if instant_record_server_write? }
     end
 
     class_methods do
@@ -31,6 +40,10 @@ module InstantRecord
 
     def instant_record_local_write?
       InstantRecord.browser? && !InstantRecord::Client.applying_remote?
+    end
+
+    def instant_record_server_write?
+      !InstantRecord.browser? && !InstantRecord.applying_client_mutation?
     end
 
     def assign_instant_record_uuid
@@ -51,6 +64,17 @@ module InstantRecord
         operation: operation,
         changes_payload: changes_payload,
         base_version: self[:server_version] || 0
+      )
+    end
+
+    # Mirrors MutationApplier's log_change/log_destroy payload shapes.
+    def record_server_change(operation)
+      InstantRecord::Change.create!(
+        record_type: self.class.name,
+        record_id: id,
+        operation: operation,
+        version: operation == "destroy" ? 0 : self[:server_version],
+        attributes_payload: operation == "destroy" ? {} : attributes.except("sync_state")
       )
     end
   end

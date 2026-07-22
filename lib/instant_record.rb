@@ -11,6 +11,7 @@ module InstantRecord
   }.freeze
 end
 
+require "active_support/isolated_execution_state"
 require "instant_record/version"
 require "instant_record/configuration"
 require "instant_record/runtime_scoped"
@@ -84,6 +85,21 @@ module InstantRecord
 
     def pending_count = Client.pending_count
     def cursor = Client.cursor
+
+    # Server-side change logging (Syncable) must not fire while a client
+    # mutation is being applied — MutationApplier logs those itself.
+    # IsolatedExecutionState is fiber-aware for Falcon's fiber-per-request.
+    def applying_client_mutation?
+      !!ActiveSupport::IsolatedExecutionState[:instant_record_applying_client_mutation]
+    end
+
+    def applying_client_mutation
+      previous = ActiveSupport::IsolatedExecutionState[:instant_record_applying_client_mutation]
+      ActiveSupport::IsolatedExecutionState[:instant_record_applying_client_mutation] = true
+      yield
+    ensure
+      ActiveSupport::IsolatedExecutionState[:instant_record_applying_client_mutation] = previous
+    end
   end
 end
 

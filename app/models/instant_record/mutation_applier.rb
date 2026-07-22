@@ -21,7 +21,9 @@ module InstantRecord
       model = InstantRecord.synced_model(@mutation[:record_type])
       return record_result(status: "rejected", reason: "unknown record type") unless model
 
-      result = ActiveRecord::Base.transaction { perform(model) }
+      result = ActiveRecord::Base.transaction do
+        InstantRecord.applying_client_mutation { perform(model) }
+      end
       record_result(**result)
     rescue ActiveRecord::RecordInvalid => e
       record_result(status: "rejected", reason: e.record.errors.full_messages.to_sentence,
