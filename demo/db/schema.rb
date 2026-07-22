@@ -10,9 +10,29 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_07_21_000102) do
+ActiveRecord::Schema[8.1].define(version: 2026_07_22_000003) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
+
+  create_table "channels", id: :string, force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.string "dm_user_id"
+    t.string "kind", default: "channel", null: false
+    t.string "name", null: false
+    t.integer "server_version", default: 0, null: false
+    t.string "sync_state", default: "synced", null: false
+    t.datetime "updated_at", null: false
+  end
+
+  create_table "chat_users", id: :string, force: :cascade do |t|
+    t.boolean "bot", default: false, null: false
+    t.datetime "created_at", null: false
+    t.string "handle", null: false
+    t.string "name", null: false
+    t.integer "server_version", default: 0, null: false
+    t.string "sync_state", default: "synced", null: false
+    t.datetime "updated_at", null: false
+  end
 
   create_table "instant_record_applied_mutations", force: :cascade do |t|
     t.datetime "created_at", null: false
@@ -54,5 +74,16 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_21_000102) do
     t.string "sync_state", default: "synced", null: false
     t.string "title", null: false
     t.datetime "updated_at", null: false
+  end
+
+  create_table "messages", id: :string, force: :cascade do |t|
+    t.text "body", null: false
+    t.string "channel_id", null: false
+    t.string "chat_user_id", null: false
+    t.datetime "created_at", null: false
+    t.integer "server_version", default: 0, null: false
+    t.string "sync_state", default: "synced", null: false
+    t.datetime "updated_at", null: false
+    t.index ["channel_id"], name: "index_messages_on_channel_id"
   end
 end
