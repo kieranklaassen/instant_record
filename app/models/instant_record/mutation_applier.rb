@@ -28,6 +28,13 @@ module InstantRecord
     rescue ActiveRecord::RecordInvalid => e
       record_result(status: "rejected", reason: e.record.errors.full_messages.to_sentence,
         server_attributes: server_attributes_for(model))
+    rescue ActiveRecord::RecordNotUnique
+      # A create whose id already exists (e.g. a client replaying rows the
+      # server already has). Rejecting lets the client roll back its local
+      # copy instead of retrying the poisoned mutation forever; the server's
+      # row comes back down through the change stream.
+      record_result(status: "rejected", reason: "id already exists",
+        server_attributes: server_attributes_for(model))
     end
 
     private

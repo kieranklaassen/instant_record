@@ -123,6 +123,27 @@ class SyncableTest < Minitest::Test
     assert_equal 0, InstantRecord::Change.count
   end
 
+  def test_duplicate_id_create_mutation_is_rejected_not_retried_forever
+    InstantRecord.sync(@model)
+    existing = on_server { @model.create!(title: "already here") }
+
+    result = on_server do
+      InstantRecord::MutationApplier.apply(
+        id: SecureRandom.uuid,
+        record_type: "Todo",
+        record_id: existing.id,
+        operation: "create",
+        changes: { "title" => "replayed duplicate" }
+      )
+    end
+
+    assert_equal "rejected", result[:status]
+    assert_equal "id already exists", result[:reason]
+    assert_equal "already here", result[:server_attributes]["title"]
+  ensure
+    InstantRecord.sync
+  end
+
   def test_applying_client_mutation_logs_exactly_one_change
     InstantRecord.sync(@model)
     result = on_server do
