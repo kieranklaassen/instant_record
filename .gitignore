@@ -10,3 +10,4 @@ demo/storage/
 demo/public/wasm/
 demo/node_modules/
 .DS_Store
+.context/
