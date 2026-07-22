@@ -93,12 +93,14 @@ module InstantRecord
       model&.find_by(id: @mutation[:record_id])&.attributes&.except("sync_state")
     end
 
+    # create_or_find_by leans on the unique index: a concurrent duplicate
+    # returns the already-recorded result instead of applying twice.
     def record_result(**result)
       payload = result.merge(mutation_id: @mutation[:id])
-      AppliedMutation.create!(mutation_id: @mutation[:id], result_payload: payload)
-      payload
-    rescue ActiveRecord::RecordNotUnique
-      AppliedMutation.find_by(mutation_id: @mutation[:id]).result_payload.symbolize_keys
+      record = AppliedMutation.create_or_find_by(mutation_id: @mutation[:id]) do |applied|
+        applied.result_payload = payload
+      end
+      record.result_payload.symbolize_keys
     end
   end
 end

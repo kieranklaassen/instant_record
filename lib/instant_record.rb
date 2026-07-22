@@ -19,9 +19,11 @@ require "instant_record/engine" if defined?(Rails::Engine)
 
 module InstantRecord
   class << self
-    # True when running inside the browser (ruby.wasm).
+    # True when running inside the browser (ruby.wasm). Delegates to
+    # wasmify-rails' Kernel#on_wasm?; kept as a method so it stays the
+    # single stub point for tests and the public name for apps.
     def browser?
-      RUBY_PLATFORM.include?("wasm")
+      on_wasm?
     end
 
     def config

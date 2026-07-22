@@ -27,10 +27,6 @@ module InstantRecord
       def instant_record_syncable? = true
     end
 
-    def sync_state
-      self[:sync_state]
-    end
-
     private
 
     def instant_record_local_write?
