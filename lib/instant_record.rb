@@ -52,11 +52,26 @@ module InstantRecord
       klass if klass.respond_to?(:instant_record_syncable?) && klass.instant_record_syncable?
     end
 
+    # Every model participating in sync: the explicit allowlist when set,
+    # otherwise all loaded Syncable includers.
+    def syncable_models
+      return synced_models if synced_models.any?
+
+      ActiveRecord::Base.descendants.select do |model|
+        !model.abstract_class? && model.name &&
+          model.respond_to?(:instant_record_syncable?) && model.instant_record_syncable?
+      end
+    end
+
     # Begin background sync (browser runtime only; a no-op on the server).
     # The gem's service worker shim schedules `tick` on config.sync_interval.
-    def start
+    # cold_boot: false skips the boot-time window eviction — the service
+    # worker passes it when it was restarted under already-open tabs (an idle
+    # SW restart mid-read must not trim scrollback the reader is holding).
+    def start(cold_boot: true)
       return false unless browser?
 
+      Client.request_eviction if cold_boot
       @started = true
     end
 

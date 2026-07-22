@@ -35,10 +35,37 @@ module InstantRecord
       # that has never synced hydrates from the bootstrap snapshot instead of
       # replaying the whole change log from cursor 0.
       def sync_pass
-        changed = drain
+        changed = evict_beyond_windows
+        changed = drain || changed
         changed = (bootstrapped? ? poll_changes : bootstrap) || changed
         notifier.records_changed if changed
         changed
+      end
+
+      # Arm the boot-time trim; InstantRecord.start sets this on cold boots
+      # only. Runs once, on the next sync pass.
+      def request_eviction
+        @eviction_pending = true
+      end
+
+      # Trim every windowed model back to its declared window. delete_all
+      # under applying_remote: no callbacks, no outbox rows. Pending rows are
+      # excluded in the WHERE — an unsynced write is never evicted. Returns
+      # true when anything was deleted.
+      def evict_beyond_windows
+        return false unless @eviction_pending
+
+        @eviction_pending = false
+        evicted = false
+        InstantRecord.syncable_models.each do |model|
+          window = model.instant_record_sync_window
+          next unless window
+
+          applying_remote do
+            evicted = true if window.beyond_window(model.where.not(sync_state: "pending")).delete_all.positive?
+          end
+        end
+        evicted
       end
 
       def pending_count
