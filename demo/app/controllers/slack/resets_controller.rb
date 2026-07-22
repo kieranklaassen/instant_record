@@ -15,7 +15,12 @@ module Slack
       seed_ids = Slack::Seeds.seed_ids
 
       ActiveRecord::Base.transaction do
-        Message.destroy_all
+        # destroy_all deletes a set of rows loaded up front, so a fake reply
+        # committed while the sweep is blocked on FakeReplyJob's row lock
+        # would survive a single pass. Re-sweep until no messages remain:
+        # once every row is deleted, pending reply jobs block on our locks
+        # and bail out when their message is gone.
+        Message.destroy_all while Message.exists?
         Channel.where.not(id: seed_ids[:channels]).destroy_all
         ChatUser.where.not(id: seed_ids[:users]).destroy_all
         Slack::Seeds.apply
