@@ -25,6 +25,9 @@ module InstantRecord
       def install_sync_driver
         copy_file "rails.sw.js", "pwa/rails.sw.js", force: true
         copy_file "database.js", "pwa/database.js", force: true
+        # Auto-booting splash: registers the worker and reloads into the app.
+        # (wasmify's boot.html stays available as a debug page.)
+        copy_file "index.html", "pwa/index.html", force: true
       end
 
       def use_pglite_in_pwa
