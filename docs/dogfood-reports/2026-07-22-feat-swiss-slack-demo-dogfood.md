@@ -165,11 +165,9 @@ Not applicable — no OAuth/email/payments in the demos.
 
 ## Decisions for a Human
 
-### Installed clients have no update story for new bundles
-- **What's broken:** An already-installed PWA keeps its booted VM until the service worker is replaced; long-lived clients can run an old bundle indefinitely (no version check, no "refresh for update" prompt). The `no-cache` wasm fetch fixes HTTP staleness, but not the product story.
-- **Why escalated:** Update UX is an architectural/product decision (version stamping, skipWaiting policy, prompt vs auto-reload), not a demo bug.
-- **Options:** (a) stamp a build version into `rails.sw.js` at build time so every rebuild triggers SW reinstall; (b) poll a version endpoint and show a "new version — reload" banner; (c) leave as-is for the PoC.
-- **Recommendation:** (a) is cheap and fits the existing SW-update mechanics; do it when the demo starts being deployed anywhere.
+### ~~Installed clients have no update story for new bundles~~ — resolved in `56b5c09`
+- **What was broken:** An already-installed PWA kept its booted VM until the service worker was replaced; long-lived clients ran old bundles indefinitely (this bit the branch author within the hour: stuck pending mutations and a blank /slack from a pre-branch bundle).
+- **Resolution (option a):** `instant_record:build` stamps the `app.wasm` digest into `rails.sw.js`; every rebuild changes the worker's bytes, the browser installs the update on the next navigation, and the new worker claims open tabs and posts `sw_updated` so they reload onto the new bundle. Verified live.
 
 ### Fresh clients depend on a complete change log
 - **What's broken (potentially):** A fresh browser converges by replaying `instant_record_changes` from cursor 0. If the change log is ever pruned, or rows predate server-side change logging, fresh clients silently miss data.
