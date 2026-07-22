@@ -321,3 +321,5 @@ The tree is a scope declaration; the implementer may adjust layout if the wasmif
 - Snapshot-plus-overlay reconciliation (upgrade path from KTD4).
 - The `resolves_conflict_on` conflict DSL.
 - Production SSE delivery (LISTEN/NOTIFY hardening or a streaming server).
+- Inertia-inspired props-as-bootstrap: a controller-declared, per-page, authorized data seed (like `render inertia: { issues: }`) that hydrates the local database on first paint instead of replaying the full change log; pairs with scoped sync (only sync what a surface declares, the partial-reload analog and the `syncable_to` authorization shape).
+- JS read surface for Inertia coexistence: expose local data to JS components via PGlite live queries (Ruby keeps writes and sync), so an Inertia Rails app can adopt InstantRecord per-surface — Inertia owns navigation and props, InstantRecord owns the live offline data plane. The engine's HTTP+SSE protocol needs no changes for this.

@@ -85,3 +85,4 @@ production:
   password: <%= ENV["DEMO_DATABASE_PASSWORD"] %>
 wasm:
   adapter: <%= ENV.fetch("ACTIVE_RECORD_ADAPTER") { "pglite" } %>
+  js_interface: pglite4rails
