@@ -3,8 +3,11 @@ module InstantRecord
     isolate_namespace InstantRecord
 
     config.instant_record = ActiveSupport::OrderedOptions.new
-    config.instant_record.mount_path = "/instant_record"
+    config.instant_record.mount_path = DEFAULT_MOUNT_PATH
     config.instant_record.build_on_precompile = false
+    # How long GET /events tails for new changes before closing (the client
+    # reconnects from its cursor). Clients may request less via ?window=.
+    config.instant_record.sse_window_seconds = 25.0
 
     initializer "instant_record.migrations" do |app|
       unless app.root == root

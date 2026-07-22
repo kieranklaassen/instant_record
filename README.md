@@ -260,7 +260,7 @@ config.active_support.isolation_level = :fiber if defined?(Falcon)
 bundle exec falcon serve --bind http://localhost:3000
 ```
 
-Delivery latency is bounded by the 0.5s change-log poll, not the server. Reproduce the numbers with `demo/script/sse_load_spike.rb`.
+Delivery latency for the gem's own browser clients is bounded by their sync tick (`config.sync_interval`, 3s default — each tick catches up from the change log and closes, so a tick never holds a stream open). Long-lived tailing streams remain available for other SSE consumers; their latency is bounded by the server's 0.5s change-log poll, and the tail window is configurable via `config.instant_record.sse_window_seconds`. Reproduce the numbers with `demo/script/sse_load_spike.rb`.
 
 ## What's proven
 

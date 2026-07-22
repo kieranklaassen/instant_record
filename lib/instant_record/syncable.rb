@@ -13,15 +13,14 @@ module InstantRecord
 
       before_create :assign_instant_record_uuid
 
-      if InstantRecord.browser?
-        before_save { self.sync_state = "pending" unless InstantRecord::Client.applying_remote? }
-
-        # after_create/update/destroy run INSIDE the wrapping transaction
-        # (unlike after_commit), which is what gives us write+outbox atomicity.
-        after_create  { record_outbox_mutation("create") unless InstantRecord::Client.applying_remote? }
-        after_update  { record_outbox_mutation("update") unless InstantRecord::Client.applying_remote? }
-        after_destroy { record_outbox_mutation("destroy") unless InstantRecord::Client.applying_remote? }
-      end
+      # Guarded at call time, not include time, so the same class works in
+      # both runtimes and tests can stub the runtime without re-including.
+      # after_create/update/destroy run INSIDE the wrapping transaction
+      # (unlike after_commit), which is what gives us write+outbox atomicity.
+      before_save   { self.sync_state = "pending" if instant_record_local_write? }
+      after_create  { record_outbox_mutation("create") if instant_record_local_write? }
+      after_update  { record_outbox_mutation("update") if instant_record_local_write? }
+      after_destroy { record_outbox_mutation("destroy") if instant_record_local_write? }
     end
 
     class_methods do
@@ -33,6 +32,10 @@ module InstantRecord
     end
 
     private
+
+    def instant_record_local_write?
+      InstantRecord.browser? && !InstantRecord::Client.applying_remote?
+    end
 
     def assign_instant_record_uuid
       self.id ||= SecureRandom.uuid

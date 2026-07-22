@@ -62,12 +62,13 @@ module InstantRecord
           parser = SseParser.new(&block)
           reader = response[:body].getReader
           decoder = JS.global[:TextDecoder].new
+          @stream_options ||= JS.eval("return {stream: true}")
 
           loop do
             result = reader.read.await
             break if result[:done] == JS::True
 
-            parser.feed(decoder.decode(result[:value], JS.eval("return {stream: true}")).to_s)
+            parser.feed(decoder.decode(result[:value], @stream_options).to_s)
           end
         end
 

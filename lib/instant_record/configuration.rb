@@ -9,7 +9,7 @@ module InstantRecord
     attr_accessor :sync_interval
 
     def initialize
-      @endpoint = "/instant_record"
+      @endpoint = DEFAULT_MOUNT_PATH
       @sync_interval = 3
     end
   end

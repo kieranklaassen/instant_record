@@ -13,7 +13,7 @@ module InstantRecord
       )
     end
 
-    test "streams changes after the cursor in order with change id as event id" do
+    test "streams changes after the cursor, parseable by the gem's own SSE parser" do
       first = create_change!("one")
       second = create_change!("two")
 
@@ -21,12 +21,13 @@ module InstantRecord
 
       assert_response :success
       assert_equal "text/event-stream", response.headers["Content-Type"]
-      assert_includes response.body, "id: #{second.id}\n"
-      assert_includes response.body, "event: change\n"
-      refute_includes response.body, "id: #{first.id}\n"
 
-      data = response.body[/data: (.+)/, 1]
-      event = JSON.parse(data)
+      # Round-trip through the client's parser: catches producer/parser drift.
+      events = []
+      InstantRecord::Client::Transport::SseParser.new { |e| events << e }.feed(response.body)
+
+      event = events.sole
+      assert_equal second.id, event["cursor"]
       assert_equal "Issue", event["type"]
       assert_equal "two", event["attributes"]["title"]
     end
@@ -54,21 +55,21 @@ module InstantRecord
       # The request executor enables the AR query cache; an in-request polling
       # loop must bypass it or every poll returns the first result forever.
       ActiveRecord::Base.cache do
-        before = InstantRecord::EventsController.fetch_changes(0).size
+        before = InstantRecord::Change.poll(0).size
         create_change!("late arrival")
-        after = InstantRecord::EventsController.fetch_changes(0).size
+        after = InstantRecord::Change.poll(0).size
 
         assert_equal before + 1, after, "later polls must see newly committed changes"
       end
     end
 
     test "polling releases its database connection (idle streams pin nothing)" do
-      # A fresh thread has no leased connection; after fetch_changes the lease
-      # must be gone, or every idle SSE stream would pin a pool connection.
+      # A fresh thread has no leased connection; after a poll the lease must
+      # be gone, or every idle SSE stream would pin a pool connection.
       Thread.new do
-        InstantRecord::EventsController.fetch_changes(0)
+        InstantRecord::Change.poll(0)
         refute InstantRecord::Change.connection_pool.active_connection?,
-          "fetch_changes must release its connection between polls"
+          "Change.poll must release its connection between polls"
       end.join
     end
   end

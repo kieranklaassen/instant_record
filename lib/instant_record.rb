@@ -1,3 +1,16 @@
+module InstantRecord
+  DEFAULT_MOUNT_PATH = "/instant_record".freeze
+
+  # Both engine controllers serve a PWA that may run on another origin in
+  # development (Vite dev server); auth on the sync endpoints is out of scope
+  # for the PoC.
+  CORS_HEADERS = {
+    "access-control-allow-origin" => "*",
+    "access-control-allow-methods" => "GET, POST, OPTIONS",
+    "access-control-allow-headers" => "content-type, last-event-id"
+  }.freeze
+end
+
 require "instant_record/version"
 require "instant_record/configuration"
 require "instant_record/runtime_scoped"
@@ -19,6 +32,23 @@ module InstantRecord
       yield config
     end
 
+    # Optional explicit allowlist of syncable models. Without it, any model
+    # that includes InstantRecord::Syncable is syncable.
+    def sync(*models)
+      @synced_models = models.flatten
+    end
+
+    def synced_models
+      @synced_models ||= []
+    end
+
+    def synced_model(record_type)
+      return synced_models.find { |model| model.name == record_type } if synced_models.any?
+
+      klass = record_type.to_s.safe_constantize
+      klass if klass.respond_to?(:instant_record_syncable?) && klass.instant_record_syncable?
+    end
+
     # Begin background sync (browser runtime only; a no-op on the server).
     # The gem's service worker shim schedules `tick` on config.sync_interval.
     def start
@@ -37,9 +67,7 @@ module InstantRecord
 
       @ticking = true
       begin
-        changed = Client.drain
-        changed = Client.poll_changes || changed
-        Client.notify_records_changed if changed
+        Client.sync_pass
         :ok
       ensure
         @ticking = false
@@ -52,22 +80,8 @@ module InstantRecord
       tick
     end
 
-    # Optional explicit allowlist of syncable models. Without it, any model
-    # that includes InstantRecord::Syncable is syncable.
-    def sync(*models)
-      @synced_models = models.flatten
-    end
-
-    def synced_models
-      @synced_models ||= []
-    end
-
-    def synced_model(record_type)
-      return synced_models.find { |model| model.name == record_type } if synced_models.any?
-
-      klass = record_type.to_s.safe_constantize
-      klass if klass.respond_to?(:instant_record_syncable?) && klass.instant_record_syncable?
-    end
+    def pending_count = Client.pending_count
+    def cursor = Client.cursor
   end
 end
 

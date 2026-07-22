@@ -1,4 +1,3 @@
-require "json"
 require "instant_record/client/transport"
 require "instant_record/client/notifier"
 
@@ -29,141 +28,152 @@ module InstantRecord
         @notifier ||= Notifier::JsClients.new
       end
 
+      # One full pass: outbox up, changes down, tabs notified when anything
+      # moved. Called under InstantRecord.tick's single-flight guard.
+      def sync_pass
+        changed = drain
+        changed = poll_changes || changed
+        notifier.records_changed if changed
+        changed
+      end
+
+      def pending_count
+        OutboxMutation.count
+      end
+
+      def pending_mutations
+        OutboxMutation.ordered.map(&:as_mutation)
+      end
+
+      def cursor
+        SyncMetadata.get("cursor").to_i
+      end
+
+      def cursor=(value)
+        SyncMetadata.set("cursor", value)
+      end
+
       # Outbox up. Returns true when anything was sent and applied.
       def drain
-        mutations = JSON.parse(InstantRecord.pending_mutations_json)
+        mutations = pending_mutations
         return false if mutations.empty?
 
         body = transport.post_json("/mutations", { mutations: mutations })
-        InstantRecord.apply_results(JSON.generate(body["results"]))
+        apply_results(body["results"])
         true
       rescue Transport::Error => e
-        InstantRecord.log_sync_failure("drain", e)
+        log_failure("drain", e)
         false
       end
 
-      # Changes down. Returns true when any remote change was applied.
+      # Changes down, catch-up style: window=0 asks the server to close the
+      # stream right after catch-up instead of tailing a long window. The tick
+      # cadence provides liveness; a long-held stream inside the single-flight
+      # tick would starve outbox drains and defer notifications.
+      # Returns true when any remote change was applied.
       def poll_changes
         changed = false
+        last_cursor = nil
 
-        transport.each_event("/events?after=#{InstantRecord.cursor}") do |event|
-          InstantRecord.apply_change(JSON.generate(event))
+        transport.each_event("/events?after=#{cursor}&window=0") do |event|
+          event = event.deep_stringify_keys
+          apply_change(event)
+          last_cursor = event["cursor"] || last_cursor
           changed = true
         end
 
+        # One cursor write per poll, not per event. A crash before this line
+        # re-applies the batch next poll; upserts + LWW make that idempotent.
+        self.cursor = last_cursor if last_cursor
         changed
       rescue Transport::Error => e
-        InstantRecord.log_sync_failure("poll", e)
-        changed || false
+        log_failure("poll", e)
+        changed
       end
 
-      def notify_records_changed
-        notifier.records_changed
-      end
-    end
-  end
+      # Server results for a posted batch.
+      # applied  -> drop the outbox row, mark the record synced
+      # rejected -> drop the outbox row, reconcile to server state
+      def apply_results(results)
+        Array(results).each do |result|
+          result = result.deep_stringify_keys
+          mutation = OutboxMutation.find_by(id: result["mutation_id"])
+          next unless mutation
 
-  class << self
-    def pending_count
-      OutboxMutation.count
-    end
-
-    def log_sync_failure(phase, error)
-      warn "[instant_record] #{phase} failed (offline?): #{error.message}"
-    end
-
-    def cursor
-      SyncMetadata.get("cursor").to_i
-    end
-
-    def cursor=(value)
-      SyncMetadata.set("cursor", value)
-    end
-
-    # Outbox drain, step 1: everything pending, oldest first.
-    def pending_mutations_json
-      OutboxMutation.ordered.map(&:as_mutation).to_json
-    end
-
-    # Outbox drain, step 2: server results for a posted batch.
-    # applied  -> drop the outbox row, mark the record synced
-    # rejected -> drop the outbox row, reconcile to server state (KTD4)
-    def apply_results(json)
-      Array(JSON.parse(json)).each do |result|
-        mutation = OutboxMutation.find_by(id: result["mutation_id"])
-        next unless mutation
-
-        Client.applying_remote do
-          case result["status"]
-          when "applied"
-            mark_synced(mutation, result["version"])
-          when "rejected"
-            reconcile_rejection(mutation, result)
+          applying_remote do
+            case result["status"]
+            when "applied"
+              mark_synced(mutation, result["version"])
+            when "rejected"
+              reconcile_rejection(mutation, result)
+            end
+            mutation.destroy!
           end
-          mutation.destroy!
         end
+        nil
       end
-      pending_count
-    end
 
-    # SSE change stream: apply one remote change event (last-write-wins).
-    def apply_change(json)
-      event = JSON.parse(json)
-      model = synced_model(event["type"])
-      return cursor unless model
+      # Apply one remote change event (last-write-wins).
+      def apply_change(event)
+        event = event.deep_stringify_keys
+        model = InstantRecord.synced_model(event["type"])
+        return unless model
 
-      Client.applying_remote do
-        case event["operation"]
-        when "destroy"
-          model.find_by(id: event["id"])&.destroy!
+        applying_remote do
+          case event["operation"]
+          when "destroy"
+            model.find_by(id: event["id"])&.destroy!
+          else
+            upsert_from_server(model, event["attributes"], event["version"])
+          end
+        end
+        nil
+      end
+
+      private
+
+      def mark_synced(mutation, version)
+        model = InstantRecord.synced_model(mutation.record_type)
+        record = model&.find_by(id: mutation.record_id)
+        return unless record
+
+        record.update_columns(sync_state: "synced", server_version: version || record.server_version)
+      end
+
+      def reconcile_rejection(mutation, result)
+        model = InstantRecord.synced_model(mutation.record_type)
+        return unless model
+
+        server_attributes = result["server_attributes"]
+
+        if server_attributes.present?
+          upsert_from_server(model, server_attributes, result["version"])
         else
-          upsert_from_server(model, event["attributes"], event["version"])
+          # The server never accepted this record (rejected create): remove it.
+          model.find_by(id: mutation.record_id)&.destroy!
         end
       end
 
-      event["cursor"].then { |c| self.cursor = c if c }
-      cursor
-    end
+      def upsert_from_server(model, attributes, version)
+        return unless attributes
 
-    private
+        record = model.find_or_initialize_by(id: attributes["id"])
 
-    def mark_synced(mutation, version)
-      model = synced_model(mutation.record_type)
-      record = model&.find_by(id: mutation.record_id)
-      return unless record
+        incoming_at = attributes["updated_at"] && Time.parse(attributes["updated_at"].to_s)
+        local_at = record.persisted? ? record.updated_at : nil
 
-      record.update_columns(sync_state: "synced", server_version: version || record.server_version)
-    end
+        # Client-side LWW: never clobber a locally newer row.
+        return if incoming_at && local_at && incoming_at < local_at
 
-    def reconcile_rejection(mutation, result)
-      model = synced_model(mutation.record_type)
-      return unless model
-
-      server_attributes = result["server_attributes"]
-
-      if server_attributes.present?
-        upsert_from_server(model, server_attributes, result["version"])
-      else
-        # The server never accepted this record (rejected create): remove it.
-        model.find_by(id: mutation.record_id)&.destroy!
+        record.assign_attributes(attributes.except("id", "server_version"))
+        record.server_version = version || attributes["server_version"] || 0
+        record.sync_state = "synced"
+        record.save!(validate: false)
       end
-    end
 
-    def upsert_from_server(model, attributes, version)
-      return unless attributes
-
-      record = model.find_or_initialize_by(id: attributes["id"])
-
-      incoming_at = attributes["updated_at"] && Time.parse(attributes["updated_at"].to_s)
-      local_at = record.persisted? ? record.updated_at : nil
-
-      # Client-side LWW: never clobber a locally newer row (R11).
-      return if incoming_at && local_at && incoming_at < local_at
-
-      record.assign_attributes(attributes.except("id", "server_version"))
-      record.server_version = version || attributes["server_version"] || 0
-      record.sync_state = "synced"
-      record.save!(validate: false)
+      def log_failure(phase, error)
+        warn "[instant_record] #{phase} failed (offline?): #{error.message}"
+      end
     end
   end
 end

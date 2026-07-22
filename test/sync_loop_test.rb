@@ -1,16 +1,7 @@
 require "test_helper"
 
-ActiveRecord::Schema.define do
-  create_table :memos, id: :string, force: true do |t|
-    t.string :title
-    t.integer :server_version, null: false, default: 0
-    t.string :sync_state, null: false, default: "synced"
-    t.timestamps
-  end
-end
-
 class FakeTransport
-  attr_reader :posts, :results_to_return
+  attr_reader :posts
   attr_accessor :events_to_yield, :on_post
 
   def initialize
@@ -63,23 +54,13 @@ end
 
 class SyncLoopTest < Minitest::Test
   def setup
-    InstantRecord.singleton_class.class_eval do
-      alias_method :original_browser?, :browser?
-      define_method(:browser?) { true }
-    end
-    @model = Class.new(ActiveRecord::Base) do
-      self.table_name = "memos"
-      def self.name = "Memo"
-      include InstantRecord::Syncable
-    end
+    @model = syncable_model("Memo")
     InstantRecord.sync(@model)
     @transport = FakeTransport.new
     @notifier = FakeNotifier.new
     InstantRecord::Client.transport = @transport
     InstantRecord::Client.notifier = @notifier
-    @model.delete_all
-    InstantRecord::OutboxMutation.delete_all
-    InstantRecord::SyncMetadata.delete_all
+    reset_instant_record_tables!
     InstantRecord.instance_variable_set(:@started, false)
   end
 
@@ -88,48 +69,62 @@ class SyncLoopTest < Minitest::Test
     InstantRecord::Client.transport = nil
     InstantRecord::Client.notifier = nil
     InstantRecord.instance_variable_set(:@started, false)
-    InstantRecord.singleton_class.class_eval do
-      remove_method :browser?
-      alias_method :browser?, :original_browser?
-      remove_method :original_browser?
-    end
   end
 
   def test_start_is_a_no_op_on_the_server_runtime
-    InstantRecord.singleton_class.send(:define_method, :browser?) { false }
-    refute InstantRecord.start
-    assert_equal :not_started, InstantRecord.tick
+    on_server do
+      refute InstantRecord.start
+      assert_equal :not_started, InstantRecord.tick
+    end
   end
 
   def test_tick_before_start_does_nothing
-    assert_equal :not_started, InstantRecord.tick
+    in_browser do
+      assert_equal :not_started, InstantRecord.tick
+    end
     assert_empty @transport.posts
   end
 
   def test_drain_posts_pending_mutations_and_applies_results
-    memo = @model.create!(title: "hello")
-    mutation_id = InstantRecord::OutboxMutation.sole.id
-    @transport.respond_with([{ "mutation_id" => mutation_id, "status" => "applied", "version" => 1 }])
+    in_browser do
+      memo = @model.create!(title: "hello")
+      mutation_id = InstantRecord::OutboxMutation.sole.id
+      @transport.respond_with([{ "mutation_id" => mutation_id, "status" => "applied", "version" => 1 }])
 
-    InstantRecord.start
-    assert_equal :ok, InstantRecord.tick
+      InstantRecord.start
+      assert_equal :ok, InstantRecord.tick
 
-    path, payload = @transport.posts.sole
-    assert_equal "/mutations", path
-    assert_equal mutation_id, payload[:mutations].first["id"]
+      path, payload = @transport.posts.sole
+      assert_equal "/mutations", path
+      assert_equal mutation_id, payload[:mutations].first[:id]
 
-    assert_equal 0, InstantRecord.pending_count
-    assert_equal "synced", memo.reload.sync_state
-    assert_equal 1, @notifier.notifications
+      assert_equal 0, InstantRecord.pending_count
+      assert_equal "synced", memo.reload.sync_state
+      assert_equal 1, @notifier.notifications
+    end
   end
 
   def test_empty_outbox_posts_nothing
-    InstantRecord.start
-    InstantRecord.tick
+    in_browser do
+      InstantRecord.start
+      InstantRecord.tick
+    end
     assert_empty @transport.posts
   end
 
-  def test_poll_applies_events_advances_cursor_and_notifies_once
+  def test_poll_requests_a_zero_window_so_ticks_never_hold_a_stream
+    in_browser do
+      InstantRecord.start
+      captured_path = nil
+      @transport.define_singleton_method(:each_event) { |path, &blk| captured_path = path }
+      InstantRecord.tick
+
+      assert_includes captured_path, "window=0",
+        "poll must ask the server to close after catch-up; a held stream starves the tick"
+    end
+  end
+
+  def test_poll_applies_events_advances_cursor_once_and_notifies_once
     @transport.events_to_yield = [
       { "type" => "Memo", "id" => "m-1", "operation" => "create", "version" => 1, "cursor" => 7,
         "attributes" => { "id" => "m-1", "title" => "from server", "updated_at" => Time.current.iso8601 } },
@@ -137,55 +132,65 @@ class SyncLoopTest < Minitest::Test
         "attributes" => { "id" => "m-2", "title" => "also from server", "updated_at" => Time.current.iso8601 } }
     ]
 
-    InstantRecord.start
-    assert_equal :ok, InstantRecord.tick
+    in_browser do
+      InstantRecord.start
+      assert_equal :ok, InstantRecord.tick
+    end
 
     assert_equal 2, @model.count
     assert_equal 8, InstantRecord.cursor
-    assert_equal 1, @notifier.notifications, "one notification per batch, not per event"
+    assert_equal 1, @notifier.notifications, "one notification per pass, not per event"
   end
 
   def test_nothing_changed_means_no_notification
-    InstantRecord.start
-    InstantRecord.tick
+    in_browser do
+      InstantRecord.start
+      InstantRecord.tick
+    end
     assert_equal 0, @notifier.notifications
   end
 
   def test_overlapping_tick_is_skipped_not_queued
-    @model.create!(title: "hello")
-    nested_result = nil
-    @transport.on_post = -> { nested_result = InstantRecord.tick }
+    in_browser do
+      @model.create!(title: "hello")
+      nested_result = nil
+      @transport.on_post = -> { nested_result = InstantRecord.tick }
 
-    InstantRecord.start
-    assert_equal :ok, InstantRecord.tick
+      InstantRecord.start
+      assert_equal :ok, InstantRecord.tick
 
-    assert_equal :busy, nested_result
-    assert_equal 1, @transport.posts.size, "no duplicate POST from the nested tick"
+      assert_equal :busy, nested_result
+      assert_equal 1, @transport.posts.size, "no duplicate POST from the nested tick"
+    end
   end
 
   def test_guard_releases_after_transport_failure
-    @model.create!(title: "hello")
-    failing = Object.new
-    def failing.post_json(*) = raise(InstantRecord::Client::Transport::Error, "offline")
-    def failing.each_event(*) = raise(InstantRecord::Client::Transport::Error, "offline")
-    InstantRecord::Client.transport = failing
+    in_browser do
+      @model.create!(title: "hello")
+      failing = Object.new
+      def failing.post_json(*) = raise(InstantRecord::Client::Transport::Error, "offline")
+      def failing.each_event(*) = raise(InstantRecord::Client::Transport::Error, "offline")
+      InstantRecord::Client.transport = failing
 
-    InstantRecord.start
-    assert_equal :ok, InstantRecord.tick, "failures are caught per phase"
-    assert_equal 1, InstantRecord.pending_count, "mutation stays queued for retry"
+      InstantRecord.start
+      assert_equal :ok, InstantRecord.tick, "failures are caught per phase"
+      assert_equal 1, InstantRecord.pending_count, "mutation stays queued for retry"
 
-    InstantRecord::Client.transport = @transport
-    assert_equal :ok, InstantRecord.tick, "guard released; next tick runs"
-    assert_equal 1, @transport.posts.size
+      InstantRecord::Client.transport = @transport
+      assert_equal :ok, InstantRecord.tick, "guard released; next tick runs"
+      assert_equal 1, @transport.posts.size
+    end
   end
 
   def test_sync_now_works_without_start
-    @model.create!(title: "hello")
-    mutation_id = InstantRecord::OutboxMutation.sole.id
-    @transport.respond_with([{ "mutation_id" => mutation_id, "status" => "applied", "version" => 1 }])
+    in_browser do
+      @model.create!(title: "hello")
+      mutation_id = InstantRecord::OutboxMutation.sole.id
+      @transport.respond_with([{ "mutation_id" => mutation_id, "status" => "applied", "version" => 1 }])
 
-    assert_equal :ok, InstantRecord.sync_now
-    assert_equal 0, InstantRecord.pending_count
+      assert_equal :ok, InstantRecord.sync_now
+      assert_equal 0, InstantRecord.pending_count
+    end
   end
 end
 

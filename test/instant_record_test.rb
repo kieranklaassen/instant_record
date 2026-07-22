@@ -1,21 +1,12 @@
 require "test_helper"
 
-ActiveRecord::Schema.define do
-  create_table :widgets, force: true do |t|
-    t.string :title
-    t.integer :server_version, null: false, default: 0
-    t.string :sync_state, null: false, default: "synced"
-    t.timestamps
-  end
-end
-
 class SyncableWidget < ActiveRecord::Base
-  self.table_name = "widgets"
+  self.table_name = "items"
   include InstantRecord::Syncable
 end
 
 class PlainWidget < ActiveRecord::Base
-  self.table_name = "widgets"
+  self.table_name = "items"
 end
 
 class InstantRecordTest < Minitest::Test
