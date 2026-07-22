@@ -6,10 +6,10 @@ module Slack
       Slack::Seeds.apply
     end
 
-    test "slack root redirects to the first channel" do
+    test "slack root redirects to #general" do
       get slack_root_url
 
-      assert_redirected_to slack_channel_path(Channel.channels.first)
+      assert_redirected_to slack_channel_path("channel-general")
     end
 
     test "show renders the seeded welcome message and the server_only marker" do

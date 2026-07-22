@@ -11,7 +11,8 @@ module Slack
     end
 
     def index
-      first_channel = Channel.channels.first
+      # Land on #general (the first seeded channel) when it exists.
+      first_channel = Channel.find_by(id: Slack::Seeds::CHANNELS.first[:id]) || Channel.channels.first
       if first_channel
         redirect_to slack_channel_path(first_channel)
       else
