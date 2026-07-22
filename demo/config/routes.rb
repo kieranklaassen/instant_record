@@ -11,10 +11,25 @@ Rails.application.routes.draw do
   # get "manifest" => "rails/pwa#manifest", as: :pwa_manifest
   # get "service-worker" => "rails/pwa#service_worker", as: :pwa_service_worker
 
-  # index is routed explicitly too: the deployed PWA's static index.html
-  # shadows root when served from public/ (ActionDispatch::Static wins).
-  resources :issues, only: [:index, :create, :update, :destroy]
+  # Each demo app lives under its own namespace: controllers in
+  # app/controllers/<demo>/, views in app/views/<demo>/, routes scoped here.
+  namespace :todo do
+    resources :issues, only: [:create, :update, :destroy]
+    root "issues#index" # /todo
+  end
 
-  # Defines the root path route ("/")
-  root "issues#index"
+  namespace :slack do
+    resources :channels, only: [:show]
+    resources :messages, only: [:create]
+    post "reset", to: "resets#create"
+    match "reset", to: "resets#preflight", via: :options
+    root "channels#index" # /slack
+  end
+
+  # The deployed PWA's static index.html (boot splash) shadows root when
+  # served from public/ (ActionDispatch::Static wins). In the browser runtime
+  # all fetches go through Rack, so this root is what visitors see there;
+  # /home reaches the same page on the server.
+  get "home", to: "home#index"
+  root "home#index"
 end

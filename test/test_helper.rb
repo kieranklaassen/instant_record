@@ -4,6 +4,12 @@ require "instant_record"
 
 ActiveRecord::Base.establish_connection(adapter: "sqlite3", database: ":memory:")
 
+# App-side models are engine-autoloaded under Rails; plain-AR tests load them
+# explicitly so server-side change logging is exercised without a Rails boot.
+require File.expand_path("../app/models/instant_record/change", __dir__)
+require File.expand_path("../app/models/instant_record/applied_mutation", __dir__)
+require File.expand_path("../app/models/instant_record/mutation_applier", __dir__)
+
 # The gem's own tables come from its real migrations, so tests can't drift
 # from what ships (and every test file works standalone).
 ActiveRecord::MigrationContext.new(File.expand_path("../db/migrate", __dir__)).migrate
@@ -54,6 +60,8 @@ module InstantRecordTestHelpers
     ActiveRecord::Base.connection.execute("DELETE FROM items")
     InstantRecord::OutboxMutation.delete_all
     InstantRecord::SyncMetadata.delete_all
+    InstantRecord::Change.delete_all
+    InstantRecord::AppliedMutation.delete_all
   end
 end
 

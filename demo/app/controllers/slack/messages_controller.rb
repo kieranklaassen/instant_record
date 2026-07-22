@@ -1,0 +1,25 @@
+module Slack
+  class MessagesController < ApplicationController
+    extend InstantRecord::RuntimeScoped
+
+    browser_only do
+      skip_forgery_protection   # no session secrets in the local runtime
+    end
+
+    server_only do
+      before_action { response.set_header("x-instant-record-runtime", "server") }
+    end
+
+    def create
+      channel = Channel.find(params.dig(:message, :channel_id))
+      body = params.dig(:message, :body).to_s.strip
+
+      if body.present?
+        # Author is always the visitor — never trusted from the form.
+        Message.create!(channel: channel, chat_user_id: ChatUser::VISITOR_ID, body: body)
+      end
+
+      redirect_to slack_channel_path(channel)
+    end
+  end
+end

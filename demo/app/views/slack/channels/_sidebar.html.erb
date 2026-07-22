@@ -1,0 +1,63 @@
+<aside class="sidebar">
+  <header class="sidebar-header">
+    <p class="micro-label">Demo 02</p>
+    <h1 class="brand">Swiss<br>Slack</h1>
+    <p class="tagline">Swag as we wack.</p>
+  </header>
+
+  <section>
+    <h3 class="micro-label">Channels</h3>
+    <ul>
+      <% @channels.each do |channel| %>
+        <li class="<%= "active" if channel == @channel %>">
+          <%= link_to "##{channel.name}", slack_channel_path(channel) %>
+        </li>
+      <% end %>
+    </ul>
+  </section>
+
+  <section>
+    <h3 class="micro-label">Direct messages</h3>
+    <ul>
+      <% @dms.each do |dm| %>
+        <li class="<%= "active" if dm == @channel %>">
+          <%= link_to dm.dm_user&.name || dm.name, slack_channel_path(dm) %>
+        </li>
+      <% end %>
+    </ul>
+  </section>
+
+  <section>
+    <h3 class="micro-label">Users</h3>
+    <ul class="roster">
+      <% @users.each do |user| %>
+        <li>
+          <span class="dot"></span><%= user.name %><%= " (you)" if user.visitor? %>
+        </li>
+      <% end %>
+    </ul>
+  </section>
+
+  <section class="sidebar-footer">
+    <form class="reset-form" action="<%= slack_reset_endpoint %>" method="post" data-turbo="false">
+      <button type="submit">Reset demo</button>
+    </form>
+    <script>
+      // Post the reset without navigating away; the reset propagates back
+      // over SSE and the shared records_changed listener reloads the page.
+      document.currentScript.previousElementSibling.addEventListener("submit", (event) => {
+        event.preventDefault();
+        fetch(event.target.action, { method: "POST" }).then((response) => {
+          if (!response.ok) throw new Error("reset failed: " + response.status);
+          // Server-rendered pages have no service worker to push the change;
+          // reload directly so the reset is visible immediately.
+          if (!(navigator.serviceWorker && navigator.serviceWorker.controller)) {
+            window.location.reload();
+          }
+        }).catch(() => {
+          alert("Reset needs the sync server — you appear to be offline. Try again once you're connected.");
+        });
+      });
+    </script>
+  </section>
+</aside>

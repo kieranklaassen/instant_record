@@ -1,0 +1,45 @@
+/* Home / demo index (namespaced under body.demo-home) */
+
+.demo-home .page { max-width: 880px; }
+
+.demo-home .lede {
+  max-width: 42rem;
+  font-size: 1.1rem;
+  margin: 1.25rem 0 0;
+}
+
+.demo-home ul.demo-index {
+  list-style: none;
+  margin: 2.5rem 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1.5rem;
+}
+
+.demo-home .demo-card {
+  display: block;
+  height: 100%;
+  padding: 1.25rem;
+  border: 2px solid var(--ink);
+  text-decoration: none;
+}
+
+.demo-home .demo-card h2 { margin: 0.25rem 0 0.5rem; }
+
+.demo-home .demo-card p { margin: 0; font-size: 0.9rem; }
+
+.demo-home .demo-card .go {
+  display: inline-block;
+  margin-top: 1rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.demo-home .demo-card:hover {
+  border-color: var(--red);
+}
+
+.demo-home .demo-card:hover .go { color: var(--red); }

@@ -79,6 +79,90 @@ class SyncableTest < Minitest::Test
     assert_equal "synced", @model.sole.sync_state
   end
 
+  def test_server_create_logs_change_with_version_one
+    todo = on_server { @model.create!(title: "from server") }
+
+    assert_equal 1, todo.server_version
+    change = InstantRecord::Change.sole
+    assert_equal "create", change.operation
+    assert_equal "Todo", change.record_type
+    assert_equal todo.id, change.record_id
+    assert_equal 1, change.version
+    assert_equal "from server", change.attributes_payload["title"]
+    refute_includes change.attributes_payload.keys, "sync_state"
+  end
+
+  def test_server_update_bumps_version_and_logs_change
+    todo = on_server { @model.create!(title: "v1") }
+    InstantRecord::Change.delete_all
+
+    on_server { todo.update!(title: "v2") }
+
+    assert_equal 2, todo.server_version
+    change = InstantRecord::Change.sole
+    assert_equal "update", change.operation
+    assert_equal 2, change.version
+    assert_equal "v2", change.attributes_payload["title"]
+  end
+
+  def test_server_destroy_logs_destroy_change
+    todo = on_server { @model.create!(title: "doomed") }
+    InstantRecord::Change.delete_all
+
+    on_server { todo.destroy! }
+
+    change = InstantRecord::Change.sole
+    assert_equal "destroy", change.operation
+    assert_equal todo.id, change.record_id
+    assert_equal({}, change.attributes_payload)
+  end
+
+  def test_browser_writes_log_no_changes
+    in_browser { @model.create!(title: "local only") }
+
+    assert_equal 0, InstantRecord::Change.count
+  end
+
+  def test_duplicate_id_create_mutation_is_rejected_not_retried_forever
+    InstantRecord.sync(@model)
+    existing = on_server { @model.create!(title: "already here") }
+
+    result = on_server do
+      InstantRecord::MutationApplier.apply(
+        id: SecureRandom.uuid,
+        record_type: "Todo",
+        record_id: existing.id,
+        operation: "create",
+        changes: { "title" => "replayed duplicate" }
+      )
+    end
+
+    assert_equal "rejected", result[:status]
+    assert_equal "id already exists", result[:reason]
+    assert_equal "already here", result[:server_attributes]["title"]
+  ensure
+    InstantRecord.sync
+  end
+
+  def test_applying_client_mutation_logs_exactly_one_change
+    InstantRecord.sync(@model)
+    result = on_server do
+      InstantRecord::MutationApplier.apply(
+        id: SecureRandom.uuid,
+        record_type: "Todo",
+        record_id: SecureRandom.uuid,
+        operation: "create",
+        changes: { "title" => "from client" }
+      )
+    end
+
+    assert_equal "applied", result[:status]
+    assert_equal 1, InstantRecord::Change.count
+    assert_equal 1, @model.sole.server_version
+  ensure
+    InstantRecord.sync
+  end
+
   def test_server_only_block_is_skipped_in_browser_runtime
     model = in_browser do
       syncable_model("Todo") do

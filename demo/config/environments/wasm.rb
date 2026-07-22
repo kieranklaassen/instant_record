@@ -20,6 +20,12 @@ Rails.application.configure do
 
   config.cache_store = :memory_store
 
+  # Serve assets dynamically from the packed app/assets: the production
+  # config this inherits expects precompiled files in public/assets, but
+  # public/ is not packed into the wasm bundle, so every stylesheet and
+  # image request would come back empty in the browser runtime.
+  config.assets.server = true
+
   if config.respond_to?(:active_job)
     config.active_job.queue_adapter = :inline
   end

@@ -21,10 +21,19 @@ module InstantRecord
       model = InstantRecord.synced_model(@mutation[:record_type])
       return record_result(status: "rejected", reason: "unknown record type") unless model
 
-      result = ActiveRecord::Base.transaction { perform(model) }
+      result = ActiveRecord::Base.transaction do
+        InstantRecord.applying_client_mutation { perform(model) }
+      end
       record_result(**result)
     rescue ActiveRecord::RecordInvalid => e
       record_result(status: "rejected", reason: e.record.errors.full_messages.to_sentence,
+        server_attributes: server_attributes_for(model))
+    rescue ActiveRecord::RecordNotUnique
+      # A create whose id already exists (e.g. a client replaying rows the
+      # server already has). Rejecting lets the client roll back its local
+      # copy instead of retrying the poisoned mutation forever; the server's
+      # row comes back down through the change stream.
+      record_result(status: "rejected", reason: "id already exists",
         server_attributes: server_attributes_for(model))
     end
 

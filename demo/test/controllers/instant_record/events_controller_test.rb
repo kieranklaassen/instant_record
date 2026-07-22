@@ -3,14 +3,9 @@ require "test_helper"
 module InstantRecord
   class EventsControllerTest < ActionDispatch::IntegrationTest
     def create_change!(title)
-      issue = Issue.new(title: title, state: "open")
-      issue.id = SecureRandom.uuid
-      issue.server_version = 1
-      issue.save!
-      InstantRecord::Change.create!(
-        record_type: "Issue", record_id: issue.id, operation: "create",
-        version: 1, attributes_payload: issue.attributes.except("sync_state")
-      )
+      # Server-side Syncable writes are change-logged automatically.
+      issue = Issue.create!(title: title, state: "open")
+      InstantRecord::Change.find_by!(record_id: issue.id, operation: "create")
     end
 
     test "streams changes after the cursor, parseable by the gem's own SSE parser" do

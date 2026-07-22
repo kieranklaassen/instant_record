@@ -1,0 +1,121 @@
+/* Swiss / International Typographic Style foundation shared by all demos.
+   Black on white, one red accent, Helvetica stack, hard rules, no decoration. */
+
+:root {
+  --ink: #111111;
+  --paper: #ffffff;
+  --rule: #111111;
+  --hairline: #d9d9d9;
+  --red: #e30613;
+  --muted: #6b6b6b;
+  --font: "Helvetica Neue", Helvetica, Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: var(--font);
+  color: var(--ink);
+  background: var(--paper);
+  -webkit-font-smoothing: antialiased;
+  line-height: 1.4;
+}
+
+h1, h2, h3 {
+  margin: 0;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.05;
+}
+
+h1 { font-size: clamp(2.5rem, 6vw, 4.5rem); }
+h2 { font-size: 1.5rem; }
+
+a { color: inherit; }
+
+.micro-label {
+  margin: 0;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--red);
+}
+
+.meta { color: var(--muted); margin: 0.5rem 0 0; font-size: 0.85rem; }
+
+.site-nav {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 1.5rem;
+  border-bottom: 2px solid var(--rule);
+}
+
+.site-nav .wordmark {
+  font-weight: 700;
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  text-decoration: none;
+}
+
+.site-nav .micro-label { color: var(--muted); }
+
+.page {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 3rem 1.5rem 4rem;
+}
+
+.page-header { margin-bottom: 2rem; }
+.page-header h1 { margin-top: 0.25rem; }
+
+/* Sync-state badges shared by all demos */
+.badge {
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  padding: 0.15rem 0.45rem;
+  border: 1px solid var(--ink);
+}
+
+.badge-pending  { border-color: var(--red); color: var(--red); }
+.badge-synced   { border-color: var(--hairline); color: var(--muted); }
+.badge-rejected { background: var(--red); border-color: var(--red); color: var(--paper); }
+
+/* Form controls: flat, ruled, no rounding */
+input[type="text"], textarea {
+  font-family: var(--font);
+  font-size: 1rem;
+  padding: 0.6rem 0.75rem;
+  border: 2px solid var(--ink);
+  border-radius: 0;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+input[type="text"]:focus, textarea:focus {
+  outline: 2px solid var(--red);
+  outline-offset: -2px;
+  border-color: var(--red);
+}
+
+input[type="submit"], button {
+  font-family: var(--font);
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  padding: 0.6rem 1rem;
+  border: 2px solid var(--ink);
+  border-radius: 0;
+  background: var(--ink);
+  color: var(--paper);
+  cursor: pointer;
+}
+
+input[type="submit"]:hover, button:hover { background: var(--red); border-color: var(--red); }

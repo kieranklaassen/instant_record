@@ -1,9 +1,9 @@
-# This file should ensure the existence of records required to run the application in every environment (production,
-# development, test). The code here should be idempotent so that it can be executed at any point in every environment.
-# The data can then be loaded with the bin/rails db:seed command (or created alongside the database with db:setup).
+# Idempotent — safe to run repeatedly. The Slack demo's reset endpoint reuses
+# the same routine, so "reset" and "fresh install" are the same state.
 #
-# Example:
-#
-#   ["Action", "Comedy", "Drama", "Horror"].each do |genre_name|
-#     MovieGenre.find_or_create_by!(name: genre_name)
-#   end
+# Server runtime only: the browser runtime also runs seeds on boot
+# (DatabaseTasks.prepare_all in the service worker), but there every create is
+# a local write that lands in the outbox — a fresh client would replay all the
+# seed rows at the server as client mutations. Browsers receive seed data via
+# the downstream change-log sync instead.
+Slack::Seeds.apply unless InstantRecord.browser?
