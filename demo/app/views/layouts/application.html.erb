@@ -11,9 +11,11 @@
 
     <%= yield :head %>
 
-    <link rel="icon" href="/icon.png" type="image/png">
-    <link rel="icon" href="/icon.svg" type="image/svg+xml">
-    <link rel="apple-touch-icon" href="/icon.png">
+    <%# Asset-pipeline icons: public/ isn't packed into the wasm bundle, so
+        hardcoded /icon.png 404s on every page load in the browser runtime. %>
+    <link rel="icon" href="<%= asset_path("icon.png") %>" type="image/png">
+    <link rel="icon" href="<%= asset_path("icon.svg") %>" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="<%= asset_path("icon.png") %>">
 
     <%# Includes all stylesheet files in app/assets/stylesheets %>
     <%= stylesheet_link_tag :app, "data-turbo-track": "reload" %>
