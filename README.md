@@ -64,7 +64,7 @@ end
 
 Syncable models need three columns — a string/uuid primary key, `server_version:integer`, and `sync_state:string` — plus two client-side tables (outbox and sync metadata). In the PoC you copy the migrations from `demo/db/migrate/`; a generator is future work.
 
-Rules that should only run on the server (authorization, quotas, anything the client shouldn't decide) stay in the same file:
+Rules that should only run on the server (authorization, quotas, anything the client shouldn't decide) stay in the same file, scoped with a block:
 
 ```ruby
 class Issue < ApplicationRecord
@@ -72,8 +72,12 @@ class Issue < ApplicationRecord
 
   validates :title, presence: true
 
-  unless InstantRecord.browser?
+  server_only do
     validate :quota_not_exceeded   # server rejects; the client rolls back
+  end
+
+  browser_only do
+    after_commit :flash_confetti   # local-runtime behavior
   end
 end
 ```
@@ -144,7 +148,8 @@ Useful helpers:
 
 - `issue.sync_state` — `"pending"` (not yet acked) or `"synced"`
 - `InstantRecord.pending_count` — outbox size, for an "unsynced changes" indicator
-- `InstantRecord.browser?` — which runtime am I in?
+- `server_only { ... }` / `browser_only { ... }` — runtime-scoped model rules
+- `InstantRecord.browser?` — the underlying runtime check, for anywhere else
 
 ### 6. Sync just happens
 

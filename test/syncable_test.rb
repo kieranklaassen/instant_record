@@ -117,4 +117,57 @@ class SyncableTest < Minitest::Test
     server_model.create!(title: "server side")
     assert_equal 0, InstantRecord::OutboxMutation.count
   end
+
+  def test_server_only_block_is_skipped_in_browser_runtime
+    browser_model = Class.new(ActiveRecord::Base) do
+      self.table_name = "todos"
+      def self.name = "Todo"
+      include InstantRecord::Syncable
+
+      server_only do
+        validates :title, exclusion: { in: ["reject me"] }
+      end
+    end
+
+    assert browser_model.new(title: "reject me").valid?
+  end
+
+  def test_server_only_block_applies_in_server_runtime
+    InstantRecord.singleton_class.send(:define_method, :browser?) { false }
+    server_model = Class.new(ActiveRecord::Base) do
+      self.table_name = "todos"
+      def self.name = "Todo"
+      include InstantRecord::Syncable
+
+      server_only do
+        validates :title, exclusion: { in: ["reject me"] }
+      end
+    end
+
+    refute server_model.new(title: "reject me").valid?
+  end
+
+  def test_browser_only_block_applies_in_browser_runtime
+    browser_model = Class.new(ActiveRecord::Base) do
+      self.table_name = "todos"
+      def self.name = "Todo"
+      include InstantRecord::Syncable
+
+      browser_only do
+        def local_hint = "browser"
+      end
+    end
+
+    assert_equal "browser", browser_model.new.local_hint
+    assert_raises(NoMethodError) do
+      InstantRecord.singleton_class.send(:define_method, :browser?) { false }
+      other = Class.new(ActiveRecord::Base) do
+        self.table_name = "todos"
+        def self.name = "Todo"
+        include InstantRecord::Syncable
+        browser_only { def local_hint = "browser" }
+      end
+      other.new.local_hint
+    end
+  end
 end

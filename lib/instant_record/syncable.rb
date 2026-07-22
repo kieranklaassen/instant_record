@@ -24,6 +24,19 @@ module InstantRecord
 
     class_methods do
       def instant_record_syncable? = true
+
+      # Declare rules that only exist in one runtime:
+      #
+      #   server_only do
+      #     validate :quota_not_exceeded   # the browser accepts optimistically,
+      #   end                              # the server rejects, the client rolls back
+      def server_only(&block)
+        class_eval(&block) unless InstantRecord.browser?
+      end
+
+      def browser_only(&block)
+        class_eval(&block) if InstantRecord.browser?
+      end
     end
 
     def sync_state
