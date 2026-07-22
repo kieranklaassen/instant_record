@@ -140,12 +140,25 @@ Useful helpers:
 
 - `issue.sync_state` — `"pending"` (not yet acked) or `"synced"`
 - `InstantRecord.pending_count` — outbox size, for an "unsynced changes" indicator
+- `InstantRecord.sync_now` — force a sync pass (the background loop runs anyway)
 - `server_only { ... }` / `browser_only { ... }` — runtime-scoped model rules
 - `InstantRecord.browser?` — the underlying runtime check, for anywhere else
 
 ### 5. Sync just happens
 
-You don't write sync code. Behind the scenes:
+The sync loop is Ruby, configured in Ruby:
+
+```ruby
+# config/initializers/instant_record.rb (optional — these are the defaults)
+InstantRecord.configure do |config|
+  config.endpoint = "/instant_record"   # absolute URL for cross-origin setups
+  config.sync_interval = 3              # seconds between background ticks
+end
+```
+
+The browser shell calls `InstantRecord.start` once at boot; from there Ruby owns the drain, the change stream, reconnects, and reconciliation. (`InstantRecord.sync_now` forces a pass manually.) The only JavaScript left is a timer — wasm Ruby can't sleep without blocking the VM, so the service worker provides the clock and nothing else.
+
+Behind the scenes:
 
 - **First load** — a new client hydrates its local database from the server automatically and remembers its position, so later visits paint instantly from IndexedDB and fetch only what's new.
 - **Every write** — committed locally first, then delivered to the server in the background. Offline just means "delivered later"; queued writes survive reloads.
@@ -197,10 +210,6 @@ Measured on the demo (Chrome, M-series MacBook):
 Sketched but **not built**:
 
 ```ruby
-# A Ruby-facing sync API instead of the JS-driven loop
-InstantRecord.configure { |c| c.endpoint = "https://example.com/instant_record" }
-InstantRecord.start
-
 # Model-level conflict resolution beyond last-write-wins
 class Issue < ApplicationRecord
   include InstantRecord::Syncable

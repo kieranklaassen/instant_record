@@ -14,3 +14,9 @@ rubies/
 dist/
 node_modules/
 *.wasm
+
+# PWA build artifacts deployed into public/ (rsync from pwa/dist)
+public/boot.html
+public/index.html
+public/rails.sw.js
+public/assets/
