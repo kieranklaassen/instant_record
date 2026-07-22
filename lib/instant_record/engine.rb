@@ -4,6 +4,7 @@ module InstantRecord
 
     config.instant_record = ActiveSupport::OrderedOptions.new
     config.instant_record.mount_path = "/instant_record"
+    config.instant_record.build_on_precompile = false
 
     initializer "instant_record.migrations" do |app|
       unless app.root == root

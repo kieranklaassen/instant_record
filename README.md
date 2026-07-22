@@ -62,7 +62,7 @@ class Issue < ApplicationRecord
 end
 ```
 
-Syncable models need three columns — a string/uuid primary key, `server_version:integer`, and `sync_state:string` — plus two client-side tables (outbox and sync metadata). In the PoC you copy the migrations from `demo/db/migrate/`; a generator is future work.
+Syncable models need three columns — a string/uuid primary key, `server_version:integer`, and `sync_state:string`. The gem's own tables (outbox, sync metadata, change log, idempotency ledger) install automatically as engine migrations — just run `bin/rails db:migrate`.
 
 Rules that should only run on the server (authorization, quotas, anything the client shouldn't decide) stay in the same file, scoped with a block:
 
@@ -94,23 +94,21 @@ InstantRecord.sync(Issue, Todo)
 
 ### 3. Build the browser bundle
 
-Your app compiles to a wasm module that boots in a service worker:
+Your app compiles to a wasm module that boots in a service worker. One generator sets everything up — the wasm environment, the PGlite database config, and a PWA shell wired with the sync driver:
 
 ```sh
-bin/rails wasmify:install    # one-time setup (creates the wasm env + pwa/ shell)
-bin/rails wasmify:pack       # packs your app + Ruby into app.wasm
+bin/rails generate instant_record:install
+bin/rails instant_record:build     # compiles the Ruby core (once) + packs app.wasm
 ```
 
-Point the wasm environment at PGlite:
+**Deploying:** the bundle is a build artifact, like precompiled assets. Either build it in your deploy pipeline with `bin/rails instant_record:build`, or opt in to building during asset precompilation:
 
-```yaml
-# config/database.yml
-wasm:
-  adapter: pglite
-  js_interface: pglite4rails
+```ruby
+# config/application.rb
+config.instant_record.build_on_precompile = true
 ```
 
-The generated `pwa/` shell boots the VM, opens the PGlite database, and runs the sync loop. The PoC's working version lives in `demo/pwa/` — copy it.
+(Off by default — the build needs the wasm toolchain and network access for ruby.wasm artifacts.)
 
 ### 4. Write your app like it's normal Rails
 
@@ -170,8 +168,7 @@ bin/rails test
 bin/rails server                  # sync server on :3000
 
 # Browser side (one-time build, ~5 min)
-bin/rails wasmify:build:core
-bin/rails wasmify:pack            # writes pwa/public/app.wasm (~83 MB)
+bin/rails instant_record:build    # writes pwa/public/app.wasm (~83 MB)
 cd pwa && yarn install && yarn dev --host
 ```
 
