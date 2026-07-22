@@ -113,6 +113,11 @@ const rackHandler = new RackHandler(initVM, { assumeSSL: true, async: true });
 
 const BOOT_RESOURCES = ["/boot", "/boot.js", "/boot.html", "/rails.sw.js"];
 const VITE_RESOURCES = ["node_modules", "@vite"];
+// The demo reset must reach the real server — only the server's change log
+// propagates to other clients. Without this passthrough, a same-origin reset
+// (PWA served by the Rails app itself) would be handled by the local wasm
+// Rack handler and only reset local PGlite.
+const NETWORK_RESOURCES = ["/slack/reset"];
 
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
@@ -131,6 +136,13 @@ self.addEventListener("fetch", (event) => {
   if (VITE_RESOURCES.some((r) => url.href.includes(r))) {
     console.log("[rails-web] Fetching Vite files from network:", url.href);
     event.respondWith(fetch(event.request.url));
+    return;
+  }
+
+  if (NETWORK_RESOURCES.some((r) => url.pathname === r)) {
+    console.log("[rails-web] Passing request to network:", url.href);
+    // fetch(event.request) preserves the method and body (these are POSTs).
+    event.respondWith(fetch(event.request));
     return;
   }
 

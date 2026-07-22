@@ -34,14 +34,21 @@ module Slack
     ].freeze
 
     def perform(message_id)
-      message = Message.find_by(id: message_id)
-      return unless message # deleted before the job ran (e.g. demo reset)
+      # Lock the visitor message so the reply serializes against a concurrent
+      # demo reset: reset's destroy_all blocks until we commit (and then also
+      # removes the reply), and a reset that already deleted the message makes
+      # the locking find return nil. Without the lock, a reply could land
+      # after the reseed and pollute the post-reset state.
+      Message.transaction do
+        message = Message.lock.find_by(id: message_id)
+        next unless message # deleted before the job ran (e.g. demo reset)
 
-      channel = message.channel
-      responder = pick_responder(channel)
-      return unless responder&.bot?
+        channel = message.channel
+        responder = pick_responder(channel)
+        next unless responder&.bot?
 
-      Message.create!(channel: channel, chat_user: responder, body: reply_body(responder))
+        Message.create!(channel: channel, chat_user: responder, body: reply_body(responder))
+      end
     end
 
     private
