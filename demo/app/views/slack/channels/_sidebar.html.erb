@@ -39,6 +39,16 @@
   </section>
 
   <section class="sidebar-footer">
-    <%= button_to "Reset demo", slack_reset_path, method: :post, form: { data: { turbo: false } } %>
+    <form class="reset-form" action="<%= slack_reset_endpoint %>" method="post" data-turbo="false">
+      <button type="submit">Reset demo</button>
+    </form>
+    <script>
+      // Post the reset without navigating away; the reset propagates back
+      // over SSE and the shared records_changed listener reloads the page.
+      document.currentScript.previousElementSibling.addEventListener("submit", (event) => {
+        event.preventDefault();
+        fetch(event.target.action, { method: "POST" });
+      });
+    </script>
   </section>
 </aside>

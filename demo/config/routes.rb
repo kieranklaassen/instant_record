@@ -22,6 +22,7 @@ Rails.application.routes.draw do
     resources :channels, only: [:show]
     resources :messages, only: [:create]
     post "reset", to: "resets#create"
+    match "reset", to: "resets#preflight", via: :options
     root "channels#index" # /slack
   end
 
