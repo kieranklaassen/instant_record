@@ -120,7 +120,7 @@ self.addEventListener("install", (event) => {
 
 const rackHandler = new RackHandler(initVM, { assumeSSL: true, async: true });
 
-const BOOT_RESOURCES = ["/boot", "/boot.js", "/boot.html", "/rails.sw.js"];
+const BOOT_RESOURCES = ["/boot", "/boot.js", "/boot.html", "/rails.sw.js", "/favicon.ico"];
 const VITE_RESOURCES = ["node_modules", "@vite"];
 
 self.addEventListener("fetch", (event) => {

@@ -47,12 +47,15 @@
       // over SSE and the shared records_changed listener reloads the page.
       document.currentScript.previousElementSibling.addEventListener("submit", (event) => {
         event.preventDefault();
-        fetch(event.target.action, { method: "POST" }).then(() => {
+        fetch(event.target.action, { method: "POST" }).then((response) => {
+          if (!response.ok) throw new Error("reset failed: " + response.status);
           // Server-rendered pages have no service worker to push the change;
           // reload directly so the reset is visible immediately.
           if (!(navigator.serviceWorker && navigator.serviceWorker.controller)) {
             window.location.reload();
           }
+        }).catch(() => {
+          alert("Reset needs the sync server — you appear to be offline. Try again once you're connected.");
         });
       });
     </script>
