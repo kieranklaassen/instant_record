@@ -23,7 +23,10 @@
   border-bottom: 1px solid var(--hairline);
 }
 
-.demo-todo ul.issues li .title { flex: 1; }
+.demo-todo ul.issues li .title {
+  flex: 1;
+  overflow-wrap: anywhere; /* long unbroken titles must not widen the page */
+}
 
 .demo-todo ul.issues li.done .title {
   text-decoration: line-through;

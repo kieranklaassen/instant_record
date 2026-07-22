@@ -128,7 +128,10 @@
   color: var(--muted);
 }
 
-.demo-slack ol.messages .body { margin: 0.15rem 0 0; }
+.demo-slack ol.messages .body {
+  margin: 0.15rem 0 0;
+  overflow-wrap: anywhere; /* long unbroken strings must not widen the page */
+}
 
 .demo-slack .composer {
   display: flex;

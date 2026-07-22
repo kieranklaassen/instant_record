@@ -58,7 +58,16 @@ const initVM = async (progress, opts = {}) => {
 
   const bootStartedAt = performance.now();
 
-  vm = await initRailsVM("/app.wasm", {
+  // Fetch with revalidation: the browser happily serves a cached app.wasm to
+  // a freshly installed service worker, pinning clients to a stale bundle
+  // after a rebuild. `no-cache` revalidates via ETag — a 304 when unchanged,
+  // fresh bytes after a deploy.
+  progress?.updateStep("Loading WebAssembly module...");
+  const wasmModule = await WebAssembly.compileStreaming(
+    fetch("/app.wasm", { cache: "no-cache" }),
+  );
+
+  vm = await initRailsVM(wasmModule, {
     database: { adapter: "pglite" },
     async: true,
     progressCallback: (step) => {
