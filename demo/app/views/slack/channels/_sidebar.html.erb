@@ -1,0 +1,44 @@
+<aside class="sidebar">
+  <header class="sidebar-header">
+    <p class="micro-label">Demo 02</p>
+    <h1 class="brand">Swiss<br>Slack</h1>
+    <p class="tagline">Swag as we wack.</p>
+  </header>
+
+  <section>
+    <h3 class="micro-label">Channels</h3>
+    <ul>
+      <% @channels.each do |channel| %>
+        <li class="<%= "active" if channel == @channel %>">
+          <%= link_to "##{channel.name}", slack_channel_path(channel) %>
+        </li>
+      <% end %>
+    </ul>
+  </section>
+
+  <section>
+    <h3 class="micro-label">Direct messages</h3>
+    <ul>
+      <% @dms.each do |dm| %>
+        <li class="<%= "active" if dm == @channel %>">
+          <%= link_to dm.dm_user&.name || dm.name, slack_channel_path(dm) %>
+        </li>
+      <% end %>
+    </ul>
+  </section>
+
+  <section>
+    <h3 class="micro-label">Users</h3>
+    <ul class="roster">
+      <% @users.each do |user| %>
+        <li>
+          <span class="dot"></span><%= user.name %><%= " (you)" if user.visitor? %>
+        </li>
+      <% end %>
+    </ul>
+  </section>
+
+  <section class="sidebar-footer">
+    <%= button_to "Reset demo", slack_reset_path, method: :post, form: { data: { turbo: false } } %>
+  </section>
+</aside>

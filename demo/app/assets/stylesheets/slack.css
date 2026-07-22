@@ -1,0 +1,145 @@
+/* Swiss Slack demo (namespaced under body.demo-slack) */
+
+.demo-slack .slack {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  min-height: calc(100vh - 45px);
+}
+
+/* Sidebar: black panel, red accents */
+.demo-slack .sidebar {
+  background: var(--ink);
+  color: var(--paper);
+  padding: 1.5rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.demo-slack .sidebar-header .brand {
+  font-size: 2rem;
+  line-height: 0.95;
+  text-transform: uppercase;
+  margin-top: 0.25rem;
+}
+
+.demo-slack .sidebar-header .tagline {
+  margin: 0.5rem 0 0;
+  font-size: 0.7rem;
+  color: #9a9a9a;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.demo-slack .sidebar section ul {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+}
+
+.demo-slack .sidebar section li {
+  padding: 0.2rem 0;
+  font-size: 0.9rem;
+}
+
+.demo-slack .sidebar section li a {
+  color: var(--paper);
+  text-decoration: none;
+}
+
+.demo-slack .sidebar section li.active a {
+  color: var(--red);
+  font-weight: 700;
+}
+
+.demo-slack .sidebar section li a:hover { color: var(--red); }
+
+.demo-slack .sidebar .roster li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: #c9c9c9;
+}
+
+.demo-slack .sidebar .roster .dot {
+  width: 7px;
+  height: 7px;
+  background: var(--red);
+}
+
+.demo-slack .sidebar-footer { margin-top: auto; }
+
+.demo-slack .sidebar-footer button {
+  width: 100%;
+  background: transparent;
+  color: var(--paper);
+  border-color: var(--paper);
+}
+
+.demo-slack .sidebar-footer button:hover {
+  background: var(--red);
+  border-color: var(--red);
+}
+
+/* Conversation column */
+.demo-slack .conversation {
+  display: flex;
+  flex-direction: column;
+  padding: 1.5rem 2rem 2rem;
+  max-width: 860px;
+}
+
+.demo-slack .conversation-header {
+  border-bottom: 2px solid var(--rule);
+  padding-bottom: 0.75rem;
+}
+
+.demo-slack .conversation-header .hash { color: var(--red); }
+
+.demo-slack ol.messages {
+  list-style: none;
+  margin: 0;
+  padding: 1rem 0;
+  flex: 1;
+}
+
+.demo-slack ol.messages li {
+  padding: 0.6rem 0;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.demo-slack .message-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+
+.demo-slack .message-head .author {
+  font-weight: 700;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.demo-slack ol.messages li.own .message-head .author { color: var(--red); }
+
+.demo-slack .message-head .timestamp {
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
+.demo-slack ol.messages .body { margin: 0.15rem 0 0; }
+
+.demo-slack .composer {
+  display: flex;
+  gap: 0.5rem;
+  border-top: 2px solid var(--rule);
+  padding-top: 1rem;
+}
+
+.demo-slack .composer input[type="text"] { flex: 1; }
+
+@media (max-width: 720px) {
+  .demo-slack .slack { grid-template-columns: 1fr; }
+  .demo-slack .sidebar { flex-direction: column; }
+}
