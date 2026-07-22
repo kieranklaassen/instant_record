@@ -33,7 +33,12 @@ const tick = () => {
 };
 
 const startSync = async () => {
-  await vm.evalAsync("InstantRecord.start");
+  // Boot-time window eviction runs only on cold boots. An idle-terminated
+  // worker restarting under already-open tabs (which it still controls) must
+  // not trim scrollback a reader is holding.
+  const controlled = await self.clients.matchAll({ type: "window" });
+  const coldBoot = controlled.length === 0;
+  await vm.evalAsync(`InstantRecord.start(cold_boot: ${coldBoot})`);
 
   const seconds = parseInt(
     (await vm.evalAsync("InstantRecord.config.sync_interval")).toString(),
@@ -43,6 +48,30 @@ const startSync = async () => {
   clearInterval(syncTimer);
   syncTimer = setInterval(tick, seconds * 1000);
   tick(); // initial drain + catch-up
+};
+
+// History fetches enter the VM here — via a page message, never from inside a
+// Rack request — because a nested evalAsync at an asyncify suspension point
+// is the known crash class. Ruby's single-flight guard answers busy while a
+// sync tick is in flight; retry briefly instead of interleaving.
+const fetchHistory = async (request, attempts = 8) => {
+  if (!vm) return { ok: false, error: "vm not ready" };
+
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    let reply;
+    try {
+      const raw = await vm.evalAsync(
+        `InstantRecord.fetch_history_json(${JSON.stringify(JSON.stringify(request))})`,
+      );
+      reply = JSON.parse(raw.toString());
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
+    if (!reply.busy) return reply;
+    await new Promise((resolve) => setTimeout(resolve, 150 * (attempt + 1)));
+  }
+
+  return { ok: false, error: "sync busy" };
 };
 
 const initVM = async (progress, opts = {}) => {
@@ -179,6 +208,12 @@ self.addEventListener("fetch", (event) => {
 
 self.addEventListener("message", async (event) => {
   console.log("[rails-web] Received worker message:", event.data);
+
+  if (event.data.type === "instant_record.fetch_history") {
+    const reply = await fetchHistory(event.data.request);
+    event.ports[0]?.postMessage(reply);
+    return;
+  }
 
   if (event.data.type === "reload-rails") {
     const progress = new Progress();

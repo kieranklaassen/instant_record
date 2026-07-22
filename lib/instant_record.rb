@@ -1,3 +1,5 @@
+require "json"
+
 module InstantRecord
   DEFAULT_MOUNT_PATH = "/instant_record".freeze
 
@@ -115,6 +117,27 @@ module InstantRecord
       ensure
         @ticking = false
       end
+    end
+
+    # String-in/string-out fetch_history for the service worker's evalAsync
+    # interop (no JS object bridging). Never raises across the boundary:
+    # errors come back as {ok: false, error:}, a held single-flight guard as
+    # {ok: false, busy: true} for the worker's retry loop.
+    def fetch_history_json(request_json)
+      request = JSON.parse(request_json)
+      model = synced_model(request["type"])
+      return JSON.generate(ok: false, error: "unknown record type #{request["type"].inspect}") unless model
+
+      before = request["before"] || {}
+      result = fetch_history(model,
+        partition: request["partition"],
+        before: { created_at: before["created_at"], id: before["id"] },
+        limit: request["limit"])
+      return JSON.generate(ok: false, busy: true, error: "sync in flight") if result == :busy
+
+      JSON.generate(result)
+    rescue JSON::ParserError, ArgumentError, TypeError => e
+      JSON.generate(ok: false, error: e.message)
     end
 
     # Server-side change logging (Syncable) must not fire while a client

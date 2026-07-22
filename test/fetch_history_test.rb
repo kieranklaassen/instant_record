@@ -166,4 +166,45 @@ class FetchHistoryTest < Minitest::Test
       on_server { InstantRecord.fetch_history(plain, before: before_cursor(Time.now.utc)) }
     end
   end
+
+  def test_fetch_history_json_round_trips
+    now = Time.now.utc
+    @transport.pages = [{ "records" => [record_payload("m-1", now - 120)], "has_more" => false }]
+    request = JSON.generate(type: "Memo", partition: "a",
+      before: { created_at: now.iso8601(6), id: "zz-boundary" })
+
+    reply = in_browser { JSON.parse(InstantRecord.fetch_history_json(request)) }
+
+    assert reply["ok"]
+    assert_equal 1, reply["applied"]
+    assert_equal false, reply["has_more"]
+    assert_equal %w[m-1], @model.pluck(:id)
+  end
+
+  def test_fetch_history_json_unknown_type_is_a_json_error
+    reply = JSON.parse(InstantRecord.fetch_history_json(JSON.generate(type: "Nope", before: {})))
+
+    refute reply["ok"]
+    assert_match(/Nope/, reply["error"])
+  end
+
+  def test_fetch_history_json_malformed_input_is_a_json_error
+    reply = JSON.parse(InstantRecord.fetch_history_json("not json"))
+
+    refute reply["ok"]
+    assert reply["error"]
+  end
+
+  def test_fetch_history_json_busy_flags_for_the_retry_loop
+    InstantRecord.instance_variable_set(:@ticking, true)
+    request = JSON.generate(type: "Memo", partition: "a",
+      before: { created_at: Time.now.utc.iso8601(6), id: "x" })
+
+    reply = JSON.parse(in_browser { InstantRecord.fetch_history_json(request) })
+
+    refute reply["ok"]
+    assert reply["busy"]
+  ensure
+    InstantRecord.instance_variable_set(:@ticking, false)
+  end
 end
