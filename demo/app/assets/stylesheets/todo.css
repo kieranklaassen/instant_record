@@ -1,0 +1,44 @@
+/* Todo demo (namespaced under body.demo-todo) */
+
+.demo-todo .todo-form {
+  display: flex;
+  gap: 0.5rem;
+  margin: 1.5rem 0;
+}
+
+.demo-todo .todo-form input[type="text"] { flex: 1; }
+
+.demo-todo ul.issues {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  border-top: 2px solid var(--rule);
+}
+
+.demo-todo ul.issues li {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.demo-todo ul.issues li .title { flex: 1; }
+
+.demo-todo ul.issues li.done .title {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+
+.demo-todo ul.issues button {
+  font-size: 0.65rem;
+  padding: 0.35rem 0.6rem;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.demo-todo ul.issues button:hover {
+  background: var(--red);
+  border-color: var(--red);
+  color: var(--paper);
+}
