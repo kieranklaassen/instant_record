@@ -40,5 +40,10 @@ module Demo
 
     # Don't generate system test files.
     config.generators.system_tests = nil
+
+    # Fiber-per-request servers (Falcon) need fiber-scoped execution state and
+    # connection pools. `defined?(Falcon)` is true only under `falcon serve`
+    # (the gem is require: false), so Puma runs and the wasm build see :thread.
+    config.active_support.isolation_level = :fiber if defined?(Falcon)
   end
 end

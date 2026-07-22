@@ -14,6 +14,16 @@ gem "propshaft", group: [:default, :wasm]
 gem "pg", "~> 1.1"
 # Use the Puma web server [https://github.com/puma/puma]
 gem "puma", ">= 5.0"
+
+group :development do
+  # Fiber-per-request server, recommended for SSE-heavy deployments.
+  # require: false — `defined?(Falcon)` gates fiber isolation to falcon runs.
+  gem "falcon", require: false
+  gem "traces", require: false   # optional falcon dep its CLI requires
+  gem "metrics", require: false  # ditto
+  # Client for the SSE load spike script (script/sse_load_spike.rb)
+  gem "async-http", require: false
+end
 # Use JavaScript with ESM import maps [https://github.com/rails/importmap-rails]
 gem "importmap-rails", group: [:default, :wasm]
 # Hotwire's SPA-like page accelerator [https://turbo.hotwired.dev]
