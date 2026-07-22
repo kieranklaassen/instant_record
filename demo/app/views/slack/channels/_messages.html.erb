@@ -1,0 +1,30 @@
+<%# The shared fragment contract (?fragment=1 serves just this partial):
+    both runtimes render conversation state from it, and the conversation JS
+    reads its data attributes for the next scroll-up cursor. data-has-more is
+    authoritative on the server runtime only; the browser's local database
+    holds just the synced window, so it renders "true" and the first
+    fetch_history reply settles it. %>
+<ol class="messages"
+    data-channel-id="<%= @channel.id %>"
+    data-fragment-url="<%= slack_channel_path(@channel, fragment: 1) %>"
+    data-oldest-created-at="<%= @messages.first&.created_at&.utc&.iso8601(6) %>"
+    data-oldest-id="<%= @messages.first&.id %>"
+    data-has-more="<%= InstantRecord.browser? || @has_more %>">
+  <% if !@has_more && !InstantRecord.browser? %>
+    <li class="beginning-marker" data-beginning="true">
+      <span class="micro-label">Beginning of <%= @channel.dm? ? "this conversation" : "##{@channel.name}" %></span>
+    </li>
+  <% end %>
+  <% @messages.each do |message| %>
+    <li class="<%= "own" if message.from_visitor? %>" data-id="<%= message.id %>">
+      <div class="message-head">
+        <span class="author"><%= message.chat_user&.name || "Unknown" %></span>
+        <span class="timestamp"><%= message.created_at.strftime("%H:%M") %></span>
+        <% if message.from_visitor? %>
+          <span class="badge badge-<%= message.sync_state %>"><%= message.sync_state %></span>
+        <% end %>
+      </div>
+      <p class="body"><%= message.body %></p>
+    </li>
+  <% end %>
+</ol>

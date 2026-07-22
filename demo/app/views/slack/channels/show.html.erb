@@ -20,20 +20,7 @@
       </p>
     </header>
 
-    <ol class="messages">
-      <% @messages.each do |message| %>
-        <li class="<%= "own" if message.from_visitor? %>">
-          <div class="message-head">
-            <span class="author"><%= message.chat_user&.name || "Unknown" %></span>
-            <span class="timestamp"><%= message.created_at.strftime("%H:%M") %></span>
-            <% if message.from_visitor? %>
-              <span class="badge badge-<%= message.sync_state %>"><%= message.sync_state %></span>
-            <% end %>
-          </div>
-          <p class="body"><%= message.body %></p>
-        </li>
-      <% end %>
-    </ol>
+    <%= render "messages" %>
 
     <%= form_with url: slack_messages_path, method: :post, class: "composer", data: { turbo: false } do |f| %>
       <%= f.hidden_field "message[channel_id]", value: @channel.id %>

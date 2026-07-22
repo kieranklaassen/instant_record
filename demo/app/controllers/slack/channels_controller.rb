@@ -20,13 +20,77 @@ module Slack
       end
     end
 
+    # Display window per render: the newest WINDOW messages by default; a
+    # ?floor keyset (plus optional deepen=1 for one more page) extends the
+    # render downward as the visitor scrolls up.
+    WINDOW = 50
+
+    # Server-runtime anti-abuse clamp, mirroring the records endpoint's hard
+    # max: an unauthenticated crafted floor must not force a full
+    # multi-thousand-row render. The browser runtime renders unclamped — its
+    # local database only ever holds what was synced or scrolled.
+    MAX_RENDER_DEPTH = 200
+
     def show
       @channels = Channel.channels
       @dms = Channel.dms
       @users = ChatUser.order(:name)
       @channel = Channel.find(params[:id])
-      @messages = @channel.messages.includes(:chat_user).order(:created_at, :id)
+      @messages = conversation_window
+      @has_more = older_rows_exist?(@messages.first)
       @pending_count = InstantRecord.browser? ? InstantRecord.pending_count : 0
+
+      render partial: "messages", layout: false if params[:fragment]
+    end
+
+    private
+
+    # Rows from the floor (inclusive) to newest, ascending for display. The
+    # newest-first limit means the server clamp drops the floor end, never
+    # the live end.
+    def conversation_window
+      newest_first = @channel.messages.includes(:chat_user).order(created_at: :desc, id: :desc)
+
+      rows =
+        if (floor = resolved_floor)
+          at, id = floor
+          scope = newest_first.where("created_at > :at OR (created_at = :at AND id >= :id)", at: at, id: id)
+          scope = scope.limit(MAX_RENDER_DEPTH) unless InstantRecord.browser?
+          scope.to_a
+        else
+          newest_first.limit(WINDOW).to_a
+        end
+      rows.reverse
+    end
+
+    def resolved_floor
+      return nil if params[:floor_created_at].blank? || params[:floor_id].blank?
+
+      at = Time.zone.parse(params[:floor_created_at].to_s)
+      return nil unless at
+
+      floor = [at, params[:floor_id].to_s]
+      params[:deepen].present? ? deepened_floor(floor) : floor
+    end
+
+    # One page below the given floor — scroll-up asks for "what I had plus
+    # the next page" without knowing the new boundary keyset up front.
+    def deepened_floor(floor)
+      at, id = floor
+      below = @channel.messages
+        .where("created_at < :at OR (created_at = :at AND id < :id)", at: at, id: id)
+        .order(created_at: :desc, id: :desc)
+        .limit(WINDOW)
+        .last
+      below ? [below.created_at, below.id] : floor
+    end
+
+    def older_rows_exist?(oldest)
+      return false unless oldest
+
+      @channel.messages
+        .where("created_at < :at OR (created_at = :at AND id < :id)", at: oldest.created_at, id: oldest.id)
+        .exists?
     end
   end
 end
