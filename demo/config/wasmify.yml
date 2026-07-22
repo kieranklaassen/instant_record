@@ -1,12 +1,14 @@
 output_dir: pwa/public
 # Specify the list of directories to be included into the final
 # app.wasm file.
+# public/ is deliberately not packed: it holds deployed PWA artifacts
+# (including app.wasm itself — packing it recursed the bundle to 179MB),
+# and the in-VM app serves no static files the demo needs.
 pack_directories:
   - app
   - lib
   - config
   - db
-  - public
 
 # Specify the list of gems to skip during the base module compiliation.
 # Usually, you want to specify the gems with native extensions that are
