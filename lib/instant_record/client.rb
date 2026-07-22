@@ -1,3 +1,5 @@
+require "uri"
+require "time"
 require "instant_record/client/transport"
 require "instant_record/client/notifier"
 
@@ -118,6 +120,41 @@ module InstantRecord
         changed
       end
 
+      # On-demand history page for a windowed model. Serves from the local
+      # database when the requested page is known-contiguous (see the
+      # per-partition low-water mark below); otherwise fetches a keyset page
+      # from the server and applies it under applying_remote — idempotent
+      # upserts, no outbox rows, no records_changed (the requesting page
+      # refreshes itself). Returns {ok:, applied:, has_more:} or an error hash.
+      # Callers enter through InstantRecord.fetch_history, which shares the
+      # tick's single-flight guard.
+      def fetch_history(model, before:, partition: nil, limit: nil)
+        window = model.instant_record_sync_window
+        raise ArgumentError, "#{model.name} declares no sync_window; fetch_history needs one" unless window
+        raise ArgumentError, "#{model.name} windows by #{window.partition_by}; pass partition:" if window.partition_by && partition.nil?
+
+        limit ||= window.limit
+        before_at = Time.parse(before[:created_at].to_s)
+        before_id = before[:id].to_s
+
+        unless InstantRecord.browser?
+          return { ok: true, applied: 0, has_more: local_page(model, window, partition, before_at, before_id, limit + 1).size > limit }
+        end
+
+        if (mark = history_mark(model, partition)) && page_local?(mark, model, window, partition, before_at, before_id, limit)
+          return { ok: true, applied: 0, has_more: mark[:has_more] }
+        end
+
+        body = transport.get_json(history_path(model, partition, before_at, before_id, limit))
+        records = Array(body["records"])
+        records.each { |record| apply_change(record) }
+        extend_history_mark(model, partition, records, has_more: !!body["has_more"])
+        { ok: true, applied: records.size, has_more: !!body["has_more"] }
+      rescue Transport::Error => e
+        log_failure("fetch_history", e)
+        { ok: false, applied: 0, has_more: nil, error: e.message }
+      end
+
       # Server results for a posted batch.
       # applied  -> drop the outbox row, mark the record synced
       # rejected -> drop the outbox row, reconcile to server state
@@ -158,6 +195,59 @@ module InstantRecord
       end
 
       private
+
+      # Contiguity low-water marks, one per (model, partition), held in
+      # VM-session memory only. Row count alone cannot prove a local page has
+      # no holes (live updates re-create evicted rows as strays); the mark
+      # tracks the oldest boundary of contiguously fetched history plus the
+      # server's last has_more answer.
+      def history_marks
+        @history_marks ||= {}
+      end
+
+      def history_mark(model, partition)
+        history_marks[[model.name, partition]]
+      end
+
+      def extend_history_mark(model, partition, records, has_more:)
+        key = [model.name, partition]
+        oldest = records.map { |r| [Time.parse(r.dig("attributes", "created_at").to_s), r["id"].to_s] }.min
+        mark = history_marks[key] ||= { oldest_at: nil, oldest_id: nil, has_more: has_more }
+        mark[:has_more] = has_more
+        return unless oldest
+        return if mark[:oldest_at] && ([mark[:oldest_at], mark[:oldest_id]] <=> oldest) <= 0
+
+        mark[:oldest_at], mark[:oldest_id] = oldest
+      end
+
+      # A page is fully local when the beginning of history was already
+      # reached, or when `limit` rows older than `before` exist locally within
+      # the contiguous region above the mark.
+      def page_local?(mark, model, window, partition, before_at, before_id, limit)
+        return true if mark[:has_more] == false
+
+        rows = local_page(model, window, partition, before_at, before_id, limit)
+        rows.size >= limit && rows.all? { |at, id| ([at, id] <=> [mark[:oldest_at], mark[:oldest_id]]) >= 0 }
+      end
+
+      # Keyset page below (before_at, before_id), newest first, as
+      # [created_at, id] tuples.
+      def local_page(model, window, partition, before_at, before_id, limit)
+        pk = model.primary_key
+        scope = window.partition_by ? model.where(window.partition_by => partition) : model.all
+        scope
+          .where("created_at < :at OR (created_at = :at AND #{pk} < :id)", at: before_at, id: before_id)
+          .order(created_at: :desc, pk => :desc)
+          .limit(limit)
+          .pluck(:created_at, pk)
+          .map { |at, id| [at.to_time, id.to_s] }
+      end
+
+      def history_path(model, partition, before_at, before_id, limit)
+        params = { type: model.name, before_created_at: before_at.utc.iso8601(6), before_id: before_id, limit: limit }
+        params[:partition] = partition if partition
+        "/records?#{URI.encode_www_form(params)}"
+      end
 
       def mark_synced(mutation, version)
         model = InstantRecord.synced_model(mutation.record_type)

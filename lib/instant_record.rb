@@ -86,6 +86,22 @@ module InstantRecord
     def pending_count = Client.pending_count
     def cursor = Client.cursor
 
+    # On-demand history page for a windowed model (see Client.fetch_history).
+    # Shares the tick's single-flight guard both ways: a fetch during a sync
+    # pass returns :busy for the caller to retry, and a tick arriving while a
+    # fetch is mid-flight is skipped — asyncify re-entrancy is the browser
+    # runtime's crash class, so the VM never runs both at once.
+    def fetch_history(model, before:, partition: nil, limit: nil)
+      return :busy if @ticking
+
+      @ticking = true
+      begin
+        Client.fetch_history(model, before: before, partition: partition, limit: limit)
+      ensure
+        @ticking = false
+      end
+    end
+
     # Server-side change logging (Syncable) must not fire while a client
     # mutation is being applied — MutationApplier logs those itself.
     # IsolatedExecutionState is fiber-aware for Falcon's fiber-per-request.
