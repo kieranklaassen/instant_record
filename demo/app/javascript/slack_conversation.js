@@ -274,6 +274,17 @@ const refreshLive = async ({ forceBottom = false } = {}) => {
       ? { at: messages.dataset.oldestCreatedAt, id: messages.dataset.oldestId }
       : null;
     morphMessages(messages, freshList, requestedFloor);
+
+    // Sync the scroll-up cursor from the fresh render (as prependHistory
+    // does). Without this, a live update that removed or replaced the floor
+    // message leaves loadOlder keysetting from the stale tuple, so the next
+    // history page skips the visible tail. The fresh list's oldest row is the
+    // correct new floor — the surviving row when the old floor was deleted.
+    if (freshList.dataset.oldestId) {
+      messages.dataset.oldestCreatedAt = freshList.dataset.oldestCreatedAt;
+      messages.dataset.oldestId = freshList.dataset.oldestId;
+    }
+
     replaceRegion(".sidebar", doc);
     replaceRegion(".conversation-header", doc);
     if (stick) scrollToBottom();
