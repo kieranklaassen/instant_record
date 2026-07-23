@@ -418,7 +418,7 @@ const installApp = async () => {
 // changes this constant, which changes the service worker's bytes, which
 // makes the browser install the new worker on the next navigation — that is
 // the whole update mechanism for already-installed clients.
-const BUILD_VERSION = "5fea17a7c971";
+const BUILD_VERSION = "cbd73184c000";
 
 self.addEventListener("activate", (event) => {
   console.log(`[rails-web] Activate Service Worker (build ${BUILD_VERSION})`);
