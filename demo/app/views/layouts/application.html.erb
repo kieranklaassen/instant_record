@@ -9,8 +9,6 @@
     <%= csrf_meta_tags %>
     <%= csp_meta_tag %>
 
-    <%= yield :head %>
-
     <%# Asset-pipeline icons: public/ isn't packed into the wasm bundle, so
         hardcoded /icon.png 404s on every page load in the browser runtime. %>
     <link rel="icon" href="<%= asset_path("icon.png") %>" type="image/png">
@@ -20,6 +18,11 @@
     <%# Includes all stylesheet files in app/assets/stylesheets %>
     <%= stylesheet_link_tag :app, "data-turbo-track": "reload" %>
     <%= javascript_importmap_tags %>
+
+    <%# After the import map: a page module tag emitted before it (via
+        content_for :head) would fetch against the default resolver and fail
+        to resolve its bare specifier. %>
+    <%= yield :head %>
   </head>
 
   <body class="demo-<%= controller_path.split("/").first %>">
@@ -31,13 +34,22 @@
     <%= yield %>
 
     <script>
-      // Every demo reloads when the service worker applies synced changes,
-      // and when a newly built service worker takes over (sw_updated).
+      // Demos reload when the service worker applies synced changes and when
+      // a newly built worker takes over (sw_updated). Pages that declare a
+      // data-instant-refresh root morph themselves in place instead of
+      // reloading (see slack_conversation.js) — but a new worker build still
+      // reloads everything onto the new bundle.
       if ("serviceWorker" in navigator) {
         navigator.serviceWorker.addEventListener("message", (event) => {
           const type = event.data && event.data.type;
-          if (type === "records_changed" || type === "sw_updated") {
+          if (type === "sw_updated") {
             window.location.reload();
+          } else if (type === "records_changed") {
+            if (document.querySelector("[data-instant-refresh]")) {
+              window.dispatchEvent(new CustomEvent("instant-record:records-changed"));
+            } else {
+              window.location.reload();
+            }
           }
         });
       }

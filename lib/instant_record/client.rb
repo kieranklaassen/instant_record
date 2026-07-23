@@ -1,3 +1,5 @@
+require "uri"
+require "time"
 require "instant_record/client/transport"
 require "instant_record/client/notifier"
 
@@ -29,12 +31,41 @@ module InstantRecord
       end
 
       # One full pass: outbox up, changes down, tabs notified when anything
-      # moved. Called under InstantRecord.tick's single-flight guard.
+      # moved. Called under InstantRecord.tick's single-flight guard. A client
+      # that has never synced hydrates from the bootstrap snapshot instead of
+      # replaying the whole change log from cursor 0.
       def sync_pass
-        changed = drain
-        changed = poll_changes || changed
+        changed = evict_beyond_windows
+        changed = drain || changed
+        changed = (bootstrapped? ? poll_changes : bootstrap) || changed
         notifier.records_changed if changed
         changed
+      end
+
+      # Arm the boot-time trim; InstantRecord.start sets this on cold boots
+      # only. Runs once, on the next sync pass.
+      def request_eviction
+        @eviction_pending = true
+      end
+
+      # Trim every windowed model back to its declared window. delete_all
+      # under applying_remote: no callbacks, no outbox rows. Pending rows are
+      # excluded in the WHERE — an unsynced write is never evicted. Returns
+      # true when anything was deleted.
+      def evict_beyond_windows
+        return false unless @eviction_pending
+
+        @eviction_pending = false
+        evicted = false
+        InstantRecord.syncable_models.each do |model|
+          window = model.instant_record_sync_window
+          next unless window
+
+          applying_remote do
+            evicted = true if window.beyond_window(model.where.not(sync_state: "pending")).delete_all.positive?
+          end
+        end
+        evicted
       end
 
       def pending_count
@@ -51,6 +82,31 @@ module InstantRecord
 
       def cursor=(value)
         SyncMetadata.set("cursor", value)
+      end
+
+      # nil-aware on purpose: cursor 0 (bootstrapped against an empty change
+      # log) and "never synced" must not be conflated — `cursor` alone would
+      # report 0 for both.
+      def bootstrapped?
+        !SyncMetadata.get("cursor").nil?
+      end
+
+      # First-sync hydration: windowed current state + cursor in one response.
+      # The server captures the cursor BEFORE reading rows, so any overlap
+      # with subsequent events re-applies idempotently. Returns true when the
+      # snapshot applied.
+      def bootstrap
+        body = transport.get_json("/bootstrap")
+        Array(body["records"]).each { |record| apply_change(record) }
+
+        # Cursor written last: a crash mid-apply leaves it nil, so the next
+        # tick re-bootstraps; upserts make the retry idempotent. A failure
+        # never falls through to a cursor-0 poll of the full change log.
+        self.cursor = body["cursor"]
+        true
+      rescue Transport::Error => e
+        log_failure("bootstrap", e)
+        false
       end
 
       # Outbox up. Returns true when anything was sent and applied.
@@ -89,6 +145,48 @@ module InstantRecord
       rescue Transport::Error => e
         log_failure("poll", e)
         changed
+      end
+
+      # On-demand history page for a windowed model. Serves from the local
+      # database when the requested page is known-contiguous (see the
+      # per-partition low-water mark below); otherwise fetches a keyset page
+      # from the server and applies it under applying_remote — idempotent
+      # upserts, no outbox rows, no records_changed (the requesting page
+      # refreshes itself). Returns {ok:, applied:, has_more:} or an error hash.
+      # Callers enter through InstantRecord.fetch_history, which shares the
+      # tick's single-flight guard.
+      def fetch_history(model, before:, partition: nil, limit: nil)
+        window = model.instant_record_sync_window
+        raise ArgumentError, "#{model.name} declares no sync_window; fetch_history needs one" unless window
+        raise ArgumentError, "#{model.name} windows by #{window.partition_by}; pass partition:" if window.partition_by && partition.nil?
+
+        limit ||= window.limit
+        before_at = Time.parse(before[:created_at].to_s)
+        before_id = before[:id].to_s
+
+        unless InstantRecord.browser?
+          return { ok: true, applied: 0, has_more: local_page(window, partition, before_at, before_id, limit + 1).size > limit }
+        end
+
+        if (mark = history_mark(model, partition)) && page_local?(mark, window, partition, before_at, before_id, limit)
+          # has_more from the served page, not the partition-wide mark: rows
+          # remain below this page when the local probe overflows `limit`, or
+          # when the page reaches the contiguity frontier and the server still
+          # has older rows (mark[:has_more]). Echoing the mark alone reports
+          # "beginning reached" for any mid-history page after the true
+          # beginning was loaded.
+          local = local_page(window, partition, before_at, before_id, limit + 1)
+          return { ok: true, applied: 0, has_more: local.size > limit || mark[:has_more] }
+        end
+
+        body = transport.get_json(history_path(model, partition, before_at, before_id, limit))
+        records = Array(body["records"])
+        records.each { |record| apply_change(record) }
+        extend_history_mark(model, partition, records, has_more: !!body["has_more"])
+        { ok: true, applied: records.size, has_more: !!body["has_more"] }
+      rescue Transport::Error => e
+        log_failure("fetch_history", e)
+        { ok: false, applied: 0, has_more: nil, error: e.message }
       end
 
       # Server results for a posted batch.
@@ -131,6 +229,56 @@ module InstantRecord
       end
 
       private
+
+      # Contiguity low-water marks, one per (model, partition), held in
+      # VM-session memory only. Row count alone cannot prove a local page has
+      # no holes (live updates re-create evicted rows as strays); the mark
+      # tracks the oldest boundary of contiguously fetched history plus the
+      # server's last has_more answer.
+      def history_marks
+        @history_marks ||= {}
+      end
+
+      def history_mark(model, partition)
+        history_marks[[model.name, partition]]
+      end
+
+      def extend_history_mark(model, partition, records, has_more:)
+        key = [model.name, partition]
+        oldest = records.map { |r| [Time.parse(r.dig("attributes", "created_at").to_s), r["id"].to_s] }.min
+        mark = history_marks[key] ||= { oldest_at: nil, oldest_id: nil }
+        mark[:has_more] = has_more
+        return unless oldest
+        return if mark[:oldest_at] && ([mark[:oldest_at], mark[:oldest_id]] <=> oldest) <= 0
+
+        mark[:oldest_at], mark[:oldest_id] = oldest
+      end
+
+      # A page is fully local when the beginning of history was already
+      # reached, or when `limit` rows older than `before` exist locally within
+      # the contiguous region above the mark.
+      def page_local?(mark, window, partition, before_at, before_id, limit)
+        return true if mark[:has_more] == false
+
+        rows = local_page(window, partition, before_at, before_id, limit)
+        rows.size >= limit && rows.all? { |at, id| ([at, id] <=> [mark[:oldest_at], mark[:oldest_id]]) >= 0 }
+      end
+
+      # Keyset page below (before_at, before_id), newest first, as
+      # [created_at, id] tuples.
+      def local_page(window, partition, before_at, before_id, limit)
+        window
+          .keyset_below(at: before_at, id: before_id, partition: partition)
+          .limit(limit)
+          .pluck(:created_at, window.model.primary_key)
+          .map { |at, id| [at.to_time, id.to_s] }
+      end
+
+      def history_path(model, partition, before_at, before_id, limit)
+        params = { type: model.name, before_created_at: before_at.utc.iso8601(6), before_id: before_id, limit: limit }
+        params[:partition] = partition if partition
+        "/records?#{URI.encode_www_form(params)}"
+      end
 
       def mark_synced(mutation, version)
         model = InstantRecord.synced_model(mutation.record_type)

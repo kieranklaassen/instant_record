@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Windowed sync: `sync_window limit:, partition_by:` on Syncable models bounds what syncs — fresh clients hydrate from `GET /bootstrap` (windowed snapshot + cursor) instead of replaying the whole change log, a cold boot evicts windowed models back to their window (pending rows never evicted), and older rows page in through `GET /records` keyset cursors via `InstantRecord.fetch_history` (local-first, idempotent, no outbox noise). The service worker gains an `instant_record.fetch_history` page message sharing the tick's single-flight guard.
+- Swiss Slack demo: thousands of seeded history messages (unlogged `insert_all` backfill, preserved across resets), windowed conversation rendering with scroll-up pagination, and in-place DOM morphing on sync — no more full-page reload on the conversation view.
+
 - Initial spike: gem skeleton, engine, Syncable concern, sync protocol, demo app.
 - Auto-mount the sync engine; models opt in by including `Syncable` (no registration).
 - `server_only` / `browser_only` blocks for runtime-scoped model rules.

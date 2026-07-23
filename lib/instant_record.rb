@@ -1,3 +1,6 @@
+require "json"
+require "base64"
+
 module InstantRecord
   DEFAULT_MOUNT_PATH = "/instant_record".freeze
 
@@ -52,11 +55,46 @@ module InstantRecord
       klass if klass.respond_to?(:instant_record_syncable?) && klass.instant_record_syncable?
     end
 
+    # Every model participating in sync: the explicit allowlist when set,
+    # otherwise all loaded Syncable includers.
+    def syncable_models
+      return synced_models if synced_models.any?
+
+      ActiveRecord::Base.descendants.select do |model|
+        !model.abstract_class? && model.name &&
+          model.respond_to?(:instant_record_syncable?) && model.instant_record_syncable?
+      end
+    end
+
+    # The wire shape for one record, shared by the bootstrap and records
+    # endpoints and mirroring Change#as_event: clients apply all three through
+    # the same upsert path. sync_state is client-local and never serialized.
+    # Timestamps are serialized at microsecond precision so the (created_at,
+    # id) keyset cursor round-trips exactly — the JSON encoder's default
+    # millisecond precision would collide sub-millisecond neighbors and let
+    # boundary rows silently vanish between history pages.
+    def record_payload(record)
+      attributes = record.attributes.except("sync_state")
+      attributes.each do |key, value|
+        attributes[key] = value.iso8601(6) if value.respond_to?(:iso8601)
+      end
+      {
+        type: record.class.name,
+        id: record.id,
+        version: record[:server_version],
+        attributes: attributes
+      }
+    end
+
     # Begin background sync (browser runtime only; a no-op on the server).
     # The gem's service worker shim schedules `tick` on config.sync_interval.
-    def start
+    # cold_boot: false skips the boot-time window eviction — the service
+    # worker passes it when it was restarted under already-open tabs (an idle
+    # SW restart mid-read must not trim scrollback the reader is holding).
+    def start(cold_boot: true)
       return false unless browser?
 
+      Client.request_eviction if cold_boot
       @started = true
     end
 
@@ -66,14 +104,10 @@ module InstantRecord
     # Single-flight: a tick that arrives while one is in flight is skipped.
     def tick
       return :not_started unless started?
-      return :busy if @ticking
 
-      @ticking = true
-      begin
+      single_flight do
         Client.sync_pass
         :ok
-      ensure
-        @ticking = false
       end
     end
 
@@ -85,6 +119,48 @@ module InstantRecord
 
     def pending_count = Client.pending_count
     def cursor = Client.cursor
+
+    # On-demand history page for a windowed model (see Client.fetch_history).
+    # Shares the tick's single-flight guard both ways: a fetch during a sync
+    # pass returns :busy for the caller to retry, and a tick arriving while a
+    # fetch is mid-flight is skipped — asyncify re-entrancy is the browser
+    # runtime's crash class, so the VM never runs both at once.
+    def fetch_history(model, before:, partition: nil, limit: nil)
+      single_flight do
+        Client.fetch_history(model, before: before, partition: partition, limit: limit)
+      end
+    end
+
+    # Base64 entrypoint the service worker calls: the request never enters
+    # Ruby source as raw text (which would be a #{}-interpolation injection
+    # sink), only as a base64 token decoded here. Delegates to
+    # fetch_history_json for the actual work.
+    def fetch_history_b64(request_b64)
+      fetch_history_json(Base64.strict_decode64(request_b64.to_s))
+    rescue ArgumentError => e
+      JSON.generate(ok: false, error: e.message)
+    end
+
+    # String-in/string-out fetch_history for the service worker's evalAsync
+    # interop (no JS object bridging). Never raises across the boundary:
+    # errors come back as {ok: false, error:}, a held single-flight guard as
+    # {ok: false, busy: true} for the worker's retry loop.
+    def fetch_history_json(request_json)
+      request = JSON.parse(request_json)
+      model = synced_model(request["type"])
+      return JSON.generate(ok: false, error: "unknown record type #{request["type"].inspect}") unless model
+
+      before = request["before"] || {}
+      result = fetch_history(model,
+        partition: request["partition"],
+        before: { created_at: before["created_at"], id: before["id"] },
+        limit: request["limit"])
+      return JSON.generate(ok: false, busy: true, error: "sync in flight") if result == :busy
+
+      JSON.generate(result)
+    rescue JSON::ParserError, ArgumentError, TypeError => e
+      JSON.generate(ok: false, error: e.message)
+    end
 
     # Server-side change logging (Syncable) must not fire while a client
     # mutation is being applied — MutationApplier logs those itself.
@@ -100,10 +176,27 @@ module InstantRecord
     ensure
       ActiveSupport::IsolatedExecutionState[:instant_record_applying_client_mutation] = previous
     end
+
+    private
+
+    # Ticks and history fetches share one guard: the wasm VM must never run
+    # two sync entry points concurrently (asyncify re-entrancy), so whichever
+    # is in flight makes the other answer :busy.
+    def single_flight
+      return :busy if @ticking
+
+      @ticking = true
+      begin
+        yield
+      ensure
+        @ticking = false
+      end
+    end
   end
 end
 
 ActiveSupport.on_load(:active_record) do
+  require "instant_record/sync_window"
   require "instant_record/syncable"
   require "instant_record/outbox_mutation"
   require "instant_record/sync_metadata"

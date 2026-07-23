@@ -39,25 +39,11 @@
   </section>
 
   <section class="sidebar-footer">
+    <%# Submitted without navigation by slack_conversation.js (delegated, so
+        the handler survives the sidebar being morphed on live updates); the
+        reset propagates back over SSE. %>
     <form class="reset-form" action="<%= slack_reset_endpoint %>" method="post" data-turbo="false">
       <button type="submit">Reset demo</button>
     </form>
-    <script>
-      // Post the reset without navigating away; the reset propagates back
-      // over SSE and the shared records_changed listener reloads the page.
-      document.currentScript.previousElementSibling.addEventListener("submit", (event) => {
-        event.preventDefault();
-        fetch(event.target.action, { method: "POST" }).then((response) => {
-          if (!response.ok) throw new Error("reset failed: " + response.status);
-          // Server-rendered pages have no service worker to push the change;
-          // reload directly so the reset is visible immediately.
-          if (!(navigator.serviceWorker && navigator.serviceWorker.controller)) {
-            window.location.reload();
-          }
-        }).catch(() => {
-          alert("Reset needs the sync server — you appear to be offline. Try again once you're connected.");
-        });
-      });
-    </script>
   </section>
 </aside>

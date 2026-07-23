@@ -1,6 +1,11 @@
 <% content_for(:title, "Swiss Slack — InstantRecord") %>
+<% content_for(:head) { javascript_import_module_tag "slack_conversation" } %>
 
-<div class="slack">
+<%# data-instant-refresh: the layout's records_changed listener hands this
+    page a custom event instead of reloading — slack_conversation.js morphs
+    the DOM in place. data-turbo="false": channel navigation stays a full
+    page load so the module's lifecycle holds. %>
+<div class="slack" data-instant-refresh data-turbo="false">
   <%= render "sidebar" %>
 
   <main class="conversation">
@@ -20,20 +25,9 @@
       </p>
     </header>
 
-    <ol class="messages">
-      <% @messages.each do |message| %>
-        <li class="<%= "own" if message.from_visitor? %>">
-          <div class="message-head">
-            <span class="author"><%= message.chat_user&.name || "Unknown" %></span>
-            <span class="timestamp"><%= message.created_at.strftime("%H:%M") %></span>
-            <% if message.from_visitor? %>
-              <span class="badge badge-<%= message.sync_state %>"><%= message.sync_state %></span>
-            <% end %>
-          </div>
-          <p class="body"><%= message.body %></p>
-        </li>
-      <% end %>
-    </ol>
+    <div class="message-scroll">
+      <%= render "messages" %>
+    </div>
 
     <%= form_with url: slack_messages_path, method: :post, class: "composer", data: { turbo: false } do |f| %>
       <%= f.hidden_field "message[channel_id]", value: @channel.id %>

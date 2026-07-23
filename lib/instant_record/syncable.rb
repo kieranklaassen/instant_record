@@ -34,6 +34,19 @@ module InstantRecord
 
     class_methods do
       def instant_record_syncable? = true
+
+      # Declare a bounded sync window: only the newest `limit` rows (per
+      # `partition_by` value when given) sync to fresh clients; older rows
+      # arrive on demand via InstantRecord.fetch_history and the browser
+      # evicts beyond the window at boot. Models without a declaration keep
+      # full sync.
+      def sync_window(limit:, partition_by: nil)
+        @instant_record_sync_window = InstantRecord::SyncWindow.new(self, limit: limit, partition_by: partition_by)
+      end
+
+      def instant_record_sync_window
+        @instant_record_sync_window
+      end
     end
 
     private

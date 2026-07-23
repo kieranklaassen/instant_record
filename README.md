@@ -198,10 +198,53 @@ The browser shell calls `InstantRecord.start` once at boot; from there Ruby owns
 
 Behind the scenes:
 
-- **First load** — a new client hydrates its local database from the server automatically and remembers its position, so later visits paint instantly from IndexedDB and fetch only what's new.
+- **First load** — a new client hydrates from a bootstrap snapshot (current state plus the sync cursor, windowed per model — see below) and remembers its position, so later visits paint instantly from IndexedDB and fetch only what's new.
 - **Every write** — committed locally first, then delivered to the server in the background. Offline just means "delivered later"; queued writes survive reloads.
 - **Other clients** — every accepted change streams to all connected clients over SSE, and their pages re-render from local data. Concurrent edits resolve last-write-wins.
 - **Rejections** — if the server refuses a write (failed validation, server-only rule), the client rolls the local record back to server state and stops retrying.
+
+### 6. Window large tables
+
+Tables with unbounded history (chat messages, events, logs) don't have to sync whole. Declare a **sync window** and only the newest rows reach clients:
+
+```ruby
+class Message < ApplicationRecord
+  include InstantRecord::Syncable
+
+  sync_window limit: 50, partition_by: :channel_id   # newest 50 per channel
+end
+```
+
+Windows order by `(created_at, id)`, so a windowed model needs a `created_at` column — and an index on `(partition, created_at, id)` keeps the queries flat at depth.
+
+Declaring a window changes three things:
+
+- **Fresh clients bootstrap.** A client that has never synced hydrates from `GET /instant_record/bootstrap` — current state, windowed per model, plus the change-log cursor — instead of replaying the whole change log. Windowless models still serialize in full.
+- **Boot-time eviction.** On a cold boot the browser trims each windowed model back to its window per partition. Rows with `sync_state: "pending"` are never evicted.
+- **History pages on demand.** Older rows stream in through keyset cursors (never OFFSET), applied idempotently with no outbox noise:
+
+```ruby
+InstantRecord.fetch_history(Message,
+  partition: channel_id,
+  before: { created_at: oldest.created_at.iso8601(6), id: oldest.id },
+  limit: 50)
+# => { ok: true, applied: 50, has_more: true }    — or :busy while a sync pass runs
+```
+
+In the browser this serves repeat scrolls and offline scrollback from the local database and only hits `GET /instant_record/records` for pages it doesn't hold. Page JavaScript reaches it through a service-worker message (never from inside a request — the wasm VM can't re-enter itself):
+
+```js
+const channel = new MessageChannel();
+channel.port1.onmessage = (event) => { /* {ok, has_more, error} */ };
+navigator.serviceWorker.controller.postMessage(
+  { type: "instant_record.fetch_history",
+    request: { type: "Message", partition: channelId,
+               before: { created_at: oldestAt, id: oldestId }, limit: 50 } },
+  [channel.port2],
+);
+```
+
+The Slack demo's infinite scroll is the reference wiring — IntersectionObserver sentinel, scroll anchoring, in-place DOM updates — in `demo/app/javascript/slack_conversation.js`.
 
 ## Running the demo
 
@@ -229,6 +272,7 @@ Things to try:
 
 - **Instant writes** — create an issue; it appears immediately with a `pending` badge that flips to `synced`.
 - **Two clients** — open http://127.0.0.1:5173/ too (different origin = separate service worker + separate local database). Changes propagate between windows through the server. A fresh client catches up automatically.
+- **Infinite scroll** — `/slack` seeds thousands of messages in `#general`, but a fresh client only syncs the newest 50 per conversation. Scroll to the top and older pages stream in; messages arriving mid-read update the page without a reload or a scroll jump.
 - **Offline** — stop the Rails server, create issues (they stay `pending`), reload the tab (still there), restart the server and watch them drain.
 - **Rejection** — create an issue titled `reject me`. It appears optimistically, the server refuses it, and it disappears on reconcile.
 
@@ -271,7 +315,8 @@ Measured on the demo (Chrome, M-series MacBook):
 - Instant optimistic create with local persistence across reloads.
 - Two independent clients converging through POST + SSE, including fresh-client catch-up.
 - Server rejection reconciled by rolling the local record back.
-- 28 tests (gem + demo) covering the atomic outbox, idempotent apply, last-write-wins both ways, cursor resume, and rejection reconcile.
+- ~5,000 seeded messages in one channel: a fresh client bootstraps only the newest window per conversation, older pages stream in on scroll, and a cold boot evicts the local database back to the window.
+- 146 tests (gem + demo) covering the atomic outbox, idempotent apply, last-write-wins both ways, cursor resume, rejection reconcile, bootstrap hydration, keyset history pages, and eviction.
 
 ## Roadmap ideas
 
@@ -285,7 +330,7 @@ class Issue < ApplicationRecord
 end
 ```
 
-Also out of scope for the PoC, on purpose: CRDTs, Postgres logical replication, multi-tab leader election, attachments, authentication/authorization on the sync endpoints, migration generators, and a server-seeded bootstrap snapshot (new clients currently replay the full change log). An Inertia-compatible layer (server-seeded props hydrating the local database, plus a JS read surface via PGlite live queries) is captured as a follow-up direction in `docs/plans/`.
+Also out of scope for the PoC, on purpose: CRDTs, Postgres logical replication, multi-tab leader election, attachments, authentication/authorization on the sync endpoints, and migration generators. An Inertia-compatible layer (server-seeded props hydrating the local database, plus a JS read surface via PGlite live queries) is captured as a follow-up direction in `docs/plans/`.
 
 ## History
 

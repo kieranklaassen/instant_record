@@ -1,13 +1,15 @@
 require "test_helper"
 
 class FakeTransport
-  attr_reader :posts
-  attr_accessor :events_to_yield, :on_post
+  attr_reader :posts, :gets
+  attr_accessor :events_to_yield, :on_post, :bootstrap_body
 
   def initialize
     @posts = []
+    @gets = []
     @events_to_yield = []
     @results_to_return = []
+    @bootstrap_body = { "cursor" => 0, "records" => [] }
   end
 
   def respond_with(results)
@@ -18,6 +20,11 @@ class FakeTransport
     @on_post&.call
     @posts << [path, payload]
     { "results" => @results_to_return }
+  end
+
+  def get_json(path)
+    @gets << path
+    @bootstrap_body
   end
 
   def each_event(_path, &block)
@@ -113,6 +120,7 @@ class SyncLoopTest < Minitest::Test
   end
 
   def test_poll_requests_a_zero_window_so_ticks_never_hold_a_stream
+    InstantRecord::Client.cursor = 0 # already bootstrapped; exercise the poll branch
     in_browser do
       InstantRecord.start
       captured_path = nil
@@ -125,6 +133,7 @@ class SyncLoopTest < Minitest::Test
   end
 
   def test_poll_applies_events_advances_cursor_once_and_notifies_once
+    InstantRecord::Client.cursor = 0 # already bootstrapped; exercise the poll branch
     @transport.events_to_yield = [
       { "type" => "Memo", "id" => "m-1", "operation" => "create", "version" => 1, "cursor" => 7,
         "attributes" => { "id" => "m-1", "title" => "from server", "updated_at" => Time.current.iso8601 } },
@@ -143,6 +152,7 @@ class SyncLoopTest < Minitest::Test
   end
 
   def test_nothing_changed_means_no_notification
+    InstantRecord::Client.cursor = 0 # already bootstrapped; a fresh client's bootstrap counts as a change
     in_browser do
       InstantRecord.start
       InstantRecord.tick
@@ -165,11 +175,13 @@ class SyncLoopTest < Minitest::Test
   end
 
   def test_guard_releases_after_transport_failure
+    InstantRecord::Client.cursor = 0
     in_browser do
       @model.create!(title: "hello")
       failing = Object.new
       def failing.post_json(*) = raise(InstantRecord::Client::Transport::Error, "offline")
       def failing.each_event(*) = raise(InstantRecord::Client::Transport::Error, "offline")
+      def failing.get_json(*) = raise(InstantRecord::Client::Transport::Error, "offline")
       InstantRecord::Client.transport = failing
 
       InstantRecord.start

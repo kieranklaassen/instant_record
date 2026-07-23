@@ -39,6 +39,13 @@ module InstantRecord
           require "js"
         end
 
+        def get_json(path)
+          response = JS.global.fetch(url(path)).await
+          raise Error, "GET #{path} -> #{response[:status]}" unless response[:ok] == JS::True
+
+          JSON.parse(response.text.await.to_s)
+        end
+
         def post_json(path, payload)
           options = JS.eval("return {}")
           options[:method] = "POST"

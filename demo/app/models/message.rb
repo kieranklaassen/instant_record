@@ -1,6 +1,10 @@
 class Message < ApplicationRecord
   include InstantRecord::Syncable
 
+  # Only the newest window per conversation syncs to fresh clients; older
+  # pages stream in on demand as the visitor scrolls up.
+  sync_window limit: 50, partition_by: :channel_id
+
   belongs_to :channel
   belongs_to :chat_user
 

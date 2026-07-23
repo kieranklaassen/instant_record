@@ -15,12 +15,16 @@ module Slack
       seed_ids = Slack::Seeds.seed_ids
 
       ActiveRecord::Base.transaction do
-        # destroy_all deletes a set of rows loaded up front, so a fake reply
-        # committed while the sweep is blocked on FakeReplyJob's row lock
-        # would survive a single pass. Re-sweep until no messages remain:
-        # once every row is deleted, pending reply jobs block on our locks
-        # and bail out when their message is gone.
-        Message.destroy_all while Message.exists?
+        # Visitor-era rows only: seeded welcomes and the backfill history
+        # survive (matched by id prefix, so the sweep never carries a
+        # thousands-long id list). destroy_all deletes a set of rows loaded
+        # up front, so a fake reply committed while the sweep is blocked on
+        # FakeReplyJob's row lock would survive a single pass. Re-sweep until
+        # none remain: once every row is deleted, pending reply jobs block on
+        # our locks and bail out when their message is gone.
+        swept = Message.where.not(id: seed_ids[:messages])
+          .where.not("id LIKE ?", "#{Slack::Seeds::BACKFILL_PREFIX}%")
+        swept.destroy_all while swept.exists?
         Channel.where.not(id: seed_ids[:channels]).destroy_all
         ChatUser.where.not(id: seed_ids[:users]).destroy_all
         Slack::Seeds.apply
