@@ -10,6 +10,7 @@
     data-oldest-id="<%= @messages.first&.id %>"
     data-has-more="<%= @has_more %>">
   <% unless @has_more %>
+    <%# data-beginning is the assertion hook the controller test uses. %>
     <li class="beginning-marker" data-beginning="true">
       <span class="micro-label">Beginning of <%= @channel.dm? ? "this conversation" : "##{@channel.name}" %></span>
     </li>
