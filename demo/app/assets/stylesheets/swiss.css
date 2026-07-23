@@ -168,7 +168,18 @@ body { padding-right: 24rem; }
   #inspector { display: none; }
 }
 
-#inspector header,
+/* Sits in the same band as the site nav across the page: 46px tall, the same
+   2px rule, and its label on the same baseline — hence the asymmetric padding
+   (16 + 16px label + 12 + 2px border), which mirrors what baseline alignment
+   does to the nav's own smaller label. */
+#inspector header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 1rem 1.5rem 0.75rem;
+  border-bottom: 2px solid rgba(255, 255, 255, 0.85);
+}
+
 #inspector footer {
   display: flex;
   align-items: center;
@@ -197,7 +208,7 @@ body { padding-right: 24rem; }
   display: flex;
   align-items: center;
   gap: 1rem;
-  padding: 0.75rem 1rem;
+  padding: 0.75rem 1.5rem;
   border-bottom: 1px solid rgba(255, 255, 255, 0.2);
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -239,7 +250,8 @@ body { padding-right: 24rem; }
 }
 
 .inspector-kind { text-transform: uppercase; color: var(--red); }
-.inspector-log li[data-kind="local"] .inspector-kind { color: #6ea8ff; }
+.inspector-log li[data-kind="local"] .inspector-kind,
+.inspector-log li[data-kind="assets"] .inspector-kind { color: #6ea8ff; }
 .inspector-log li[data-kind="sync-pass"] .inspector-kind { color: #8f8f8f; }
 .inspector-log li[data-kind="change"] .inspector-kind { color: #4ec9a0; }
 .inspector-log li[data-kind="stream"] .inspector-kind { color: #c678dd; }

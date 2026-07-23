@@ -51,6 +51,33 @@ const report = (entry) => {
   });
 };
 
+// Assets arrive as a burst after every navigation. Worth knowing that the
+// bundle serves its own asset pipeline — but once per page, as a total, not as
+// a dozen lines that bury the sync flow. (They are re-requested each load
+// rather than cached, which is why the burst repeats.)
+const ASSET_BATCH_MS = 250;
+
+let assetBatch = null;
+
+const reportAssets = (ms) => {
+  if (!sim.report) return;
+
+  assetBatch ||= { count: 0, ms: 0, timer: null };
+  assetBatch.count += 1;
+  assetBatch.ms += ms;
+
+  clearTimeout(assetBatch.timer);
+  assetBatch.timer = setTimeout(() => {
+    const { count, ms: total } = assetBatch;
+    assetBatch = null;
+    report({
+      kind: "assets",
+      path: `${count} served from the bundle`,
+      ms: total,
+    });
+  }, ASSET_BATCH_MS);
+};
+
 const nativeFetch = globalThis.fetch.bind(globalThis);
 
 globalThis.fetch = async (input, init) => {
@@ -391,7 +418,7 @@ const installApp = async () => {
 // changes this constant, which changes the service worker's bytes, which
 // makes the browser install the new worker on the next navigation — that is
 // the whole update mechanism for already-installed clients.
-const BUILD_VERSION = "b522e434962f";
+const BUILD_VERSION = "5fea17a7c971";
 
 self.addEventListener("activate", (event) => {
   console.log(`[rails-web] Activate Service Worker (build ${BUILD_VERSION})`);
@@ -461,22 +488,24 @@ self.addEventListener("fetch", (event) => {
   // a navigation are not window.fetch calls — wrapping fetch in the page misses
   // the entire plain-Rails interaction model, and the first page load with it.
   //
-  // Assets are skipped. The wasm bundle really does serve its own asset
-  // pipeline, which is a nice thing to know once, but a dozen lines of icons
-  // and controllers per page load buries the flow this panel exists to show.
-  if (sim.report && !url.pathname.startsWith("/assets/")) {
+  if (sim.report) {
     const startedAt = performance.now();
+    const isAsset = url.pathname.startsWith("/assets/");
+
     event.waitUntil(
       respond
-        .then((response) =>
+        .then((response) => {
+          const ms = Math.round(performance.now() - startedAt);
+          if (isAsset) return reportAssets(ms);
+
           report({
             kind: "local",
             method: event.request.method,
             path: url.pathname + url.search,
             status: response.status,
-            ms: Math.round(performance.now() - startedAt),
-          }),
-        )
+            ms,
+          });
+        })
         .catch(() => {}),
     );
   }

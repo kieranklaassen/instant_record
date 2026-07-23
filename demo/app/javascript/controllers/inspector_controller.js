@@ -109,6 +109,9 @@ const flowsFor = (entry) => {
       return reachedTheServer(entry)
         ? ["postgres", "server", "down", "wasm"]
         : ["down"]
+    case "assets":
+      // Still the local runtime serving them, just summarised.
+      return ["page", "local", "wasm"]
     case "change":
       return ["wasm", "local", "page"]
     case "sync-pass":
