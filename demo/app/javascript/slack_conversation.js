@@ -266,7 +266,14 @@ const refreshLive = async ({ forceBottom = false } = {}) => {
     const freshList = doc.querySelector("ol.messages");
     if (!freshList) return void (window.location.href = "/slack");
 
-    morphMessages(messages, freshList);
+    // The floor we *requested* bounds the fetched range [floor, newest]; any
+    // DOM row at or above it that the fresh list dropped is a real deletion.
+    // (Using the fresh list's own oldest instead would keep a just-deleted
+    // floor row as a ghost, since the survivors start one row newer.)
+    const requestedFloor = messages.dataset.oldestId
+      ? { at: messages.dataset.oldestCreatedAt, id: messages.dataset.oldestId }
+      : null;
+    morphMessages(messages, freshList, requestedFloor);
     replaceRegion(".sidebar", doc);
     replaceRegion(".conversation-header", doc);
     if (stick) scrollToBottom();
@@ -284,16 +291,14 @@ const refreshLive = async ({ forceBottom = false } = {}) => {
 // Merge by data-id: both lists are ascending (created_at, id), so one pass
 // inserts new rows in order, updates changed ones, and removes the missing.
 // Rows without data-id (markers) are JS- or server-owned and left alone.
-const morphMessages = (current, fresh) => {
+// `requestedFloor` is the keyset the fetch asked for — its lower bound, so
+// only rows at or above it are in scope for removal.
+const morphMessages = (current, fresh, requestedFloor) => {
   const existing = new Map(
     [...current.children].map((li) => [li.dataset.id, li]),
   );
   existing.delete(undefined);
 
-  // The fresh fetch is floor-bounded, so a DOM row absent from it because it
-  // sorts BELOW the fetched floor is not a deletion — only rows within the
-  // fetched range may be removed. Guards against a back-skewed-clock message
-  // being culled as "missing" when it merely fell below the floor.
   const freshIds = new Set(
     [...fresh.children].map((li) => li.dataset.id).filter(Boolean),
   );
@@ -318,14 +323,15 @@ const morphMessages = (current, fresh) => {
     anchor = node;
   }
 
-  // Remove only rows within the fetched floor→newest range that the fresh
-  // list dropped (a genuine destroy). The fetched range is bounded below by
-  // its oldest row; anything the DOM holds below that stays.
-  const floorId = fresh.dataset.oldestId;
-  const floorAt = fresh.dataset.oldestCreatedAt;
+  // A DOM row the fresh list dropped is a genuine deletion only when it lies
+  // within the range the fetch actually covered: at or above the REQUESTED
+  // floor. Rows below that floor (e.g. a back-skewed-clock send) were never
+  // in scope and stay. Using the requested floor — not the fresh list's own
+  // oldest — is what lets a just-deleted floor row be removed instead of
+  // lingering as a ghost after a reset.
   for (const leftover of existing.values()) {
     if (freshIds.has(leftover.dataset.id)) continue;
-    if (floorId && belowFloor(leftover, floorAt, floorId)) continue;
+    if (requestedFloor && belowFloor(leftover, requestedFloor.at, requestedFloor.id)) continue;
     leftover.remove();
   }
 };
