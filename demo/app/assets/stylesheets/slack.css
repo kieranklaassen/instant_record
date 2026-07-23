@@ -102,6 +102,10 @@
   flex: 1;
   overflow-y: auto;
   min-height: 0;
+  /* prependHistory anchors the viewport manually (Safari has no native
+     anchoring); leaving this on double-compensates when history pages are
+     prefetched mid-scroll and throws the reader to the bottom. */
+  overflow-anchor: none;
 }
 
 .demo-slack ol.messages {
@@ -110,22 +114,33 @@
   padding: 1rem 0;
 }
 
+/* The sentinel and the beginning marker are two states of the same slot at the
+   top of the scrollback. The browser runtime renders has_more=true optimistically
+   (its database holds only the synced window), so the first history probe always
+   swaps one for the other — matching their boxes keeps that swap from shifting
+   every message below it. */
+.demo-slack .history-sentinel,
+.demo-slack .beginning-marker {
+  min-height: 2.75rem;
+  padding: 0.6rem 0;
+  text-align: center;
+  border-bottom: 2px solid transparent;
+}
+
 .demo-slack .history-sentinel {
-  min-height: 1.75rem;
-  padding: 0.4rem 0;
   font-size: 0.7rem;
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.12em;
-  text-align: center;
 }
 
 .demo-slack .history-sentinel[data-state="offline"] { color: var(--red); }
 
+/* The slot's resolved state: scrollback is complete. Styled to match the
+   server-rendered .beginning-marker, since either can hold the label. */
+.demo-slack .history-sentinel[data-state="beginning"],
 .demo-slack .beginning-marker {
-  padding: 0.6rem 0;
-  border-bottom: 2px solid var(--rule);
-  text-align: center;
+  border-bottom-color: var(--rule);
 }
 
 .demo-slack ol.messages li {

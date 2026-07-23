@@ -39,10 +39,10 @@
   </section>
 
   <section class="sidebar-footer">
-    <%# Submitted without navigation by slack_conversation.js (delegated, so
-        the handler survives the sidebar being morphed on live updates); the
-        reset propagates back over SSE. %>
-    <form class="reset-form" action="<%= slack_reset_endpoint %>" method="post" data-turbo="false">
+    <%# Posted by the reset controller, which then reloads — a reset is the one
+        thing that deletes records, and live updates never remove rows. %>
+    <form class="reset-form" action="<%= slack_reset_endpoint %>" method="post"
+          data-controller="reset" data-action="reset#submit">
       <button type="submit">Reset demo</button>
     </form>
   </section>

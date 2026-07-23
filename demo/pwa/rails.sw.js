@@ -20,16 +20,132 @@ const initDB = async (progress) => {
 };
 
 let vm = null;
-let syncTimer = null;
 
-// The whole sync loop lives in Ruby (InstantRecord.tick). Wasm Ruby cannot
-// sleep without blocking the VM, so this shim provides the clock — nothing
-// else. Ruby's single-flight guard makes overlapping ticks safe.
-const tick = () => {
+// --- Inspection and simulation ----------------------------------------------
+// Ruby's transport reaches the network through globalThis.fetch (see
+// Client::Transport::JsFetch), so wrapping it here is the one place that sees
+// every request the sync loop makes to the server — and the one place that can
+// delay or fail those requests without the sync code knowing. A page turns this
+// on by posting instant_record.simulate; until then it is inert.
+
+const sim = { report: false, offline: false, latencyMs: 0 };
+
+// Kept here, not in the page: in a plain-Rails app every interaction is a
+// navigation, which wipes any page-side buffer and races the message announcing
+// the navigation itself. The worker outlives all of that, so a page that just
+// loaded can ask for what it missed.
+const REPORT_HISTORY = 150;
+const history = [];
+
+const report = (entry) => {
+  const stamped = { ...entry, at: Date.now() };
+  history.push(stamped);
+  if (history.length > REPORT_HISTORY) history.shift();
+
+  if (!sim.report) return;
+
+  self.clients.matchAll({ type: "window" }).then((clients) => {
+    clients.forEach((client) =>
+      client.postMessage({ type: "instant_record.debug", entry: stamped }),
+    );
+  });
+};
+
+const nativeFetch = globalThis.fetch.bind(globalThis);
+
+globalThis.fetch = async (input, init) => {
+  const href = typeof input === "string" ? input : input.url;
+  const url = new URL(href, self.location.origin);
+
+  // Only requests to the sync server are simulated. The app's own bundle and
+  // assets are same-origin and must keep loading even while "offline" — going
+  // offline means losing the server, not the local runtime.
+  if (url.origin === self.location.origin) return nativeFetch(input, init);
+
+  const method = (
+    init?.method || (typeof input === "object" && input.method) || "GET"
+  ).toUpperCase();
+  const startedAt = performance.now();
+  const elapsed = () => Math.round(performance.now() - startedAt);
+
+  if (sim.latencyMs) {
+    await new Promise((resolve) => setTimeout(resolve, sim.latencyMs));
+  }
+
+  if (sim.offline) {
+    report({ kind: "sync", method, path: url.pathname, status: "offline" });
+    throw new TypeError("Failed to fetch (simulated offline)");
+  }
+
+  try {
+    const response = await nativeFetch(input, init);
+    report({ kind: "sync", method, path: url.pathname, status: response.status, ms: elapsed() });
+    return response;
+  } catch (error) {
+    report({ kind: "sync", method, path: url.pathname, status: "failed", ms: elapsed() });
+    throw error;
+  }
+};
+
+// --- Carrying writes up ------------------------------------------------------
+// No heartbeat. A sync pass runs when there is a reason for one: a local write
+// just happened, the app just booted, or the network came back. The only reason
+// to come back unprompted is an outbox that still has something in it, so the
+// pass reports what is left and we retry with backoff until it is empty. An idle
+// client makes no requests at all beyond holding the change stream open.
+
+const DRAIN_BACKOFF_CAP_MS = 30000;
+// How long a burst is given to finish before one pass carries all of it. Short
+// enough to be imperceptible — the write itself already rendered locally.
+const SYNC_QUIET_MS = 50;
+
+let drainTimer = null;
+let drainBaseMs = 3000; // replaced with config.sync_interval once the VM is up
+let drainDelayMs = drainBaseMs;
+
+const syncNow = async () => {
   if (!vm) return;
-  vm.evalAsync("InstantRecord.tick").catch((e) =>
-    console.warn("[instant-record] tick failed", e),
-  );
+
+  clearTimeout(drainTimer);
+  drainTimer = null;
+
+  const startedAt = performance.now();
+  const reply = await enterVM("InstantRecord.tick_json");
+  const ms = Math.round(performance.now() - startedAt);
+
+  if (reply.error) console.warn("[instant-record] sync pass failed", reply.error);
+
+  // Nothing queued: stop. This is what makes an idle tab silent.
+  const pending = reply.pending ?? 0;
+  if (reply.ok && pending === 0) {
+    drainDelayMs = drainBaseMs;
+    report({ kind: "sync-pass", path: "outbox empty, idle", ms });
+    return;
+  }
+
+  report({
+    kind: "sync-pass",
+    path: `${pending} queued, retrying in ${Math.round(drainDelayMs / 1000)}s`,
+    status: reply.ok ? undefined : "failed",
+    ms,
+  });
+
+  drainTimer = setTimeout(syncNow, drainDelayMs);
+  drainDelayMs = Math.min(drainDelayMs * 2, DRAIN_BACKOFF_CAP_MS);
+};
+
+// A fresh reason to sync resets the backoff — the previous delay was chosen for
+// a failure that a new write or a reconnect has no bearing on.
+//
+// The short wait is this shim's only job here: Ruby coalesces requests that
+// arrive while a pass is running (see InstantRecord::COALESCE_PASSES), but it
+// cannot sleep to wait for ones that arrive *between* passes, because sleeping
+// would block the VM. So a burst of writes settles into one pass rather than one
+// pass each, and the batched drain then carries the whole burst in one request.
+const syncSoon = () => {
+  drainDelayMs = drainBaseMs;
+  clearTimeout(drainTimer);
+  drainTimer = setTimeout(syncNow, SYNC_QUIET_MS);
 };
 
 const startSync = async () => {
@@ -45,9 +161,120 @@ const startSync = async () => {
     10,
   );
 
-  clearInterval(syncTimer);
-  syncTimer = setInterval(tick, seconds * 1000);
-  tick(); // initial drain + catch-up
+  drainBaseMs = seconds * 1000;
+  drainDelayMs = drainBaseMs;
+
+  // The one unprompted pass: hydrates a fresh client, trims windows on a cold
+  // boot, and clears anything an earlier session left queued.
+  syncNow();
+
+  // Not awaited: holds a stream for as long as the VM lives.
+  streamChanges();
+};
+
+// --- The change stream -------------------------------------------------------
+// Ruby cannot hold a tailing stream: every chunk it awaited would suspend the
+// single-flight guard, starving outbox drains for the whole window. That is why
+// its own poll asks for window=0. The worker has no such problem — it is plain
+// JavaScript — so it holds the stream here and hands batches to Ruby. Inbound
+// delivery is push, and reopening with ?after=<cursor> replays anything missed,
+// which is why nothing needs to poll for changes any more.
+
+const STREAM_RETRY_MS = 2000;
+
+let streaming = false;
+// Going offline has to sever the connection that is already open, not just fail
+// the next one — a held stream would otherwise keep delivering for the rest of
+// its window and make the simulation look broken.
+let streamAbort = null;
+
+// Enter the VM for one guarded, JSON-returning call, retrying while a sync pass
+// holds the single-flight guard. Every entry point the worker uses answers
+// {busy: true} rather than re-entering.
+const enterVM = async (expression, attempts = 8) => {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    let reply;
+    try {
+      reply = JSON.parse((await vm.evalAsync(expression)).toString());
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
+    if (!reply.busy) return reply;
+    await new Promise((resolve) => setTimeout(resolve, 150 * (attempt + 1)));
+  }
+  return { ok: false, busy: true };
+};
+
+const runStream = async () => {
+  const endpoint = (await vm.evalAsync("InstantRecord.endpoint")).toString();
+  const cursor = (await vm.evalAsync("InstantRecord.cursor")).toString();
+  // Deliberately the wrapped fetch: the stream is a sync-server request, so
+  // "offline" must break it like any other and let the poll take over.
+  streamAbort = new AbortController();
+  const response = await fetch(`${endpoint}/events?after=${cursor}`, {
+    signal: streamAbort.signal,
+  });
+  if (!response.ok) throw new Error(`stream -> ${response.status}`);
+
+  // Also discards any half-received frame from the connection that just died.
+  await enterVM("InstantRecord.stream_opened_json");
+  streaming = true;
+  report({ kind: "stream", path: `connected, tailing from ${cursor}`, streamOpen: true });
+
+  // Reaching the server proves the network is back, which is the other reason a
+  // stalled outbox deserves an immediate retry rather than waiting out a backoff.
+  syncSoon();
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+
+  // Read bytes, hand over text. Framing the SSE wire format is Ruby's job — it
+  // already has a parser for it (Transport::SseParser), and a second one here
+  // would be an untested copy free to drift. A frame split across chunks is
+  // buffered on that side until it is whole.
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    const chunk = decoder.decode(value, { stream: true });
+    if (!chunk) continue;
+
+    const encoded = btoa(unescape(encodeURIComponent(chunk)));
+    const consumed = await enterVM(`InstantRecord.consume_stream_b64("${encoded}")`);
+    if (!consumed.applied) continue;
+
+    report({
+      kind: "stream",
+      path: `${consumed.applied} pushed → applied, cursor ${consumed.cursor}`,
+      status: consumed.ok ? 200 : "failed",
+    });
+  }
+};
+
+// One stream at a time, reopened for as long as the VM is alive. A failure just
+// means the tick's poll is the delivery path until the next attempt succeeds.
+const streamChanges = async () => {
+  for (;;) {
+    if (!vm) return;
+
+    try {
+      await runStream();
+      report({ kind: "stream", path: "window closed, reopening", streamOpen: false });
+    } catch (error) {
+      report({
+        kind: "stream",
+        path: "unavailable — polling instead",
+        status: "failed",
+        streamOpen: false,
+      });
+      await new Promise((resolve) => setTimeout(resolve, STREAM_RETRY_MS));
+    } finally {
+      if (streaming) {
+        streaming = false;
+        await enterVM("InstantRecord.stream_closed_json");
+      }
+    }
+  }
 };
 
 // History fetches enter the VM here — via a page message, never from inside a
@@ -65,6 +292,8 @@ const fetchHistory = async (request, attempts = 8) => {
     unescape(encodeURIComponent(JSON.stringify(request))),
   );
 
+  const startedAt = performance.now();
+
   for (let attempt = 0; attempt < attempts; attempt++) {
     let reply;
     try {
@@ -73,9 +302,19 @@ const fetchHistory = async (request, attempts = 8) => {
       );
       reply = JSON.parse(raw.toString());
     } catch (e) {
+      report({ kind: "history", path: "fetch_history", status: "failed" });
       return { ok: false, error: String(e) };
     }
-    if (!reply.busy) return reply;
+    if (!reply.busy) {
+      report({
+        kind: "history",
+        path: `fetch_history → ${reply.applied ?? 0} applied, more: ${!!reply.has_more}`,
+        status: reply.ok ? 200 : "failed",
+        ms: Math.round(performance.now() - startedAt),
+      });
+      return reply;
+    }
+    report({ kind: "history", path: "fetch_history → busy, retrying", status: "busy" });
     await new Promise((resolve) => setTimeout(resolve, 150 * (attempt + 1)));
   }
 
@@ -134,8 +373,9 @@ const initVM = async (progress, opts = {}) => {
 };
 
 const resetVM = () => {
-  clearInterval(syncTimer);
-  syncTimer = null;
+  clearTimeout(drainTimer);
+  drainTimer = null;
+  // The stream loop and any pending retry both bail once the VM is gone.
   vm = null;
 };
 
@@ -151,7 +391,7 @@ const installApp = async () => {
 // changes this constant, which changes the service worker's bytes, which
 // makes the browser install the new worker on the next navigation — that is
 // the whole update mechanism for already-installed clients.
-const BUILD_VERSION = "c013670f20df";
+const BUILD_VERSION = "b0002141cff7";
 
 self.addEventListener("activate", (event) => {
   console.log(`[rails-web] Activate Service Worker (build ${BUILD_VERSION})`);
@@ -174,12 +414,22 @@ const rackHandler = new RackHandler(initVM, { assumeSSL: true, async: true });
 
 const BOOT_RESOURCES = ["/boot", "/boot.js", "/boot.html", "/rails.sw.js", "/favicon.ico"];
 const VITE_RESOURCES = ["node_modules", "@vite"];
+const VITE_ASSETS = ["/assets/pglite-", "/assets/boot-"];
 
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
 
   // Cross-origin requests (e.g. the sync server) go straight to the network.
   if (url.origin !== self.location.origin) {
+    return;
+  }
+
+  // Vite's hashed output shares /assets/ with Rails' Propshaft assets, which
+  // Rack-in-Wasm serves from the bundle. Match Vite's files by name — a
+  // blanket /assets/ bypass 404s every stylesheet and Stimulus controller.
+  if (VITE_ASSETS.some((prefix) => url.pathname.startsWith(prefix))) {
+    console.log("[rails-web] Fetching Vite asset from network:", url.href);
+    event.respondWith(fetch(event.request));
     return;
   }
 
@@ -207,9 +457,30 @@ self.addEventListener("fetch", (event) => {
 
   const respond = rackHandler.handle(event.request);
 
-  // Local writes enqueue outbox mutations; sync right after.
+  // Reported from here rather than from the page, because a form submission and
+  // a navigation are not window.fetch calls — wrapping fetch in the page misses
+  // the entire plain-Rails interaction model, and the first page load with it.
+  if (sim.report) {
+    const startedAt = performance.now();
+    event.waitUntil(
+      respond
+        .then((response) =>
+          report({
+            kind: "local",
+            method: event.request.method,
+            path: url.pathname + url.search,
+            status: response.status,
+            ms: Math.round(performance.now() - startedAt),
+          }),
+        )
+        .catch(() => {}),
+    );
+  }
+
+  // A local write enqueues an outbox mutation, and that is the main reason a
+  // sync pass ever runs — there is no timer waiting to notice it.
   if (event.request.method !== "GET") {
-    event.waitUntil(respond.then(() => tick()));
+    event.waitUntil(respond.then(() => syncSoon()));
   }
 
   return event.respondWith(respond);
@@ -221,6 +492,33 @@ self.addEventListener("message", async (event) => {
   if (event.data.type === "instant_record.fetch_history") {
     const reply = await fetchHistory(event.data.request);
     event.ports[0]?.postMessage(reply);
+    return;
+  }
+
+  // Inspector controls: report toggles the event stream, offline and latencyMs
+  // simulate a bad network on the sync server only.
+  if (event.data.type === "instant_record.simulate") {
+    const wasOffline = sim.offline;
+    Object.assign(sim, event.data.settings || {});
+
+    // Cut a live stream the moment the network is "lost".
+    if (sim.offline && !wasOffline) streamAbort?.abort();
+
+    report({
+      kind: "sim",
+      path: `offline: ${sim.offline}, latency: ${sim.latencyMs}ms`,
+      streamOpen: streaming,
+    });
+
+    // Only when asked. A page requests this once, on load: replaying it later
+    // would replace a log that has since accumulated entries of its own.
+    if (event.data.backlog) {
+      event.source?.postMessage({
+        type: "instant_record.debug_backlog",
+        entries: history,
+        streamOpen: streaming,
+      });
+    }
     return;
   }
 

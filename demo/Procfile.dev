@@ -1,0 +1,6 @@
+# Falcon, not Puma: each client now holds a tailing change stream, and Puma's
+# default 3 threads are consumed by 3 of them (see "Scaling the SSE stream" in
+# the README). Falcon gives every stream a fiber instead, and config/application
+# .rb switches ActiveSupport to fiber-scoped state when it detects Falcon.
+web: bundle exec falcon serve --bind http://localhost:${PORT:-3000}
+pwa: cd pwa && yarn dev --host

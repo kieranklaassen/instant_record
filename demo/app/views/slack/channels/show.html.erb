@@ -1,11 +1,13 @@
 <% content_for(:title, "Swiss Slack — InstantRecord") %>
-<% content_for(:head) { javascript_import_module_tag "slack_conversation" } %>
 
 <%# data-instant-refresh: the layout's records_changed listener hands this
-    page a custom event instead of reloading — slack_conversation.js morphs
-    the DOM in place. data-turbo="false": channel navigation stays a full
-    page load so the module's lifecycle holds. %>
-<div class="slack" data-instant-refresh data-turbo="false">
+    page a custom event instead of reloading — the conversation controller
+    morphs the DOM in place. Turbo Drive handles channel navigation; Stimulus
+    reconnects the controller on every visit. %>
+<div class="slack"
+     data-instant-refresh
+     data-controller="conversation"
+     data-action="instant-record:records-changed@window->conversation#sync">
   <%= render "sidebar" %>
 
   <main class="conversation">
@@ -25,11 +27,22 @@
       </p>
     </header>
 
-    <div class="message-scroll">
+    <div class="message-scroll"
+         data-conversation-target="scroller"
+         data-action="scroll->conversation#scrolled">
+      <%# Rendered here rather than created in JS so the first paint already
+          reserves the slot's height — injecting it on connect shifted the whole
+          list down by 44px on every load. The conversation controller adopts
+          this element and converts it in place when history runs out. %>
+      <% if @has_more %>
+        <div class="history-sentinel"
+             data-state="idle"
+             data-conversation-target="sentinel"></div>
+      <% end %>
       <%= render "messages" %>
     </div>
 
-    <%= form_with url: slack_messages_path, method: :post, class: "composer", data: { turbo: false } do |f| %>
+    <%= form_with url: slack_messages_path, method: :post, class: "composer", data: { action: "conversation#send" } do |f| %>
       <%= f.hidden_field "message[channel_id]", value: @channel.id %>
       <%= f.text_field "message[body]", placeholder: @channel.dm? ? "Message #{@channel.dm_user&.name}" : "Message ##{@channel.name}", required: true, autofocus: true, autocomplete: "off" %>
       <%= f.submit "Send" %>

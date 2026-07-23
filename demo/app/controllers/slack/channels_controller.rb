@@ -34,7 +34,12 @@ module Slack
     def show
       @channel = Channel.find(params[:id])
       @messages = conversation_window
-      @has_more = older_rows_exist?(@messages.first)
+      # The browser can't rule out older pages — its database holds only the
+      # synced window — so it renders optimistically and the first history
+      # probe settles it. The server runtime is authoritative. Decided here
+      # rather than in the partial because show.html.erb reserves the slot
+      # from it too.
+      @has_more = InstantRecord.browser? || older_rows_exist?(@messages.first)
 
       # Scroll-up fragment fetches need none of the page chrome below.
       return render partial: "messages", layout: false if params[:fragment]
@@ -96,10 +101,10 @@ module Slack
       older_than(oldest.created_at, oldest.id).exists?
     end
 
+    # The gem owns this keyset predicate and the records endpoint pages history
+    # with it, so borrow it rather than keeping a second copy in sync by hand.
     def older_than(at, id)
-      @channel.messages
-        .where("created_at < :at OR (created_at = :at AND id < :id)", at: at, id: id)
-        .order(created_at: :desc, id: :desc)
+      Message.instant_record_sync_window.keyset_below(at: at, id: id, partition: @channel.id)
     end
   end
 end
