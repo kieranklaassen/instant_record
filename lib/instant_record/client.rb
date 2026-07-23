@@ -122,20 +122,77 @@ module InstantRecord
         false
       end
 
+      # Set while something outside the VM holds a tailing stream and feeds
+      # events in through apply_events (the service worker does this). Ruby
+      # cannot hold that stream itself: each chunk it awaited would suspend the
+      # single-flight tick, starving outbox drains for the length of the window.
+      attr_writer :streaming
+
+      def streaming? = !!@streaming
+
+      # Feeds one chunk of the change stream through the same SseParser the poll
+      # path uses, and applies whatever complete events it yields. The worker owns
+      # the socket — Ruby awaiting chunks would suspend the sync guard — but the
+      # wire format is parsed here, so there is one implementation of it and it is
+      # the tested one. A frame split across chunks is buffered until it is whole.
+      # Returns the number applied.
+      def consume_stream(chunk)
+        stream_parser.feed(chunk.to_s)
+        return 0 if stream_events.empty?
+
+        applied = apply_events(stream_events)
+        stream_events.clear
+        applied
+      end
+
+      # A reconnect starts a new stream: drop any half-received frame from the
+      # old one rather than letting its prefix corrupt the first new frame.
+      def reset_stream
+        @stream_parser = nil
+        stream_events.clear
+        nil
+      end
+
+      # Applies events delivered from outside — a stream the worker is holding.
+      # Idempotent by the same upsert + last-write-wins path a poll uses, so a
+      # replayed or overlapping batch is harmless. Returns the number applied.
+      def apply_events(events)
+        applied = 0
+        newest_cursor = nil
+
+        Array(events).each do |event|
+          event = event.deep_stringify_keys
+          applied += 1 if apply_change(event)
+          # The cursor advances for every event, changed or not: an echo we chose
+          # to ignore must not be handed to us again.
+          newest_cursor = event["cursor"] || newest_cursor
+        end
+
+        # One cursor write per batch, as poll_changes does: a crash before this
+        # re-applies the batch, which the upserts make safe.
+        self.cursor = newest_cursor if newest_cursor
+        notifier.records_changed if applied.positive?
+        applied
+      end
+
       # Changes down, catch-up style: window=0 asks the server to close the
       # stream right after catch-up instead of tailing a long window. The tick
       # cadence provides liveness; a long-held stream inside the single-flight
       # tick would starve outbox drains and defer notifications.
+      #
+      # Skipped entirely while a stream is live — that stream is already
+      # delivering, and re-polling would only re-fetch what it just applied.
       # Returns true when any remote change was applied.
       def poll_changes
+        return false if streaming?
+
         changed = false
         last_cursor = nil
 
         transport.each_event("/events?after=#{cursor}&window=0") do |event|
           event = event.deep_stringify_keys
-          apply_change(event)
+          changed = true if apply_change(event)
           last_cursor = event["cursor"] || last_cursor
-          changed = true
         end
 
         # One cursor write per poll, not per event. A crash before this line
@@ -211,24 +268,32 @@ module InstantRecord
         nil
       end
 
-      # Apply one remote change event (last-write-wins).
+      # Apply one remote change event (last-write-wins). Returns whether it
+      # actually changed anything here — see upsert_from_server.
       def apply_change(event)
         event = event.deep_stringify_keys
         model = InstantRecord.synced_model(event["type"])
-        return unless model
+        return false unless model
 
         applying_remote do
-          case event["operation"]
-          when "destroy"
-            model.find_by(id: event["id"])&.destroy!
+          if event["operation"] == "destroy"
+            !!model.find_by(id: event["id"])&.destroy!
           else
             upsert_from_server(model, event["attributes"], event["version"])
           end
         end
-        nil
       end
 
       private
+
+      # Where the parser drops finished events, drained by consume_stream.
+      def stream_events
+        @stream_events ||= []
+      end
+
+      def stream_parser
+        @stream_parser ||= Transport::SseParser.new { |event| stream_events << event }
+      end
 
       # Contiguity low-water marks, one per (model, partition), held in
       # VM-session memory only. Row count alone cannot prove a local page has
@@ -302,8 +367,12 @@ module InstantRecord
         end
       end
 
+      # Returns whether the row actually moved. Every accepted write comes back
+      # down the change stream, so a client is constantly re-applying its own
+      # rows; treating those as changes would announce them, and an announcement
+      # reloads any page without an in-place refresh.
       def upsert_from_server(model, attributes, version)
-        return unless attributes
+        return false unless attributes
 
         record = model.find_or_initialize_by(id: attributes["id"])
 
@@ -311,12 +380,15 @@ module InstantRecord
         local_at = record.persisted? ? record.updated_at : nil
 
         # Client-side LWW: never clobber a locally newer row.
-        return if incoming_at && local_at && incoming_at < local_at
+        return false if incoming_at && local_at && incoming_at < local_at
 
         record.assign_attributes(attributes.except("id", "server_version"))
         record.server_version = version || attributes["server_version"] || 0
         record.sync_state = "synced"
+        return false unless record.changed?
+
         record.save!(validate: false)
+        true
       end
 
       def log_failure(phase, error)

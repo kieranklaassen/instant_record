@@ -100,13 +100,38 @@ module InstantRecord
 
     def started? = !!@started
 
-    # One sync pass: drain the outbox up, poll changes down, notify tabs.
-    # Single-flight: a tick that arrives while one is in flight is skipped.
+    # How many times one tick will loop to absorb requests that arrived while it
+    # was working. A cap keeps a continuous writer from holding the VM forever —
+    # whatever is left is reported as pending and retried.
+    COALESCE_PASSES = 5
+
+    # One sync pass: drain the outbox up, changes down, notify tabs.
+    #
+    # Requests that arrive mid-pass are coalesced rather than queued or dropped.
+    # They cannot start a second pass — the VM must never be re-entered — so the
+    # running pass notes them and goes round again. A burst of writes therefore
+    # costs a couple of batched requests instead of one per write, and no write
+    # is left sitting in the outbox waiting for a later trigger.
     def tick
       return :not_started unless started?
 
+      if @ticking
+        @tick_again = true
+        return :busy
+      end
+
       single_flight do
-        Client.sync_pass
+        COALESCE_PASSES.times do
+          @tick_again = false
+          outbox_before = Client.pending_count
+          Client.sync_pass
+
+          # Go round again only for a request that arrived mid-pass AND an outbox
+          # that actually moved. Repeating a pass that changed nothing would just
+          # hammer a server already refusing the same batch; the caller's backoff
+          # is where that belongs.
+          break unless @tick_again && Client.pending_count != outbox_before
+        end
         :ok
       end
     end
@@ -115,6 +140,21 @@ module InstantRecord
     def sync_now
       @started = true
       tick
+    end
+
+    # A tick for the service worker, which needs to know whether to come back.
+    # There is no heartbeat: writes trigger a pass, the change stream carries
+    # everything inbound, and this `pending` count is the only reason to retry —
+    # so when it reaches zero an idle client goes quiet entirely.
+    def tick_json
+      result = tick
+      return JSON.generate(ok: false, busy: true) if result == :busy
+      return JSON.generate(ok: false, started: false) if result == :not_started
+
+      JSON.generate(ok: true, pending: pending_count)
+    rescue StandardError => e
+      # Never raise across the JS boundary; a failed pass is a retry, not a crash.
+      JSON.generate(ok: false, error: e.message, pending: safe_pending_count)
     end
 
     def pending_count = Client.pending_count
@@ -129,6 +169,60 @@ module InstantRecord
       single_flight do
         Client.fetch_history(model, before: before, partition: partition, limit: limit)
       end
+    end
+
+    # --- Streamed changes -----------------------------------------------------
+    # Ruby can't hold the change stream itself: every chunk it awaited would
+    # suspend the single-flight tick, so a tailing window would starve outbox
+    # drains for its whole duration. That is why the sync loop polls with
+    # window=0 by default. Something outside the VM — the service worker — can
+    # hold the stream instead and hand events in here, which is what turns
+    # tick-bounded delivery into push.
+
+    # Where the sync engine lives, so the holder of the stream knows what to
+    # open. Reading it from here keeps one source of truth.
+    def endpoint = config.endpoint
+
+    # Tell the sync loop a stream is live, so its own catch-up poll stands down.
+    # Set false when the stream drops and the poll should take over again.
+    def streaming=(value)
+      Client.streaming = value
+    end
+
+    # Apply a batch of streamed events. Shares the tick's single-flight guard:
+    # applying while a sync pass runs would re-enter the VM, so the caller gets
+    # :busy and retries — the same contract as fetch_history.
+    def apply_events(events)
+      single_flight { Client.apply_events(events) }
+    end
+
+    # One chunk of the change stream, straight off the socket the worker holds.
+    # Base64 for the same injection reason as fetch_history_b64. A :busy reply
+    # leaves the chunk unparsed, so resending it is safe and loses nothing.
+    def consume_stream_b64(chunk_b64)
+      chunk = Base64.strict_decode64(chunk_b64.to_s)
+      result = single_flight { Client.consume_stream(chunk) }
+      return JSON.generate(ok: false, busy: true) if result == :busy
+
+      JSON.generate(ok: true, applied: result, cursor: cursor)
+    rescue ArgumentError, TypeError => e
+      JSON.generate(ok: false, error: e.message)
+    end
+
+    # A stream just opened: forget any half-received frame from the last one and
+    # stand the catch-up poll down.
+    def stream_opened_json
+      result = single_flight do
+        Client.reset_stream
+        self.streaming = true
+      end
+      JSON.generate(result == :busy ? { ok: false, busy: true } : { ok: true })
+    end
+
+    # The stream dropped: the poll is the delivery path again until it is back.
+    def stream_closed_json
+      result = single_flight { self.streaming = false }
+      JSON.generate(result == :busy ? { ok: false, busy: true } : { ok: true })
     end
 
     # Base64 entrypoint the service worker calls: the request never enters
@@ -178,6 +272,14 @@ module InstantRecord
     end
 
     private
+
+    # The retry decision must survive a database that is itself unhappy:
+    # reporting "nothing pending" there would strand queued writes forever.
+    def safe_pending_count
+      pending_count
+    rescue StandardError
+      1
+    end
 
     # Ticks and history fetches share one guard: the wasm VM must never run
     # two sync entry points concurrently (asyncify re-entrancy), so whichever
