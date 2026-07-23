@@ -19,4 +19,5 @@ node_modules/
 public/boot.html
 public/index.html
 public/rails.sw.js
+public/favicon.ico
 public/assets/
