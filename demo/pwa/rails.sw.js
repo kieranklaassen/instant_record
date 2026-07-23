@@ -57,11 +57,19 @@ const startSync = async () => {
 const fetchHistory = async (request, attempts = 8) => {
   if (!vm) return { ok: false, error: "vm not ready" };
 
+  // Base64 the request before it enters Ruby source: the base64 alphabet
+  // has none of Ruby's string-literal metacharacters, so an untrusted page
+  // message can't break out of the string or trigger #{} interpolation.
+  // Passing raw JSON here would be a code-injection sink.
+  const encoded = btoa(
+    unescape(encodeURIComponent(JSON.stringify(request))),
+  );
+
   for (let attempt = 0; attempt < attempts; attempt++) {
     let reply;
     try {
       const raw = await vm.evalAsync(
-        `InstantRecord.fetch_history_json(${JSON.stringify(JSON.stringify(request))})`,
+        `InstantRecord.fetch_history_b64("${encoded}")`,
       );
       reply = JSON.parse(raw.toString());
     } catch (e) {
@@ -71,7 +79,8 @@ const fetchHistory = async (request, attempts = 8) => {
     await new Promise((resolve) => setTimeout(resolve, 150 * (attempt + 1)));
   }
 
-  return { ok: false, error: "sync busy" };
+  // Retries exhausted while a sync pass held the VM: transient, not offline.
+  return { ok: false, busy: true, error: "sync busy" };
 };
 
 const initVM = async (progress, opts = {}) => {
@@ -142,7 +151,7 @@ const installApp = async () => {
 // changes this constant, which changes the service worker's bytes, which
 // makes the browser install the new worker on the next navigation — that is
 // the whole update mechanism for already-installed clients.
-const BUILD_VERSION = "1e662b2e12eb";
+const BUILD_VERSION = "1074ceaafd51";
 
 self.addEventListener("activate", (event) => {
   console.log(`[rails-web] Activate Service Worker (build ${BUILD_VERSION})`);
