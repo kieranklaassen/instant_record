@@ -32,15 +32,17 @@ module Slack
     MAX_RENDER_DEPTH = 200
 
     def show
-      @channels = Channel.channels
-      @dms = Channel.dms
-      @users = ChatUser.order(:name)
       @channel = Channel.find(params[:id])
       @messages = conversation_window
       @has_more = older_rows_exist?(@messages.first)
-      @pending_count = InstantRecord.browser? ? InstantRecord.pending_count : 0
 
-      render partial: "messages", layout: false if params[:fragment]
+      # Scroll-up fragment fetches need none of the page chrome below.
+      return render partial: "messages", layout: false if params[:fragment]
+
+      @channels = Channel.channels
+      @dms = Channel.dms
+      @users = ChatUser.order(:name)
+      @pending_count = InstantRecord.browser? ? InstantRecord.pending_count : 0
     end
 
     private
@@ -66,31 +68,38 @@ module Slack
     def resolved_floor
       return nil if params[:floor_created_at].blank? || params[:floor_id].blank?
 
-      at = Time.zone.parse(params[:floor_created_at].to_s)
+      at = parse_floor_time(params[:floor_created_at])
       return nil unless at
 
       floor = [at, params[:floor_id].to_s]
       params[:deepen].present? ? deepened_floor(floor) : floor
     end
 
+    # A crafted floor timestamp falls back to the default window rather than
+    # 500ing: Time.zone.parse raises on out-of-range components.
+    def parse_floor_time(value)
+      Time.zone.parse(value.to_s)
+    rescue ArgumentError
+      nil
+    end
+
     # One page below the given floor — scroll-up asks for "what I had plus
     # the next page" without knowing the new boundary keyset up front.
     def deepened_floor(floor)
       at, id = floor
-      below = @channel.messages
-        .where("created_at < :at OR (created_at = :at AND id < :id)", at: at, id: id)
-        .order(created_at: :desc, id: :desc)
-        .limit(WINDOW)
-        .last
-      below ? [below.created_at, below.id] : floor
+      older_than(at, id).limit(WINDOW).pluck(:created_at, :id).last || floor
     end
 
     def older_rows_exist?(oldest)
       return false unless oldest
 
+      older_than(oldest.created_at, oldest.id).exists?
+    end
+
+    def older_than(at, id)
       @channel.messages
-        .where("created_at < :at OR (created_at = :at AND id < :id)", at: oldest.created_at, id: oldest.id)
-        .exists?
+        .where("created_at < :at OR (created_at = :at AND id < :id)", at: at, id: id)
+        .order(created_at: :desc, id: :desc)
     end
   end
 end

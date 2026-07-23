@@ -26,8 +26,9 @@ module Slack
     # Inserted with insert_all: no callbacks, therefore no change-log rows —
     # a logged backfill would make every already-synced client replay
     # thousands of events (KTD7 in the plan). Fresh clients see it because
-    # bootstrap reads tables, not the log. The `backfill-` id prefix is
-    # load-bearing: reset preserves history by excluding it.
+    # bootstrap reads tables, not the log. The id prefix is load-bearing:
+    # reset preserves history by excluding it.
+    BACKFILL_PREFIX = "backfill-".freeze
     BACKFILL_SPAN = 21.days
     BACKFILL_LINES = [
       "Alignment is a lifestyle.",
@@ -54,7 +55,7 @@ module Slack
     end
 
     def backfill_id(channel_id, index)
-      "backfill-#{channel_id}-#{format('%05d', index)}"
+      "#{BACKFILL_PREFIX}#{channel_id}-#{format('%05d', index)}"
     end
 
     def apply
@@ -110,9 +111,11 @@ module Slack
       now = Time.current
       backfill_counts.each do |channel_id, count|
         next if count.zero?
-        # Sentinel: the first backfill row existing means this channel's
-        # backfill already ran — reseeding and reset skip the bulk insert.
-        next if Message.exists?(id: backfill_id(channel_id, 1))
+        # Sentinel is the LAST row: its presence means the whole batch
+        # committed. Checking the first row would treat a crash mid-insert as
+        # "done" and permanently skip the tail; insert_all's duplicate skip
+        # makes the retry idempotent.
+        next if Message.exists?(id: backfill_id(channel_id, count))
 
         rows = (1..count).map do |i|
           at = now - BACKFILL_SPAN + (BACKFILL_SPAN * i / (count + 1))

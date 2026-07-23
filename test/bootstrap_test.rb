@@ -4,12 +4,13 @@ require "test_helper"
 # `ruby -Itest test/bootstrap_test.rb` (rake loads all files, order unknown).
 class BootstrapTransport
   attr_reader :bootstrap_requests, :event_paths
-  attr_accessor :bootstrap_body, :fail_bootstrap
+  attr_accessor :bootstrap_body, :fail_bootstrap, :events_to_yield
 
   def initialize
     @bootstrap_requests = []
     @event_paths = []
     @bootstrap_body = { "cursor" => 0, "records" => [] }
+    @events_to_yield = []
   end
 
   def get_json(path)
@@ -23,8 +24,9 @@ class BootstrapTransport
     { "results" => [] }
   end
 
-  def each_event(path)
+  def each_event(path, &block)
     @event_paths << path
+    @events_to_yield.each(&block)
   end
 end
 
@@ -133,5 +135,33 @@ class BootstrapTest < Minitest::Test
     end
 
     assert_equal 0, InstantRecord::OutboxMutation.count
+  end
+
+  # KTD2: the cursor is captured before rows, so an event committed between
+  # snapshot and response re-applies over the snapshot row. LWW on updated_at
+  # must keep the newer of the two — proving the overlap is safe, not doubled.
+  def test_overlapping_change_after_snapshot_applies_by_lww
+    older = 2.minutes.ago
+    @transport.bootstrap_body = {
+      "cursor" => 42,
+      "records" => [
+        { "type" => "Memo", "id" => "m-1", "version" => 1,
+          "attributes" => { "id" => "m-1", "title" => "snapshot value", "updated_at" => older.iso8601 } }
+      ]
+    }
+    @transport.events_to_yield = [
+      { "type" => "Memo", "id" => "m-1", "operation" => "update", "version" => 2, "cursor" => 43,
+        "attributes" => { "id" => "m-1", "title" => "newer value", "updated_at" => Time.current.iso8601 } }
+    ]
+
+    in_browser do
+      InstantRecord.start
+      InstantRecord.tick  # bootstrap applies the snapshot row
+      InstantRecord.tick  # next poll delivers the overlapping newer event
+    end
+
+    assert_equal 1, @model.count, "overlap upserts, never duplicates"
+    assert_equal "newer value", @model.find("m-1").title, "LWW keeps the newer overlapping change"
+    assert_equal 43, InstantRecord.cursor
   end
 end

@@ -47,8 +47,13 @@ const bindOnce = () => {
   bound = true;
 
   // The layout's reload listener defers to us on pages with an
-  // instant-refresh root (see layouts/application.html.erb).
-  window.addEventListener("instant-record:records-changed", () => refreshLive());
+  // instant-refresh root (see layouts/application.html.erb). A completed sync
+  // pass also proves the VM is responsive, so re-arm a sentinel that a
+  // transient busy/timeout had parked.
+  window.addEventListener("instant-record:records-changed", () => {
+    refreshLive();
+    rearmSentinel();
+  });
   window.addEventListener("online", rearmSentinel);
   document.addEventListener("submit", onSubmit);
 };
@@ -78,16 +83,21 @@ const mountSentinel = () => {
 
 const loadOlder = async () => {
   if (state.fetchingHistory || state.exhausted) return;
+
+  const messages = list();
+  const before = {
+    created_at: messages.dataset.oldestCreatedAt,
+    id: messages.dataset.oldestId,
+  };
+  // A fresh client can render before bootstrap fills the cursor attributes;
+  // firing with blank cursors would 500 the fetch. Wait for the next
+  // records_changed, which re-arms the sentinel.
+  if (!before.created_at || !before.id) return;
+
   state.fetchingHistory = true;
   setSentinel("loading", "Loading history…");
 
   try {
-    const messages = list();
-    const before = {
-      created_at: messages.dataset.oldestCreatedAt,
-      id: messages.dataset.oldestId,
-    };
-
     let hasMore = null;
     if (swControlled()) {
       // Pull the older page into the local database first; the VM fetches
@@ -98,6 +108,10 @@ const loadOlder = async () => {
         before,
         limit: PAGE_SIZE,
       });
+      // busy/timeout are transient (the VM was mid-sync), not offline: leave
+      // the observer armed so the next scroll or sync retries. Only a genuine
+      // fetch failure disarms and waits for reconnect.
+      if (reply.busy) return setSentinel("idle", "");
       if (!reply.ok) return offline(reply.error);
       hasMore = reply.has_more;
     }
@@ -111,14 +125,23 @@ const loadOlder = async () => {
     else setSentinel("idle", "");
   } finally {
     state.fetchingHistory = false;
+    // A records_changed that arrived mid-prepend was deferred; run it now.
+    if (state.refreshQueued) {
+      state.refreshQueued = false;
+      const queuedForceBottom = state.queuedForceBottom || false;
+      state.queuedForceBottom = false;
+      refreshLive({ forceBottom: queuedForceBottom });
+    }
   }
 };
 
 const fetchHistoryViaWorker = (request) =>
   new Promise((resolve) => {
     const channel = new MessageChannel();
+    // Transient: an unresponsive worker recovers on the next records_changed;
+    // busy keeps the sentinel armed instead of latching the offline notice.
     const timer = setTimeout(
-      () => resolve({ ok: false, error: "history request timed out" }),
+      () => resolve({ ok: false, busy: true, error: "history request timed out" }),
       15000,
     );
     channel.port1.onmessage = (event) => {
@@ -207,8 +230,13 @@ const setSentinel = (mode, text) => {
 // reconcile in place: new messages appear, destroyed ones drop out, badges
 // flip — without touching scroll position unless the reader was at bottom.
 const refreshLive = async ({ forceBottom = false } = {}) => {
-  if (state.refreshing) {
+  // Never morph while a history page is being prepended: the two writers
+  // share the message list and the floor cursor, and a mid-flight morph would
+  // fight the prepend. Queue and let loadOlder's completion trigger the next
+  // records_changed, or run once it clears.
+  if (state.refreshing || state.fetchingHistory) {
     state.refreshQueued = true;
+    state.queuedForceBottom = state.queuedForceBottom || forceBottom;
     return;
   }
   state.refreshing = true;
@@ -246,7 +274,9 @@ const refreshLive = async ({ forceBottom = false } = {}) => {
     state.refreshing = false;
     if (state.refreshQueued) {
       state.refreshQueued = false;
-      refreshLive({ forceBottom });
+      const queuedForceBottom = state.queuedForceBottom || false;
+      state.queuedForceBottom = false;
+      refreshLive({ forceBottom: queuedForceBottom });
     }
   }
 };
@@ -259,6 +289,14 @@ const morphMessages = (current, fresh) => {
     [...current.children].map((li) => [li.dataset.id, li]),
   );
   existing.delete(undefined);
+
+  // The fresh fetch is floor-bounded, so a DOM row absent from it because it
+  // sorts BELOW the fetched floor is not a deletion — only rows within the
+  // fetched range may be removed. Guards against a back-skewed-clock message
+  // being culled as "missing" when it merely fell below the floor.
+  const freshIds = new Set(
+    [...fresh.children].map((li) => li.dataset.id).filter(Boolean),
+  );
 
   let anchor = null;
   for (const freshLi of [...fresh.children]) {
@@ -280,13 +318,36 @@ const morphMessages = (current, fresh) => {
     anchor = node;
   }
 
-  for (const leftover of existing.values()) leftover.remove();
+  // Remove only rows within the fetched floor→newest range that the fresh
+  // list dropped (a genuine destroy). The fetched range is bounded below by
+  // its oldest row; anything the DOM holds below that stays.
+  const floorId = fresh.dataset.oldestId;
+  const floorAt = fresh.dataset.oldestCreatedAt;
+  for (const leftover of existing.values()) {
+    if (freshIds.has(leftover.dataset.id)) continue;
+    if (floorId && belowFloor(leftover, floorAt, floorId)) continue;
+    leftover.remove();
+  }
+};
+
+// A DOM row's timestamp is display-only (%H:%M), so membership below the
+// floor is judged by id/attribute presence, not a parsed clock: rows are
+// only removable when they sit within the fetched keyset range. We keep any
+// row the fresh fetch did not cover below its oldest cursor.
+const belowFloor = (li, floorAt, floorId) => {
+  const at = li.dataset.createdAt;
+  if (!at) return false;
+  if (at < floorAt) return true;
+  return at === floorAt && li.dataset.id < floorId;
 };
 
 const replaceRegion = (selector, doc) => {
-  const current = root().querySelector(selector) || document.querySelector(selector);
+  const current = root().querySelector(selector);
   const fresh = doc.querySelector(selector);
-  if (current && fresh) current.replaceWith(fresh.cloneNode(true));
+  if (!current || !fresh) return;
+  // Skip identical regions: no DOM churn, no lost hover/focus states.
+  if (current.outerHTML === fresh.outerHTML) return;
+  current.replaceWith(fresh.cloneNode(true));
 };
 
 // --- Composer and reset (delegated: both survive sidebar/header morphs) ----

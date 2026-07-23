@@ -4,19 +4,22 @@
     authoritative on the server runtime only; the browser's local database
     holds just the synced window, so it renders "true" and the first
     fetch_history reply settles it. %>
+<% has_more = InstantRecord.browser? || @has_more %>
 <ol class="messages"
     data-channel-id="<%= @channel.id %>"
     data-fragment-url="<%= slack_channel_path(@channel, fragment: 1) %>"
     data-oldest-created-at="<%= @messages.first&.created_at&.utc&.iso8601(6) %>"
     data-oldest-id="<%= @messages.first&.id %>"
-    data-has-more="<%= InstantRecord.browser? || @has_more %>">
-  <% if !@has_more && !InstantRecord.browser? %>
+    data-has-more="<%= has_more %>">
+  <% unless has_more %>
     <li class="beginning-marker" data-beginning="true">
       <span class="micro-label">Beginning of <%= @channel.dm? ? "this conversation" : "##{@channel.name}" %></span>
     </li>
   <% end %>
   <% @messages.each do |message| %>
-    <li class="<%= "own" if message.from_visitor? %>" data-id="<%= message.id %>">
+    <li class="<%= "own" if message.from_visitor? %>"
+        data-id="<%= message.id %>"
+        data-created-at="<%= message.created_at.utc.iso8601(6) %>">
       <div class="message-head">
         <span class="author"><%= message.chat_user&.name || "Unknown" %></span>
         <span class="timestamp"><%= message.created_at.strftime("%H:%M") %></span>

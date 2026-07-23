@@ -165,11 +165,18 @@ module InstantRecord
         before_id = before[:id].to_s
 
         unless InstantRecord.browser?
-          return { ok: true, applied: 0, has_more: local_page(model, window, partition, before_at, before_id, limit + 1).size > limit }
+          return { ok: true, applied: 0, has_more: local_page(window, partition, before_at, before_id, limit + 1).size > limit }
         end
 
-        if (mark = history_mark(model, partition)) && page_local?(mark, model, window, partition, before_at, before_id, limit)
-          return { ok: true, applied: 0, has_more: mark[:has_more] }
+        if (mark = history_mark(model, partition)) && page_local?(mark, window, partition, before_at, before_id, limit)
+          # has_more from the served page, not the partition-wide mark: rows
+          # remain below this page when the local probe overflows `limit`, or
+          # when the page reaches the contiguity frontier and the server still
+          # has older rows (mark[:has_more]). Echoing the mark alone reports
+          # "beginning reached" for any mid-history page after the true
+          # beginning was loaded.
+          local = local_page(window, partition, before_at, before_id, limit + 1)
+          return { ok: true, applied: 0, has_more: local.size > limit || mark[:has_more] }
         end
 
         body = transport.get_json(history_path(model, partition, before_at, before_id, limit))
@@ -239,7 +246,7 @@ module InstantRecord
       def extend_history_mark(model, partition, records, has_more:)
         key = [model.name, partition]
         oldest = records.map { |r| [Time.parse(r.dig("attributes", "created_at").to_s), r["id"].to_s] }.min
-        mark = history_marks[key] ||= { oldest_at: nil, oldest_id: nil, has_more: has_more }
+        mark = history_marks[key] ||= { oldest_at: nil, oldest_id: nil }
         mark[:has_more] = has_more
         return unless oldest
         return if mark[:oldest_at] && ([mark[:oldest_at], mark[:oldest_id]] <=> oldest) <= 0
@@ -250,23 +257,20 @@ module InstantRecord
       # A page is fully local when the beginning of history was already
       # reached, or when `limit` rows older than `before` exist locally within
       # the contiguous region above the mark.
-      def page_local?(mark, model, window, partition, before_at, before_id, limit)
+      def page_local?(mark, window, partition, before_at, before_id, limit)
         return true if mark[:has_more] == false
 
-        rows = local_page(model, window, partition, before_at, before_id, limit)
+        rows = local_page(window, partition, before_at, before_id, limit)
         rows.size >= limit && rows.all? { |at, id| ([at, id] <=> [mark[:oldest_at], mark[:oldest_id]]) >= 0 }
       end
 
       # Keyset page below (before_at, before_id), newest first, as
       # [created_at, id] tuples.
-      def local_page(model, window, partition, before_at, before_id, limit)
-        pk = model.primary_key
-        scope = window.partition_by ? model.where(window.partition_by => partition) : model.all
-        scope
-          .where("created_at < :at OR (created_at = :at AND #{pk} < :id)", at: before_at, id: before_id)
-          .order(created_at: :desc, pk => :desc)
+      def local_page(window, partition, before_at, before_id, limit)
+        window
+          .keyset_below(at: before_at, id: before_id, partition: partition)
           .limit(limit)
-          .pluck(:created_at, pk)
+          .pluck(:created_at, window.model.primary_key)
           .map { |at, id| [at.to_time, id.to_s] }
       end
 

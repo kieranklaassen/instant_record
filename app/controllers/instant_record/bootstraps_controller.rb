@@ -17,30 +17,18 @@ module InstantRecord
 
     private
 
-    # Mirrors how InstantRecord.synced_model resolves: the explicit allowlist
-    # when set, otherwise every loaded Syncable includer (eager-loading first
-    # so development doesn't miss lazily-loaded models).
+    # Eager-load first so development doesn't miss lazily-loaded models;
+    # syncable_models then resolves like synced_model (allowlist or all
+    # Syncable includers).
     def bootstrap_models
-      return InstantRecord.synced_models if InstantRecord.synced_models.any?
-
       Rails.application.eager_load! unless Rails.application.config.eager_load
-      ActiveRecord::Base.descendants.select do |model|
-        !model.abstract_class? && model.name &&
-          model.respond_to?(:instant_record_syncable?) && model.instant_record_syncable?
-      end
+      InstantRecord.syncable_models
     end
 
     def serialize_rows(model)
       window = model.instant_record_sync_window
       scope = window ? window.in_window : model.all
-      scope.map do |record|
-        {
-          type: model.name,
-          id: record.id,
-          version: record[:server_version],
-          attributes: record.attributes.except("sync_state")
-        }
-      end
+      scope.map { |record| InstantRecord.record_payload(record) }
     end
   end
 end

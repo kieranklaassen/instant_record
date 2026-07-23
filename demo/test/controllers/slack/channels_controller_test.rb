@@ -140,6 +140,29 @@ module Slack
       assert_includes response.body, 'data-has-more="false"'
     end
 
+    test "browser runtime always arms scroll-up and hides the beginning marker" do
+      # A fully-held DM: on the server this would render data-has-more=false
+      # with a beginning marker. In the browser runtime the local DB holds
+      # only the window, so has_more must render true and the marker must be
+      # absent — otherwise the sentinel never arms on a fresh client.
+      [ChatUser, Channel, Message, Slack::Seeds].each(&:name)
+      InstantRecord.singleton_class.class_eval do
+        alias_method :original_browser?, :browser?
+        define_method(:browser?) { true }
+      end
+
+      get slack_channel_url("dm-bot-ursula")
+
+      assert_includes response.body, 'data-has-more="true"'
+      refute_includes response.body, "data-beginning"
+    ensure
+      InstantRecord.singleton_class.class_eval do
+        remove_method :browser?
+        alias_method :browser?, :original_browser?
+        remove_method :original_browser?
+      end
+    end
+
     test "keyset pagination across a boundary yields no duplicates or gaps" do
       create_history(120)
 

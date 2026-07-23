@@ -36,7 +36,10 @@ module InstantRecord
 
       ids = (first_page["records"] + second_page["records"]).map { |r| r["id"] }
       assert_equal ids.uniq, ids, "boundary rows must not duplicate across pages"
-      assert_equal 8, ids.size, "boundary rows must not vanish between pages"
+      expected = Message.where(channel_id: "channel-general")
+        .where("created_at < :at OR (created_at = :at AND id < :id)", at: newest.created_at, id: newest.id)
+        .order(created_at: :desc, id: :desc).limit(8).pluck(:id)
+      assert_equal expected, ids, "the two pages must be exactly the 8 rows below the cursor in keyset order"
     end
 
     test "microsecond-identical timestamps break ties by id without loss" do
@@ -54,13 +57,14 @@ module InstantRecord
     end
 
     test "limit is clamped to the hard maximum" do
-      create_messages(3)
+      ceiling = InstantRecord::RecordsController::HARD_LIMIT
+      create_messages(ceiling + 5, base: (ceiling + 20).minutes.ago)
 
-      fetch_page(before_at: Time.zone.now, before_id: "zzz", limit: 100_000)
+      page = fetch_page(before_at: Time.zone.now, before_id: "zzz", limit: 100_000)
 
       assert_response :success
-      # 3 history rows + 1 welcome seed; a runaway limit must not error or 500
-      assert_operator JSON.parse(response.body)["records"].size, :<=, InstantRecord::RecordsController::HARD_LIMIT
+      assert_equal ceiling, page["records"].size, "a runaway limit is clamped to the ceiling"
+      assert page["has_more"], "rows beyond the clamp are still reported as more"
     end
 
     test "rows carry server_version and never sync_state" do

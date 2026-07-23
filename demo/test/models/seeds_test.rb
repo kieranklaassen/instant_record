@@ -31,15 +31,27 @@ class SeedsTest < ActiveSupport::TestCase
   test "backfill sentinel short-circuits the bulk insert per channel" do
     Slack::Seeds.apply
 
-    # Leave only #general's sentinel row standing, then reseed: #general is
-    # skipped (sentinel present), the other channels backfill again.
-    Message.where("id LIKE 'backfill-%'")
-      .where.not(id: Slack::Seeds.backfill_id("channel-general", 1))
-      .delete_all
+    # Leave only #general's last-row sentinel standing, then reseed: #general
+    # is skipped (sentinel present), the other channels backfill again.
+    general_sentinel = Slack::Seeds.backfill_id("channel-general", Slack::Seeds.backfill_counts["channel-general"])
+    Message.where("id LIKE 'backfill-%'").where.not(id: general_sentinel).delete_all
     Slack::Seeds.apply_backfill
 
     assert_equal 1, Message.where("id LIKE 'backfill-channel-general-%'").count
     assert_equal Slack::Seeds.backfill_counts["channel-random"],
       Message.where("id LIKE 'backfill-channel-random-%'").count
+  end
+
+  test "an interrupted backfill completes on the next run" do
+    Slack::Seeds.apply
+
+    # Simulate a crash after the first insert_all slice: the tail is missing
+    # and the last-row sentinel is absent, so reseeding fills the gap.
+    count = Slack::Seeds.backfill_counts["channel-general"]
+    Message.where("id LIKE 'backfill-channel-general-%'")
+      .where("id > ?", Slack::Seeds.backfill_id("channel-general", 1)).delete_all
+    Slack::Seeds.apply_backfill
+
+    assert_equal count, Message.where("id LIKE 'backfill-channel-general-%'").count
   end
 end

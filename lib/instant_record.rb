@@ -1,4 +1,5 @@
 require "json"
+require "base64"
 
 module InstantRecord
   DEFAULT_MOUNT_PATH = "/instant_record".freeze
@@ -65,6 +66,26 @@ module InstantRecord
       end
     end
 
+    # The wire shape for one record, shared by the bootstrap and records
+    # endpoints and mirroring Change#as_event: clients apply all three through
+    # the same upsert path. sync_state is client-local and never serialized.
+    # Timestamps are serialized at microsecond precision so the (created_at,
+    # id) keyset cursor round-trips exactly — the JSON encoder's default
+    # millisecond precision would collide sub-millisecond neighbors and let
+    # boundary rows silently vanish between history pages.
+    def record_payload(record)
+      attributes = record.attributes.except("sync_state")
+      attributes.each do |key, value|
+        attributes[key] = value.iso8601(6) if value.respond_to?(:iso8601)
+      end
+      {
+        type: record.class.name,
+        id: record.id,
+        version: record[:server_version],
+        attributes: attributes
+      }
+    end
+
     # Begin background sync (browser runtime only; a no-op on the server).
     # The gem's service worker shim schedules `tick` on config.sync_interval.
     # cold_boot: false skips the boot-time window eviction — the service
@@ -83,14 +104,10 @@ module InstantRecord
     # Single-flight: a tick that arrives while one is in flight is skipped.
     def tick
       return :not_started unless started?
-      return :busy if @ticking
 
-      @ticking = true
-      begin
+      single_flight do
         Client.sync_pass
         :ok
-      ensure
-        @ticking = false
       end
     end
 
@@ -109,14 +126,19 @@ module InstantRecord
     # fetch is mid-flight is skipped — asyncify re-entrancy is the browser
     # runtime's crash class, so the VM never runs both at once.
     def fetch_history(model, before:, partition: nil, limit: nil)
-      return :busy if @ticking
-
-      @ticking = true
-      begin
+      single_flight do
         Client.fetch_history(model, before: before, partition: partition, limit: limit)
-      ensure
-        @ticking = false
       end
+    end
+
+    # Base64 entrypoint the service worker calls: the request never enters
+    # Ruby source as raw text (which would be a #{}-interpolation injection
+    # sink), only as a base64 token decoded here. Delegates to
+    # fetch_history_json for the actual work.
+    def fetch_history_b64(request_b64)
+      fetch_history_json(Base64.strict_decode64(request_b64.to_s))
+    rescue ArgumentError => e
+      JSON.generate(ok: false, error: e.message)
     end
 
     # String-in/string-out fetch_history for the service worker's evalAsync
@@ -153,6 +175,22 @@ module InstantRecord
       yield
     ensure
       ActiveSupport::IsolatedExecutionState[:instant_record_applying_client_mutation] = previous
+    end
+
+    private
+
+    # Ticks and history fetches share one guard: the wasm VM must never run
+    # two sync entry points concurrently (asyncify re-entrancy), so whichever
+    # is in flight makes the other answer :busy.
+    def single_flight
+      return :busy if @ticking
+
+      @ticking = true
+      begin
+        yield
+      ensure
+        @ticking = false
+      end
     end
   end
 end

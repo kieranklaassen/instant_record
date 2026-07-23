@@ -92,6 +92,33 @@ class FetchHistoryTest < Minitest::Test
       "row count alone cannot prove contiguity; without a mark the page must fetch"
   end
 
+  def test_stray_rows_below_the_mark_still_fetch_from_the_server
+    now = Time.now.utc
+    # First page establishes a contiguity mark at (now-180).
+    @transport.pages = [{ "records" => [record_payload("m-2", now - 120), record_payload("m-1", now - 180)],
+                          "has_more" => true }]
+
+    in_browser do
+      first = before_cursor(now)
+      InstantRecord.fetch_history(@model, partition: "a", before: first)
+
+      # Stray rows appear locally BELOW the mark (e.g. a live update re-created
+      # an evicted row). Count alone would look contiguous; the mark guard
+      # must still fetch the gap page.
+      InstantRecord::Client.applying_remote do
+        @model.create!(id: "stray-a", state: "a", created_at: now - 600, updated_at: now - 600)
+        @model.create!(id: "stray-b", state: "a", created_at: now - 660, updated_at: now - 660)
+      end
+      @transport.pages = [{ "records" => [record_payload("m-0", now - 240)], "has_more" => true }]
+
+      # Request the page below the mark boundary (m-1 @ now-180).
+      InstantRecord.fetch_history(@model, partition: "a", before: { created_at: (now - 180).iso8601(6), id: "m-1" })
+    end
+
+    assert_equal 2, @transport.history_requests.size,
+      "a page at/below the contiguity frontier must fetch, not serve the stray local rows"
+  end
+
   def test_beginning_of_history_serves_locally_forever_after
     now = Time.now.utc
     @transport.pages = [{ "records" => [record_payload("m-1", now - 120)], "has_more" => false }]
@@ -206,5 +233,39 @@ class FetchHistoryTest < Minitest::Test
     assert reply["busy"]
   ensure
     InstantRecord.instance_variable_set(:@ticking, false)
+  end
+
+  def test_fetch_history_b64_decodes_and_delegates
+    now = Time.now.utc
+    @transport.pages = [{ "records" => [record_payload("m-1", now - 120)], "has_more" => false }]
+    request = JSON.generate(type: "Memo", partition: "a",
+      before: { created_at: now.iso8601(6), id: "zz-boundary" })
+
+    reply = in_browser { JSON.parse(InstantRecord.fetch_history_b64(Base64.strict_encode64(request))) }
+
+    assert reply["ok"]
+    assert_equal %w[m-1], @model.pluck(:id)
+  end
+
+  # The whole reason fetch_history_b64 exists: an untrusted page message must
+  # not become Ruby source. A field carrying #{...} would be interpolated if
+  # the request entered evalAsync as raw text; base64 has none of Ruby's
+  # string-literal metacharacters, so it round-trips as inert data.
+  def test_fetch_history_b64_neutralizes_ruby_interpolation
+    malicious = JSON.generate(type: 'Memo#{system("touch /tmp/pwned")}', before: {})
+
+    reply = in_browser { JSON.parse(InstantRecord.fetch_history_b64(Base64.strict_encode64(malicious))) }
+
+    refute reply["ok"], "an unknown/hostile type must be rejected, not evaluated"
+    refute File.exist?("/tmp/pwned"), "no interpolation side effect"
+  ensure
+    File.delete("/tmp/pwned") if File.exist?("/tmp/pwned")
+  end
+
+  def test_fetch_history_b64_rejects_malformed_base64
+    reply = JSON.parse(InstantRecord.fetch_history_b64("not valid base64!!!"))
+
+    refute reply["ok"]
+    assert reply["error"]
   end
 end

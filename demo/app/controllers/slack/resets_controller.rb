@@ -22,7 +22,8 @@ module Slack
         # FakeReplyJob's row lock would survive a single pass. Re-sweep until
         # none remain: once every row is deleted, pending reply jobs block on
         # our locks and bail out when their message is gone.
-        swept = Message.where.not(id: seed_ids[:messages]).where.not("id LIKE 'backfill-%'")
+        swept = Message.where.not(id: seed_ids[:messages])
+          .where.not("id LIKE ?", "#{Slack::Seeds::BACKFILL_PREFIX}%")
         swept.destroy_all while swept.exists?
         Channel.where.not(id: seed_ids[:channels]).destroy_all
         ChatUser.where.not(id: seed_ids[:users]).destroy_all

@@ -17,37 +17,30 @@ module InstantRecord
       return head :unprocessable_entity unless window
       return head :bad_request if window.partition_by && params[:partition].blank?
 
-      before_at = Time.zone.parse(params[:before_created_at].to_s)
+      before_at = parse_time(params[:before_created_at])
       return head :bad_request if before_at.nil? || params[:before_id].blank?
 
       limit = (params[:limit].presence || window.limit).to_i.clamp(1, HARD_LIMIT)
-      rows = page(model, window, before_at, limit)
+      rows = window
+        .keyset_below(at: before_at, id: params[:before_id], partition: params[:partition])
+        .limit(limit + 1)
+        .to_a
 
       render json: {
-        records: rows.first(limit).map { |record| serialize(model, record) },
+        records: rows.first(limit).map { |record| InstantRecord.record_payload(record) },
         has_more: rows.size > limit
       }
     end
 
     private
 
-    def page(model, window, before_at, limit)
-      pk = model.primary_key
-      scope = window.partition_by ? model.where(window.partition_by => params[:partition]) : model.all
-      scope
-        .where("created_at < :at OR (created_at = :at AND #{pk} < :id)", at: before_at, id: params[:before_id])
-        .order(created_at: :desc, pk => :desc)
-        .limit(limit + 1)
-        .to_a
-    end
-
-    def serialize(model, record)
-      {
-        type: model.name,
-        id: record.id,
-        version: record[:server_version],
-        attributes: record.attributes.except("sync_state")
-      }
+    # Time.zone.parse returns nil for unparseable input but raises
+    # ArgumentError for out-of-range components ("25:61"); treat both as a bad
+    # cursor so a crafted param is a 400, not a 500.
+    def parse_time(value)
+      Time.zone.parse(value.to_s)
+    rescue ArgumentError
+      nil
     end
   end
 end

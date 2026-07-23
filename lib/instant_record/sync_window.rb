@@ -27,6 +27,17 @@ module InstantRecord
       scope.where("#{quoted_primary_key} IN (#{ranked_ids_sql(">")})")
     end
 
+    # Keyset page scope: rows strictly below the (created_at, id) tuple within
+    # one partition, newest first. Shared by the records endpoint (server) and
+    # the client's local-page checks — one predicate, no OFFSET.
+    def keyset_below(at:, id:, partition: nil)
+      pk = @model.primary_key
+      scope = @partition_by ? @model.where(@partition_by => partition) : @model.all
+      scope
+        .where("created_at < :at OR (created_at = :at AND #{pk} < :id)", at: at, id: id)
+        .order(created_at: :desc, pk => :desc)
+    end
+
     private
 
     # ROW_NUMBER() runs identically on Postgres, PGlite, and SQLite >= 3.25 —
