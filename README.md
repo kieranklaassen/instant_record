@@ -190,7 +190,7 @@ The sync loop is Ruby, configured in Ruby:
 # config/initializers/instant_record.rb (optional — these are the defaults)
 InstantRecord.configure do |config|
   config.endpoint = "/instant_record"   # absolute URL for cross-origin setups
-  config.sync_interval = 3              # seconds between background ticks
+  config.sync_interval = 3              # base backoff for retrying a stuck outbox
 end
 ```
 
@@ -244,7 +244,9 @@ navigator.serviceWorker.controller.postMessage(
 );
 ```
 
-The Slack demo's infinite scroll is the reference wiring — IntersectionObserver sentinel, scroll anchoring, in-place DOM updates — in `demo/app/javascript/slack_conversation.js`.
+**Render the top of the scrollback server-side.** A windowed view needs a slot above its oldest row — a scroll-up sentinel, or a "beginning of history" marker once there's nothing left. Render that slot in the initial HTML even when you don't yet know which it is, and let JavaScript fill it in place. Injecting it after a probe shifts every row below it by its height on each load.
+
+The Slack demo's infinite scroll is the reference wiring — IntersectionObserver sentinel, scroll anchoring, in-place DOM updates — in the Stimulus controller `demo/app/javascript/controllers/conversation_controller.js`.
 
 ## Running the demo
 
@@ -254,17 +256,21 @@ Requirements: Ruby 3.3.3, Node, PostgreSQL, [wasmtime](https://wasmtime.dev) and
 # Gem tests
 bundle install && bundle exec rake test
 
-# Server side
+# One-time setup
 cd demo
 bundle install
 bin/rails db:prepare
 bin/rails test
-bin/rails server                  # sync server on :3000
+cd pwa && yarn install && cd ..
 
-# Browser side (one-time build, ~5 min)
+# One-time browser build (~5 min)
 bin/rails instant_record:build    # writes pwa/public/app.wasm (~83 MB)
-cd pwa && yarn install && yarn dev --host
+
+# Run it — sync server on :3000, PWA on :5173
+bin/dev
 ```
+
+`bin/dev` runs both processes under foreman (see `demo/Procfile.dev`): the Rails sync server, and the Vite server that hosts the service worker, `app.wasm`, and PGlite's wasm.
 
 Open http://localhost:5173/boot.html, wait for **Service Worker Ready**, then open http://localhost:5173/ — that page is rendered by Rails in your browser.
 
@@ -278,7 +284,7 @@ Things to try:
 
 ## Scaling the SSE stream
 
-Every client holds one persistent SSE connection, so concurrent streams scale with open tabs — plan your server accordingly. The engine's stream endpoint is a plain Rack streaming body (no `ActionController::Live`, no thread per stream) that releases its database connection between polls, so it runs well on both servers; the ceiling is the server's concurrency model. Measured on the demo (M-series MacBook, dev mode):
+Every client holds one persistent SSE connection — the service worker keeps it open in JavaScript and hands each event to Ruby, because Ruby awaiting a chunk itself would suspend the sync guard and starve outbox drains for the length of the window. Concurrent streams therefore scale with open tabs; plan your server accordingly. The engine's stream endpoint is a plain Rack streaming body (no `ActionController::Live`, no thread per stream) that releases its database connection between polls, so it runs well on both servers; the ceiling is the server's concurrency model. Measured on the demo (M-series MacBook, dev mode):
 
 | Server | Concurrent SSE clients | Result |
 |---|---|---|
@@ -304,7 +310,9 @@ config.active_support.isolation_level = :fiber if defined?(Falcon)
 bundle exec falcon serve --bind http://localhost:3000
 ```
 
-Delivery latency for the gem's own browser clients is bounded by their sync tick (`config.sync_interval`, 3s default — each tick catches up from the change log and closes, so a tick never holds a stream open). Long-lived tailing streams remain available for other SSE consumers; their latency is bounded by the server's 0.5s change-log poll, and the tail window is configurable via `config.instant_record.sse_window_seconds`. Reproduce the numbers with `demo/script/sse_load_spike.rb`.
+Browser clients receive changes over that held stream — measured at **130ms** from a server-side write to the row appearing, bounded by the server's 0.5s change-log poll rather than by any client interval. Reopening with `?after=<cursor>` replays whatever a dropped connection missed, so nothing polls for changes. The tail window is configurable via `config.instant_record.sse_window_seconds`.
+
+There is no heartbeat in the browser: a sync pass runs on a local write, at boot, and when the network returns, then retries with backoff only while the outbox still has something in it. An idle tab issues no requests at all beyond holding its stream. Reproduce the numbers with `demo/script/sse_load_spike.rb`.
 
 ## What's proven
 
