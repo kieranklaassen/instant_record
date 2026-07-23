@@ -391,7 +391,7 @@ const installApp = async () => {
 // changes this constant, which changes the service worker's bytes, which
 // makes the browser install the new worker on the next navigation — that is
 // the whole update mechanism for already-installed clients.
-const BUILD_VERSION = "b0002141cff7";
+const BUILD_VERSION = "259b8e5114af";
 
 self.addEventListener("activate", (event) => {
   console.log(`[rails-web] Activate Service Worker (build ${BUILD_VERSION})`);
@@ -495,20 +495,31 @@ self.addEventListener("message", async (event) => {
     return;
   }
 
+  // Clearing has to reach the buffer, not just the page's copy of it.
+  if (event.data.type === "instant_record.clear_log") {
+    history.length = 0;
+    return;
+  }
+
   // Inspector controls: report toggles the event stream, offline and latencyMs
   // simulate a bad network on the sync server only.
   if (event.data.type === "instant_record.simulate") {
     const wasOffline = sim.offline;
+    const before = `${sim.offline}/${sim.latencyMs}`;
     Object.assign(sim, event.data.settings || {});
 
     // Cut a live stream the moment the network is "lost".
     if (sim.offline && !wasOffline) streamAbort?.abort();
 
-    report({
-      kind: "sim",
-      path: `offline: ${sim.offline}, latency: ${sim.latencyMs}ms`,
-      streamOpen: streaming,
-    });
+    // Only worth a line when something actually changed: every page load
+    // re-states its settings, and logging that is pure noise.
+    if (`${sim.offline}/${sim.latencyMs}` !== before) {
+      report({
+        kind: "sim",
+        path: `offline: ${sim.offline}, latency: ${sim.latencyMs}ms`,
+        streamOpen: streaming,
+      });
+    }
 
     // Only when asked. A page requests this once, on load: replaying it later
     // would replace a log that has since accumulated entries of its own.

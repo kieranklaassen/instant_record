@@ -164,6 +164,9 @@ export default class extends Controller {
   clear() {
     entries.length = 0
     this.draw()
+    // The worker holds the real buffer; without this the next page load adopts
+    // it again and everything just cleared comes straight back.
+    navigator.serviceWorker?.controller?.postMessage({ type: "instant_record.clear_log" })
   }
 
   push() {
