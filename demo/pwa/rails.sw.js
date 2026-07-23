@@ -391,7 +391,7 @@ const installApp = async () => {
 // changes this constant, which changes the service worker's bytes, which
 // makes the browser install the new worker on the next navigation — that is
 // the whole update mechanism for already-installed clients.
-const BUILD_VERSION = "259b8e5114af";
+const BUILD_VERSION = "b522e434962f";
 
 self.addEventListener("activate", (event) => {
   console.log(`[rails-web] Activate Service Worker (build ${BUILD_VERSION})`);
@@ -460,7 +460,11 @@ self.addEventListener("fetch", (event) => {
   // Reported from here rather than from the page, because a form submission and
   // a navigation are not window.fetch calls — wrapping fetch in the page misses
   // the entire plain-Rails interaction model, and the first page load with it.
-  if (sim.report) {
+  //
+  // Assets are skipped. The wasm bundle really does serve its own asset
+  // pipeline, which is a nice thing to know once, but a dozen lines of icons
+  // and controllers per page load buries the flow this panel exists to show.
+  if (sim.report && !url.pathname.startsWith("/assets/")) {
     const startedAt = performance.now();
     event.waitUntil(
       respond
