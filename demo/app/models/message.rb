@@ -8,7 +8,7 @@ class Message < ApplicationRecord
   belongs_to :channel
   belongs_to :chat_user
 
-  validates :body, presence: true
+  validates :body, presence: true, length: { maximum: 2_000 }
 
   # Fake replies are a server concern: the job is enqueued only where it can
   # run, and the reply syncs back to browsers through the change log + SSE.

@@ -1,7 +1,7 @@
 class Issue < ApplicationRecord
   include InstantRecord::Syncable
 
-  validates :title, presence: true
+  validates :title, presence: true, length: { maximum: 200 }
 
   scope :open, -> { where.not(state: "done") }
 

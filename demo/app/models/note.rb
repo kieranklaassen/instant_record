@@ -1,7 +1,8 @@
 class Note < ApplicationRecord
   include InstantRecord::Syncable
 
-  validates :title, presence: true
+  validates :title, presence: true, length: { maximum: 200 }
+  validates :body, length: { maximum: 10_000 }
 
   # v2's behaviour, guarded by a schema question rather than a runtime one.
   #

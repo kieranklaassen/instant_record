@@ -12,6 +12,11 @@ gem "instant_record", path: "..", group: [:default, :wasm]
 gem "propshaft", group: [:default, :wasm]
 # Use postgresql as the database for Active Record (server side only)
 gem "pg", "~> 1.1"
+
+# Abuse limits for the deployed demo's write endpoints (server side only, and
+# deliberately not in the :wasm group: the browser runtime is the visitor's own
+# tab and has nobody to throttle). See config/initializers/rack_attack.rb.
+gem "rack-attack"
 # Use the Puma web server [https://github.com/puma/puma]
 gem "puma", ">= 5.0"
 
