@@ -569,7 +569,7 @@ const installApp = async () => {
 // changes this constant, which changes the service worker's bytes, which
 // makes the browser install the new worker on the next navigation — that is
 // the whole update mechanism for already-installed clients.
-const BUILD_VERSION = "8364e2ff9828";
+const BUILD_VERSION = "96925a629df3";
 
 self.addEventListener("activate", (event) => {
   console.log(

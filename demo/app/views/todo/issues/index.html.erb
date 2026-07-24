@@ -3,30 +3,38 @@
 <% open_issues = @issues.count { |i| i.state != "done" } %>
 <% done_issues = @issues.size - open_issues %>
 
-<div class="todo-poster">
+<%# data-instant-refresh + the issues controller: writes go over fetch and the
+    list morphs by data-id — add, update, remove — so scroll position and the
+    composer's focus survive every change. Same records-changed signal and
+    morph discipline as the chat page; removal is allowed here because this
+    list is complete, not a window. %>
+<div class="todo-poster"
+     data-instant-refresh
+     data-controller="issues"
+     data-action="instant-record:records-changed@window->issues#sync">
   <div class="todo-main">
     <p class="micro-label kicker">Demo 01 · Todo</p>
     <h1 class="poster-headline">The list<br>the browser<br>owns.</h1>
 
-    <%= form_with url: todo_issues_path, method: :post, class: "todo-form", data: { turbo: false } do |f| %>
+    <%= form_with url: todo_issues_path, method: :post, class: "todo-form", data: { turbo: false, action: "submit->issues#submit" } do |f| %>
       <%= f.text_field "issue[title]", placeholder: "New issue title", required: true, autofocus: true %>
       <%= f.submit "Create" %>
     <% end %>
 
-    <ul class="issues">
+    <ul class="issues" data-issues-target="list">
       <% @issues.each_with_index do |issue, index| %>
-        <li class="<%= issue.state %>">
+        <li class="<%= issue.state %>" data-id="<%= issue.id %>">
           <span class="issue-no"><%= format("%02d", index + 1) %></span>
-          <%# The checkbox is the control: ticking it submits the form it sits in,
-              so a plain reload of the page is the whole interaction — served
-              locally in the browser runtime. %>
-          <%= form_with url: todo_issue_path(issue), method: :patch, class: "toggle", data: { turbo: false } do %>
+          <%# The checkbox is the control: ticking it submits the form it sits
+              in; the issues controller catches the submit and morphs instead
+              of navigating. %>
+          <%= form_with url: todo_issue_path(issue), method: :patch, class: "toggle", data: { turbo: false, action: "submit->issues#submit" } do %>
             <%= label_tag "issue-#{issue.id}-done", issue.title, class: "title" %>
             <%= check_box_tag "done", "1", issue.state == "done",
                               id: "issue-#{issue.id}-done",
                               onchange: "this.form.requestSubmit()" %>
           <% end %>
-          <%= button_to "×", todo_issue_path(issue), method: :delete, form: { data: { turbo: false } } %>
+          <%= button_to "×", todo_issue_path(issue), method: :delete, form: { data: { turbo: false, action: "submit->issues#submit" } } %>
         </li>
       <% end %>
     </ul>
@@ -35,17 +43,17 @@
   <aside class="todo-facts">
     <div class="stat-hero">
       <p class="micro-label">Open</p>
-      <p class="stat-huge"><%= format("%02d", open_issues) %></p>
+      <p class="stat-huge" data-issues-target="open"><%= format("%02d", open_issues) %></p>
     </div>
     <div class="stat">
       <p class="micro-label">Done</p>
-      <p class="stat-big"><%= format("%02d", done_issues) %></p>
+      <p class="stat-big" data-issues-target="done"><%= format("%02d", done_issues) %></p>
     </div>
     <div class="facts">
       <p>Runtime<br><strong><%= InstantRecord.browser? ? "ruby.wasm" : "CRuby" %></strong></p>
       <p>Store<br><strong><%= InstantRecord.browser? ? "PGlite" : "Postgres" %></strong></p>
       <% if InstantRecord.browser? %>
-        <p>Pending<br><strong id="pending-count"><%= @pending_count %> <%= "mutation".pluralize(@pending_count) %></strong></p>
+        <p>Pending<br><strong id="pending-count" data-issues-target="pending"><%= @pending_count %> <%= "mutation".pluralize(@pending_count) %></strong></p>
       <% end %>
     </div>
     <p class="micro-label foot">No network on this path</p>
