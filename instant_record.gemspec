@@ -17,7 +17,11 @@ Gem::Specification.new do |spec|
   spec.metadata["source_code_uri"] = spec.homepage
   spec.metadata["changelog_uri"] = "#{spec.homepage}/blob/main/CHANGELOG.md"
 
-  spec.files = Dir["{app,config,lib}/**/*", "CHANGELOG.md", "LICENSE.txt", "README.md"]
+  # db/ is not optional: the engine appends its own db/migrate to the host app's
+  # migration paths, and those migrations create the tables the sync protocol
+  # runs on (changes, outbox, sync_metadata, applied_mutations). Omit them and
+  # the gem installs into an app that can never build its own schema.
+  spec.files = Dir["{app,config,db,lib}/**/*", "CHANGELOG.md", "LICENSE.txt", "README.md"]
 
   spec.add_dependency "rails", ">= 8.0"
   spec.add_dependency "wasmify-rails", "~> 0.5"
