@@ -11,3 +11,12 @@ demo/public/wasm/
 demo/node_modules/
 .DS_Store
 .context/
+
+# Rails credentials: the demo reads none (config/environments/wasm.rb sets its
+# own secret_key_base), so there is nothing here worth committing.
+demo/config/master.key
+demo/config/credentials.yml.enc
+
+# Local debugging artifacts
+.playwright-mcp/
+/*.png
