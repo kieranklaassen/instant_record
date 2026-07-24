@@ -8,6 +8,11 @@ module InstantRecord
   # included — via JS fetch interop; the service worker shim only schedules
   # `InstantRecord.tick` (wasm Ruby cannot sleep without blocking the VM).
   module Client
+    # Columns the gem keeps for its own bookkeeping. A remote value that differs
+    # in these alone is not a change to the row, it is our own write being
+    # acknowledged twice.
+    BOOKKEEPING_COLUMNS = %w[server_version sync_state].freeze
+
     class << self
       # Applying remote state must never enqueue new outbox mutations.
       def applying_remote? = @applying_remote
@@ -246,9 +251,13 @@ module InstantRecord
         { ok: false, applied: 0, has_more: nil, error: e.message }
       end
 
-      # Server results for a posted batch.
-      # applied  -> drop the outbox row, mark the record synced
-      # rejected -> drop the outbox row, reconcile to server state
+      # Server results for a posted batch. Every result drops the outbox row —
+      # each one is a durable resolution, not a retry — and what happens to the
+      # record depends on which resolution it is:
+      # applied           -> mark the record synced
+      # applied + skipped -> the write lost last-write-wins; reconcile to the
+      #                      value that won, because it did NOT land here
+      # rejected          -> reconcile to server state
       def apply_results(results)
         Array(results).each do |result|
           result = result.deep_stringify_keys
@@ -258,7 +267,19 @@ module InstantRecord
           applying_remote do
             case result["status"]
             when "applied"
-              mark_synced(mutation, result["version"])
+              # `skipped` is the server saying it threw this write away to
+              # last-write-wins. It is resolved (nothing will retry it) but it
+              # never landed, so marking the record synced would badge a
+              # discarded write as delivered — the record does not hold what the
+              # server holds. Reconcile to the winner, which rides along with the
+              # result; the same value also arrives over the change stream, which
+              # is what makes doing nothing here look fine until the stream is
+              # behind.
+              if result["skipped"]
+                reconcile_to_server_state(mutation, result)
+              else
+                mark_synced(mutation, result["version"])
+              end
             when "rejected"
               reconcile_rejection(mutation, result)
             end
@@ -354,35 +375,80 @@ module InstantRecord
       end
 
       def reconcile_rejection(mutation, result)
+        return if reconcile_to_server_state(mutation, result)
+
+        # The server never accepted this record (rejected create): remove it.
+        InstantRecord.synced_model(mutation.record_type)&.find_by(id: mutation.record_id)&.destroy!
+      end
+
+      # Roll the local record onto the server's own copy of the row, when the
+      # result carries one. Returns whether it did — the caller distinguishes
+      # "the server has no such row" from "the server has this row".
+      #
+      # Authoritative: the server told us what it holds in answer to a write of
+      # ours it would not take, so its row wins here regardless of timestamps.
+      def reconcile_to_server_state(mutation, result)
         model = InstantRecord.synced_model(mutation.record_type)
-        return unless model
+        return false unless model && result["server_attributes"].present?
 
-        server_attributes = result["server_attributes"]
-
-        if server_attributes.present?
-          upsert_from_server(model, server_attributes, result["version"])
-        else
-          # The server never accepted this record (rejected create): remove it.
-          model.find_by(id: mutation.record_id)&.destroy!
-        end
+        upsert_from_server(model, result["server_attributes"], result["version"], authoritative: true)
+        true
       end
 
       # Returns whether the row actually moved. Every accepted write comes back
       # down the change stream, so a client is constantly re-applying its own
       # rows; treating those as changes would announce them, and an announcement
       # reloads any page without an in-place refresh.
-      def upsert_from_server(model, attributes, version)
+      #
+      # Client-side last-write-wins, with the tie-break stated on purpose: a
+      # remote value must be strictly NEWER to replace a local one, so equal
+      # stamps leave the row alone. Equal stamps are the ordinary case, not the
+      # exotic one — every write we make comes back with the timestamp we sent —
+      # and applying those echoes would re-save the row, announce a change to
+      # every tab, and fire the host app's after_save callbacks for a value that
+      # never moved. Until both paths carried microseconds, rounding hid this by
+      # making an echo look older than its own row; the rule has to be explicit
+      # instead of an artifact of truncation.
+      #
+      # The two sides break ties in opposite directions deliberately:
+      # MutationApplier#stale? is strict too, so the server ACCEPTS an
+      # equal-stamped client mutation. A tie is therefore settled once, on the
+      # server, and never has to be settled again here. (Both sides still compare
+      # two machines' wall clocks with no logical clock. Microsecond stamps make
+      # a coincidental tie far less likely than millisecond ones did, so the
+      # tie-break matters less than it used to — but a client whose clock runs
+      # ahead still wins writes it should lose, and that is unchanged.)
+      # `authoritative` skips the comparison entirely, for the one case where the
+      # server's row is the answer no matter what the clocks say: reconciling a
+      # rejection. A rejected update is the ordinary case here, and the server's
+      # un-updated row is necessarily OLDER than the optimistic local row that it
+      # refused — so last-write-wins would drop it, the outbox row would still be
+      # destroyed, and the record would keep the value the server just refused
+      # and sit at `pending` forever. Nothing was discarded remotely in that
+      # case, so the discard seam does not fire either.
+      def upsert_from_server(model, attributes, version, authoritative: false)
         return false unless attributes
 
+        # Schema skew must not raise here either: a client behind the server is
+        # sent columns it has not migrated yet. They are the server's to keep;
+        # this runtime converges on the columns it actually has.
+        attributes = attributes.slice(*model.column_names)
         record = model.find_or_initialize_by(id: attributes["id"])
 
         incoming_at = attributes["updated_at"] && Time.parse(attributes["updated_at"].to_s)
         local_at = record.persisted? ? record.updated_at : nil
 
-        # Client-side LWW: never clobber a locally newer row.
-        return false if incoming_at && local_at && incoming_at < local_at
-
         record.assign_attributes(attributes.except("id", "server_version"))
+
+        if !authoritative && incoming_at && local_at && incoming_at <= local_at
+          # The remote value lost. This is the last moment it exists in this
+          # runtime — nothing downstream sees it, which is why models get a seam.
+          if (record.changed - BOOKKEEPING_COLUMNS).any?
+            model.instant_record_discarded_change_handler&.call(attributes)
+          end
+          return false
+        end
+
         record.server_version = version || attributes["server_version"] || 0
         record.sync_state = "synced"
         return false unless record.changed?

@@ -35,6 +35,19 @@ module InstantRecord
       # row comes back down through the change stream.
       record_result(status: "rejected", reason: "id already exists",
         server_attributes: server_attributes_for(model))
+    rescue ActiveModel::UnknownAttributeError => e
+      # Schema skew: this client is a migration ahead of this server and sent a
+      # column that does not exist here. Rejecting is the only outcome that
+      # cannot jam the queue. Raising 500s the entire batch, and because the
+      # client keeps the row on a transport error it would retry the same
+      # poisoned mutation forever, blocking every write queued behind it.
+      # Slicing the unknown column off instead would answer "applied" for a
+      # write the server only partly stored — silent data loss the client has no
+      # way to notice. A surfaced rejection loses the same write loudly, rolls
+      # the local record back to what the server actually holds, and leaves the
+      # queue draining. Deploy order (server first) remains the real defence.
+      record_result(status: "rejected", reason: e.message,
+        server_attributes: server_attributes_for(model))
     end
 
     private
@@ -53,8 +66,12 @@ module InstantRecord
         return { status: "rejected", reason: "record not found" } unless record
 
         if stale?(record)
-          # Last-write-wins: an older concurrent write is acknowledged but skipped.
-          { status: "applied", version: record.server_version, skipped: true }
+          # Last-write-wins: an older concurrent write is acknowledged (there is
+          # nothing to retry) but skipped. The row that won travels back with the
+          # result, because a client told only "applied" badges the write it just
+          # lost as synced. See Client#apply_results.
+          { status: "applied", version: record.server_version, skipped: true,
+            server_attributes: InstantRecord.wire_attributes(record.attributes) }
         else
           record.assign_attributes(@changes.except("id", "server_version"))
           record.server_version += 1
@@ -84,7 +101,7 @@ module InstantRecord
         record_id: record.id,
         operation: operation,
         version: record.server_version,
-        attributes_payload: record.attributes.except("sync_state")
+        attributes_payload: InstantRecord.wire_attributes(record.attributes)
       )
     end
 
@@ -99,7 +116,8 @@ module InstantRecord
     end
 
     def server_attributes_for(model)
-      model&.find_by(id: @mutation[:record_id])&.attributes&.except("sync_state")
+      record = model&.find_by(id: @mutation[:record_id])
+      InstantRecord.wire_attributes(record.attributes) if record
     end
 
     # create_or_find_by leans on the unique index: a concurrent duplicate

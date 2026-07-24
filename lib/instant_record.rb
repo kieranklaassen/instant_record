@@ -12,6 +12,19 @@ module InstantRecord
     "access-control-allow-methods" => "GET, POST, OPTIONS",
     "access-control-allow-headers" => "content-type, last-event-id"
   }.freeze
+
+  # Every timestamp crossing the wire carries microseconds, in both directions.
+  # This used to differ per path — the change log and the outbox serialize
+  # through ActiveSupport's JSON encoder, which stops at milliseconds, while the
+  # bootstrap and records endpoints kept all six places — and the mismatch was
+  # not cosmetic. It loses (created_at, id) keyset neighbours between history
+  # pages, and it biases every last-write-wins comparison against whichever side
+  # was rounded, which silently discarded writes on both.
+  TIME_PRECISION = 6
+
+  # Query marker that tells the service worker to pass one request to the
+  # network instead of the local wasm runtime (see InstantRecord.server_url).
+  NETWORK_MARKER = "instant_record_network=1".freeze
 end
 
 require "active_support/isolated_execution_state"
@@ -66,25 +79,37 @@ module InstantRecord
       end
     end
 
+    # One record's attributes as they cross the wire, in either direction and on
+    # every path: the bootstrap and records endpoints, the change log, the
+    # outbox, and the server's rejection/superseded replies. sync_state is
+    # client-local and never serialized. Timestamps go out at TIME_PRECISION so
+    # the (created_at, id) keyset cursor round-trips exactly and both sides of a
+    # last-write-wins comparison are measured with the same ruler.
+    def wire_attributes(attributes)
+      attributes.except("sync_state").transform_values do |value|
+        # usec, not iso8601: a Date answers to iso8601 but takes no precision
+        # argument, and its default JSON form already round-trips exactly.
+        value.respond_to?(:usec) ? value.iso8601(TIME_PRECISION) : value
+      end
+    end
+
     # The wire shape for one record, shared by the bootstrap and records
     # endpoints and mirroring Change#as_event: clients apply all three through
-    # the same upsert path. sync_state is client-local and never serialized.
-    # Timestamps are serialized at microsecond precision so the (created_at,
-    # id) keyset cursor round-trips exactly — the JSON encoder's default
-    # millisecond precision would collide sub-millisecond neighbors and let
-    # boundary rows silently vanish between history pages.
+    # the same upsert path.
     def record_payload(record)
-      attributes = record.attributes.except("sync_state")
-      attributes.each do |key, value|
-        attributes[key] = value.iso8601(6) if value.respond_to?(:iso8601)
-      end
       {
         type: record.class.name,
         id: record.id,
         version: record[:server_version],
-        attributes: attributes
+        attributes: wire_attributes(record.attributes)
       }
     end
+
+    # Bring this runtime's database up to the app's schema. Stands in for a bare
+    # `ActiveRecord::Tasks::DatabaseTasks.prepare_all` at boot, which cannot see
+    # the app's migrations from the browser VM's working directory and so leaves
+    # a returning visitor on the schema they first booted with — see LocalSchema.
+    def prepare_database! = LocalSchema.prepare!
 
     # Begin background sync (browser runtime only; a no-op on the server).
     # The gem's service worker shim schedules `tick` on config.sync_interval.
@@ -183,6 +208,22 @@ module InstantRecord
     # open. Reading it from here keeps one source of truth.
     def endpoint = config.endpoint
 
+    # One of your own app paths on the authoritative server, reachable from
+    # either runtime — for the rare action that must not be served locally
+    # (anything whose effect has to reach other clients through the server's
+    # change log).
+    #
+    # The sync endpoint already points at that server, so an app path hangs off
+    # the same base: absolute when the PWA is served cross-origin (a Vite dev
+    # server), empty when the endpoint is the same-origin default. The marker
+    # tells the service worker to pass this one request to the network instead of
+    # the local runtime; on the server there is no service worker and it is
+    # ignored — which is why app code builds this URL without asking which
+    # runtime it is in.
+    def server_url(path)
+      "#{endpoint.to_s.delete_suffix(mount_path)}#{path}?#{NETWORK_MARKER}"
+    end
+
     # Tell the sync loop a stream is live, so its own catch-up poll stands down.
     # Set false when the stream drops and the poll should take over again.
     def streaming=(value)
@@ -273,6 +314,14 @@ module InstantRecord
 
     private
 
+    # Where the engine is mounted on the authoritative server. The endpoint IS
+    # that mount, so stripping it leaves the app's own base — read from config
+    # rather than assumed, because an app is free to move the mount.
+    def mount_path
+      configured = Rails.application.config.instant_record.mount_path if defined?(Rails) && Rails.application
+      configured.is_a?(String) ? configured : DEFAULT_MOUNT_PATH
+    end
+
     # The retry decision must survive a database that is itself unhappy:
     # reporting "nothing pending" there would strand queued writes forever.
     def safe_pending_count
@@ -298,6 +347,7 @@ module InstantRecord
 end
 
 ActiveSupport.on_load(:active_record) do
+  require "instant_record/local_schema"
   require "instant_record/sync_window"
   require "instant_record/syncable"
   require "instant_record/outbox_mutation"

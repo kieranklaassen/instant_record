@@ -4,6 +4,11 @@ require "instant_record"
 
 ActiveRecord::Base.establish_connection(adapter: "sqlite3", database: ":memory:")
 
+# MutationApplier parses incoming stamps through Time.zone, which Rails sets and
+# a plain-AR test process does not.
+require "active_support/core_ext/time"
+Time.zone = "UTC"
+
 # App-side models are engine-autoloaded under Rails; plain-AR tests load them
 # explicitly so server-side change logging is exercised without a Rails boot.
 require File.expand_path("../app/models/instant_record/change", __dir__)

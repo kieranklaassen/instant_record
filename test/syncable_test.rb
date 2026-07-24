@@ -144,6 +144,86 @@ class SyncableTest < Minitest::Test
     InstantRecord.sync
   end
 
+  # Schema skew, client ahead of the server: a browser one migration ahead sends
+  # a column this server has never heard of. Raising 500s the whole batch, and
+  # the client keeps the row on a transport error — so one unknown column used to
+  # block every write queued behind it, forever.
+  def test_unknown_column_mutation_is_rejected_so_the_outbox_cannot_jam
+    InstantRecord.sync(@model)
+
+    result = on_server do
+      InstantRecord::MutationApplier.apply(
+        id: "one-migration-ahead", record_type: "Todo", record_id: SecureRandom.uuid,
+        operation: "create", changes: { "title" => "written after a client migration", "word_count" => 2 }
+      )
+    end
+
+    assert_equal "rejected", result[:status]
+    assert_match(/word_count/, result[:reason])
+    assert_equal 0, @model.count, "nothing partial may be stored"
+
+    # And the client retrying the same mutation id gets the same answer off the
+    # ledger, so it can never re-poison the batch.
+    replay = on_server do
+      InstantRecord::MutationApplier.apply(
+        id: "one-migration-ahead", record_type: "Todo", record_id: SecureRandom.uuid,
+        operation: "create", changes: { "title" => "retry", "word_count" => 2 }
+      )
+    end
+    assert_equal result, replay
+  ensure
+    InstantRecord.sync
+  end
+
+  # Both directions serialize timestamps with the same ruler. The outbox and the
+  # change log go through ActiveSupport's JSON encoder, which stops at
+  # milliseconds, while the bootstrap and records endpoints kept all six places.
+  def test_outbox_and_change_payloads_carry_microsecond_timestamps
+    in_browser { @model.create!(title: "written locally") }
+    assert_match(/\.\d{6}Z\z/, InstantRecord::OutboxMutation.sole.changes_payload["updated_at"])
+
+    on_server { @model.create!(title: "written on the server") }
+    assert_match(/\.\d{6}Z\z/, InstantRecord::Change.last.attributes_payload["updated_at"])
+  end
+
+  # What that mismatch actually cost: rounding a client's stamp down makes a
+  # write NEWER than the row it updates arrive looking older, and the server
+  # discards it as stale. Goes through the real outbox, not a hand-built payload.
+  def test_a_write_newer_by_microseconds_survives_the_trip_through_the_outbox
+    InstantRecord.sync(@model)
+    record = on_server { @model.create!(title: "server line") }
+    record.update_columns(updated_at: Time.utc(2026, 7, 23, 12, 0, 0, 500_100))
+    in_browser { record.update!(title: "client line", updated_at: Time.utc(2026, 7, 23, 12, 0, 0, 500_900)) }
+
+    result = on_server { InstantRecord::MutationApplier.apply(InstantRecord::OutboxMutation.sole.as_mutation) }
+
+    refute result[:skipped], "800 microseconds newer than the row is newer, not stale"
+    assert_equal "client line", record.reload.title
+  ensure
+    InstantRecord.sync
+  end
+
+  # A write the server does discard reports the row that beat it, so the client
+  # can reconcile instead of badging its own discarded value as synced.
+  def test_a_stale_write_is_skipped_and_answers_with_the_row_that_won
+    InstantRecord.sync(@model)
+    record = on_server { @model.create!(title: "server line") }
+
+    result = on_server do
+      InstantRecord::MutationApplier.apply(
+        id: SecureRandom.uuid, record_type: "Todo", record_id: record.id, operation: "update",
+        changes: { "title" => "stale client line", "updated_at" => (record.updated_at - 3600).utc.iso8601(6) }
+      )
+    end
+
+    assert result[:skipped]
+    assert_equal "server line", result[:server_attributes]["title"]
+    assert_match(/\.\d{6}Z\z/, result[:server_attributes]["updated_at"],
+      "the client compares this against its own row; a rounded stamp loses the comparison")
+  ensure
+    InstantRecord.sync
+  end
+
   def test_applying_client_mutation_logs_exactly_one_change
     InstantRecord.sync(@model)
     result = on_server do

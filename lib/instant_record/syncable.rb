@@ -47,6 +47,18 @@ module InstantRecord
       def instant_record_sync_window
         @instant_record_sync_window
       end
+
+      # Observe a value from the server that last-write-wins threw away. The
+      # block runs with the losing attribute hash at the moment it is dropped,
+      # which is the only moment it exists in this runtime — the gem assigns
+      # nothing, fires no callback, and keeps no copy.
+      def on_discarded_change(&block)
+        @instant_record_discarded_change_handler = block
+      end
+
+      def instant_record_discarded_change_handler
+        @instant_record_discarded_change_handler
+      end
     end
 
     private
@@ -66,8 +78,8 @@ module InstantRecord
     def record_outbox_mutation(operation)
       changes_payload =
         case operation
-        when "create"  then attributes.except("sync_state")
-        when "update"  then saved_changes.transform_values(&:last).except("sync_state")
+        when "create"  then InstantRecord.wire_attributes(attributes)
+        when "update"  then InstantRecord.wire_attributes(saved_changes.transform_values(&:last))
         when "destroy" then {}
         end
 
@@ -87,7 +99,7 @@ module InstantRecord
         record_id: id,
         operation: operation,
         version: operation == "destroy" ? 0 : self[:server_version],
-        attributes_payload: operation == "destroy" ? {} : attributes.except("sync_state")
+        attributes_payload: operation == "destroy" ? {} : InstantRecord.wire_attributes(attributes)
       )
     end
   end
