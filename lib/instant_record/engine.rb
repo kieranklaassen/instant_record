@@ -7,7 +7,24 @@ module InstantRecord
     config.instant_record.build_on_precompile = false
     # How long GET /events tails for new changes before closing (the client
     # reconnects from its cursor). Clients may request less via ?window=.
+    #
+    # 25s is sized for Puma, where every open stream holds a request thread —
+    # short windows are what keep a small thread pool from starving. Under a
+    # fiber-per-request server (Falcon) streams are cheap and the window can be
+    # minutes; Mercure, the dedicated SSE hub, defaults to 600s. Whatever the
+    # length, the cursor makes the close/reopen lossless.
     config.instant_record.sse_window_seconds = 25.0
+
+    # Idle heartbeat: an SSE comment written when nothing else has been for
+    # this long. Two jobs. Reverse proxies kill connections they think are
+    # idle (commonly at 60-100s), and a comment resets that clock. And a
+    # vanished client — closed laptop, dropped network — is only discovered
+    # when a write fails; on a quiet stream the heartbeat is that write, so a
+    # dead peer's fiber is collected within one interval instead of surviving
+    # to the end of the window. Comments are invisible to clients: EventSource
+    # ignores them by spec, and the gem's own parser skips blocks with no
+    # `data:` line. 0 disables.
+    config.instant_record.sse_heartbeat_seconds = 15.0
 
     initializer "instant_record.migrations" do |app|
       unless app.root == root

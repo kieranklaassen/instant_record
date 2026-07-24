@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- SSE idle heartbeat: `GET /events` writes a comment (`: hb`) after `config.instant_record.sse_heartbeat_seconds` (default 15) of quiet. Keeps reverse proxies from reaping "idle" streams, and turns a vanished client into an `EPIPE` within one interval instead of a fiber held to the end of the window. Client hang-ups now end the stream quietly instead of logging a backtrace per departed visitor. Comments are invisible to clients — EventSource ignores them by spec and the gem's parser skips them.
+- Documented the window/server relationship: the 25s `sse_window_seconds` default is Puma sizing (a stream holds a thread); under Falcon streams are fibers and minutes-long windows are the norm (Mercure defaults to 600s). The demo reads `INSTANT_RECORD_SSE_WINDOW_SECONDS` so a deployment can raise it without code changes.
+
 ## 0.1.0
 
 First release. Real Active Record models running in the browser on ruby.wasm

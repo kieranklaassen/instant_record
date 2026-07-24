@@ -19,21 +19,39 @@ module InstantRecord
     }.freeze
 
     class EventStream
-      def initialize(cursor:, deadline:)
+      def initialize(cursor:, deadline:, heartbeat: 15.0)
         @cursor = cursor
         @deadline = deadline
+        @heartbeat = heartbeat
+        @last_write = Time.current
       end
 
       def each
         loop do
           Change.poll(@cursor).each do |change|
             @cursor = change.id
+            @last_write = Time.current
             yield "id: #{change.id}\nevent: change\ndata: #{change.as_event.to_json}\n\n"
+          end
+
+          # An SSE comment, written only when the stream has been quiet for a
+          # full interval. Keeps idle-connection reapers (reverse proxies) at
+          # bay, and doubles as the write that discovers a vanished client —
+          # without it, a dead peer on a quiet stream holds its fiber and its
+          # poll loop until the window ends.
+          if @heartbeat.positive? && Time.current - @last_write >= @heartbeat
+            @last_write = Time.current
+            yield ": hb\n\n"
           end
 
           break if Time.current >= @deadline
           sleep 0.5
         end
+      rescue Errno::EPIPE, Errno::ECONNRESET, IOError
+        # The client hung up mid-stream — a closed tab, a navigation, a dead
+        # network. That is the normal end of an SSE stream, not a failure;
+        # returning cleanly here is what keeps the server's logs from filling
+        # with a full backtrace per departed visitor.
       end
     end
 
@@ -41,7 +59,11 @@ module InstantRecord
       cursor = (request.headers["Last-Event-ID"] || params[:after] || 0).to_i
 
       headers.merge!(EVENT_STREAM_HEADERS).merge!(InstantRecord::CORS_HEADERS)
-      self.response_body = EventStream.new(cursor: cursor, deadline: Time.current + window_seconds)
+      self.response_body = EventStream.new(
+        cursor: cursor,
+        deadline: Time.current + window_seconds,
+        heartbeat: Rails.application.config.instant_record.sse_heartbeat_seconds.to_f
+      )
     end
 
     private
