@@ -43,3 +43,36 @@
 }
 
 .demo-home .demo-card:hover .go { color: var(--red); }
+
+.demo-home .project-strip {
+  margin-top: 3rem;
+  padding-top: 1.25rem;
+  border-top: 2px solid var(--ink);
+}
+
+.demo-home .project-strip p { margin: 0.25rem 0 0; font-size: 0.9rem; max-width: 60ch; }
+
+.demo-home .project-links {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 0.85rem;
+}
+
+.demo-home .project-links a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.35rem 0.7rem;
+  border: 2px solid var(--ink);
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  text-decoration: none;
+}
+
+.demo-home .project-links a:hover { border-color: var(--red); color: var(--red); }
+
+.demo-home .project-links code { font-size: 0.8rem; color: var(--muted); }
