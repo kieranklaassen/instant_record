@@ -32,7 +32,7 @@ module Todo
 
     def update
       issue = Issue.find(params[:id])
-      issue.update!(state: issue.state == "done" ? "open" : "done")
+      issue.update!(state: params[:done] == "1" ? "done" : "open")
       redirect_to todo_root_path
     end
 

@@ -21,8 +21,8 @@
       <%= link_to todo_root_path, class: "demo-card" do %>
         <p class="micro-label">Demo 01</p>
         <h2>Todo</h2>
-        <p>Optimistic local writes, sync badges, and a server-only validation that
-        rejects a title after the browser already accepted it.</p>
+        <p>Optimistic local writes, and a server-only validation that rejects a
+        title after the browser already accepted it.</p>
         <span class="go">Open →</span>
       <% end %>
     </li>
@@ -35,5 +35,27 @@
         <span class="go">Open →</span>
       <% end %>
     </li>
+    <li>
+      <%= link_to migrate_root_path, class: "demo-card" do %>
+        <p class="micro-label">Demo 03</p>
+        <h2>Ship v2</h2>
+        <p>Fill a local database, leave writes unsynced, then run a migration over
+        the top of it. Your rows and your queue both have to survive.</p>
+        <span class="go">Open →</span>
+      <% end %>
+    </li>
+    <li>
+      <%= link_to console_root_path, class: "demo-card" do %>
+        <p class="micro-label">Demo 04</p>
+        <h2>Console</h2>
+        <p>No UI, no seeds, nothing staged — an ActiveRecord prompt against the
+        database in this tab. Type a query the demo didn't anticipate.</p>
+        <span class="go">Open →</span>
+      <% end %>
+    </li>
   </ul>
+
+  <p class="meta">
+    <%= link_to "What this cost on your device →", receipts_path %>
+  </p>
 </div>

@@ -12,9 +12,14 @@ let db = null;
 const initDB = async (progress) => {
   if (db) return db;
 
+  bootStarted();
+  const startedAt = performance.now();
+
   progress?.updateStep("Initializing PGlite database...");
   db = await setupPGliteDatabase();
   progress?.updateStep("PGlite database created.");
+
+  bootPhase("pglite", { ms: since(startedAt) });
 
   return db;
 };
@@ -349,8 +354,66 @@ const fetchHistory = async (request, attempts = 8) => {
   return { ok: false, busy: true, error: "sync busy" };
 };
 
+// --- The boot ledger ---------------------------------------------------------
+// A first boot downloads ~60MB of Ruby, compiles it, opens a Postgres, boots
+// Rails and prepares a schema. Behind one line of splash copy that wait reads as
+// broken; itemised, it reads as expensive and understood. So each phase is
+// timed here and announced as it lands.
+//
+// This is the browser's own instrumentation, not sync logic: the worker is the
+// only place that sees the bundle arrive and the VM come up. It reports numbers
+// only — the words belong to the page. Nothing is estimated: a figure this side
+// cannot measure is sent as null, and the page leaves that line out.
+
+// Only this build produces ledger messages, and it says so out loud. An edited
+// worker can fail to reach the browser silently (the dev worker's URL never
+// changes), so anything measuring the worker can check what it is talking to
+// instead of assuming.
+const LEDGER_VERSION = "boot-ledger-1";
+
+const boot = { at: null, startedAt: null, entries: [], totalMs: null };
+
+const announce = async (message) => {
+  // includeUncontrolled: during install this worker controls nothing yet, and
+  // the splash waiting on it is precisely the client that needs these.
+  const clients = await self.clients.matchAll({
+    includeUncontrolled: true,
+    type: "window",
+  });
+  clients.forEach((client) => client.postMessage(message));
+};
+
+// Whichever entry point gets there first owns the clock: install boots the VM,
+// but so does the first Rack request after an idle worker was terminated.
+const bootStarted = () => {
+  if (boot.startedAt !== null) return;
+
+  boot.at = Date.now();
+  boot.startedAt = performance.now();
+  boot.entries = [];
+  boot.totalMs = null;
+};
+
+const since = (mark) => Math.round(performance.now() - mark);
+
+const bootPhase = (phase, detail) => {
+  const entry = { phase, ...detail };
+  boot.entries.push(entry);
+  announce({ type: "instant_record.boot_phase", entry, ledger: LEDGER_VERSION });
+};
+
+const bootLedger = () => ({
+  ledger: LEDGER_VERSION,
+  build: BUILD_VERSION,
+  at: boot.at,
+  entries: boot.entries,
+  totalMs: boot.totalMs,
+});
+
 const initVM = async (progress, opts = {}) => {
   if (vm) return vm;
+
+  bootStarted();
 
   if (!db) {
     await initDB(progress);
@@ -360,16 +423,63 @@ const initVM = async (progress, opts = {}) => {
 
   let redirectConsole = true;
 
-  const bootStartedAt = performance.now();
-
   // Fetch with revalidation: the browser happily serves a cached app.wasm to
   // a freshly installed service worker, pinning clients to a stale bundle
   // after a rebuild. `no-cache` revalidates via ETag — a 304 when unchanged,
   // fresh bytes after a deploy.
   progress?.updateStep("Loading WebAssembly module...");
-  const wasmModule = await WebAssembly.compileStreaming(
-    fetch("/app.wasm", { cache: "no-cache" }),
+  const wasmUrl = new URL("/app.wasm", self.location.origin).href;
+  const requestedAt = performance.now();
+  const response = await fetch(wasmUrl, { cache: "no-cache" });
+
+  // Count the bytes on their way into the compiler rather than trusting a size
+  // written down at build time — that number drifts, this one cannot. The
+  // stream still feeds compileStreaming, so compiling continues to overlap the
+  // download and the transform costs nothing measurable.
+  let bytes = 0;
+  let lastByteAt = null;
+  const counted = response.body.pipeThrough(
+    new TransformStream({
+      transform(chunk, controller) {
+        bytes += chunk.byteLength;
+        controller.enqueue(chunk);
+      },
+      flush() {
+        lastByteAt = performance.now();
+      },
+    }),
   );
+
+  const wasmModule = await WebAssembly.compileStreaming(
+    new Response(counted, { headers: { "content-type": "application/wasm" } }),
+  );
+  const compiledAt = performance.now();
+
+  // Whether those bytes crossed the network is the browser's own accounting,
+  // not something to infer: `transferSize` counts what came over the wire, so
+  // 0 is a cache hit and header-sized is a revalidated one. `no-cache` above
+  // means even a warm boot re-asks, which is why the comparison is against
+  // encodedBodySize rather than zero. Resource timing is not guaranteed inside
+  // a worker — without it, cached stays null and the page says nothing.
+  const timing = performance.getEntriesByName(wasmUrl).pop();
+  const wireBytes = timing ? timing.encodedBodySize || null : null;
+  const cached = timing
+    ? timing.transferSize === 0 ||
+      (timing.encodedBodySize > 0 && timing.transferSize < timing.encodedBodySize)
+    : null;
+
+  bootPhase("bundle", {
+    ms: Math.round((lastByteAt ?? compiledAt) - requestedAt),
+    bytes,
+    wireBytes,
+    cached,
+  });
+
+  // Streaming compilation finishes shortly after the last byte; that tail is
+  // the only part of the compile that is not hidden behind the download.
+  bootPhase("compile", { ms: Math.round(compiledAt - (lastByteAt ?? requestedAt)) });
+
+  const vmStartedAt = performance.now();
 
   vm = await initRailsVM(wasmModule, {
     database: { adapter: "pglite" },
@@ -384,13 +494,24 @@ const initVM = async (progress, opts = {}) => {
     ...opts,
   });
 
-  // Ensure schema is loaded (PGlite is async-only, so evalAsync)
-  progress?.updateStep("Preparing database...");
-  await vm.evalAsync("ActiveRecord::Tasks::DatabaseTasks.prepare_all");
+  bootPhase("vm", { ms: since(vmStartedAt) });
 
-  const bootMs = Math.round(performance.now() - bootStartedAt);
-  console.log(`[instant-record] Rails VM boot + db prepare: ${bootMs}ms`);
-  progress?.notify(`Rails VM boot + db prepare: ${bootMs}ms`);
+  // Ensure schema is loaded (PGlite is async-only, so evalAsync). Not a bare
+  // DatabaseTasks.prepare_all: the app's migrations are invisible from this VM's
+  // working directory, so catching an existing local database up to a schema
+  // that has grown since is Ruby's job — InstantRecord::LocalSchema.
+  const schemaStartedAt = performance.now();
+  progress?.updateStep("Preparing database...");
+  await vm.evalAsync("InstantRecord.prepare_database!");
+
+  bootPhase("schema", { ms: since(schemaStartedAt) });
+
+  boot.totalMs = Math.round(performance.now() - boot.startedAt);
+  console.log(
+    `[instant-record] boot ${boot.totalMs}ms (build ${BUILD_VERSION}, ${LEDGER_VERSION})`,
+  );
+  progress?.notify(`Rails VM boot + db prepare: ${boot.totalMs}ms`);
+  announce({ type: "instant_record.boot_done", ledger: bootLedger() });
 
   redirectConsole = false;
 
@@ -404,6 +525,36 @@ const resetVM = () => {
   drainTimer = null;
   // The stream loop and any pending retry both bail once the VM is gone.
   vm = null;
+  // The next boot is a boot of its own, and gets its own ledger.
+  boot.startedAt = null;
+};
+
+// Half of a cold boot on demand — measuring one used to mean the DevTools
+// "clear site data" ritual, so it was never repeated.
+//
+// This side lets go of everything: the held change stream (a pending fetch keeps
+// this worker alive, and a live worker is what blocks the database delete), the
+// PGlite handle, the caches, and finally the registration, so the page that
+// reloads next comes back uncontrolled and installs a worker from scratch.
+//
+// Deleting the database itself is deliberately not done here. IndexedDB will not
+// delete a database while anything holds it open, and closing PGlite does not
+// release the handle its wasm filesystem keeps — only this worker's death does.
+// So the page deletes it on the next load, once this worker is gone; a page that
+// does not bother still gets a fresh worker on the data that is already there.
+// What nothing can clear is the browser's own HTTP cache, which may still hold
+// app.wasm — hence the ledger measuring where the bundle came from instead of
+// assuming a wipe implies a download.
+const wipeLocalData = async () => {
+  streamAbort?.abort();
+  resetVM();
+
+  const open = db;
+  db = null;
+  await open?.close();
+
+  await Promise.all((await caches.keys()).map((key) => caches.delete(key)));
+  await self.registration.unregister();
 };
 
 const installApp = async () => {
@@ -418,10 +569,12 @@ const installApp = async () => {
 // changes this constant, which changes the service worker's bytes, which
 // makes the browser install the new worker on the next navigation — that is
 // the whole update mechanism for already-installed clients.
-const BUILD_VERSION = "e2a20daec6b8";
+const BUILD_VERSION = "1215f4d7c5e9";
 
 self.addEventListener("activate", (event) => {
-  console.log(`[rails-web] Activate Service Worker (build ${BUILD_VERSION})`);
+  console.log(
+    `[rails-web] Activate Service Worker (build ${BUILD_VERSION}, ${LEDGER_VERSION})`,
+  );
   // Take over open tabs immediately and reload them onto the new bundle;
   // without this, old tabs keep the previous worker's VM forever.
   event.waitUntil(
@@ -433,7 +586,9 @@ self.addEventListener("activate", (event) => {
 });
 
 self.addEventListener("install", (event) => {
-  console.log(`[rails-web] Install Service Worker (build ${BUILD_VERSION})`);
+  console.log(
+    `[rails-web] Install Service Worker (build ${BUILD_VERSION}, ${LEDGER_VERSION})`,
+  );
   event.waitUntil(installApp().then(() => self.skipWaiting()));
 });
 
@@ -525,6 +680,23 @@ self.addEventListener("message", async (event) => {
   if (event.data.type === "instant_record.fetch_history") {
     const reply = await fetchHistory(event.data.request);
     event.ports[0]?.postMessage(reply);
+    return;
+  }
+
+  // A page that was not open for the boot it wants to report on asks for the
+  // ledger here — /receipts, or any warm visit where the splash never appeared.
+  // totalMs is null while a boot is still running.
+  if (event.data.type === "instant_record.boot_ledger") {
+    event.source?.postMessage({
+      type: "instant_record.boot_done",
+      ledger: bootLedger(),
+    });
+    return;
+  }
+
+  if (event.data.type === "instant_record.wipe_local_data") {
+    await wipeLocalData();
+    event.ports[0]?.postMessage({ ok: true });
     return;
   }
 

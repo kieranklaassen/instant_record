@@ -1,0 +1,10 @@
+<%# One transcript row, rendered by the runtime that ran (or refused) the line.
+    Formatting a value, a timing or an error stays in Ruby; console_controller.js
+    only appends what comes back. %>
+<li class="console-entry<%= " failed" if failed %>">
+  <div class="console-echo"><span class="console-prompt">&gt;&gt;</span><code><%= source %></code></div>
+  <div class="console-result">
+    <span class="console-prompt">=&gt;</span><code><%= output %></code>
+  </div>
+  <p class="console-meta"><%= meta %></p>
+</li>

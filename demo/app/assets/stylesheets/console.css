@@ -1,0 +1,314 @@
+/* Code as content: the source drawer (every page) and the console REPL.
+   Both surfaces exist to be read, so the typography is the design — one
+   monospace face, a fixed line box, hard rules, and the red accent reserved for
+   the lines that are actually about InstantRecord.
+
+   Note on registration: `stylesheet_link_tag :app` in the layout expands to
+   every sheet in app/assets/stylesheets, alphabetically. Nothing to register.
+   Since `console.css` sorts before `swiss.css`, every rule here is scoped by an
+   id or a class so specificity — not order — decides. */
+
+:root {
+  /* Belongs in swiss.css the moment a third sheet needs it. */
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* --- The source drawer -----------------------------------------------------
+   In flow at the foot of every page rather than fixed: it is documentation, so
+   it reads best at the end of the document, and in flow it can never cover a
+   composer or fight the sync inspector for the right-hand column. */
+
+#source-drawer {
+  border-top: 2px solid var(--rule);
+  padding: 0 1.5rem 3rem;
+}
+
+#source-drawer > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.9rem 0;
+  cursor: pointer;
+  list-style: none;
+}
+
+#source-drawer > summary::-webkit-details-marker { display: none; }
+
+/* A typographic disclosure indicator: no icon set, no image. */
+#source-drawer > summary::before {
+  content: "+";
+  font-weight: 700;
+  font-size: 0.9rem;
+  line-height: 1;
+  color: var(--red);
+}
+
+#source-drawer[open] > summary::before { content: "–"; }
+
+#source-drawer > summary .meta { margin: 0; }
+#source-drawer > summary:hover .micro-label { color: var(--ink); }
+
+.source-body {
+  max-width: 60rem;
+  padding-bottom: 1rem;
+  font-size: 0.8rem;
+}
+
+.source-note {
+  max-width: 42rem;
+  margin: 0 0 2rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.source-note code { font-family: var(--mono); color: var(--ink); }
+
+.source-file { margin-bottom: 2rem; }
+
+.source-file > header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 2px solid var(--rule);
+}
+
+.source-path {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.source-count {
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--red);
+  white-space: nowrap;
+}
+
+/* Long lines scroll inside the block; the page never widens. */
+.source-code {
+  overflow-x: auto;
+  border-bottom: 1px solid var(--hairline);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  line-height: 1.7;
+}
+
+.source-line { display: flex; gap: 1rem; }
+
+.source-ln {
+  flex: 0 0 2.5rem;
+  text-align: right;
+  color: var(--hairline);
+  user-select: none;
+}
+
+.source-text { white-space: pre; }
+
+/* The whole argument, in one rule: the marked lines are the price of admission,
+   and there are almost none of them. */
+.source-line.instant-record {
+  background: #fff0f1;
+  box-shadow: inset 3px 0 0 var(--red);
+}
+
+.source-line.instant-record .source-ln { color: var(--red); }
+
+/* Syntax highlighting (Rouge token classes).
+   Red stays reserved for the InstantRecord marking above — if literals were red
+   too, the one thing this drawer exists to point at would stop standing out. So
+   the code is built from ink weights plus a single desaturated slate for
+   literals: enough structure to read, quiet enough that the marked lines still
+   win the page. */
+.source-text .k, .source-text .kd, .source-text .kn,
+.source-text .kp, .source-text .kr, .source-text .kv {
+  font-weight: 700;
+}
+
+/* Class and module names, constants, symbols in a definition position. */
+.source-text .nc, .source-text .nn, .source-text .no {
+  font-weight: 700;
+  color: #1b1b1b;
+}
+
+/* Method definitions read as structure; calls stay plain ink. */
+.source-text .nf { font-weight: 700; }
+
+/* Literals: strings, symbols, numbers, regexes, and their delimiters. */
+.source-text .s, .source-text .s1, .source-text .s2, .source-text .sb,
+.source-text .sc, .source-text .sd, .source-text .se, .source-text .sh,
+.source-text .si, .source-text .sr, .source-text .ss, .source-text .sx,
+.source-text .dl, .source-text .m, .source-text .mf, .source-text .mh,
+.source-text .mi, .source-text .mo {
+  color: #4a5568;
+}
+
+/* Instance and class variables, and the globals a Rails file occasionally uses. */
+.source-text .nv, .source-text .vi, .source-text .vc, .source-text .vg {
+  color: #2d3748;
+}
+
+.source-text .c, .source-text .c1, .source-text .cm,
+.source-text .cs, .source-text .ch, .source-text .cd {
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* ERB's own delimiters, and the preprocessor class Rouge gives them. Bracketing
+   the Ruby inside a template is structure worth seeing. */
+.source-text .cp, .source-text .cpf {
+  color: #718096;
+  font-weight: 700;
+}
+
+.source-text .o, .source-text .ow, .source-text .p { color: #4a5568; }
+
+/* An ERB template is mostly markup: the tag names carry the structure a reader
+   is scanning for, so they get the weight and the attribute names recede. */
+.source-text .nt { font-weight: 700; color: #1b1b1b; }
+.source-text .na { color: #718096; }
+
+/* An unrecognised token should look like code, not like an error. */
+.source-text .err, .source-text .gr { color: inherit; background: none; }
+
+.source-missing {
+  margin: 0.75rem 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.source-missing code { font-family: var(--mono); }
+
+/* --- The console -----------------------------------------------------------
+   Namespaced under body.demo-console, like every other per-demo sheet. */
+
+.demo-console .page { max-width: 60rem; }
+
+.demo-console .lede {
+  max-width: 42rem;
+  font-size: 1.1rem;
+  margin: 1.25rem 0 0;
+}
+
+.demo-console .console-warning {
+  max-width: 42rem;
+  margin: 2rem 0;
+  padding: 1rem 1.25rem;
+  border: 2px solid var(--red);
+}
+
+.demo-console .console-warning p:last-child {
+  margin: 0.5rem 0 0;
+  font-size: 0.85rem;
+}
+
+.demo-console .console-warning code {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+}
+
+.demo-console .console-snippets {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 2rem 0 1.5rem;
+}
+
+.demo-console .console-snippets .micro-label {
+  flex: 0 0 100%;
+  margin-bottom: 0.25rem;
+}
+
+/* Snippets are code, so they are set as code — the button is just the rule
+   around it. */
+.demo-console .console-snippets button {
+  padding: 0.35rem 0.55rem;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  background: var(--paper);
+  color: var(--ink);
+  border-width: 1px;
+}
+
+.demo-console .console-snippets button:hover {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--paper);
+}
+
+.demo-console .console-transcript {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  line-height: 1.6;
+}
+
+.demo-console .console-transcript:not(:empty) {
+  border-top: 2px solid var(--rule);
+}
+
+.demo-console .console-entry {
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.demo-console .console-echo,
+.demo-console .console-result {
+  display: flex;
+  gap: 0.6rem;
+  overflow-x: auto;
+}
+
+.demo-console .console-echo code,
+.demo-console .console-result code { white-space: pre-wrap; }
+
+.demo-console .console-echo code { font-weight: 700; }
+.demo-console .console-result code { overflow-wrap: anywhere; }
+
+.demo-console .console-prompt {
+  flex: 0 0 1.5rem;
+  color: var(--red);
+  user-select: none;
+}
+
+.demo-console .console-meta {
+  margin: 0.35rem 0 0 2.1rem;
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+}
+
+.demo-console .console-entry.failed .console-result code { color: var(--red); }
+.demo-console .console-entry.failed .console-meta { color: var(--red); }
+
+.demo-console .console-form { margin-top: 2rem; }
+
+.demo-console .console-form textarea {
+  display: block;
+  width: 100%;
+  margin-top: 0.4rem;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.demo-console .console-actions {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 0.75rem;
+}
+
+.demo-console .console-actions .meta { margin: 0; font-family: var(--mono); }

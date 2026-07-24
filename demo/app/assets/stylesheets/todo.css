@@ -23,8 +23,26 @@
   border-bottom: 1px solid var(--hairline);
 }
 
+/* The tick and its title read as one row, and the title is the label, so the
+   whole line is the hit area. */
+.demo-todo ul.issues form.toggle {
+  display: flex;
+  flex: 1;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+
+.demo-todo ul.issues input[type="checkbox"] {
+  width: 1.05rem;
+  height: 1.05rem;
+  margin: 0;
+  accent-color: var(--red);
+  cursor: pointer;
+}
+
 .demo-todo ul.issues li .title {
   flex: 1;
+  cursor: pointer;
   overflow-wrap: anywhere; /* long unbroken titles must not widen the page */
 }
 

@@ -34,6 +34,21 @@
 
     <%= yield %>
 
+    <%# Proof rather than prose: the controller, view and models behind this page,
+        read out of the packed wasm bundle by the runtime that just rendered it.
+        Collapsed and lazy — source_controller.js fetches /source the first time
+        the drawer is opened. Nothing is pasted, so nothing can go stale. %>
+    <details id="source-drawer"
+             data-controller="source"
+             data-source-url-value="<%= source_path(page: controller_path, view: action_name) %>"
+             data-action="toggle->source#load">
+      <summary>
+        <span class="micro-label">The code behind this page</span>
+        <span class="meta">Read live out of app.wasm — not a snippet</span>
+      </summary>
+      <div class="source-body" data-source-target="body"></div>
+    </details>
+
     <%# Shared by every demo: what the sync loop is doing, and switches to make
         it misbehave on purpose. Both switches affect only the sync server — the
         local runtime keeps serving pages, which is the point. %>

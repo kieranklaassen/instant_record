@@ -1,0 +1,204 @@
+<% content_for(:title, "Receipts — InstantRecord") %>
+
+<%# Every figure on this page is written by measure_controller.js from something
+    it measured in this browser. The cells start at "—" so an unmeasured figure
+    reads as missing rather than as zero. %>
+<div class="page receipts"
+     data-controller="measure"
+     data-measure-local-url-value="<%= receipts_probe_path %>"
+     data-measure-server-url-value="<%= @server_probe_url %>">
+  <header class="page-header">
+    <p class="micro-label">Receipts</p>
+    <h1>What this cost on&nbsp;your device.</h1>
+    <p class="lede">
+      This is a proof of concept with an expensive first visit, and this page is
+      the itemised bill. Every figure was measured on this machine by the code
+      that incurred it: the boot ledger by the service worker as it booted, the
+      timings below by asking this app the same question twice — once locally,
+      once over the network to the server. Nothing is quoted from a README,
+      nothing is rounded in our favour, and anything this browser will not report
+      is left blank rather than guessed.
+    </p>
+    <p class="meta" data-measure-target="cell" data-figure="runtime">Checking which runtime is serving this page…</p>
+  </header>
+
+  <section>
+    <h2>The bundle</h2>
+    <p class="meta">
+      CRuby, Rails, the gems and this app, compiled to one WebAssembly module.
+      Counted byte by byte as it streamed into the compiler on the last boot this
+      browser recorded — MB here means 10<sup>6</sup> bytes.
+    </p>
+
+    <table class="ledger">
+      <tbody>
+        <tr>
+          <th scope="row">app.wasm</th>
+          <td class="bought">the module the browser compiles</td>
+          <td class="figure" data-measure-target="cell" data-figure="bundle.bytes">—</td>
+        </tr>
+        <tr>
+          <th scope="row">Over the network</th>
+          <td class="bought">what actually crossed the wire, compression included</td>
+          <td class="figure" data-measure-target="cell" data-figure="bundle.wire">—</td>
+        </tr>
+        <tr>
+          <th scope="row">Served from</th>
+          <td class="bought">the browser's own accounting, not an assumption</td>
+          <td class="figure" data-measure-target="cell" data-figure="bundle.source">—</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Boot</h2>
+    <p class="meta">
+      Two boots, told apart by what each one measured rather than by which visit
+      it was: a boot that pulled the bundle over the network, and a boot that
+      found it in the cache. The second column is what every visit after the
+      first one costs.
+    </p>
+
+    <table class="ledger boots">
+      <thead>
+        <tr>
+          <th scope="col">Phase</th>
+          <th scope="col">Bundle from network</th>
+          <th scope="col">Bundle from cache</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row">Database opened<span class="bought">PGlite — a Postgres in wasm, kept in IndexedDB</span></th>
+          <td class="figure" data-measure-target="cell" data-figure="network.pglite">—</td>
+          <td class="figure" data-measure-target="cell" data-figure="cache.pglite">—</td>
+        </tr>
+        <tr>
+          <th scope="row">Bundle downloaded<span class="bought">streamed into the compiler as it arrived</span></th>
+          <td class="figure" data-measure-target="cell" data-figure="network.bundle">—</td>
+          <td class="figure" data-measure-target="cell" data-figure="cache.bundle">—</td>
+        </tr>
+        <tr>
+          <th scope="row">CRuby compiled<span class="bought">the tail after the last byte; the rest overlapped the download</span></th>
+          <td class="figure" data-measure-target="cell" data-figure="network.compile">—</td>
+          <td class="figure" data-measure-target="cell" data-figure="cache.compile">—</td>
+        </tr>
+        <tr>
+          <th scope="row">Rails booted<span class="bought">your initializers and eager loads, in this tab</span></th>
+          <td class="figure" data-measure-target="cell" data-figure="network.vm">—</td>
+          <td class="figure" data-measure-target="cell" data-figure="cache.vm">—</td>
+        </tr>
+        <tr>
+          <th scope="row">Schema prepared<span class="bought">your migrations, against the local Postgres</span></th>
+          <td class="figure" data-measure-target="cell" data-figure="network.schema">—</td>
+          <td class="figure" data-measure-target="cell" data-figure="cache.schema">—</td>
+        </tr>
+        <tr>
+          <th scope="row">First page rendered<span class="bought">GET / handled by Rails here, HTML only</span></th>
+          <td class="figure" data-measure-target="cell" data-figure="network.render">—</td>
+          <td class="figure" data-measure-target="cell" data-figure="cache.render">—</td>
+        </tr>
+        <tr class="total">
+          <th scope="row">Total<span class="bought">wall clock, first phase to a usable app</span></th>
+          <td class="figure" data-measure-target="cell" data-figure="network.total">—</td>
+          <td class="figure" data-measure-target="cell" data-figure="cache.total">—</td>
+        </tr>
+        <tr class="recorded">
+          <th scope="row">Recorded</th>
+          <td class="figure" data-measure-target="cell" data-figure="network.at">—</td>
+          <td class="figure" data-measure-target="cell" data-figure="cache.at">—</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p class="meta" data-measure-target="cell" data-figure="boot.note"></p>
+  </section>
+
+  <section>
+    <h2>This tab, right now</h2>
+    <p class="meta">
+      One Rails action, requested twice at the same moment: once by whatever
+      runtime is serving this page, once with the marker that sends it to the
+      server over the network. Same controller, same query, same write.
+    </p>
+
+    <table class="ledger boots">
+      <thead>
+        <tr>
+          <th scope="col">Measurement</th>
+          <th scope="col">Here</th>
+          <th scope="col">Server</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row">Round trip<span class="bought">request to response, timed by this page</span></th>
+          <td class="figure" data-measure-target="cell" data-figure="local.trip">—</td>
+          <td class="figure" data-measure-target="cell" data-figure="server.trip">—</td>
+        </tr>
+        <tr>
+          <th scope="row">Query<span class="bought">20 newest issues, timed inside Ruby</span></th>
+          <td class="figure" data-measure-target="cell" data-figure="local.query">—</td>
+          <td class="figure" data-measure-target="cell" data-figure="server.query">—</td>
+        </tr>
+        <tr>
+          <th scope="row">Write<span class="bought">INSERT plus its outbox row, rolled back — no COMMIT in this number</span></th>
+          <td class="figure" data-measure-target="cell" data-figure="local.write">—</td>
+          <td class="figure" data-measure-target="cell" data-figure="server.write">—</td>
+        </tr>
+        <tr class="total">
+          <th scope="row">Difference<span class="bought">derived: server round trip ÷ local round trip</span></th>
+          <td class="figure" colspan="2" data-measure-target="cell" data-figure="trip.ratio">—</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p class="meta" data-measure-target="cell" data-figure="probe.note"></p>
+
+    <div class="actions">
+      <button type="button" data-action="measure#remeasure" data-measure-target="remeasure">Re-measure</button>
+      <button type="button" class="secondary" data-action="measure#wipe" data-measure-target="wipe">
+        Wipe local data and boot cold
+      </button>
+    </div>
+    <p class="meta" data-measure-target="status"></p>
+  </section>
+
+  <section>
+    <h2>Method</h2>
+    <ul class="method">
+      <li>
+        <strong>Measured.</strong> Bundle bytes are counted as the module streams
+        into the compiler. Boot phases are timed by the service worker around the
+        work itself. Round trips are timed by this page; the query and write
+        figures are timed inside Ruby, in the runtime that ran them.
+      </li>
+      <li>
+        <strong>Derived.</strong> Only the difference row — one measured number
+        divided by another. Bytes are shown in MB (10<sup>6</sup>) from an exact
+        byte count.
+      </li>
+      <li>
+        <strong>Not measured.</strong> The write excludes its COMMIT, so it is a
+        floor rather than the whole cost of a durable write: committing would
+        leave a row behind and queue a mutation for the server, which this page
+        refuses to do to measure itself. Compression is only reported when the
+        browser reports it. Whether the bundle crossed the network comes from
+        resource timing; where a browser withholds that, the source cell stays
+        blank instead of assuming.
+      </li>
+      <li>
+        <strong>Repeatable.</strong> “Wipe local data and boot cold” drops the
+        caches and the service worker, then reloads into the splash, which deletes
+        the local database before installing a new worker — a page no worker
+        controls is the only thing that can. Two limits, both stated on the way
+        through: the browser's own HTTP cache is not ours to clear, so app.wasm may
+        still come from disk (which is why the ledger measures where the bundle came
+        from instead of inferring it), and a browser that will not release the old
+        database says so on the splash rather than booting on it and calling that a
+        first visit.
+      </li>
+    </ul>
+  </section>
+</div>

@@ -3,66 +3,465 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>InstantRecord</title>
+  <title>InstantRecord — first boot</title>
+  <!-- This page loads before the app's stylesheets exist (Rails is not running
+       yet), so it carries its own. Same Swiss foundation as the app: black on
+       white, one red accent, Helvetica, hard rules, numbers in tabular mono. -->
   <style>
+    :root {
+      --ink: #111111;
+      --paper: #ffffff;
+      --hairline: #d9d9d9;
+      --red: #e30613;
+      --muted: #6b6b6b;
+      --font: "Helvetica Neue", Helvetica, Arial, sans-serif;
+      --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    * { box-sizing: border-box; }
+
     body {
-      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-      display: flex; flex-direction: column; align-items: center; justify-content: center;
-      min-height: 100vh; margin: 0; background: #fafafa; color: #333;
+      margin: 0;
+      padding: 3rem 1.5rem 4rem;
+      font-family: var(--font);
+      line-height: 1.4;
+      color: var(--ink);
+      background: var(--paper);
+      -webkit-font-smoothing: antialiased;
     }
-    .pulse {
-      width: 14px; height: 14px; border-radius: 50%; background: #34c759;
-      animation: pulse 1.2s ease-in-out infinite; margin-bottom: 1.25rem;
+
+    main { max-width: 46rem; margin: 0 auto; }
+
+    .micro-label {
+      margin: 0;
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      color: var(--red);
     }
-    @keyframes pulse { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.6); opacity: 0.4; } }
-    h1 { font-size: 1.1rem; font-weight: 600; margin: 0 0 0.5rem; }
-    #status { font-size: 0.85rem; color: #888; min-height: 1.2em; max-width: 32rem; text-align: center; }
-    .hint { font-size: 0.75rem; color: #bbb; margin-top: 2rem; }
+
+    h1 {
+      margin: 0.25rem 0 0;
+      font-size: clamp(2rem, 5vw, 3.25rem);
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      line-height: 1.05;
+    }
+
+    .lede { max-width: 34rem; margin: 1.25rem 0 0; font-size: 1rem; }
+    .muted { color: var(--muted); }
+
+    /* The ledger. Three columns: what happened, what it bought, what it cost. */
+    ol#ledger {
+      margin: 2.5rem 0 0;
+      padding: 0;
+      list-style: none;
+      border-top: 2px solid var(--ink);
+    }
+
+    ol#ledger li {
+      display: grid;
+      grid-template-columns: 11rem 1fr 5.5rem;
+      gap: 0.75rem;
+      align-items: baseline;
+      padding: 0.6rem 0;
+      border-bottom: 1px solid var(--hairline);
+    }
+
+    .phase { font-weight: 700; font-size: 0.85rem; }
+    .bought { font-size: 0.8rem; color: var(--muted); }
+
+    .figure {
+      font-family: var(--mono);
+      font-variant-numeric: tabular-nums;
+      font-size: 0.85rem;
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    /* The phase currently running: the wait is differentiated, and visibly
+       moving, which is the whole difference from a one-line splash. */
+    li.running .phase, li.running .figure { color: var(--red); }
+
+    #total {
+      display: none;
+      grid-template-columns: 11rem 1fr 5.5rem;
+      gap: 0.75rem;
+      align-items: baseline;
+      padding: 0.75rem 0;
+      border-bottom: 2px solid var(--ink);
+    }
+
+    #total.shown { display: grid; }
+    #total .phase { text-transform: uppercase; letter-spacing: 0.08em; }
+    #total .figure { font-size: 1.1rem; font-weight: 700; }
+
+    #after { margin-top: 2rem; }
+    #after p { margin: 0 0 1.25rem; max-width: 34rem; font-size: 0.9rem; }
+
+    .actions { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; }
+
+    a.action, button.action {
+      font-family: var(--font);
+      font-size: 0.8rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      padding: 0.6rem 1rem;
+      border: 2px solid var(--ink);
+      border-radius: 0;
+      background: var(--ink);
+      color: var(--paper);
+      text-decoration: none;
+      cursor: pointer;
+    }
+
+    a.action.secondary, button.action.secondary { background: var(--paper); color: var(--ink); }
+    a.action:hover, button.action:hover { background: var(--red); border-color: var(--red); color: var(--paper); }
+
+    #failure { margin-top: 2rem; color: var(--red); font-weight: 700; }
+
+    @media (max-width: 40rem) {
+      ol#ledger li, #total { grid-template-columns: 1fr 5.5rem; }
+      .bought { grid-column: 1 / -1; }
+    }
   </style>
 </head>
 <body>
-  <div class="pulse"></div>
-  <h1>InstantRecord</h1>
-  <p id="status">Starting the local runtime&hellip;</p>
-  <p class="hint">First visit compiles Ruby for your browser (~60MB, cached afterwards)</p>
+  <main>
+    <p class="micro-label">InstantRecord</p>
+    <h1 id="headline">Compiling Rails<br />for this browser.</h1>
+    <p class="lede" id="lede">
+      This is a proof of concept, and it is honest about the bill: a first visit
+      downloads CRuby, Rails and this app compiled to WebAssembly — around 60&nbsp;MB —
+      compiles it, and starts a Postgres in this tab. Every line below is measured
+      here, on this device, as it happens. Afterwards none of it happens again.
+    </p>
+
+    <ol id="ledger"></ol>
+    <div id="total">
+      <span class="phase">Total</span>
+      <span class="bought" id="total-note"></span>
+      <span class="figure" id="total-figure"></span>
+    </div>
+
+    <div id="after" hidden>
+      <p id="after-note"></p>
+      <div class="actions">
+        <a class="action" id="open-app" href="/">Open the app →</a>
+        <a class="action secondary" href="/receipts">See the receipts →</a>
+      </div>
+    </div>
+
+    <p id="failure" hidden></p>
+  </main>
 
   <!-- Classic (non-module) script on purpose: served verbatim by both the
-       static server and the Vite build, no bundling required. -->
+       static server and the Vite build, no bundling required. It also has to
+       run before Stimulus (or Rails) exists, so plain JS is the right tool. -->
   <script>
-    (async () => {
-      const status = document.getElementById("status");
+    (function () {
+      var ledger = document.getElementById("ledger");
+      var lede = document.getElementById("lede");
+      var headline = document.getElementById("headline");
+      var failure = document.getElementById("failure");
+
+      // Bytes in MB = 10^6, stated as such on /receipts. Sub-second phases stay
+      // in ms; anything longer reads better in seconds.
+      function fmtMs(value) {
+        return value >= 1000 ? (value / 1000).toFixed(1) + " s" : Math.round(value) + " ms";
+      }
+
+      function fmtMb(bytes) {
+        return (bytes / 1e6).toFixed(1) + " MB";
+      }
+
+      // What each phase bought, in plain language. The worker sends numbers
+      // only; the wording lives here, next to the rest of the page's copy.
+      function bought(entry) {
+        switch (entry.phase) {
+          case "wipe":
+            return "the database this browser had is gone, so what follows is a first visit";
+          case "pglite":
+            return "PGlite — a Postgres compiled to wasm, kept in IndexedDB";
+          case "bundle":
+            if (entry.cached === true) {
+              return fmtMb(entry.bytes) + " from this browser's cache — nothing crossed the network";
+            }
+            var note = fmtMb(entry.bytes) + " of CRuby, Rails and this app";
+            if (entry.cached === false) {
+              // Only worth saying when the server actually compressed it —
+              // otherwise the same figure twice reads like a mistake.
+              note += entry.wireBytes && entry.wireBytes < entry.bytes
+                ? " — " + fmtMb(entry.wireBytes) + " compressed over the network, cached from here on"
+                : " — downloaded uncompressed, cached from here on";
+            }
+            return note;
+          case "compile":
+            return "compiled while it downloaded; this is the tail after the last byte";
+          case "vm":
+            return "your initializers and eager loads, running in this tab";
+          case "schema":
+            return "your migrations, run against the Postgres in this tab";
+          case "render":
+            return "GET / handled by Rails here — no network in the path";
+          default:
+            return "";
+        }
+      }
+
+      var titles = {
+        wipe: "Local data deleted",
+        pglite: "Database opened",
+        bundle: "Bundle downloaded",
+        compile: "CRuby compiled",
+        vm: "Rails booted",
+        schema: "Schema prepared",
+        render: "First page rendered"
+      };
+
+      function addRow(entry) {
+        var row = document.createElement("li");
+        row.innerHTML =
+          '<span class="phase"></span><span class="bought"></span><span class="figure"></span>';
+        row.querySelector(".phase").textContent = titles[entry.phase] || entry.phase;
+        row.querySelector(".bought").textContent = bought(entry);
+        row.querySelector(".figure").textContent = fmtMs(entry.ms);
+        ledger.insertBefore(row, running);
+        return row;
+      }
+
+      // The phase in flight, with the worker's own step text and a clock that
+      // keeps moving. An undifferentiated wait is what reads as broken.
+      var running = document.createElement("li");
+      running.className = "running";
+      running.innerHTML =
+        '<span class="phase">Working</span><span class="bought"></span><span class="figure"></span>';
+      ledger.appendChild(running);
+
+      var startedAt = performance.now();
+      var ticker = setInterval(function () {
+        running.querySelector(".figure").textContent = fmtMs(performance.now() - startedAt);
+      }, 100);
+
+      function step(text) {
+        running.querySelector(".bought").textContent = text;
+      }
+
+      function stopRunning() {
+        clearInterval(ticker);
+        running.remove();
+      }
+
+      // Cold and warm are told apart by what the ledger measured, not by which
+      // visit it was: the bundle phase reports whether the bytes crossed the
+      // network. /receipts reads these back to compare the two.
+      function persist(ledgerData) {
+        var bundle = null;
+        for (var i = 0; i < ledgerData.entries.length; i++) {
+          if (ledgerData.entries[i].phase === "bundle") bundle = ledgerData.entries[i];
+        }
+        var source = !bundle || bundle.cached === null || bundle.cached === undefined
+          ? "unknown"
+          : bundle.cached ? "cache" : "network";
+        try {
+          localStorage.setItem("instant_record.boot." + source, JSON.stringify(ledgerData));
+        } catch (error) {
+          // Private mode or a full quota. The page still showed the numbers.
+        }
+      }
+
+      function finish(ledgerData) {
+        stopRunning();
+
+        // Wall clock, not a sum of rows: the worker timed the whole boot, and
+        // this page timed the render it added afterwards.
+        var render = null;
+        for (var i = 0; i < ledgerData.entries.length; i++) {
+          if (ledgerData.entries[i].phase === "render") render = ledgerData.entries[i];
+        }
+
+        document.getElementById("total-figure").textContent =
+          fmtMs(ledgerData.totalMs + (render ? render.ms : 0));
+        document.getElementById("total-note").textContent =
+          "measured on this device, just now";
+        document.getElementById("total").classList.add("shown");
+
+        headline.textContent = "Rails is running in this browser.";
+        lede.remove();
+
+        var bundle = null;
+        for (var j = 0; j < ledgerData.entries.length; j++) {
+          if (ledgerData.entries[j].phase === "bundle") bundle = ledgerData.entries[j];
+        }
+        document.getElementById("after-note").textContent =
+          bundle && bundle.cached === false
+            ? "That was the whole bill, and it is paid. The next visit skips this page: " +
+              "the bundle is cached, the database is already here, and pages render " +
+              "locally in milliseconds."
+            : "The bundle was already cached, so this boot cost a fraction of a first visit. " +
+              "Pages render locally from here on.";
+        document.getElementById("after").hidden = false;
+        document.getElementById("open-app").focus();
+
+        persist(ledgerData);
+      }
 
       if (!("serviceWorker" in navigator)) {
-        status.textContent = "This browser does not support service workers.";
+        stopRunning();
+        failure.hidden = false;
+        failure.textContent = "This browser does not support service workers, so the local runtime cannot start.";
         return;
       }
 
-      // If a previous visit already installed the app, the service worker
-      // will take over this URL on reload.
-      if (navigator.serviceWorker.controller) {
-        location.reload();
-        return;
+      // A cold boot on demand: /receipts (and the dev launcher) send the visitor
+      // here with this flag once the worker has closed the database, cleared its
+      // caches and unregistered itself. Deleting the database has to happen here
+      // rather than there — IndexedDB will not delete a database while anything
+      // holds it open, and only the worker's death releases the handle its wasm
+      // filesystem keeps. The flag is dropped from the URL immediately so a
+      // reload of a finished boot does not try to wipe the database the new
+      // worker has just opened.
+      var wipeFirst = new URLSearchParams(location.search).has("instant_record_cold_boot");
+      if (wipeFirst) history.replaceState({}, "", "/");
+
+      // A previous visit already installed the app: the worker takes over this
+      // URL on reload and Rails serves the page. Nothing to itemise.
+      //
+      // The controller alone cannot tell that apart from a first visit. A force
+      // reload (cmd+shift+r) deliberately bypasses the service worker, so the
+      // network serves this splash and the page arrives uncontrolled even though
+      // the runtime is installed and running. Registering again would resolve
+      // instantly against that worker — no install, no phases, no ledger — and
+      // the splash would tick forever on a boot that already happened. So ask
+      // the registration, which a force reload does not hide, and reload: an
+      // ordinary reload the worker does serve.
+      function installedRuntime() {
+        if (navigator.serviceWorker.controller) return Promise.resolve(true);
+
+        return navigator.serviceWorker.getRegistration().then(function (registration) {
+          return !!(registration && registration.active);
+        });
       }
 
-      navigator.serviceWorker.addEventListener("message", (event) => {
-        if (event.data && event.data.type === "progress" && event.data.step) {
-          status.textContent = event.data.step;
+      function deleteDatabases() {
+        step("deleting the local database");
+        var at = performance.now();
+
+        var deletions = (indexedDB.databases ? indexedDB.databases() : Promise.resolve([]))
+          .then(function (databases) {
+            return Promise.all(
+              databases.map(function (info) {
+                return new Promise(function (resolve) {
+                  var request = indexedDB.deleteDatabase(info.name);
+                  request.onsuccess = request.onerror = resolve;
+                });
+              }),
+            );
+          });
+
+        // A delete waits, silently and indefinitely, for every connection to the
+        // database to close, and it is not always ours to hurry: another tab of
+        // this app holds it, and so does a worker the browser has not finished
+        // shutting down (measured: Chrome kept one for minutes, without firing
+        // `blocked` to say so). Give up rather than hang, and never continue
+        // quietly — booting on the old database is not the cold boot that was
+        // asked for, so the visitor gets the choice instead of a fiction.
+        var held = new Promise(function (_resolve, reject) {
+          setTimeout(function () {
+            reject(new Error("database held open"));
+          }, 12000);
+        });
+
+        return Promise.race([deletions, held]).then(function () {
+          addRow({ phase: "wipe", ms: performance.now() - at });
+          startedAt = performance.now();
+          step("");
+        });
+      }
+
+      navigator.serviceWorker.addEventListener("message", function (event) {
+        var data = event.data || {};
+
+        if (data.type === "progress" && data.step) {
+          step(data.step);
+        } else if (data.type === "instant_record.boot_phase") {
+          addRow(data.entry);
+          startedAt = performance.now();
+          step("");
+        } else if (data.type === "instant_record.boot_done" && data.ledger.totalMs !== null) {
+          renderFirstPage(data.ledger);
         }
       });
 
-      try {
-        await navigator.serviceWorker.register("/rails.sw.js", { scope: "/", type: "module" });
-      } catch (error) {
-        status.textContent = "Could not start: " + error.message;
-        return;
+      // The last line of the ledger is the payoff, and only this page can time
+      // it: a page render served by Rails in this tab. It has to wait for the
+      // worker to claim this client — before that, a fetch would go to the
+      // network and measure the server instead. If the claim never lands the
+      // row is left out rather than filled in with a number from elsewhere.
+      function renderFirstPage(ledgerData) {
+        step("rendering the first page locally");
+
+        var waited = false;
+        var done = function () {
+          if (waited) return;
+          waited = true;
+          finish(ledgerData);
+        };
+
+        var timeout = setTimeout(done, 5000);
+
+        navigator.serviceWorker.ready.then(function () {
+          var measure = function () {
+            var at = performance.now();
+            fetch("/", { headers: { accept: "text/html" } })
+              .then(function () {
+                if (waited) return;
+                clearTimeout(timeout);
+                ledgerData.entries.push({ phase: "render", ms: Math.round(performance.now() - at) });
+                addRow(ledgerData.entries[ledgerData.entries.length - 1]);
+                done();
+              })
+              .catch(done);
+          };
+
+          if (navigator.serviceWorker.controller) return measure();
+          navigator.serviceWorker.addEventListener("controllerchange", measure, { once: true });
+        });
       }
 
-      // `ready` resolves once install finishes — and install boots the whole
-      // Rails VM, so this is "the app is actually usable".
-      await navigator.serviceWorker.ready;
+      function install() {
+        return (wipeFirst ? deleteDatabases() : Promise.resolve())
+          .then(function () {
+            step("registering the service worker");
 
-      status.textContent = "Ready — opening the app";
-      location.reload(); // now served by Rails running in this browser
+            return navigator.serviceWorker.register("/rails.sw.js", {
+              scope: "/",
+              type: "module",
+            });
+          })
+          .catch(function (error) {
+            stopRunning();
+            failure.hidden = false;
+
+            if (error.message === "database held open") {
+              failure.innerHTML =
+                "The browser would not delete the local database — something still has it " +
+                'open, usually another tab of this app. Close the others, then <a href="/?instant_record_cold_boot=1">' +
+                'wipe again</a>, or <a href="/">boot on the data that is already here</a>.';
+              return;
+            }
+
+            failure.textContent = "Could not start the local runtime: " + error.message;
+          });
+      }
+
+      installedRuntime().then(function (installed) {
+        if (installed && !wipeFirst) return location.reload();
+
+        install();
+      });
     })();
   </script>
 </body>

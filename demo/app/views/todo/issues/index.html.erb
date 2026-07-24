@@ -20,9 +20,15 @@
   <ul class="issues">
     <% @issues.each do |issue| %>
       <li class="<%= issue.state %>">
-        <%= button_to issue.state == "done" ? "Reopen" : "Done", todo_issue_path(issue), method: :patch, form: { data: { turbo: false } } %>
-        <span class="title"><%= issue.title %></span>
-        <span class="badge badge-<%= issue.sync_state %>"><%= issue.sync_state %></span>
+        <%# The checkbox is the control: ticking it submits the form it sits in,
+            so a plain reload of the page is the whole interaction — served
+            locally in the browser runtime. %>
+        <%= form_with url: todo_issue_path(issue), method: :patch, class: "toggle", data: { turbo: false } do %>
+          <%= check_box_tag "done", "1", issue.state == "done",
+                            id: "issue-#{issue.id}-done",
+                            onchange: "this.form.requestSubmit()" %>
+          <%= label_tag "issue-#{issue.id}-done", issue.title, class: "title" %>
+        <% end %>
         <%= button_to "×", todo_issue_path(issue), method: :delete, form: { data: { turbo: false } } %>
       </li>
     <% end %>

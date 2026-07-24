@@ -1,0 +1,158 @@
+<% content_for(:title, "Ship v2 — InstantRecord") %>
+<% has_word_count = @columns.include?(Release::COLUMN) %>
+
+<div class="page">
+  <header class="page-header">
+    <p class="micro-label">Demo 03</p>
+    <h1>Ship v2</h1>
+    <p class="meta">
+      Local schema:
+      <strong class="data">
+        <%= @release_pending ? "v1 · v2 (#{Release.version}) pending" : "v2 (#{Release.version}) applied" %>
+      </strong>
+    </p>
+  </header>
+
+  <p>
+    A migration is the one deploy step local-first cannot do for you server-side.
+    The database that has to change is sitting in a visitor's browser, holding
+    their rows and — if they were offline — a queue of writes that never reached
+    you. This page runs that migration for real: DDL and a backfill against the
+    local Postgres exactly as you left it.
+  </p>
+
+  <ol class="run">
+    <li>Write a couple of notes. Each one commits locally and syncs.</li>
+    <li>Switch <strong>Offline</strong> on in the inspector, write two more. Those stay in the outbox.</li>
+    <li>Read the three numbers below.</li>
+    <li>Press <strong>Ship v2</strong>.</li>
+    <li>Read them again, and look at the list: the same rows, with the timestamps they already had, now carrying a word count derived from the body text that was already there.</li>
+  </ol>
+
+  <section class="state">
+    <h2 class="micro-label">The local database right now</h2>
+
+    <dl class="facts">
+      <dt>Rows in <code>notes</code></dt>
+      <dd class="data"><%= @notes.size %></dd>
+
+      <dt>Outbox rows pending</dt>
+      <dd class="data"><%= @pending_count %></dd>
+
+      <dt>Columns in <code>notes</code></dt>
+      <dd class="data"><%= @columns.size %></dd>
+    </dl>
+
+    <%# Read from the connection, not from Note.column_names — the claim is
+        about what the store actually holds, not what the model believes. %>
+    <ul class="columns">
+      <% @columns.each do |column| %>
+        <li class="data <%= "added" if column == Release::COLUMN %>"><%= column %></li>
+      <% end %>
+    </ul>
+
+    <% if @release_pending %>
+      <p class="change">
+        <strong>Ship v2</strong> adds <code><%= Release::COLUMN %></code> to
+        <code>notes</code> and backfills it from <code>body</code>. It deletes no
+        rows, and it writes no outbox mutations — the backfill runs through a
+        migration-local model with <code>update_columns</code>, so nothing
+        queues. Both numbers above must read the same afterwards.
+      </p>
+
+      <%= form_with url: migrate_ship_path, method: :post,
+                    data: { turbo: false, controller: "release", action: "submit->release#ship" } do |f| %>
+        <%= f.submit "Ship v2", data: { release_target: "button" } %>
+      <% end %>
+    <% else %>
+      <p class="change">
+        v2 applied. <code><%= Release::COLUMN %></code> is in the table above,
+        the rows below are the ones you wrote before it ran, and the outbox count
+        did not move. The version is recorded in <code>schema_migrations</code>,
+        so a reload does not run it again.
+      </p>
+
+      <%= form_with url: migrate_ship_path, method: :delete, data: { turbo: false } do |f| %>
+        <%= f.submit "Roll back to v1" %>
+        <p class="note">
+          Drops <code><%= Release::COLUMN %></code> again and leaves every row and
+          timestamp alone, so the migration can be watched a second time. The
+          migration is an <code>add_column</code> inside <code>change</code>, so
+          this is its real reversal — not a separate undo written by hand.
+        </p>
+      <% end %>
+    <% end %>
+  </section>
+
+  <%= form_with url: migrate_notes_path, method: :post, class: "note-form", data: { turbo: false } do |f| %>
+    <%= f.text_field "note[title]", placeholder: "Note title", required: true %>
+    <%= f.text_area "note[body]", placeholder: "Body — the word count is derived from this", rows: 2 %>
+    <%= f.submit "Write note" %>
+  <% end %>
+
+  <table class="notes">
+    <thead>
+      <tr>
+        <th>Title</th>
+        <th>Body</th>
+        <% if has_word_count %><th class="num data"><%= Release::COLUMN %></th><% end %>
+        <th>Written</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% @notes.each do |note| %>
+        <tr>
+          <td><%= note.title %></td>
+          <td class="body"><%= note.body %></td>
+          <% if has_word_count %><td class="num data"><%= note.word_count %></td><% end %>
+          <td class="data"><%= note.created_at.strftime("%H:%M:%S") %></td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+
+  <section class="scope">
+    <h2 class="micro-label">What this does not stage</h2>
+
+    <p>
+      <strong>No deploy handover.</strong> The migration runs inside the runtime
+      that is already booted. A real deploy installs a new service worker, which
+      boots a <em>second</em> Ruby VM against the same PGlite store while the old
+      one may still be ticking a sync pass. That double-VM window is a known
+      hole and it is not exercised here. Read this page as evidence about DDL
+      over live local data, nothing more.
+    </p>
+
+    <p>
+      <strong>The sync server is still on v1, on purpose.</strong>
+      <code>db/schema.rb</code> is one file shared by both runtimes and it is
+      what a fresh browser loads at boot, so the only way this browser can be
+      genuinely behind is for the server to be behind too. Two consequences,
+      both real:
+    </p>
+
+    <ul>
+      <li>
+        The mutations you queued before shipping were captured at v1 and drain
+        cleanly. The backfilled <code><%= Release::COLUMN %></code> never leaves
+        this browser — the server is not told about it.
+      </li>
+      <li>
+        A note written <em>after</em> v2 carries <code><%= Release::COLUMN %></code>
+        upward, and the server rejects a column it has never heard of: the batch
+        fails and the outbox jams. Watch <code>POST /mutations</code> start
+        failing in the inspector. There is no schema negotiation in this
+        protocol, so the ordinary rule holds — migrate the server first, ship the
+        client second. Opening this page on the sync server itself and pressing
+        Ship v2 there is that first half.
+      </li>
+    </ul>
+
+    <p>
+      <strong>PGlite is inferred, not measured.</strong> The tests behind this
+      claim — rows survive, the column is backfilled, the outbox does not move —
+      run against server Postgres. PGlite is Postgres compiled to wasm and takes
+      the same DDL, but nothing on this page proves that independently.
+    </p>
+  </section>
+</div>

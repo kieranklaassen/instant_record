@@ -30,6 +30,16 @@ gem "importmap-rails", group: [:default, :wasm]
 gem "turbo-rails", group: [:default, :wasm]
 # Hotwire's modest JavaScript framework [https://stimulus.hotwired.dev]
 gem "stimulus-rails", group: [:default, :wasm]
+# Syntax highlighting for the source drawer, which renders each demo's own
+# controller, model and view. Pure Ruby and in the :wasm group on purpose: the
+# browser runtime reads those files out of app.wasm and highlights them itself,
+# so the drawer needs no JS and cannot drift from the code it displays.
+# Pinned below 5.0 deliberately: Rouge 5 declares a dependency on the standalone
+# `strscan` gem, and that gem's C extension does not build for wasm32-wasi
+# ("static declaration of 'rb_reg_onig_match' follows non-static declaration"),
+# which breaks the browser bundle's core build. Rouge 4 uses the strscan already
+# inside ruby.wasm and needs no native compile.
+gem "rouge", "~> 4.6", group: [:default, :wasm]
 
 # Windows does not include zoneinfo files, so bundle the tzinfo-data gem
 # gem "tzinfo-data", platforms: %i[ windows jruby ]

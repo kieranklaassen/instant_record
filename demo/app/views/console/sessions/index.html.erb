@@ -1,0 +1,62 @@
+<% content_for(:title, "Console — InstantRecord") %>
+
+<div class="page console"
+     data-controller="console">
+  <header class="page-header">
+    <p class="micro-label">Demo 04</p>
+    <h1>Console</h1>
+    <p class="lede">
+      An ActiveRecord prompt against the runtime that served this page. Nothing is
+      staged and nothing is seeded: you supply the Ruby, Rails evaluates it, and
+      you get the value back.
+    </p>
+    <%# No runtime branch anywhere on this page. The adapter names itself, which
+        is both shorter and a fact you can check rather than a label we chose:
+        PGliteAdapter in the browser, PostgreSQLAdapter on the server — and
+        adapter_name says "PostgreSQL" in both, because in both it is Postgres. %>
+    <p class="meta">
+      Adapter: <strong><%= ApplicationRecord.connection.class.name.demodulize %></strong>
+      · Speaking: <strong><%= ApplicationRecord.connection.adapter_name %></strong>
+      · Holding <strong><%= pluralize(Issue.count, "issue") %></strong>
+    </p>
+  </header>
+
+  <aside class="console-warning">
+    <p class="micro-label">Read this before you copy it</p>
+    <p>
+      This page evaluates arbitrary Ruby, and that is only defensible where it
+      happens. In your browser the VM, the database and the page are all yours —
+      there is no privilege boundary for an eval to cross, and devtools would get
+      you there anyway. On a server there is, so this app never defines the action
+      there: it sits inside a <code>browser_only</code> block, which means on the
+      server the evaluating method does not exist to reach. Open the drawer at the
+      foot of the page and read it. <strong>Do not ship an eval endpoint.</strong>
+    </p>
+  </aside>
+
+  <div class="console-snippets">
+    <p class="micro-label">Run one of these</p>
+    <% @snippets.each do |snippet| %>
+      <button type="button"
+              data-action="console#run"
+              data-console-code-param="<%= snippet %>"><%= snippet %></button>
+    <% end %>
+  </div>
+
+  <ol class="console-transcript" data-console-target="transcript"></ol>
+
+  <%= form_with url: console_eval_path, method: :post, class: "console-form",
+                data: { console_target: "form", action: "console#submit" } do |f| %>
+    <%= f.label :code, "Your Ruby", class: "micro-label" %>
+    <%= f.text_area :code, rows: 3, autofocus: true, spellcheck: false,
+          placeholder: "Issue.where(state: \"open\").count",
+          data: {
+            console_target: "input",
+            action: "keydown.meta+enter->console#submit keydown.ctrl+enter->console#submit"
+          } %>
+    <div class="console-actions">
+      <%= f.submit "Run" %>
+      <span class="meta">⌘ + Enter</span>
+    </div>
+  <% end %>
+</div>

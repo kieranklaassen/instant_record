@@ -1,0 +1,37 @@
+<%# The drawer's contents. Rendered without a layout and injected by
+    source_controller.js; see layouts/application.html.erb for the wiring. %>
+
+<p class="source-note">
+  These files were read off disk a moment ago by the Rails app that rendered the
+  page you are on. In your browser that disk is <code>app.wasm</code> — the
+  bundle packs <code>app/</code>, <code>lib/</code>, <code>config/</code> and
+  <code>db/</code>, so the runtime can open its own source. Nothing below is a
+  copy kept in a partial, so nothing below can be out of date.
+  <strong>Marked lines are the InstantRecord ones.</strong> Everything else is
+  the Rails you already write.
+</p>
+
+<% @files.each do |file| %>
+  <section class="source-file">
+    <header>
+      <span class="source-path"><%= file[:path] %></span>
+      <% if file[:lines] %>
+        <span class="source-count"><%= pluralize(file[:lines].count { |line| instant_record_line?(line) }, "InstantRecord line") %> of <%= file[:lines].size %></span>
+      <% end %>
+    </header>
+
+    <% if file[:lines] %>
+      <%# Highlighted once per file, then zipped back onto the raw lines: the raw
+          line decides whether it is an InstantRecord line, the highlighted one
+          is what gets rendered. %>
+      <% highlighted = highlighted_lines(file[:lines], file[:path]) %>
+      <div class="source-code"><% file[:lines].each_with_index do |line, index| %><div class="source-line<%= " instant-record" if instant_record_line?(line) %>"><span class="source-ln"><%= index + 1 %></span><span class="source-text"><%= highlighted[index] %></span></div><% end %></div>
+    <% else %>
+      <p class="source-missing">
+        Not in this bundle. Either the file doesn't exist yet, or it lives
+        somewhere <code>config/wasmify.yml</code> doesn't pack — <code>public/</code>
+        is excluded, so the browser runtime genuinely cannot read it.
+      </p>
+    <% end %>
+  </section>
+<% end %>

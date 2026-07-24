@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_07_22_000004) do
+ActiveRecord::Schema[8.1].define(version: 2026_07_23_190001) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -32,6 +32,25 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_22_000004) do
     t.integer "server_version", default: 0, null: false
     t.string "sync_state", default: "synced", null: false
     t.datetime "updated_at", null: false
+  end
+
+  create_table "headline_writes", force: :cascade do |t|
+    t.boolean "arrived_from_server", default: false, null: false
+    t.datetime "created_at", null: false
+    t.boolean "discarded_on_arrival", default: false, null: false
+    t.string "text", null: false
+    t.datetime "updated_at", null: false
+    t.string "writer", null: false
+    t.datetime "written_at", null: false
+  end
+
+  create_table "headlines", id: :string, force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.integer "server_version", default: 0, null: false
+    t.string "sync_state", default: "synced", null: false
+    t.string "text", null: false
+    t.datetime "updated_at", null: false
+    t.string "writer", null: false
   end
 
   create_table "instant_record_applied_mutations", force: :cascade do |t|
@@ -86,5 +105,14 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_22_000004) do
     t.datetime "updated_at", null: false
     t.index ["channel_id", "created_at", "id"], name: "index_messages_on_channel_id_and_created_at_and_id"
     t.index ["channel_id"], name: "index_messages_on_channel_id"
+  end
+
+  create_table "notes", id: :string, force: :cascade do |t|
+    t.text "body", default: "", null: false
+    t.datetime "created_at", null: false
+    t.integer "server_version", default: 0, null: false
+    t.string "sync_state", default: "synced", null: false
+    t.string "title", null: false
+    t.datetime "updated_at", null: false
   end
 end

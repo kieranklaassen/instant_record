@@ -26,6 +26,12 @@ Rails.application.routes.draw do
     root "channels#index" # /slack
   end
 
+  # Demos added after the first two keep their routes in config/routes/<demo>.rb
+  # so each one is edited in isolation.
+  draw(:migrate)
+  draw(:receipts)
+  draw(:console)
+
   # The deployed PWA's static index.html (boot splash) shadows root when
   # served from public/ (ActionDispatch::Static wins). In the browser runtime
   # all fetches go through Rack, so this root is what visitors see there;

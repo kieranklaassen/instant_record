@@ -20,13 +20,23 @@ module Todo
       assert Issue.exists?(title: "new issue")
     end
 
-    test "update toggles done state" do
+    test "update sets done state from the checkbox" do
       issue = Issue.create!(title: "toggle me", state: "open")
 
-      patch todo_issue_url(issue)
+      patch todo_issue_url(issue), params: { done: "1" }
 
       assert_redirected_to todo_root_path
       assert_equal "done", issue.reload.state
+    end
+
+    test "update reopens when the checkbox is cleared" do
+      issue = Issue.create!(title: "untick me", state: "done")
+
+      # An unchecked box submits no parameter at all.
+      patch todo_issue_url(issue)
+
+      assert_redirected_to todo_root_path
+      assert_equal "open", issue.reload.state
     end
 
     test "destroy removes the issue" do

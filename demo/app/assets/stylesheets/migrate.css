@@ -1,0 +1,146 @@
+/* Ship v2 demo (namespaced under body.demo-migrate) */
+
+/* Schema names and counts are data, not prose: monospace, tabular figures, so
+   a column list and a row count line up between two readings of the page. */
+.demo-migrate .data,
+.demo-migrate code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.demo-migrate p { margin: 0 0 1rem; }
+
+.demo-migrate ol.run {
+  margin: 0 0 2rem;
+  padding-left: 1.25rem;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.demo-migrate ol.run li { margin-bottom: 0.25rem; }
+.demo-migrate ol.run strong { color: var(--ink); }
+
+/* --- The numbers -----------------------------------------------------------
+   The panel the visitor reads twice, so it is the one boxed block on the page. */
+
+.demo-migrate .state {
+  margin: 0 0 2.5rem;
+  padding: 1.25rem 1.5rem 1.5rem;
+  border: 2px solid var(--rule);
+}
+
+.demo-migrate .state h2,
+.demo-migrate .scope h2 { margin-bottom: 1rem; }
+
+.demo-migrate .facts {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  margin: 1rem 0 0;
+}
+
+.demo-migrate .facts dt {
+  padding: 0.4rem 1rem 0.4rem 0;
+  border-bottom: 1px solid var(--hairline);
+  font-size: 0.85rem;
+}
+
+.demo-migrate .facts dd {
+  margin: 0;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid var(--hairline);
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1;
+  text-align: right;
+}
+
+.demo-migrate ul.columns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  list-style: none;
+  margin: 1rem 0 0;
+  padding: 0;
+}
+
+.demo-migrate ul.columns li {
+  padding: 0.15rem 0.45rem;
+  border: 1px solid var(--hairline);
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
+/* The column the migration added: the single delta, so it takes the accent. */
+.demo-migrate ul.columns li.added {
+  border-color: var(--red);
+  color: var(--red);
+  font-weight: 700;
+}
+
+.demo-migrate .change {
+  margin: 1.25rem 0 1rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.demo-migrate .change strong { color: var(--ink); }
+
+/* --- Notes ---------------------------------------------------------------- */
+
+.demo-migrate .note-form {
+  display: flex;
+  gap: 0.5rem;
+  margin: 0 0 1.5rem;
+}
+
+.demo-migrate .note-form input[type="text"] { flex: 0 0 12rem; }
+.demo-migrate .note-form textarea { flex: 1; }
+
+.demo-migrate table.notes {
+  width: 100%;
+  border-collapse: collapse;
+  border-top: 2px solid var(--rule);
+  font-size: 0.85rem;
+}
+
+.demo-migrate table.notes th {
+  padding: 0.5rem 0.5rem 0.5rem 0;
+  border-bottom: 1px solid var(--rule);
+  text-align: left;
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+}
+
+.demo-migrate table.notes td {
+  padding: 0.6rem 0.5rem 0.6rem 0;
+  border-bottom: 1px solid var(--hairline);
+  vertical-align: top;
+}
+
+.demo-migrate table.notes th.num,
+.demo-migrate table.notes td.num { text-align: right; padding-left: 1rem; }
+
+/* A column name is a name, not a label: keep it lowercase in the header. */
+.demo-migrate table.notes th.data { text-transform: none; letter-spacing: 0; }
+
+.demo-migrate table.notes td.body {
+  color: var(--muted);
+  overflow-wrap: anywhere; /* an unbroken paste must not widen the page */
+}
+
+/* --- Scope ---------------------------------------------------------------- */
+
+.demo-migrate .scope {
+  margin-top: 3rem;
+  padding-top: 1.25rem;
+  border-top: 2px solid var(--rule);
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.demo-migrate .scope strong { color: var(--ink); }
+.demo-migrate .scope ul { margin: 0 0 1rem; padding-left: 1.25rem; }
+.demo-migrate .scope li { margin-bottom: 0.5rem; }

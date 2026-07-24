@@ -22,9 +22,6 @@
       <div class="message-head">
         <span class="author"><%= message.chat_user&.name || "Unknown" %></span>
         <span class="timestamp"><%= message.created_at.strftime("%H:%M") %></span>
-        <% if message.from_visitor? %>
-          <span class="badge badge-<%= message.sync_state %>"><%= message.sync_state %></span>
-        <% end %>
       </div>
       <p class="body"><%= message.body %></p>
     </li>
