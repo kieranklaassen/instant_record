@@ -1,10 +1,12 @@
-<% content_for(:title, "Swiss Slack — InstantRecord") %>
+<% content_for(:title, "Chat — InstantRecord") %>
 
 <%# data-instant-refresh: the layout's records_changed listener hands this
     page a custom event instead of reloading — the conversation controller
     morphs the DOM in place. Turbo Drive handles channel navigation; Stimulus
-    reconnects the controller on every visit. %>
-<div class="slack"
+    reconnects the controller on every visit. The open thread is URL state
+    (?thread=), so the panel is server-rendered like everything else and
+    survives a reload in either runtime. %>
+<div class="slack <%= "thread-open" if @thread_parent %>"
      data-instant-refresh
      data-controller="conversation"
      data-action="instant-record:records-changed@window->conversation#sync">
@@ -12,19 +14,21 @@
 
   <main class="conversation">
     <header class="conversation-header">
-      <h2>
-        <% if @channel.dm? %>
-          <span class="micro-label">DM</span> <%= @channel.dm_user&.name || @channel.name %>
-        <% else %>
-          <span class="hash">#</span><%= @channel.name %>
-        <% end %>
-      </h2>
-      <p class="meta">
-        Runtime: <strong><%= InstantRecord.browser? ? "browser" : "server" %></strong>
-        <% if InstantRecord.browser? %>
-          · Pending: <strong><%= @pending_count %></strong>
-        <% end %>
-      </p>
+      <div class="room">
+        <h2>
+          <% if @channel.dm? %>
+            <span class="micro-label">DM</span> <%= @channel.dm_user&.name || @channel.name %>
+          <% else %>
+            <span class="hash">#</span><%= @channel.name %>
+          <% end %>
+        </h2>
+        <span class="room-meta">
+          Runtime <strong><%= InstantRecord.browser? ? "browser" : "server" %></strong>
+        </span>
+      </div>
+      <% if InstantRecord.browser? %>
+        <span class="pending-badge">Pending <%= @pending_count %></span>
+      <% end %>
     </header>
 
     <div class="message-scroll"
@@ -48,4 +52,34 @@
       <%= f.submit "Send" %>
     <% end %>
   </main>
+
+  <% if @thread_parent %>
+    <aside class="thread-panel">
+      <header class="thread-header">
+        <span class="micro-label">Thread</span>
+        <%= link_to "×", slack_channel_path(@channel), class: "thread-close", aria: { label: "Close thread" } %>
+      </header>
+
+      <div class="thread-scroll">
+        <article class="thread-parent <%= "own" if @thread_parent.from_visitor? %>">
+          <div class="tile"><%= slack_initials(@thread_parent.chat_user) %></div>
+          <div class="message-main">
+            <div class="message-head">
+              <span class="author"><%= @thread_parent.chat_user&.name || "Unknown" %></span>
+              <span class="timestamp"><%= @thread_parent.created_at.strftime("%H:%M") %></span>
+            </div>
+            <p class="body"><%= @thread_parent.body %></p>
+          </div>
+        </article>
+
+        <%= render "thread_replies" %>
+      </div>
+
+      <%= form_with url: slack_messages_path, method: :post, class: "thread-composer", data: { action: "conversation#send" } do |f| %>
+        <%= f.hidden_field "message[channel_id]", value: @channel.id %>
+        <%= f.hidden_field "message[parent_message_id]", value: @thread_parent.id %>
+        <%= f.text_field "message[body]", placeholder: "Reply in thread", required: true, autocomplete: "off" %>
+      <% end %>
+    </aside>
+  <% end %>
 </div>

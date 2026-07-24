@@ -1,49 +1,57 @@
 <aside class="sidebar">
   <header class="sidebar-header">
-    <p class="micro-label">Demo 02</p>
-    <h1 class="brand">Swiss<br>Slack</h1>
-    <p class="tagline">Swag as we wack.</p>
+    <p class="brand">Swiss Slack</p>
+    <p class="micro-label">Demo 02 · Chat</p>
   </header>
 
-  <section>
-    <h3 class="micro-label">Channels</h3>
-    <ul>
-      <% @channels.each do |channel| %>
-        <li class="<%= "active" if channel == @channel %>">
-          <%= link_to "##{channel.name}", slack_channel_path(channel) %>
-        </li>
-      <% end %>
-    </ul>
-  </section>
+  <div class="sidebar-scroll">
+    <section>
+      <h3 class="micro-label">Channels</h3>
+      <ul>
+        <% @channels.each do |channel| %>
+          <li class="<%= "active" if channel == @channel %>">
+            <%= link_to slack_channel_path(channel) do %>
+              <span class="hash">#</span><span class="name"><%= channel.name %></span><span class="count"><%= format("%02d", @channel_counts&.fetch(channel.id, 0).to_i) %></span>
+            <% end %>
+          </li>
+        <% end %>
+      </ul>
+    </section>
 
-  <section>
-    <h3 class="micro-label">Direct messages</h3>
-    <ul>
-      <% @dms.each do |dm| %>
-        <li class="<%= "active" if dm == @channel %>">
-          <%= link_to dm.dm_user&.name || dm.name, slack_channel_path(dm) %>
-        </li>
-      <% end %>
-    </ul>
-  </section>
+    <section>
+      <h3 class="micro-label">Direct messages</h3>
+      <ul>
+        <% @dms.each do |dm| %>
+          <li class="<%= "active" if dm == @channel %>">
+            <%= link_to slack_channel_path(dm) do %>
+              <span class="dot"></span><span class="name"><%= dm.dm_user&.name || dm.name %></span>
+            <% end %>
+          </li>
+        <% end %>
+      </ul>
+    </section>
 
-  <section>
-    <h3 class="micro-label">Users</h3>
-    <ul class="roster">
-      <% @users.each do |user| %>
-        <li>
-          <span class="dot"></span><%= user.name %><%= " (you)" if user.visitor? %>
-        </li>
-      <% end %>
-    </ul>
-  </section>
+    <section>
+      <h3 class="micro-label">Users</h3>
+      <ul class="roster">
+        <% @users.each do |user| %>
+          <li>
+            <span class="dot"></span><%= user.name %><%= " (you)" if user.visitor? %>
+          </li>
+        <% end %>
+      </ul>
+    </section>
+  </div>
 
-  <section class="sidebar-footer">
+  <footer class="sidebar-footer">
+    <% if InstantRecord.browser? %>
+      <p class="outbox-row"><span>Outbox</span><span class="count"><%= format("%02d", @pending_count.to_i) %></span></p>
+    <% end %>
     <%# Posted by the reset controller, which then reloads — a reset is the one
         thing that deletes records, and live updates never remove rows. %>
     <form class="reset-form" action="<%= slack_reset_endpoint %>" method="post"
           data-controller="reset" data-action="reset#submit">
       <button type="submit">Reset demo</button>
     </form>
-  </section>
+  </footer>
 </aside>

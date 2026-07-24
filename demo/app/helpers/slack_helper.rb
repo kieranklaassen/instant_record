@@ -6,4 +6,9 @@ module SlackHelper
   def slack_reset_endpoint
     InstantRecord.server_url(slack_reset_path)
   end
+
+  # Avatar tile text: two initials, uppercase.
+  def slack_initials(user)
+    (user&.name || "??").split.map { |w| w[0] }.join[0, 2].upcase
+  end
 end

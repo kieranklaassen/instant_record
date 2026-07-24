@@ -1,73 +1,114 @@
-/* Swiss Slack demo (namespaced under body.demo-slack) */
+/* Chat demo (namespaced under body.demo-slack).
+   Three columns on the same rules: dark rail, conversation, thread panel.
+   The thread column exists only when a thread is open (?thread= in the URL);
+   the grid collapses to two columns otherwise. */
 
 .demo-slack .slack {
   display: grid;
-  grid-template-columns: 240px 1fr;
-  min-height: calc(100vh - 45px);
+  grid-template-columns: 250px minmax(0, 1fr);
+  height: calc(100vh - 46px);
 }
 
-/* Sidebar: black panel, red accents */
+.demo-slack .slack.thread-open {
+  grid-template-columns: 250px minmax(0, 1fr) 330px;
+}
+
+/* --- Rail ------------------------------------------------------------------ */
+
 .demo-slack .sidebar {
   background: var(--ink);
   color: var(--paper);
-  padding: 1.5rem 1.25rem;
   display: flex;
   flex-direction: column;
-  gap: 1.5rem;
+  min-height: 0;
+}
+
+.demo-slack .sidebar-header {
+  padding: 0.9rem 1.15rem;
+  border-bottom: 2px solid var(--paper);
 }
 
 .demo-slack .sidebar-header .brand {
-  font-size: 2rem;
-  line-height: 0.95;
-  text-transform: uppercase;
-  margin-top: 0.25rem;
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
 }
 
-.demo-slack .sidebar-header .tagline {
-  margin: 0.5rem 0 0;
-  font-size: 0.7rem;
-  color: #9a9a9a;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
+.demo-slack .sidebar-header .micro-label { margin-top: 0.2rem; color: #8f8f8f; }
+
+.demo-slack .sidebar-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.9rem 0;
 }
+
+.demo-slack .sidebar section + section { margin-top: 1.15rem; }
+
+.demo-slack .sidebar section .micro-label { padding: 0 1.15rem; color: #8f8f8f; }
 
 .demo-slack .sidebar section ul {
   list-style: none;
-  margin: 0.5rem 0 0;
+  margin: 0.35rem 0 0;
   padding: 0;
 }
 
-.demo-slack .sidebar section li {
-  padding: 0.2rem 0;
-  font-size: 0.9rem;
-}
-
 .demo-slack .sidebar section li a {
+  display: grid;
+  grid-template-columns: 14px 1fr auto;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.32rem 1.15rem;
+  font-size: 0.9rem;
   color: var(--paper);
   text-decoration: none;
 }
 
-.demo-slack .sidebar section li.active a {
-  color: var(--red);
-  font-weight: 700;
+.demo-slack .sidebar section li a .hash { color: var(--muted); font-weight: 700; }
+.demo-slack .sidebar section li a .dot { width: 7px; height: 7px; background: var(--red); }
+.demo-slack .sidebar section li a .count {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 0.65rem;
+  color: #8f8f8f;
 }
 
+.demo-slack .sidebar section li.active a { color: var(--red); font-weight: 700; }
+.demo-slack .sidebar section li.active a .hash { color: var(--red); }
 .demo-slack .sidebar section li a:hover { color: var(--red); }
 
 .demo-slack .sidebar .roster li {
   display: flex;
   align-items: center;
   gap: 0.5rem;
+  padding: 0.22rem 1.15rem;
+  font-size: 0.85rem;
   color: #c9c9c9;
 }
 
-.demo-slack .sidebar .roster .dot {
-  width: 7px;
-  height: 7px;
-  background: var(--red);
+.demo-slack .sidebar .roster .dot { width: 7px; height: 7px; background: var(--red); }
+
+.demo-slack .sidebar-footer {
+  border-top: 2px solid var(--paper);
+  padding: 0.8rem 1.15rem;
 }
 
-.demo-slack .sidebar-footer { margin-top: auto; }
+.demo-slack .sidebar-footer .outbox-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin: 0 0 0.7rem;
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: #8f8f8f;
+}
+
+.demo-slack .sidebar-footer .outbox-row .count {
+  font-family: ui-monospace, Menlo, monospace;
+  color: var(--red);
+}
 
 .demo-slack .sidebar-footer button {
   width: 100%;
@@ -81,27 +122,69 @@
   border-color: var(--red);
 }
 
-/* Conversation column: the message list scrolls, the chrome stays put —
-   infinite scroll needs one stable scroll container to anchor against. */
+/* --- Conversation ----------------------------------------------------------
+   The message list scrolls, the chrome stays put — infinite scroll needs one
+   stable scroll container to anchor against. */
+
 .demo-slack .conversation {
   display: flex;
   flex-direction: column;
-  padding: 1.5rem 2rem 2rem;
-  max-width: 860px;
-  height: calc(100vh - 45px);
+  min-width: 0;
+  min-height: 0;
+  border-right: 2px solid var(--rule);
 }
 
 .demo-slack .conversation-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0 1.5rem;
+  height: 56px;
+  box-sizing: border-box;
   border-bottom: 2px solid var(--rule);
-  padding-bottom: 0.75rem;
+}
+
+.demo-slack .conversation-header .room {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.demo-slack .conversation-header h2 {
+  margin: 0;
+  font-size: 1.4rem;
+  letter-spacing: -0.03em;
+  white-space: nowrap;
 }
 
 .demo-slack .conversation-header .hash { color: var(--red); }
+
+.demo-slack .conversation-header .room-meta {
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+}
+
+.demo-slack .conversation-header .pending-badge {
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--red);
+  border: 1px solid var(--red);
+  padding: 0.15rem 0.4rem;
+  white-space: nowrap;
+}
 
 .demo-slack .message-scroll {
   flex: 1;
   overflow-y: auto;
   min-height: 0;
+  padding: 0 1.5rem;
   /* prependHistory anchors the viewport manually (Safari has no native
      anchoring); leaving this on double-compensates when history pages are
      prefetched mid-scroll and throws the reader to the bottom. */
@@ -111,7 +194,7 @@
 .demo-slack ol.messages {
   list-style: none;
   margin: 0;
-  padding: 1rem 0;
+  padding: 0 0 1rem;
 }
 
 /* The sentinel and the beginning marker are two states of the same slot at the
@@ -143,10 +226,37 @@
   border-bottom-color: var(--rule);
 }
 
+/* --- Message rows: avatar tile + content ----------------------------------- */
+
 .demo-slack ol.messages li {
-  padding: 0.6rem 0;
-  border-bottom: 1px solid var(--hairline);
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 0.9rem;
+  padding: 0.85rem 0;
+  border-top: 1px solid var(--hairline);
 }
+
+.demo-slack ol.messages li.beginning-marker {
+  display: block;
+  border-top: 0;
+}
+
+.demo-slack .tile {
+  width: 32px;
+  height: 32px;
+  background: var(--ink);
+  color: var(--paper);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.65rem;
+  font-weight: 700;
+}
+
+.demo-slack li.own .tile,
+.demo-slack .thread-parent.own .tile { background: var(--red); }
+
+.demo-slack .message-main { min-width: 0; }
 
 .demo-slack .message-head {
   display: flex;
@@ -156,33 +266,188 @@
 
 .demo-slack .message-head .author {
   font-weight: 700;
-  font-size: 0.85rem;
+  font-size: 0.75rem;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.1em;
 }
 
-.demo-slack ol.messages li.own .message-head .author { color: var(--red); }
+.demo-slack li.own .message-head .author,
+.demo-slack .thread-parent.own .message-head .author { color: var(--red); }
 
 .demo-slack .message-head .timestamp {
-  font-size: 0.7rem;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 0.65rem;
   color: var(--muted);
 }
 
-.demo-slack ol.messages .body {
-  margin: 0.15rem 0 0;
+.demo-slack .message-head .flag {
+  font-size: 0.6rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--red);
+}
+
+.demo-slack .message-main .body {
+  margin: 0.25rem 0 0;
+  font-size: 0.95rem;
+  line-height: 1.5;
   overflow-wrap: anywhere; /* long unbroken strings must not widen the page */
 }
 
-.demo-slack .composer {
-  display: flex;
-  gap: 0.5rem;
-  border-top: 2px solid var(--rule);
-  padding-top: 1rem;
+/* The thread affordance. With replies it is part of the row's information and
+   stays visible; without, it is an action and waits for the pointer. */
+.demo-slack .thread-link {
+  display: inline-block;
+  margin-top: 0.4rem;
+  font-size: 0.6rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  text-decoration: none;
+  color: var(--muted);
+  visibility: hidden;
 }
 
-.demo-slack .composer input[type="text"] { flex: 1; }
+.demo-slack ol.messages li:hover .thread-link { visibility: visible; }
 
-@media (max-width: 720px) {
-  .demo-slack .slack { grid-template-columns: 1fr; }
-  .demo-slack .sidebar { flex-direction: column; }
+.demo-slack .thread-link.has-replies {
+  visibility: visible;
+  color: var(--red);
+}
+
+.demo-slack .thread-link:hover { color: var(--red); }
+
+/* --- Composer -------------------------------------------------------------- */
+
+.demo-slack .composer {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  border-top: 2px solid var(--rule);
+  height: 56px;
+  box-sizing: border-box;
+}
+
+.demo-slack .composer input[type="text"] {
+  flex: 1;
+  border: 0;
+  padding: 0 1.5rem;
+  font-size: 0.95rem;
+  outline: none;
+}
+
+.demo-slack .composer input[type="submit"] {
+  border: 0;
+  border-left: 2px solid var(--rule);
+  background: var(--ink);
+  color: var(--paper);
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  padding: 0 1.6rem;
+  cursor: pointer;
+}
+
+.demo-slack .composer input[type="submit"]:hover { background: var(--red); }
+
+/* --- Thread panel ----------------------------------------------------------- */
+
+.demo-slack .thread-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.demo-slack .thread-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 1.25rem;
+  height: 56px;
+  box-sizing: border-box;
+  border-bottom: 2px solid var(--rule);
+}
+
+.demo-slack .thread-close {
+  font-size: 1rem;
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.demo-slack .thread-close:hover { color: var(--red); }
+
+.demo-slack .thread-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 1rem 1.25rem;
+}
+
+.demo-slack .thread-parent {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 0.75rem;
+  padding-bottom: 0.9rem;
+  border-bottom: 2px solid var(--rule);
+}
+
+.demo-slack .thread-parent .tile { width: 28px; height: 28px; font-size: 0.6rem; }
+
+.demo-slack ol.thread-replies {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.demo-slack ol.thread-replies li {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 0.75rem;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--hairline);
+}
+
+/* Replies get outlined tiles; the parent keeps the filled one. */
+.demo-slack ol.thread-replies .tile {
+  width: 28px;
+  height: 28px;
+  font-size: 0.6rem;
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--ink);
+}
+
+.demo-slack ol.thread-replies li.own .tile {
+  background: var(--red);
+  color: var(--paper);
+  border-color: var(--red);
+}
+
+.demo-slack .thread-composer {
+  display: flex;
+  align-items: center;
+  border-top: 2px solid var(--rule);
+  height: 56px;
+  box-sizing: border-box;
+  padding: 0 1.25rem;
+}
+
+.demo-slack .thread-composer input[type="text"] {
+  width: 100%;
+  font-size: 0.85rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--rule);
+  outline: none;
+}
+
+/* --- Small screens ---------------------------------------------------------- */
+
+@media (max-width: 960px) {
+  .demo-slack .slack,
+  .demo-slack .slack.thread-open { grid-template-columns: 1fr; height: auto; }
+  .demo-slack .conversation { height: 70vh; border-right: 0; }
+  .demo-slack .thread-panel { border-top: 2px solid var(--rule); }
 }

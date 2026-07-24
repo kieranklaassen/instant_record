@@ -23,7 +23,7 @@ module Slack
     test "show lists channels, dms, and users in the sidebar" do
       get slack_channel_url("channel-general")
 
-      assert_includes response.body, "#random"
+      assert_includes response.body, %(<span class="name">random</span>)
       assert_includes response.body, "Heidi Helvetica"
       assert_includes response.body, "(you)"
     end

@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_07_23_190001) do
+ActiveRecord::Schema[8.1].define(version: 2026_07_25_000101) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -100,11 +100,13 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_23_190001) do
     t.string "channel_id", null: false
     t.string "chat_user_id", null: false
     t.datetime "created_at", null: false
+    t.string "parent_message_id"
     t.integer "server_version", default: 0, null: false
     t.string "sync_state", default: "synced", null: false
     t.datetime "updated_at", null: false
     t.index ["channel_id", "created_at", "id"], name: "index_messages_on_channel_id_and_created_at_and_id"
     t.index ["channel_id"], name: "index_messages_on_channel_id"
+    t.index ["parent_message_id", "created_at"], name: "index_messages_on_parent_message_id_and_created_at"
   end
 
   create_table "notes", id: :string, force: :cascade do |t|

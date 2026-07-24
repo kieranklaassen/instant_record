@@ -1,7 +1,11 @@
 <%# The shared fragment contract (?fragment=1 serves just this partial):
     both runtimes render conversation state from it, and the conversation JS
     reads its data attributes for the next scroll-up cursor. @has_more is
-    authoritative on the server runtime only — see the controller. %>
+    authoritative on the server runtime only — see the controller.
+
+    Rows carry their whole markup — tile, flag, thread link — so the morph's
+    outerHTML comparison refreshes a row when any of it changes: a pending
+    flag clearing on sync, a reply count ticking up. %>
 <ol class="messages"
     data-conversation-target="list"
     data-channel-id="<%= @channel.id %>"
@@ -16,14 +20,24 @@
     </li>
   <% end %>
   <% @messages.each do |message| %>
+    <% reply_count = @reply_counts&.fetch(message.id, nil) %>
     <li class="<%= "own" if message.from_visitor? %>"
         data-id="<%= message.id %>"
         data-created-at="<%= message.created_at.utc.iso8601(6) %>">
-      <div class="message-head">
-        <span class="author"><%= message.chat_user&.name || "Unknown" %></span>
-        <span class="timestamp"><%= message.created_at.strftime("%H:%M") %></span>
+      <div class="tile"><%= slack_initials(message.chat_user) %></div>
+      <div class="message-main">
+        <div class="message-head">
+          <span class="author"><%= message.chat_user&.name || "Unknown" %></span>
+          <span class="timestamp"><%= message.created_at.strftime("%H:%M") %></span>
+          <% if message.sync_state != "synced" %>
+            <span class="flag">· pending</span>
+          <% end %>
+        </div>
+        <p class="body"><%= message.body %></p>
+        <%= link_to reply_count ? "#{reply_count} #{"reply".pluralize(reply_count)} ⟶" : "Reply in thread",
+              slack_channel_path(@channel, thread: message.id),
+              class: "thread-link #{"has-replies" if reply_count}" %>
       </div>
-      <p class="body"><%= message.body %></p>
     </li>
   <% end %>
 </ol>

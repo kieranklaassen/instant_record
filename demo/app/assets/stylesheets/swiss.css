@@ -143,10 +143,12 @@ input[type="submit"]:hover, button:hover { background: var(--red); border-color:
    Fixed and out of flow, so opening it never reflows what it is describing —
    the page is only shifted over by the body padding below. */
 
+/* On the LEFT: the chat demo's thread panel owns the right edge, so the
+   debugging chrome yields that side to the product it is describing. */
 #inspector {
   position: fixed;
   top: 0;
-  right: 0;
+  left: 0;
   bottom: 0;
   z-index: 200;
   display: flex;
@@ -155,16 +157,16 @@ input[type="submit"]:hover, button:hover { background: var(--red); border-color:
   max-width: 100vw;
   background: var(--ink);
   color: var(--paper);
-  border-left: 2px solid var(--red);
+  border-right: 2px solid var(--red);
   font-size: 0.7rem;
 }
 
 /* Make room instead of covering the page. Fixed positioning is viewport-based,
    so the panel itself is unaffected by this padding. */
-body { padding-right: 24rem; }
+body { padding-left: 24rem; }
 
 @media (max-width: 60rem) {
-  body { padding-right: 0; }
+  body { padding-left: 0; }
   #inspector { display: none; }
 }
 

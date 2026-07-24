@@ -1,53 +1,155 @@
-/* Home / demo index (namespaced under body.demo-home) */
+/* Home / demo index (namespaced under body.demo-home).
+   Modular board: masthead beside the red count field, four equal demo
+   modules, one information band. */
 
-.demo-home .page { max-width: 880px; }
+.demo-home .home-board { border-bottom: 2px solid var(--rule); }
 
-.demo-home .lede {
-  max-width: 42rem;
-  font-size: 1.1rem;
-  margin: 1.25rem 0 0;
+/* --- Hero: copy beside the red facts field --------------------------------- */
+
+.demo-home .board-hero {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  border-bottom: 2px solid var(--rule);
 }
 
-.demo-home ul.demo-index {
-  list-style: none;
-  margin: 2.5rem 0 0;
-  padding: 0;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+.demo-home .hero-copy {
+  padding: 2.5rem 2rem 2.5rem 2rem;
+  border-right: 2px solid var(--rule);
+}
+
+.demo-home .kicker { color: var(--red); }
+
+.demo-home .hero-copy h1 {
+  margin: 0.9rem 0 0;
+  font-size: clamp(2.8rem, 6.5vw, 4.9rem);
+  font-weight: 700;
+  letter-spacing: -0.05em;
+  line-height: 0.86;
+}
+
+.demo-home .lede {
+  max-width: 34em;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  margin: 1.5rem 0 0;
+}
+
+.demo-home .hero-facts {
+  background: var(--red);
+  color: var(--paper);
+  padding: 2.5rem 1.6rem;
+  display: flex;
+  flex-direction: column;
   gap: 1.5rem;
 }
 
+.demo-home .hero-facts .micro-label { color: rgba(255, 255, 255, 0.75); }
+
+.demo-home .stat-huge {
+  margin: 0.1rem 0 0;
+  font-size: 5.75rem;
+  font-weight: 700;
+  letter-spacing: -0.06em;
+  line-height: 0.8;
+}
+
+.demo-home .hero-facts .facts {
+  border-top: 1px solid rgba(255, 255, 255, 0.45);
+  padding-top: 1rem;
+  font-size: 0.65rem;
+  line-height: 1.6;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.demo-home .hero-facts .facts p { margin: 0; }
+.demo-home .hero-facts .facts p + p { margin-top: 0.9rem; }
+
+.demo-home .hero-facts .foot { margin-top: auto; color: rgba(255, 255, 255, 0.75); }
+
+/* --- The four modules ------------------------------------------------------- */
+
+.demo-home ul.demo-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.demo-home ul.demo-grid li:nth-child(odd) .demo-card { border-right: 1px solid var(--rule); }
+.demo-home ul.demo-grid li:nth-child(-n+2) .demo-card { border-bottom: 1px solid var(--rule); }
+
 .demo-home .demo-card {
-  display: block;
+  display: flex;
+  flex-direction: column;
   height: 100%;
-  padding: 1.25rem;
-  border: 2px solid var(--ink);
+  min-height: 200px;
+  padding: 1.75rem 2rem;
   text-decoration: none;
 }
 
-.demo-home .demo-card h2 { margin: 0.25rem 0 0.5rem; }
+.demo-home .demo-card:hover { background: #f6f6f6; }
 
-.demo-home .demo-card p { margin: 0; font-size: 0.9rem; }
+.demo-home .card-no {
+  margin: 0;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
+.demo-home .demo-card h2 {
+  margin: 0.6rem 0 0;
+  font-size: 2.6rem;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+  line-height: 0.95;
+}
+
+.demo-home .card-copy {
+  margin: 0.9rem 0 0;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  max-width: 30em;
+}
 
 .demo-home .demo-card .go {
-  display: inline-block;
-  margin-top: 1rem;
-  font-size: 0.75rem;
+  margin-top: auto;
+  padding-top: 1.1rem;
+  font-size: 0.6rem;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.16em;
+  color: var(--red);
 }
 
-.demo-home .demo-card:hover {
-  border-color: var(--red);
+/* --- Information band ------------------------------------------------------- */
+
+.demo-home .board-band {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: 0.9rem 2rem;
+  border-top: 2px solid var(--rule);
+  font-size: 0.6rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--muted);
 }
 
-.demo-home .demo-card:hover .go { color: var(--red); }
+.demo-home .board-band a {
+  color: var(--red);
+  text-decoration: none;
+}
+
+/* --- Open-source strip ------------------------------------------------------ */
 
 .demo-home .project-strip {
-  margin-top: 3rem;
-  padding-top: 1.25rem;
-  border-top: 2px solid var(--ink);
+  padding: 1.25rem 2rem 2rem;
+  border-top: 2px solid var(--rule);
 }
 
 .demo-home .project-strip p { margin: 0.25rem 0 0; font-size: 0.9rem; max-width: 60ch; }
@@ -76,3 +178,10 @@
 .demo-home .project-links a:hover { border-color: var(--red); color: var(--red); }
 
 .demo-home .project-links code { font-size: 0.8rem; color: var(--muted); }
+
+@media (max-width: 820px) {
+  .demo-home .board-hero { grid-template-columns: 1fr; }
+  .demo-home .hero-copy { border-right: 0; border-bottom: 2px solid var(--rule); }
+  .demo-home ul.demo-grid { grid-template-columns: 1fr; }
+  .demo-home ul.demo-grid li .demo-card { border-right: 0 !important; border-bottom: 1px solid var(--rule); }
+}

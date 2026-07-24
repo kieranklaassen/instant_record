@@ -47,7 +47,10 @@ module Slack
         responder = pick_responder(channel)
         next unless responder&.bot?
 
-        Message.create!(channel: channel, chat_user: responder, body: reply_body(responder))
+        # The reply lands where the visitor wrote: a threaded message draws a
+        # threaded answer, a top-level one stays top-level.
+        Message.create!(channel: channel, chat_user: responder, body: reply_body(responder),
+          parent_message_id: message.parent_message_id)
       end
     end
 

@@ -33,7 +33,19 @@ module Slack
 
     def show
       @channel = Channel.find(params[:id])
+
+      # The open thread is URL state (?thread=<message id>), so it needs no
+      # client-side bookkeeping, survives a reload, and renders identically in
+      # both runtimes. A stale id (reset swept the parent) falls back to the
+      # plain conversation instead of 404ing the whole channel.
+      @thread_parent = @channel.messages.top_level.find_by(id: params[:thread]) if params[:thread]
+      @thread_replies = @thread_parent ? @thread_parent.replies.includes(:chat_user).order(:created_at, :id) : []
+
+      # Thread fragment: just the replies list, for the live-update morph.
+      return render partial: "thread_replies", layout: false if params[:fragment] && @thread_parent
+
       @messages = conversation_window
+      @reply_counts = Message.where(parent_message_id: @messages.map(&:id)).group(:parent_message_id).count
       # The browser can't rule out older pages — its database holds only the
       # synced window — so it renders optimistically and the first history
       # probe settles it. The server runtime is authoritative. Decided here
@@ -45,6 +57,7 @@ module Slack
       return render partial: "messages", layout: false if params[:fragment]
 
       @channels = Channel.channels
+      @channel_counts = Message.top_level.group(:channel_id).count
       @dms = Channel.dms
       @users = ChatUser.order(:name)
       @pending_count = InstantRecord.browser? ? InstantRecord.pending_count : 0
@@ -54,9 +67,12 @@ module Slack
 
     # Rows from the floor (inclusive) to newest, ascending for display. The
     # newest-first limit means the server clamp drops the floor end, never
-    # the live end.
+    # the live end. Top-level only: replies render in the thread panel, not
+    # the conversation. (History pages still sync every row — the gem's keyset
+    # pages the whole partition — so replies of old messages land locally too;
+    # the scope only decides what this list shows.)
     def conversation_window
-      newest_first = @channel.messages.includes(:chat_user).order(created_at: :desc, id: :desc)
+      newest_first = @channel.messages.top_level.includes(:chat_user).order(created_at: :desc, id: :desc)
 
       rows =
         if (floor = resolved_floor)

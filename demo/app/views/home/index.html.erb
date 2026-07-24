@@ -1,63 +1,75 @@
 <% content_for(:title, "InstantRecord Demos") %>
 
-<div class="page home">
-  <header class="page-header">
-    <p class="micro-label">InstantRecord</p>
-    <h1>Rails models that run in the&nbsp;browser.</h1>
-    <p class="lede">
-      These demos are ordinary Rails controllers and views — compiled to WebAssembly
-      and rendered inside a service worker, backed by Postgres-in-the-browser.
-      Writes commit locally and instantly, queue in a durable outbox, and sync to the
-      server when you're online. Everyone else's changes stream back down over
-      server-sent events. Go offline; keep working.
-    </p>
-    <p class="meta">
-      Runtime: <strong><%= InstantRecord.browser? ? "browser (ruby.wasm + PGlite)" : "server (CRuby + Postgres)" %></strong>
-    </p>
-  </header>
+<div class="home-board">
+  <div class="board-hero">
+    <div class="hero-copy">
+      <p class="micro-label kicker">Four demos</p>
+      <h1>Rails models<br>that run in<br>the browser.</h1>
+      <p class="lede">
+        Compiled to WebAssembly, rendered in a service worker, backed by
+        Postgres in the tab. Writes commit locally, queue in a durable outbox,
+        and sync when you're online. Everyone else's changes stream back down
+        over server-sent events.
+      </p>
+    </div>
+    <aside class="hero-facts">
+      <div>
+        <p class="micro-label">Demos</p>
+        <p class="stat-huge">04</p>
+      </div>
+      <div class="facts">
+        <p>Runtime<br><strong><%= InstantRecord.browser? ? "ruby.wasm" : "CRuby" %></strong></p>
+        <p>Store<br><strong><%= InstantRecord.browser? ? "PGlite" : "Postgres" %></strong></p>
+        <p>Sync<br><strong>Outbox + SSE</strong></p>
+      </div>
+      <p class="micro-label foot">Go offline; keep working</p>
+    </aside>
+  </div>
 
-  <ul class="demo-index">
+  <ul class="demo-grid">
     <li>
       <%= link_to todo_root_path, class: "demo-card" do %>
-        <p class="micro-label">Demo 01</p>
+        <p class="card-no">01</p>
         <h2>Todo</h2>
-        <p>Optimistic local writes, and a server-only validation that rejects a
+        <p class="card-copy">Optimistic local writes, and a server-only validation that rejects a
         title after the browser already accepted it.</p>
-        <span class="go">Open →</span>
+        <span class="go">Open ⟶</span>
       <% end %>
     </li>
     <li>
       <%= link_to slack_root_path, class: "demo-card" do %>
-        <p class="micro-label">Demo 02</p>
-        <h2>Swiss Slack</h2>
-        <p>Channels, DMs, and fake users who reply from the server — watch their
-        messages arrive over SSE without touching a WebSocket. Swag as we wack.</p>
-        <span class="go">Open →</span>
+        <p class="card-no">02</p>
+        <h2>Chat</h2>
+        <p class="card-copy">Channels, DMs, threads, and users who reply from the server —
+        messages arrive over SSE without touching a WebSocket.</p>
+        <span class="go">Open ⟶</span>
       <% end %>
     </li>
     <li>
       <%= link_to migrate_root_path, class: "demo-card" do %>
-        <p class="micro-label">Demo 03</p>
+        <p class="card-no">03</p>
         <h2>Ship v2</h2>
-        <p>Fill a local database, leave writes unsynced, then run a migration over
-        the top of it. Your rows and your queue both have to survive.</p>
-        <span class="go">Open →</span>
+        <p class="card-copy">Fill a local database, leave writes unsynced, then run a migration
+        over the top. Your rows and your queue both have to survive.</p>
+        <span class="go">Open ⟶</span>
       <% end %>
     </li>
     <li>
       <%= link_to console_root_path, class: "demo-card" do %>
-        <p class="micro-label">Demo 04</p>
+        <p class="card-no">04</p>
         <h2>Console</h2>
-        <p>No UI, no seeds, nothing staged — an ActiveRecord prompt against the
+        <p class="card-copy">No UI, no seeds, nothing staged — an ActiveRecord prompt against the
         database in this tab. Type a query the demo didn't anticipate.</p>
-        <span class="go">Open →</span>
+        <span class="go">Open ⟶</span>
       <% end %>
     </li>
   </ul>
 
-  <p class="meta">
-    <%= link_to "What this cost on your device →", receipts_path %>
-  </p>
+  <div class="board-band">
+    <span>Rendered by Rails inside your browser — runtime:
+      <strong><%= InstantRecord.browser? ? "browser (ruby.wasm + PGlite)" : "server (CRuby + Postgres)" %></strong></span>
+    <%= link_to "What this cost on your device ⟶", receipts_path %>
+  </div>
 
   <footer class="project-strip">
     <p class="micro-label">Open source</p>

@@ -40,7 +40,7 @@ const BOTTOM_SLACK_PX = 60
 const HISTORY_LABEL_DELAY_MS = 200
 
 export default class extends Controller {
-  static targets = ["scroller", "list", "sentinel"]
+  static targets = ["scroller", "list", "sentinel", "threadList"]
 
   connect() {
     this.busy = false
@@ -124,11 +124,22 @@ export default class extends Controller {
 
     // Offline or a bad response: keep what's on screen and let the next tick
     // retry.
-    const fresh = await fetchMessageList(this.listTarget.dataset.fragmentUrl)
+    const fresh = await fetchList(this.listTarget.dataset.fragmentUrl, "ol.messages")
     if (!fresh) return
 
     mergeRows(this.listTarget, fresh)
     if (stick) this.scrollToBottom()
+
+    // The open thread panel refreshes on the same signal with the same morph —
+    // replies are rows with data-id like everything else. Its own fragment URL
+    // carries the ?thread param, so the server renders just the replies list.
+    if (this.hasThreadListTarget) {
+      const replies = await fetchList(
+        this.threadListTarget.dataset.threadFragmentUrl,
+        "ol.thread-replies",
+      )
+      if (replies) mergeRows(this.threadListTarget, replies)
+    }
   }
 
   // --- History ---------------------------------------------------------------
@@ -200,7 +211,7 @@ export default class extends Controller {
     url.searchParams.set("floor_id", before.id)
     url.searchParams.set("deepen", "1")
 
-    return fetchMessageList(url)
+    return fetchList(url, "ol.messages")
   }
 
   // Prepend the rows we don't have, holding the viewport on whatever the reader
@@ -256,15 +267,15 @@ export default class extends Controller {
 const swControlled = () =>
   "serviceWorker" in navigator && !!navigator.serviceWorker.controller
 
-// Both callers want the same thing from a render: the message list, or null if
-// the page couldn't be reached. A thrown fetch and a non-ok response mean the
-// same thing to them, so they're answered the same way.
-const fetchMessageList = async (url) => {
+// All callers want the same thing from a render: one list out of the fragment,
+// or null if the page couldn't be reached. A thrown fetch and a non-ok
+// response mean the same thing to them, so they're answered the same way.
+const fetchList = async (url, selector) => {
   try {
     const response = await fetch(url)
     if (!response.ok) return null
     const doc = new DOMParser().parseFromString(await response.text(), "text/html")
-    return doc.querySelector("ol.messages")
+    return doc.querySelector(selector)
   } catch {
     return null
   }

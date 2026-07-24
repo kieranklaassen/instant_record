@@ -1,0 +1,22 @@
+<%# The thread's fragment contract (?fragment=1&thread=<id> serves just this
+    list): the conversation JS refreshes it with the same add-and-update morph
+    as the conversation — rows carry data-id, nothing is ever removed live. %>
+<ol class="thread-replies"
+    data-conversation-target="threadList"
+    data-thread-fragment-url="<%= slack_channel_path(@channel, fragment: 1, thread: @thread_parent.id) %>">
+  <% @thread_replies.each do |reply| %>
+    <li class="<%= "own" if reply.from_visitor? %>" data-id="<%= reply.id %>">
+      <div class="tile"><%= slack_initials(reply.chat_user) %></div>
+      <div class="message-main">
+        <div class="message-head">
+          <span class="author"><%= reply.chat_user&.name || "Unknown" %></span>
+          <span class="timestamp"><%= reply.created_at.strftime("%H:%M") %></span>
+          <% if reply.sync_state != "synced" %>
+            <span class="flag">· pending</span>
+          <% end %>
+        </div>
+        <p class="body"><%= reply.body %></p>
+      </div>
+    </li>
+  <% end %>
+</ol>
