@@ -143,6 +143,21 @@ Useful helpers:
 - `InstantRecord.sync_now` — force a sync pass (the background loop runs anyway)
 - `server_only { ... }` / `browser_only { ... }` — runtime-scoped model rules
 - `InstantRecord.browser?` — the underlying runtime check, for anywhere else
+- `InstantRecord::Client.applying_remote?` — whether the write running right now arrived from the server, rather than being made here
+- `InstantRecord.server_url(path)` — the URL that reaches the authoritative server from either runtime, honouring a customised `mount_path`
+
+Convergence is last-write-wins on `updated_at`, and the value that loses is gone from the row. A model can watch for that:
+
+```ruby
+class Issue < ApplicationRecord
+  include InstantRecord::Syncable
+
+  # A value from the server that last-write-wins threw away. The block runs with
+  # the losing attribute hash at the only moment it exists here — nothing is
+  # assigned, no callback fires, and the gem keeps no copy.
+  on_discarded_change { |attributes| Rails.logger.info("dropped #{attributes["title"].inspect}") }
+end
+```
 
 #### Server-only controller behavior: auth and scoping
 
@@ -264,7 +279,7 @@ bin/rails test
 cd pwa && yarn install && cd ..
 
 # One-time browser build (~5 min)
-bin/rails instant_record:build    # writes pwa/public/app.wasm (~83 MB)
+bin/rails instant_record:build    # writes pwa/public/app.wasm (~62 MB)
 
 # Run it — sync server on :3000, PWA on :5173
 bin/dev
@@ -319,12 +334,12 @@ There is no heartbeat in the browser: a sync pass runs on a local write, at boot
 Measured on the demo (Chrome, M-series MacBook):
 
 - Rails 8.1.3 boots under wasm32-wasi with the full gem bundle, including this gem.
-- Warm boot — VM init plus PGlite schema prepare — in **~1.8 seconds**; the `app.wasm` module is **82.7 MB** raw.
+- Warm boot — VM init plus PGlite schema prepare — in **~1.8 seconds**; the `app.wasm` module is **61.9 MB** raw, **17.1 MB** gzipped over the wire.
 - Instant optimistic create with local persistence across reloads.
 - Two independent clients converging through POST + SSE, including fresh-client catch-up.
 - Server rejection reconciled by rolling the local record back.
 - ~5,000 seeded messages in one channel: a fresh client bootstraps only the newest window per conversation, older pages stream in on scroll, and a cold boot evicts the local database back to the window.
-- 146 tests (gem + demo) covering the atomic outbox, idempotent apply, last-write-wins both ways, cursor resume, rejection reconcile, bootstrap hydration, keyset history pages, and eviction.
+- 226 tests (116 gem + 110 demo) covering the atomic outbox, idempotent apply, last-write-wins both ways, cursor resume, rejection reconcile, bootstrap hydration, keyset history pages, eviction, migration over a populated local store, and schema skew in both directions.
 
 ## Roadmap ideas
 
