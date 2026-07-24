@@ -2,6 +2,10 @@
 
 Rails models that run in the browser, sync to your server, and keep working offline.
 
+**[Try the live demo →](https://instant-record.kieranklaassen.com)** — a real Rails app running on ruby.wasm and PGlite in your tab. Open it in two windows and watch them converge; turn off your network and keep typing. It ships a REPL (`/console`) so you can run Ruby against the runtime yourself, and `/receipts` measures what it costs on your own device.
+
+> First visit downloads a ~18MB (gzipped) wasm bundle and takes a few seconds to boot. After that it runs from your local database.
+
 ## The Problem
 
 Apps like Linear feel instant because they never make you wait on the network: every read and write hits a **local** database, the UI renders from local data, and syncing with the server happens in the background. No spinners, no loading states, and offline works for free.
