@@ -1,7 +1,9 @@
 require "uri"
 require "time"
+require "active_support/notifications"
 require "instant_record/client/transport"
 require "instant_record/client/notifier"
+require "instant_record/client/instrumentation"
 
 module InstantRecord
   # Browser-side sync client. Ruby owns the whole sync loop — transport
@@ -101,14 +103,18 @@ module InstantRecord
       # with subsequent events re-applies idempotently. Returns true when the
       # snapshot applied.
       def bootstrap
-        body = transport.get_json("/bootstrap")
-        Array(body["records"]).each { |record| apply_change(record) }
+        instrument("bootstrap") do |event|
+          body = transport.get_json("/bootstrap")
+          records = Array(body["records"])
+          records.each { |record| apply_change(record) }
+          event[:records] = records.size
 
-        # Cursor written last: a crash mid-apply leaves it nil, so the next
-        # tick re-bootstraps; upserts make the retry idempotent. A failure
-        # never falls through to a cursor-0 poll of the full change log.
-        self.cursor = body["cursor"]
-        true
+          # Cursor written last: a crash mid-apply leaves it nil, so the next
+          # tick re-bootstraps; upserts make the retry idempotent. A failure
+          # never falls through to a cursor-0 poll of the full change log.
+          self.cursor = body["cursor"]
+          true
+        end
       rescue Transport::Error => e
         log_failure("bootstrap", e)
         false
@@ -119,9 +125,16 @@ module InstantRecord
         mutations = pending_mutations
         return false if mutations.empty?
 
-        body = transport.post_json("/mutations", { mutations: mutations })
-        apply_results(body["results"])
-        true
+        instrument("drain") do |event|
+          body = transport.post_json("/mutations", { mutations: mutations })
+          apply_results(body["results"])
+
+          results = Array(body["results"]).map { |r| r.deep_stringify_keys }
+          event[:posted] = mutations.size
+          event[:rejected] = results.count { |r| r["status"] == "rejected" }
+          event[:reasons] = results.filter_map { |r| r["reason"] }.uniq.first(3)
+          true
+        end
       rescue Transport::Error => e
         log_failure("drain", e)
         false
@@ -177,6 +190,7 @@ module InstantRecord
         # re-applies the batch, which the upserts make safe.
         self.cursor = newest_cursor if newest_cursor
         notifier.records_changed if applied.positive?
+        instrument("stream", applied: applied) if applied.positive?
         applied
       end
 
@@ -192,17 +206,24 @@ module InstantRecord
         return false if streaming?
 
         changed = false
+        applied = 0
         last_cursor = nil
 
-        transport.each_event("/events?after=#{cursor}&window=0") do |event|
-          event = event.deep_stringify_keys
-          changed = true if apply_change(event)
-          last_cursor = event["cursor"] || last_cursor
-        end
+        instrument("poll") do |note|
+          transport.each_event("/events?after=#{cursor}&window=0") do |event|
+            event = event.deep_stringify_keys
+            if apply_change(event)
+              changed = true
+              applied += 1
+            end
+            last_cursor = event["cursor"] || last_cursor
+          end
+          note[:applied] = applied
 
-        # One cursor write per poll, not per event. A crash before this line
-        # re-applies the batch next poll; upserts + LWW make that idempotent.
-        self.cursor = last_cursor if last_cursor
+          # One cursor write per poll, not per event. A crash before this line
+          # re-applies the batch next poll; upserts + LWW make that idempotent.
+          self.cursor = last_cursor if last_cursor
+        end
         changed
       rescue Transport::Error => e
         log_failure("poll", e)
@@ -241,11 +262,15 @@ module InstantRecord
           return { ok: true, applied: 0, has_more: local.size > limit || mark[:has_more] }
         end
 
-        body = transport.get_json(history_path(model, partition, before_at, before_id, limit))
-        records = Array(body["records"])
-        records.each { |record| apply_change(record) }
-        extend_history_mark(model, partition, records, has_more: !!body["has_more"])
-        { ok: true, applied: records.size, has_more: !!body["has_more"] }
+        instrument("fetch_history") do |event|
+          body = transport.get_json(history_path(model, partition, before_at, before_id, limit))
+          records = Array(body["records"])
+          records.each { |record| apply_change(record) }
+          extend_history_mark(model, partition, records, has_more: !!body["has_more"])
+          event[:applied] = records.size
+          event[:has_more] = !!body["has_more"]
+          { ok: true, applied: records.size, has_more: !!body["has_more"] }
+        end
       rescue Transport::Error => e
         log_failure("fetch_history", e)
         { ok: false, applied: 0, has_more: nil, error: e.message }
@@ -458,7 +483,20 @@ module InstantRecord
       end
 
       def log_failure(phase, error)
+        instrument("offline", phase: phase, error: error.message)
         warn "[instant_record] #{phase} failed (offline?): #{error.message}"
+      end
+
+      # Every meaningful sync outcome is announced through
+      # ActiveSupport::Notifications — the seam a host app subscribes to for
+      # logging or metrics, and the one the browser runtime's forwarder turns
+      # into inspector entries (see Client::Instrumentation). Ruby authors the
+      # narrative because Ruby is what knows: the worker can only say it made a
+      # request; this side knows what the pass actually did. Free-standing
+      # events (no block) fire instantly; wrapped ones carry duration and, on a
+      # raise, the exception in the payload.
+      def instrument(name, payload = {}, &block)
+        ActiveSupport::Notifications.instrument("#{name}.instant_record", payload, &block)
       end
     end
   end

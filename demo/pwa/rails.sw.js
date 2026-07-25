@@ -56,6 +56,19 @@ const report = (entry) => {
   });
 };
 
+// Ruby-authored entries, same pipe. The VM knows what a sync pass actually did
+// — "drained 3, 1 rejected: Body is too long" — where this worker only knows
+// it saw a POST return 200. The gem's Client::Instrumentation forwards its
+// ActiveSupport::Notifications events here as ready-made entries; the worker
+// contributes transport, backlog, and delivery, never authorship.
+self.instantRecordReport = (json) => {
+  try {
+    report(JSON.parse(json));
+  } catch {
+    // Narration must never break sync.
+  }
+};
+
 // Assets arrive as a burst after every navigation. Worth knowing that the
 // bundle serves its own asset pipeline — but once per page, as a total, not as
 // a dozen lines that bury the sync flow. (They are re-requested each load
@@ -338,12 +351,18 @@ const fetchHistory = async (request, attempts = 8) => {
       return { ok: false, error: String(e) };
     }
     if (!reply.busy) {
-      report({
-        kind: "history",
-        path: `fetch_history → ${reply.applied ?? 0} applied, more: ${!!reply.has_more}`,
-        status: reply.ok ? 200 : "failed",
-        ms: Math.round(performance.now() - startedAt),
-      });
+      // Success narrates itself from Ruby (fetch_history.instant_record →
+      // instantRecordReport); this side only reports what only it can see —
+      // the eval failing outright, or the busy/retry dance around the
+      // single-flight guard.
+      if (!reply.ok) {
+        report({
+          kind: "history",
+          path: "fetch_history",
+          status: "failed",
+          ms: Math.round(performance.now() - startedAt),
+        });
+      }
       return reply;
     }
     report({ kind: "history", path: "fetch_history → busy, retrying", status: "busy" });
@@ -569,7 +588,7 @@ const installApp = async () => {
 // changes this constant, which changes the service worker's bytes, which
 // makes the browser install the new worker on the next navigation — that is
 // the whole update mechanism for already-installed clients.
-const BUILD_VERSION = "96925a629df3";
+const BUILD_VERSION = "ee11f6812b82";
 
 self.addEventListener("activate", (event) => {
   console.log(

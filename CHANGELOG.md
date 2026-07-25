@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Instrumentation via `ActiveSupport::Notifications`: the sync client announces `bootstrap`, `drain` (with rejection counts and reasons), `poll`, `stream`, `fetch_history`, and `offline` as `<event>.instant_record` — the standard seam for host-app logging and metrics, with no new dependency. In the browser runtime a forwarder (`Client::Instrumentation`) turns these into sync-inspector entries, moving narration authorship from the service worker's fetch inference ("POST /mutations 200") to the runtime that knows what happened ("drained 3, 1 rejected: Body is too long"). The worker keeps transport, backlog, scheduler, and boot narration — the parts that are genuinely its own.
 - SSE idle heartbeat: `GET /events` writes a comment (`: hb`) after `config.instant_record.sse_heartbeat_seconds` (default 15) of quiet. Keeps reverse proxies from reaping "idle" streams, and turns a vanished client into an `EPIPE` within one interval instead of a fiber held to the end of the window. Client hang-ups now end the stream quietly instead of logging a backtrace per departed visitor. Comments are invisible to clients — EventSource ignores them by spec and the gem's parser skips them.
 - Documented the window/server relationship: the 25s `sse_window_seconds` default is Puma sizing (a stream holds a thread); under Falcon streams are fibers and minutes-long windows are the norm (Mercure defaults to 600s). The demo reads `INSTANT_RECORD_SSE_WINDOW_SECONDS` so a deployment can raise it without code changes.
 

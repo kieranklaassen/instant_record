@@ -119,6 +119,10 @@ module InstantRecord
     def start(cold_boot: true)
       return false unless browser?
 
+      # Sync narration flows to the inspector from here on: Ruby authors the
+      # entries, the worker's report pipe carries them (see
+      # Client::Instrumentation).
+      Client::Instrumentation.attach
       Client.request_eviction if cold_boot
       @started = true
     end
