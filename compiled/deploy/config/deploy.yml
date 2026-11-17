@@ -1,0 +1,40 @@
+# Kamal config for the compiled browser build as a static site.
+# Values come from the environment: copy deploy.env.example to .kamal/deploy.env, fill it in,
+# and `source .kamal/deploy.env` before running kamal.
+minimum_version: 2.12.0
+
+service: <%= ENV.fetch("KAMAL_SERVICE", "instant-record-compiled") %>
+image: <%= ENV.fetch("KAMAL_IMAGE") %>
+
+servers:
+  web:
+    - <%= ENV.fetch("KAMAL_WEB_HOST") %>
+
+# Its own hostname, not a path on the ruby.wasm demo's host: that demo's service worker
+# takes over every request on its origin, so the two builds cannot share one.
+proxy:
+  ssl: true
+  hosts:
+<% ENV.fetch("KAMAL_PROXY_HOSTS").split(",").map(&:strip).reject(&:empty?).each do |proxy_host| %>
+    - <%= proxy_host %>
+<% end %>
+  app_port: 80
+  healthcheck:
+    path: /up
+
+registry:
+  server: <%= ENV.fetch("KAMAL_REGISTRY_SERVER", "ghcr.io") %>
+  username: <%= ENV.fetch("KAMAL_REGISTRY_USERNAME") %>
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+
+builder:
+  arch: <%= ENV.fetch("KAMAL_BUILDER_ARCH", "amd64") %>
+<% unless ENV["KAMAL_BUILDER_REMOTE"].to_s.empty? %>
+  remote: <%= ENV["KAMAL_BUILDER_REMOTE"] %>
+<% end %>
+  # Build from this folder as it is: site/ is a build output and is not committed.
+  context: "."
+
+ssh:
+  user: <%= ENV.fetch("KAMAL_SSH_USER") %>

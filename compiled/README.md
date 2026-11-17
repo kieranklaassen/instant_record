@@ -98,3 +98,22 @@ Copy `toolchain.env.example` to `toolchain.env`, fill in the paths, then:
 the Rails sync server (create, toggle, delete, a server write arriving, a rejection rolling back,
 a Slack post with its bot reply, a thread reply, reload, a fresh browser bootstrapping, no page
 errors).
+
+## Deploying it
+
+`deploy/` serves the built folder as a static site: nginx in a container, deployed with Kamal.
+
+    SYNC_ENDPOINT=https://your-rails-app.example/instant_record python3 pipeline/build.py
+    cp -R web/dist deploy/site
+    python3 deploy/scrub_path.py deploy/site/app-*.wasm "$PWD/.build/wasm-tree"
+    cd deploy
+    cp deploy.env.example .kamal/deploy.env    # fill in, then:
+    source .kamal/deploy.env
+    kamal deploy --version <a tag for this build>
+
+- The sync server must allow cross-origin requests from the site; the gem's endpoints do.
+- Give it its own hostname. It cannot live under a path of a host that runs the ruby.wasm build:
+  that build's service worker takes over every request on its origin.
+- The module contains the absolute path of the folder it was built in; `scrub_path.py` replaces
+  it with a neutral one of the same length.
+- Every path that is not a file serves the shell page, so deep links and reloads work.
