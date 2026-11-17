@@ -11,17 +11,21 @@ upstream. Nothing here is loaded by the gem.
 
 ## Numbers
 
-Headless Chrome on one Mac, Rails sync server on localhost, medians.
+Headless Chrome on one Mac, Rails sync server on localhost, medians of three runs.
 
-| | ruby.wasm build | This build (baseline) |
+| | ruby.wasm build | This build |
 |---|---|---|
 | First visit, gzipped | 17.1 MB (`app.wasm` alone) | 2.56 MB |
-| Warm boot to a rendered Slack conversation | about 2.3 to 2.8 s | 199 ms |
-| Cold boot, including bootstrap from Rails | 3.3 to 8.8 s over a real network | 1313 ms |
-| Switch channel | not measured | 26 ms |
-| Todo write to rendered row | not measured | 51 ms |
+| Warm boot to a rendered Slack conversation | about 2.3 to 2.8 s | 113 ms |
+| Cold boot, including bootstrap from Rails | 3.3 to 8.8 s over a real network | 199 ms |
+| Switch channel | not measured | 23 ms |
+| Todo write to rendered row | not measured | 16 ms |
 
-The ruby.wasm column was measured against the live demo; it is not a like-for-like run.
+The ruby.wasm column was measured against the live demo; it is not a like-for-like run. Boot times
+are taken on the page's own clock (the first frame in which the conversation is laid out).
+
+Before an optimization pass these were 122 ms, 1238 ms, 23 ms and 39 ms; what changed and what
+did not work is in `docs/optimize/compiled-app-speed-report.md`.
 
 ## What is the same code
 
@@ -87,6 +91,8 @@ Copy `toolchain.env.example` to `toolchain.env`, fill in the paths, then:
     python3 pipeline/build.py     # writes web/dist
     node bench/serve.mjs          # serves it on http://127.0.0.1:4174
     node bench/bench.mjs          # builds, measures, and runs the behavior checks
+
+`bench/env.mjs` holds one machine's Rails and Postgres settings; adjust it to yours.
 
 `bench/bench.mjs` prints one JSON object: the timings above and twelve behavior checks against
 the Rails sync server (create, toggle, delete, a server write arriving, a rejection rolling back,

@@ -1,4 +1,5 @@
 // Timings for the compiled app in headless Chrome. Every number is a median over repeated samples.
+//   Boot times are taken on the page's own clock: the first frame in which the row is laid out.
 //   cold_boot_ms  brand-new profile -> /slack -> first conversation row. Includes the download, the wasm
 //                 compile, the gem's bootstrap from Rails, and any reload the page does on the way.
 //   warm_boot_ms  assets cached, local database saved, nothing running -> /slack -> first conversation row.
@@ -21,11 +22,34 @@ const timed = (page, act, done, arg) => page.evaluate(({ act, done, arg }) => ne
   new Function("arg", "return (" + act + ")(arg)")(arg);
 }), { act: act.toString(), done: done.toString(), arg });
 
-const loadUntil = async (page, url, selector) => {
+// Runs in every document before its own scripts. Records, on the page's own clock, the first
+// animation frame in which the awaited element is laid out. Timing from inside the page matters:
+// the app replaces the shell document when it boots, and a driver-side wait notices that
+// replacement about 80 ms late, which would be charged to the app.
+const probe = () => {
+  const targets = { conversation: "ol.messages li", todo: "form.todo-form input[type=text]" };
+  window.__boot = {};
+  const tick = () => {
+    for (const [name, selector] of Object.entries(targets)) {
+      if (window.__boot[name] !== undefined) continue;
+      const element = document.querySelector(selector);
+      if (!element) continue;
+      const box = element.getBoundingClientRect();
+      if (box.width > 0 && box.height > 0) window.__boot[name] = performance.now();
+    }
+    if (Object.keys(window.__boot).length === 0 && performance.now() < 60000) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+};
+
+// Milliseconds from asking the browser to navigate until the awaited element is laid out,
+// across any reload on the way: the final document's own start time plus its in-page stamp.
+const loadUntil = async (page, url, target) => {
   const started = Date.now();
   await page.goto(url);
-  await page.waitForSelector(selector, { timeout: 60000 });
-  return Date.now() - started;
+  await page.waitForFunction((name) => window.__boot && window.__boot[name] !== undefined, target, { timeout: 60000 });
+  const { origin, at } = await page.evaluate((name) => ({ origin: performance.timeOrigin, at: window.__boot[name] }), target);
+  return origin - started + at;
 };
 const stimulus = (page, identifier) => page.waitForFunction(
   (name) => !!window.Stimulus && window.Stimulus.controllers.some((c) => c.identifier === name), identifier, { timeout: 20000 });
@@ -38,9 +62,10 @@ export async function measure(base) {
     for (let run = 0; run < CONTEXTS; run++) {
       await fetch(base + "/__test/traffic?reset=1");
       const context = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+      await context.addInitScript(probe);
 
       const first = await context.newPage();
-      samples.cold.push(await loadUntil(first, base + "/slack", "ol.messages li"));
+      samples.cold.push(await loadUntil(first, base + "/slack", "conversation"));
       if (run === 0) traffic = await (await fetch(base + "/__test/traffic")).json();
       await first.waitForTimeout(2000); // let the first sync finish any refresh before timing clicks
       await stimulus(first, "conversation");
@@ -73,14 +98,14 @@ export async function measure(base) {
 
       for (let i = 0; i < WARM_PER_CONTEXT; i++) {
         const page = await context.newPage();
-        samples.warm.push(await loadUntil(page, base + "/slack", "ol.messages li"));
+        samples.warm.push(await loadUntil(page, base + "/slack", "conversation"));
         const marks = await page.evaluate(() => window.__spinel?.marks ?? {});
         if (typeof marks.compileMs === "number") samples.compile.push(marks.compileMs);
         if (typeof marks.firstRequestMs === "number") samples.firstRequest.push(marks.firstRequestMs);
         await page.close();
       }
       const todo = await context.newPage();
-      samples.todoWarm.push(await loadUntil(todo, base + "/todo", "form.todo-form input[type=text]"));
+      samples.todoWarm.push(await loadUntil(todo, base + "/todo", "todo"));
       await context.close();
     }
   } finally {

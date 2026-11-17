@@ -24,20 +24,8 @@ window.__spinel = { marks, call };
 const isLocal = (url) => url.origin === location.origin &&
   !url.pathname.startsWith("/assets/") && !url.pathname.startsWith("/harness/") && !/^\/app[-.\w]*\.wasm$/.test(url.pathname);
 
-async function appRequest(method, path, body, contentType) {
-  let result = await call("request", { method, path, body, contentType });
-  let redirected = false;
-  let finalPath = path;
-  for (let hops = 0; hops < 5 && result.status >= 300 && result.status < 400; hops++) {
-    const location = result.headers.find(([name]) => name.toLowerCase() === "location")?.[1];
-    if (!location) break;
-    const next = new URL(location, window.location.origin);
-    finalPath = next.pathname + next.search;
-    redirected = true;
-    result = await call("request", { method: "GET", path: finalPath });
-  }
-  return { result, redirected, finalPath };
-}
+// One page request; the worker follows the app's redirects and returns the final answer.
+const appRequest = (method, path, body, contentType) => call("navigate", { method, path, body, contentType });
 
 // The same seam a service worker's fetch handler is, from inside the page.
 const networkFetch = window.fetch.bind(window);
@@ -91,10 +79,12 @@ function recordsChanged() {
   }
 }
 
-const boot = await call("boot");
+// The shell began compiling the module before this script loaded; pass it on, and ask for the
+// current page in the same message so boot and first render are one round trip.
+const boot = await call("boot", { module: await window.__wasm, path: location.pathname + location.search });
 marks.booted = performance.now();
-marks.compileMs = boot.compileMs;
-const { result, finalPath } = await appRequest("GET", location.pathname + location.search);
+marks.compileMs = window.__wasmMs ?? boot.compileMs;
+const { result, finalPath } = boot.first;
 marks.firstResponse = performance.now();
 marks.firstRequestMs = result.ms;
 if (finalPath !== location.pathname + location.search) history.replaceState(null, "", finalPath);

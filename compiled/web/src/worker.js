@@ -52,7 +52,20 @@ function scheduleSave() {
   }, 200);
 }
 
+// A write should reach the server soon, but not ahead of the page's own next request: the page
+// that just posted asks for its refreshed view straight away, and a sync pass started first would
+// make it wait behind a wasm run and an HTTP round trip. So the pass a write asks for starts once
+// the worker has been quiet for a moment.
+const QUIET_MS = 30;
+let kickTimer = null;
+function kickSync() {
+  clearTimeout(kickTimer);
+  kickTimer = setTimeout(syncPass, QUIET_MS);
+}
+
 async function syncPass() {
+  clearTimeout(kickTimer);
+  kickTimer = null;
   const result = host.sync(SYNC_ENDPOINT);
   if (result.changed || result.notified) {
     // Save before telling the tab: a page without an in-place refresh reloads on this message,
@@ -64,32 +77,74 @@ async function syncPass() {
   return result;
 }
 
-async function boot() {
+// Start reading what an earlier visit saved as soon as the worker exists, not when the boot
+// message arrives.
+const saved = Promise.all([load("development.sqlite3"), load("secret_key_base")]);
+
+// One page request through the app, following its redirects here so the page gets the final
+// answer in one round trip.
+function navigate({ method, path, body, contentType }) {
   const started = performance.now();
-  const [module, savedDatabase, savedSecret] = await Promise.all([
-    WebAssembly.compileStreaming(fetch(import.meta.env.VITE_WASM_URL || "/app.wasm")),
-    load("development.sqlite3"),
-    load("secret_key_base"),
+  let result = host.request(method, path, { body: body ?? "", contentType: contentType || "application/x-www-form-urlencoded" });
+  let redirected = false;
+  let finalPath = path;
+  for (let hops = 0; hops < 5 && result.status >= 300 && result.status < 400; hops++) {
+    const location = result.headers.find(([name]) => name.toLowerCase() === "location")?.[1];
+    if (!location) break;
+    const next = new URL(location, self.location.origin);
+    finalPath = next.pathname + next.search;
+    redirected = true;
+    result = host.request("GET", finalPath);
+  }
+  if (method !== "GET") {
+    scheduleSave();
+    kickSync(); // a local write: push it up as soon as the page has what it asked for
+  } else if (kickTimer) {
+    kickSync(); // still busy with the page: keep the pending pass behind it
+  }
+  return { result: { ...result, ms: performance.now() - started }, redirected, finalPath };
+}
+
+async function boot(payload = {}) {
+  const started = performance.now();
+  // The shell starts compiling the module itself and passes it in; compile here only if it did not.
+  const [module, [savedDatabase, savedSecret]] = await Promise.all([
+    payload.module || WebAssembly.compileStreaming(fetch(import.meta.env.VITE_WASM_URL || "/app.wasm")),
+    saved,
   ]);
   const compiled = performance.now();
   const secret = savedSecret || [...crypto.getRandomValues(new Uint8Array(64))].map((b) => b.toString(16).padStart(2, "0")).join("");
   if (!savedSecret) await store("secret_key_base", secret);
   host = new AppHost(module, { exchange, env: { SECRET_KEY_BASE: secret } });
-  if (savedDatabase) host.restoreDatabase(savedDatabase);
+  if (savedDatabase) {
+    host.restoreDatabase(savedDatabase);
+  } else {
+    // First visit: nothing local to show yet. Take the server's snapshot now, before the first
+    // page is rendered, instead of rendering an empty page, waiting for the sync timer and
+    // reloading. If the server cannot be reached the pass fails fast and the page renders empty.
+    const first = host.sync(SYNC_ENDPOINT);
+    if (first.changed) scheduleSave();
+  }
   setInterval(syncPass, SYNC_EVERY_MS);
-  return { compileMs: compiled - started, restored: !!savedDatabase };
+  // Answer the page's first request in the same round trip as the boot.
+  const first = payload.path ? navigate({ method: "GET", path: payload.path }) : null;
+  return { compileMs: compiled - started, restored: !!savedDatabase, first };
 }
 
 self.onmessage = async (event) => {
   const { id, type, payload } = event.data;
   try {
-    if (type === "boot") return self.postMessage({ id, result: await boot() });
+    if (type === "boot") return self.postMessage({ id, result: await boot(payload) });
+    if (type === "navigate") return self.postMessage({ id, result: navigate(payload) });
     if (type === "request") {
+      // A single request with no redirect following, for callers that asked for redirect: "manual".
       const started = performance.now();
       const result = host.request(payload.method, payload.path, { body: payload.body ?? "", contentType: payload.contentType || "application/x-www-form-urlencoded" });
       if (payload.method !== "GET") {
         scheduleSave();
-        setTimeout(syncPass, 0); // a local write: push it up right away
+        kickSync();
+      } else if (kickTimer) {
+        kickSync();
       }
       return self.postMessage({ id, result: { ...result, ms: performance.now() - started } });
     }
