@@ -30,7 +30,7 @@ try {
   })));
   await go("/todo");
   await ready("issues");
-  const facts = await page.locator(".todo-facts").innerText();
+  const facts = await page.locator(".todo-facts").textContent();
   assert.match(facts, /Spinel/);
   assert.match(facts, /SQLite/);
   assert.doesNotMatch(facts, /ruby\.wasm|PGlite/i);
