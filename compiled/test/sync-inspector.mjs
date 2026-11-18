@@ -79,8 +79,26 @@ try {
   await page.waitForFunction(() => document.querySelector("#pending-count")?.textContent.trim().startsWith("0 "));
   assert.equal(await serverCount(), 1);
   await slow.uncheck();
+
+  // A second tab writes upstream while the inspected tab is offline.
+  await offline.check();
+  const peer = await browser.newPage();
+  await peer.goto(url);
+  await ready(peer);
+  const remoteTitle = "peer " + randomUUID();
+  const peerForm = peer.locator("form.todo-form");
+  await peerForm.locator("input[type=text]").fill(remoteTitle);
+  await peerForm.evaluate(f => f.requestSubmit());
+  await peer.locator("ul.issues li").filter({ hasText: remoteTitle }).waitFor();
+  await peer.locator('li[data-kind=sync][data-status=ok]').filter({ hasText: "POST /instant_record/mutations" }).waitFor();
+  await log.locator('li[data-kind=stream][data-status=bad]').filter({ hasText: "/instant_record/events" }).first().waitFor();
+  assert.equal(await page.locator("ul.issues li").filter({ hasText: remoteTitle }).count(), 0);
+  await offline.uncheck();
+  await page.locator("ul.issues li").filter({ hasText: remoteTitle }).waitFor();
+  await log.locator('li[data-kind=stream][data-status=ok]').filter({ hasText: "/instant_record/events" }).first().waitFor();
+  await peer.close();
   assert.deepEqual(errors, []);
-  console.log("Inspector verified: boot history, Clear, local requests, offline reload, reconnection and two-second Slow sync.");
+  console.log("Inspector verified: boot history, Clear, local requests, offline reload, two-second Slow sync and incoming peer changes.");
 } finally {
   await browser.close();
 }
