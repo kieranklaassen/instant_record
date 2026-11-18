@@ -2,9 +2,7 @@
 
 Rails models that run in the browser, sync to your server, and keep working offline.
 
-**[Try the live demo →](https://instant-record.kieranklaassen.com)** — a real Rails app running on ruby.wasm and PGlite in your tab. Open it in two windows and watch them converge; turn off your network and keep typing. It ships a REPL (`/console`) so you can run Ruby against the runtime yourself, and `/receipts` measures what it costs on your own device.
-
-> First visit downloads a ~18MB (gzipped) wasm bundle and takes a few seconds to boot. After that it runs from your local database.
+**[Try the live demo →](https://instant-record.kieranklaassen.com)** — a Rails app compiled with Spinel, running against SQLite in your tab. Open Todo in two windows to see the same records, inspect local queries in `/console`, or visit `/receipts` to measure boot and query time on your device.
 
 ## The Problem
 
@@ -284,6 +282,12 @@ The static site is written to `tmp/instant_record/compiled/web/dist`. The defaul
 sync endpoint is `/instant_record`. Use `SYNC_ENDPOINT` for a separately hosted
 Rails server. The compiled demo includes Todo, Chat, Ship v2, local database
 inspection and Receipts. [Toolchain setup and supported features](compiled/README.md).
+
+To ship the optimized browser app with a Rails deploy, set
+`config.instant_record.build_on_precompile = :compiled` and configure its browser
+hostname. Rails asset precompilation publishes the build. Open tabs detect the
+release, and returning profiles migrate their local database before rendering.
+[Deployment and browser migration setup](compiled/README.md#ship-on-a-rails-deploy).
 
 ## Running the demo
 

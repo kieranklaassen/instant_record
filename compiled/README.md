@@ -32,6 +32,11 @@ for application builds. Point `INSTANT_RECORD_TOOLCHAIN` at another config if de
 
 ## Build and serve
 
+The build machine needs the SQLite adapter and Prism in the app's bundle. For
+a PostgreSQL app, add `gem "sqlite3", ">= 2.1", require: false` and
+`gem "prism", require: false` to the Gemfile and run `bundle install`.
+These gems generate SQL on the build machine. The sync server keeps its existing database.
+
 ```sh
 bin/rails db:migrate
 bin/rails instant_record:compile
@@ -47,7 +52,58 @@ Serve `tmp/instant_record/compiled/web/dist` from the root of a static origin.
 Return its `index.html` for page routes and serve Wasm with the
 `application/wasm` content type. Route `/instant_record` to your Rails server
 or build with `SYNC_ENDPOINT=https://your-rails.example/instant_record`.
-The task stages sources outside the gem and leaves the Rails app’s public directory intact.
+The standalone compile task stages sources outside the gem.
+
+### Ship on a Rails deploy
+
+```ruby
+# config/application.rb
+config.instant_record.build_on_precompile = :compiled
+config.instant_record.compiled_host = "browser.example.com"
+```
+
+Point that hostname at Rails and allow it in your Rails host configuration.
+Run `bin/rails assets:precompile` with the compiler toolchain available. Include
+`public/instant_record_compiled` from the build in the deployed Rails image.
+The hook publishes an immutable release directory and atomically switches the
+`current` symlink after a successful build. The gem serves browser navigation and
+compiled assets on the configured hostname. Sync requests continue through Rails.
+Keep the previous release directory in the image or shared asset store during a
+rollout so a tab that just received the old HTML can still fetch its worker and Wasm.
+The existing `build_on_precompile = true` setting selects ruby.wasm/PGlite.
+
+Open compiled tabs check the release manifest on focus, on reconnect, and once
+a minute while visible. An idle tab reloads. After input, the tab offers a
+reload button so the reader can finish editing. Applications with custom draft
+state can cancel the `instant-record:before-update` window event. When adopting
+this mechanism from an older bundle, reload those tabs once.
+
+### Migrate an existing browser database
+
+Commit the Rails migration and its updated `db/schema.rb` together. The
+compiler reads the configured Rails migration paths. Literal `create_table`,
+`add_column`, `add_index`, and `execute` operations in `change` or `up` are
+compiled to SQLite SQL. For example, a release can add a column and backfill
+it with a SQL UPDATE that runs against each browser's existing rows.
+
+For a Ruby backfill, adapter-specific SQL, or another unsupported operation,
+provide `db/browser_migrate/<same migration filename>.sql`. This file contains
+the SQLite equivalent for the whole migration. For renames and deletions,
+handle any queued mutations that refer to the old fields and keep the sync
+server compatible with older clients. An unsupported declaration without a
+companion file fails the build before publication.
+
+New profiles start at the dumped schema. Returning profiles run only pending
+steps before rendering. The database and migration version commit in one
+IndexedDB transaction. A failed upgrade keeps the previous database and outbox.
+An older release cannot open a newer saved schema. Fix a bad published migration
+with a new, higher-numbered migration and roll forward.
+
+If an earlier compiled app already stored **unversioned** SQLite snapshots,
+set `config.instant_record.compiled_migration_baseline` to the numeric Rails
+schema version that bundle actually shipped. Publish a versioned baseline
+release before changing the schema. Existing profiles with differing unrecorded
+schemas require an app-specific migration strategy. A fresh app needs no baseline.
 
 ## Demo and compatibility
 
@@ -72,8 +128,8 @@ ruby.wasm/PGlite backend. Tabs on the same origin and browser profile share
 one durable SQLite snapshot. Each write picks up the latest revision and saves
 the changed records and outbox together before the browser confirms the write.
 Pending changes survive closing every tab and sync when the app reopens online.
-Changes to existing columns need an explicit browser-side
-migration. The demo’s Ship v2 page demonstrates one. The sync server remains authoritative across clients.
+The demo's Ship v2 page runs its teaching migration on demand. Consumer apps
+apply their release migrations at boot. The sync server remains authoritative across clients.
 
 ## Deploying it
 
