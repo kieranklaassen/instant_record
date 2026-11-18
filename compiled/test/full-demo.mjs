@@ -16,6 +16,18 @@ try {
   await go("/");
   assert.deepEqual(await page.locator(".demo-card").evaluateAll(cards => cards.map(c => c.getAttribute("href"))), ["/todo","/slack","/migrate","/console"]);
   await page.getByRole("link",{name:/performance receipts/i}).waitFor();
+  const previews = page.locator(".demo-card img");
+  assert.equal(await previews.count(), 4);
+  for (const preview of await previews.all()) {
+    await preview.scrollIntoViewIfNeeded();
+    await preview.evaluate(img => img.decode());
+  }
+  assert.equal(await page.locator(".demo-grid").evaluate(grid => getComputedStyle(grid).display), "grid");
+  await page.locator('link[rel="icon"]').evaluateAll(icons => Promise.all(icons.map(icon => {
+    const image = new Image();
+    image.src = icon.href;
+    return image.decode();
+  })));
   await go("/todo");
   await ready("issues");
   await page.locator("[data-inspector-target=offline]").check();

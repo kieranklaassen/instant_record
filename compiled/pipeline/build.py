@@ -286,9 +286,12 @@ def main():
     shutil.copy(final, os.path.join(dist, f"app-{digest}.wasm"))
     assets = os.path.join(dist, "assets")
     os.makedirs(os.path.join(assets, "controllers"), exist_ok=True)
-    for js_dir in (os.path.join(emit, "static/assets"), os.path.join(app, "app/javascript")):
-        if os.path.isdir(js_dir):
-            shutil.copytree(js_dir, assets, dirs_exist_ok=True)
+    # The Rails helpers can emit logical URLs such as /assets/icon.svg even
+    # when Roundhouse doesn't generate a digested static asset directory.
+    for asset_dir in (os.path.join(app, "app/assets/stylesheets"), os.path.join(app, "app/assets/images"),
+                      os.path.join(emit, "static/assets"), os.path.join(app, "app/javascript")):
+        if os.path.isdir(asset_dir):
+            shutil.copytree(asset_dir, assets, dirs_exist_ok=True)
     for name in ["turbo.min.js", "stimulus.min.js", "stimulus-loading.js"]:
         found = subprocess.run(["find", T["RAILS_GEMS"], "-name", name], stdout=subprocess.PIPE, text=True).stdout.split("\n")[0]
         if found:
