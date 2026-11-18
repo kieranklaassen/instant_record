@@ -142,11 +142,10 @@ open(os.path.join(app, "lib/instant_record/client/notifier.rb"), "w").write('''m
 end
 ''')
 
-# 7. Instrumentation forwards ActiveSupport::Notifications to a JS function for the demo's sync
-#    inspector, which this build does not carry.
+# 7. The compiled worker reports requests and sync results directly to the inspector.
 open(os.path.join(app, "lib/instant_record/client/instrumentation.rb"), "w").write('''module InstantRecord
   module Client
-    # Host seam (see vendor_gem.py): the inspector feed is not carried.
+    # The worker owns inspector delivery in the compiled runtime.
     module Instrumentation
       def self.attach
         nil
@@ -192,7 +191,12 @@ source = open(target).read()
 if "source-drawer" in source:
     a = source.index("    <%# Proof rather than prose")
     b = source.index("    </details>\n", a) + len("    </details>\n")
-    open(target, "w").write(source[:a] + source[b:])
+    source = source[:a] + source[b:]
+source = (source.replace("Rails on ruby.wasm", "Compiled Rails")
+          .replace("This browser · service worker", "This browser · dedicated worker")
+          .replace("PGlite — Postgres in this tab", "SQLite in this tab")
+          .replace("SSE, held open", "polled every second"))
+open(target, "w").write(source)
 
 # 11. Database. The demo's database.yml names PostgreSQL (and PGlite for ruby.wasm). This build
 #     keeps its local data in SQLite, the store the compiled runtime can carry into wasm.

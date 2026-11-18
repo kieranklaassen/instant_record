@@ -9,19 +9,49 @@ const QUIET_MS = 30;
 const DRAIN_RETRY_BASE_MS = 500;
 const DRAIN_RETRY_CAP_MS = 10000;
 
+let simulation = { offline: false, latencyMs: 0, report: false };
+const history = [];
+
+function report(entry) {
+  const stamped = { ...entry, at: Date.now() };
+  history.push(stamped);
+  if (history.length > 150) history.shift();
+  if (simulation.report) self.postMessage({ type: "instant_record.debug", entry: stamped });
+}
+
 async function fetchReply(method, path, body = "") {
   const url = SYNC_ENDPOINT + path;
+  const started = performance.now();
+  const poll = path.startsWith("/events?");
+  let status = 0;
+  let text = "";
+  let outcome = "failed";
   try {
+    if (simulation.latencyMs && !simulation.offline) {
+      await new Promise(resolve => setTimeout(resolve, simulation.latencyMs));
+    }
+    if (simulation.offline) {
+      outcome = "offline";
+      return { method, url, body, status, text };
+    }
     const options = { method, signal: AbortSignal.timeout(30000) };
     if (method === "POST") {
       options.headers = { "Content-Type": "application/json" };
       options.body = body;
     }
     const response = await fetch(url, options);
-    return { method, url, body, status: response.status, text: await response.text() };
+    text = await response.text();
+    outcome = status = response.status;
   } catch {
-    return { method, url, body, status: 0, text: "" };
+    // A failed exchange stays in the durable outbox for retry.
+  } finally {
+    // Empty successful catch-up polls would bury the actions being inspected.
+    if (!poll || status !== 200 || text.trim()) {
+      report({ kind: poll ? "stream" : "sync", method, path: new URL(url, self.location.origin).pathname,
+        status: outcome, ms: Math.round(performance.now() - started) });
+    }
   }
+  return { method, url, body, status, text };
 }
 
 // ── persistence: single cached IndexedDB handle ──
@@ -118,6 +148,7 @@ async function drain(revision, initial = false) {
     return { status: reply.status, body: reply.text };
   });
   const needsBootstrap = plan.bootstrap && !host.syncState().bootstrapped;
+  if (push || snapshot) report({ kind: "sync-pass", path: `${result.pending} pending` });
   currentCursor = needsBootstrap ? null : result.cursor;
   if (result.changed || result.notified) {
     if (initial) {
@@ -153,9 +184,8 @@ async function pollChanges() {
       }
       currentCursor = state.cursor;
     }
-    const response = await fetch(`${SYNC_ENDPOINT}/events?after=${currentCursor}&window=0`);
-    if (!response.ok) return;
-    const text = await response.text();
+    const { status, text } = await fetchReply("GET", `/events?after=${currentCursor}&window=0`);
+    if (status !== 200) return;
     if (!text.trim() || draining || kickTimer || revision !== localRevision) return;
 
     const consumed = host.consumeStream(text);
@@ -181,9 +211,16 @@ function afterRequest(method) {
   kickSync();
 }
 
+function localRequest(method, path, options) {
+  const started = performance.now();
+  const result = host.request(method, path, options);
+  report({ kind: "local", method, path, status: result.status, ms: Math.round(performance.now() - started) });
+  return result;
+}
+
 function navigate({ method, path, body, contentType }) {
   const started = performance.now();
-  let result = host.request(method, path, { body: body ?? "", contentType: contentType || "application/x-www-form-urlencoded" });
+  let result = localRequest(method, path, { body: body ?? "", contentType: contentType || "application/x-www-form-urlencoded" });
   let redirected = false;
   let finalPath = path;
   for (let hops = 0; hops < 5 && result.status >= 300 && result.status < 400; hops++) {
@@ -192,7 +229,7 @@ function navigate({ method, path, body, contentType }) {
     const next = new URL(location, self.location.origin);
     finalPath = next.pathname + next.search;
     redirected = true;
-    result = host.request("GET", finalPath);
+    result = localRequest("GET", finalPath);
   }
   afterRequest(method);
   return { result: { ...result, ms: performance.now() - started }, redirected, finalPath };
@@ -223,11 +260,27 @@ async function boot(payload = {}) {
 self.onmessage = async (event) => {
   const { id, type, payload } = event.data;
   try {
+    if (type === "instant_record.clear_log") {
+      history.length = 0;
+      return;
+    }
+    if (type === "instant_record.simulate") {
+      const previous = simulation;
+      simulation = event.data.settings;
+      if (event.data.backlog) {
+        self.postMessage({ type: "instant_record.debug_backlog", entries: history, streamOpen: false });
+      }
+      if (host && previous.offline && !simulation.offline) {
+        drainDelayMs = DRAIN_RETRY_BASE_MS;
+        kickSync(0);
+      }
+      return;
+    }
     if (type === "boot") return self.postMessage({ id, result: await boot(payload) });
     if (type === "navigate") return self.postMessage({ id, result: navigate(payload) });
     if (type === "request") {
       const started = performance.now();
-      const result = host.request(payload.method, payload.path, { body: payload.body ?? "", contentType: payload.contentType || "application/x-www-form-urlencoded" });
+      const result = localRequest(payload.method, payload.path, { body: payload.body ?? "", contentType: payload.contentType || "application/x-www-form-urlencoded" });
       afterRequest(payload.method);
       return self.postMessage({ id, result: { ...result, ms: performance.now() - started } });
     }

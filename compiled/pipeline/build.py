@@ -225,6 +225,17 @@ def main():
     emit = os.path.join(B, "emit")
     clean(emit)
     run([T["ROUNDHOUSE_BIN"], "--target", "spinel", "-o", emit, app], log="emit.log")
+    # Roundhouse emits plain asset URLs. Give the inspector a content-based cache key
+    # so existing tabs get its matching worker protocol after an ordinary reload.
+    inspector_asset = "/assets/controllers/inspector_controller.js"
+    with open(os.path.join(app, "app/javascript/controllers/inspector_controller.js"), "rb") as f:
+        inspector_version = hashlib.sha256(f.read()).hexdigest()[:10]
+    for config in ("config/importmap.rb", "config/application.rb"):
+        path = os.path.join(emit, config)
+        with open(path) as f:
+            source = f.read()
+        with open(path, "w") as f:
+            f.write(source.replace(inspector_asset, f"{inspector_asset}?v={inspector_version}"))
     toml = os.path.join(emit, "spin.toml")
     open(toml, "w").write(open(toml).read().replace('\nallocator = "jemalloc"', '\n# allocator = "jemalloc"  (wasm build: no jemalloc)'))
 

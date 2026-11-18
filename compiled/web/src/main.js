@@ -19,7 +19,16 @@ const call = (type, payload) => new Promise((resolve, reject) => {
 });
 
 const marks = { start: performance.now() };
-window.__spinel = { marks, call };
+window.__spinel = { marks, call, worker };
+
+// Restore the switches before even the first bootstrap can reach Rails.
+try {
+  const ui = JSON.parse(sessionStorage.getItem("instant_record.inspector"));
+  if (ui) worker.postMessage({
+    type: "instant_record.simulate",
+    settings: { offline: !!ui.offline, latencyMs: ui.slow ? 2000 : 0 },
+  });
+} catch { /* Storage may be unavailable. */ }
 
 const isLocal = (url) => url.origin === location.origin &&
   !url.pathname.startsWith("/assets/") && !url.pathname.startsWith("/harness/") && !/^\/app[-.\w]*\.wasm$/.test(url.pathname);
