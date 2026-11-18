@@ -112,8 +112,27 @@ errors).
     kamal deploy --version <a tag for this build>
 
 - The sync server must allow cross-origin requests from the site; the gem's endpoints do.
-- Give it its own hostname. It cannot live under a path of a host that runs the ruby.wasm build:
-  that build's service worker takes over every request on its origin.
+- Give it its own hostname, or replace the ruby.wasm build on its host (below). It cannot live
+  under a path next to that build: that build's service worker takes over every request on its
+  origin.
 - The module contains the absolute path of the folder it was built in; `scrub_path.py` replaces
   it with a neutral one of the same length.
 - Every path that is not a file serves the shell page, so deep links and reloads work.
+
+### Replacing the ruby.wasm build on its host
+
+A browser that visited the ruby.wasm build still has its service worker. Three things make the
+switch clean for it:
+
+- Keep `/instant_record` on that host going to the Rails app and send everything else here.
+  With kamal-proxy that is the Rails service deployed with `--path-prefix /instant_record
+  --strip-path-prefix=false` and no TLS options; the service on the root path carries TLS for
+  the host.
+- Copy `deploy/rails.sw.js` into `deploy/site/` before building the image. The old worker's
+  browser asks for that path on its next visit; this file takes the old worker's place, removes
+  itself, deletes the old local database and reloads the tab.
+- `nginx.conf` answers `/app.wasm` with 404. That stops the old worker from starting its app,
+  and from opening its change stream, on that one last visit.
+
+Measured in Chrome: a returning browser shows the old worker's error text for about three
+seconds, reloads by itself, and is on this build after about four. A first visit is not affected.
