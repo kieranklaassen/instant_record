@@ -22,9 +22,9 @@ export const RAILS = process.env.RAILS_URL || "http://127.0.0.1:3210";
 const PG = ["-h", "127.0.0.1", "-p", "54329", "-U", "demo", "-d", "demo_development", "-At"];
 const railsEnv = {
   ...process.env,
-  RBENV_VERSION: "3.3.10",
-  BUNDLE_PATH: join(tools.TOOLS, "gems"),
-  BUNDLE_APP_CONFIG: join(tools.TOOLS, "bundle-config"),
+  RBENV_VERSION: tools.RBENV_VERSION || process.env.RBENV_VERSION || "3.3.3",
+  ...(tools.BUNDLE_PATH ? { BUNDLE_PATH: tools.BUNDLE_PATH } : {}),
+  ...(tools.BUNDLE_APP_CONFIG ? { BUNDLE_APP_CONFIG: tools.BUNDLE_APP_CONFIG } : {}),
   DATABASE_URL: "postgres://demo@127.0.0.1:54329/demo_development",
   RAILS_ENV: "development",
 };
