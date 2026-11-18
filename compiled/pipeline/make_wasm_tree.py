@@ -247,4 +247,186 @@ boot = os.path.join(target, "boot.rb")
 text = open(boot).read()
 first = re.search(r"^require(_relative)? ", text, flags=re.M).start()  # the first real require line
 open(boot, "w").write(text[:first] + 'require_relative "runtime/wasm_threads"\n' + text[first:])
-print("wasm tree:", touched, "runtime files had threading constants renamed")
+
+# Browser-only dead-subsystem pruning: Roundhouse emits a full Rails + multi-threaded server runtime
+# (ActionText, ActiveStorage, ActionCable, Sidekiq, SolidQueue, Rake/Migrations, TCP/Fiber servers,
+# page/fragment caching, I18n, NumberHelper, UserAgent, ErrorReporter). None of those run in the
+# browser Wasm reactor; replacing them with minimal stubs shrinks app.c and app.wasm substantially.
+PRUNED_STUBS = {
+    "runtime/action_text.rb": "module ActionText\nend\n",
+    "runtime/action_text_json.rb": "",
+    "runtime/nokogiri_spinel.rb": "",
+    "runtime/rails_html_sanitizer_spinel.rb": "",
+    "runtime/active_storage.rb": '''module ActiveStorage
+  module Routes
+    def self.table
+      []
+    end
+
+    def self.instantiate_controller(_sym)
+      nil
+    end
+  end
+
+  module Previewer
+    class VideoPreviewer
+    end
+  end
+end
+''',
+    "runtime/active_storage_disk.rb": "",
+    "runtime/active_storage_processor.rb": "",
+    "runtime/active_storage_previewer.rb": "",
+    "runtime/multipart.rb": "",
+    "runtime/cable.rb": "module Cable\n  def self.upgrade(_req, _res)\n    nil\n  end\nend\n",
+    "runtime/action_cable.rb": "",
+    "runtime/turbo_streams.rb": "",
+    "runtime/redis_cable.rb": "",
+    "runtime/faye_websocket.rb": "module Faye\n  class WebSocket\n  end\nend\n",
+    "runtime/sidekiq_redis.rb": "",
+    "runtime/sidekiq_envelope.rb": "",
+    "runtime/sidekiq_worker.rb": "",
+    "runtime/sidekiq_push.rb": '''module SidekiqPush
+  def self.flush_held
+    nil
+  end
+
+  def self.drop_held
+    nil
+  end
+
+  def self.enqueue(_name, _queue, _at, _payload)
+    nil
+  end
+end
+''',
+    "runtime/solid_queue.rb": "",
+    "runtime/solid_queue_standin.rb": "",
+    "runtime/active_job_serialization.rb": "",
+    "runtime/integration_session.rb": "",
+    "runtime/active_record/tasks.rb": '''module ActiveRecord
+  module Tasks
+    module DatabaseTasks
+      def self.current_db_config
+        nil
+      end
+
+      def self.replace_configs(_configs)
+        nil
+      end
+    end
+  end
+end
+''',
+    "runtime/active_record/migration_runner.rb": "",
+    "runtime/active_record/schema_reader.rb": "",
+    "runtime/rake/task.rb": "",
+    "runtime/active_record/friendly_id.rb": "",
+    "runtime/active_record/signed_id.rb": "",
+    "runtime/active_record/token_for.rb": "",
+    "runtime/action_controller_page_caching.rb": '''module ActionController
+  class Base
+    def self.page_cache_directory
+      ""
+    end
+
+    def self.perform_caching
+      false
+    end
+  end
+end
+''',
+    "runtime/action_controller_fragment_caching.rb": "",
+    "runtime/action_controller_json_render.rb": "",
+    "runtime/fragment_cache.rb": "",
+    "runtime/active_support_cache.rb": "",
+    "runtime/active_support_reporters.rb": "",
+    "runtime/i18n_locale.rb": "",
+    "runtime/schematized_json.rb": "",
+    "runtime/user_agent.rb": '''module UserAgent
+  def self.parse(_ua)
+    nil
+  end
+
+  def self.version_below?(_reported, _floor)
+    false
+  end
+end
+''',
+    "runtime/active_support_number_helper.rb": '''module ActiveSupport
+  module NumberHelper
+    def self.symbolize_options(opts = {})
+      opts
+    end
+
+    def self.number_to_currency(n, _opts = {}); n.to_s; end
+    def self.number_to_delimited(n, _opts = {}); n.to_s; end
+    def self.number_to_human(n, _opts = {}); n.to_s; end
+    def self.number_to_human_size(n, _opts = {}); n.to_s; end
+    def self.number_to_percentage(n, _opts = {}); n.to_s; end
+    def self.number_to_phone(n, _opts = {}); n.to_s; end
+    def self.number_to_rounded(n, _opts = {}); n.to_s; end
+  end
+end
+''',
+    "runtime/tep/server.rb": "",
+    "runtime/tep/server_threaded.rb": "",
+    "runtime/tep/server_scheduled.rb": "",
+    "runtime/tep/unix_listener.rb": "",
+    "runtime/tep/thruster_cache.rb": '''module Tep
+  class ThrusterCache
+    def answer(_req, _res)
+      false
+    end
+
+    def store(_req, _res)
+      nil
+    end
+  end
+
+  THRUSTER_CACHE = ThrusterCache.new
+end
+''',
+    "runtime/tep/presence.rb": "",
+    "runtime/tep/scheduler.rb": '''module Tep
+  class FiberSlot
+    def initialize(_fiber)
+    end
+  end
+
+  module Scheduler
+    READ = 1
+
+    def self.io_wait(_fd, _mode, _timeout)
+      0
+    end
+  end
+end
+''',
+    "runtime/tep/broadcast.rb": '''module Tep
+  module Broadcast
+    def self.subscribers_for(_topic)
+      []
+    end
+  end
+end
+''',
+    "runtime/tep/websocket.rb": '''module Tep
+  module WebSocket
+    class Driver
+      def initialize(_fd = 0)
+      end
+    end
+  end
+end
+''',
+}
+
+pruned_lines = 0
+for rel, stub in PRUNED_STUBS.items():
+    path = os.path.join(target, rel)
+    if os.path.exists(path):
+        pruned_lines += open(path).read().count("\n")
+        open(path, "w").write("# Pruned for browser wasm (see make_wasm_tree.py)\n" + stub)
+
+print("wasm tree:", touched, "runtime files had threading constants renamed;", pruned_lines, "dead runtime lines pruned")
