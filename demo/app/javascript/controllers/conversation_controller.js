@@ -40,7 +40,7 @@ const BOTTOM_SLACK_PX = 60
 const HISTORY_LABEL_DELAY_MS = 200
 
 export default class extends Controller {
-  static targets = ["scroller", "list", "sentinel", "threadList"]
+  static targets = ["pane", "scroller", "list", "sentinel", "threadPanel", "threadList"]
 
   connect() {
     this.busy = false
@@ -49,6 +49,98 @@ export default class extends Controller {
   }
 
   // --- Actions ---------------------------------------------------------------
+
+  // Delegated click handler on .slack: channel switches, thread opens, and thread
+  // closes swap only the affected pane via lightweight fragments instead of a
+  // full-page Turbo Drive body replacement.
+  async navigate(event) {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return
+
+    const channelLink = event.target.closest(".sidebar a[href]")
+    if (channelLink) {
+      event.preventDefault()
+      await this.switchChannel(channelLink.getAttribute("href"), { push: true })
+      return
+    }
+
+    const threadLink = event.target.closest("a.thread-link[href]")
+    if (threadLink) {
+      event.preventDefault()
+      await this.openThread(threadLink.getAttribute("href"), { push: true })
+      return
+    }
+
+    const closeLink = event.target.closest("a.thread-close[href]")
+    if (closeLink) {
+      event.preventDefault()
+      this.closeThread(closeLink.getAttribute("href"), { push: true })
+    }
+  }
+
+  async popstate() {
+    const url = new URL(window.location.href)
+    const thread = url.searchParams.get("thread")
+    await this.switchChannel(url.pathname, { push: false })
+    if (thread) await this.openThread(url.pathname + url.search, { push: false })
+  }
+
+  async switchChannel(href, { push = true } = {}) {
+    const url = new URL(href, window.location.origin)
+    if (push && url.pathname === window.location.pathname && !window.location.search) return
+
+    const fragmentUrl = new URL(url.pathname, window.location.origin)
+    fragmentUrl.searchParams.set("fragment", "pane")
+
+    this.highlightChannel(url.pathname)
+    const pane = await fetchElement(fragmentUrl, "main.conversation")
+    if (!pane) {
+      window.location.href = href
+      return
+    }
+
+    this.paneTarget.replaceWith(pane)
+    this.removeThreadPanel()
+    this.exhausted = this.listTarget.dataset.hasMore !== "true"
+    if (push) history.pushState({}, "", url.pathname)
+    this.scrollToBottom()
+  }
+
+  async openThread(href, { push = true } = {}) {
+    const url = new URL(href, window.location.origin)
+    const fragmentUrl = new URL(url.href)
+    fragmentUrl.searchParams.set("fragment", "thread")
+
+    const panel = await fetchElement(fragmentUrl, "aside.thread-panel")
+    if (!panel) {
+      window.location.href = href
+      return
+    }
+
+    if (this.hasThreadPanelTarget) {
+      this.threadPanelTarget.replaceWith(panel)
+    } else {
+      this.element.append(panel)
+    }
+    this.element.classList.add("thread-open")
+    if (push) history.pushState({}, "", url.pathname + url.search)
+  }
+
+  closeThread(href, { push = true } = {}) {
+    this.removeThreadPanel()
+    if (push) history.pushState({}, "", new URL(href, window.location.origin).pathname)
+  }
+
+  removeThreadPanel() {
+    if (this.hasThreadPanelTarget) this.threadPanelTarget.remove()
+    this.element.classList.remove("thread-open")
+  }
+
+  highlightChannel(pathname) {
+    for (const li of this.element.querySelectorAll(".sidebar li")) {
+      const a = li.querySelector("a[href]")
+      li.classList.toggle("active", !!a && new URL(a.getAttribute("href"), window.location.origin).pathname === pathname)
+    }
+  }
 
   // scroll->conversation#scrolled
   scrolled() {
@@ -267,19 +359,22 @@ export default class extends Controller {
 const swControlled = () =>
   "serviceWorker" in navigator && !!navigator.serviceWorker.controller
 
-// All callers want the same thing from a render: one list out of the fragment,
-// or null if the page couldn't be reached. A thrown fetch and a non-ok
-// response mean the same thing to them, so they're answered the same way.
-const fetchList = async (url, selector) => {
+const fetchElement = async (url, selector) => {
   try {
     const response = await fetch(url)
     if (!response.ok) return null
-    const doc = new DOMParser().parseFromString(await response.text(), "text/html")
-    return doc.querySelector(selector)
+    const template = document.createElement("template")
+    template.innerHTML = (await response.text()).trim()
+    return template.content.querySelector(selector)
   } catch {
     return null
   }
 }
+
+// All callers want the same thing from a render: one list out of the fragment,
+// or null if the page couldn't be reached. A thrown fetch and a non-ok
+// response mean the same thing to them, so they're answered the same way.
+const fetchList = (url, selector) => fetchElement(url, selector)
 
 const fetchHistoryViaWorker = (request) =>
   new Promise((resolve) => {

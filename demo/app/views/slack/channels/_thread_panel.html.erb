@@ -1,0 +1,27 @@
+<aside class="thread-panel" data-conversation-target="threadPanel">
+  <header class="thread-header">
+    <span class="micro-label">Thread</span>
+    <%= link_to "×", slack_channel_path(@channel), class: "thread-close", aria: { label: "Close thread" } %>
+  </header>
+
+  <div class="thread-scroll">
+    <article class="thread-parent <%= "own" if @thread_parent.from_visitor? %>">
+      <div class="tile"><%= slack_initials(@thread_parent.chat_user) %></div>
+      <div class="message-main">
+        <div class="message-head">
+          <span class="author"><%= @thread_parent.chat_user&.name || "Unknown" %></span>
+          <span class="timestamp"><%= @thread_parent.created_at.strftime("%H:%M") %></span>
+        </div>
+        <p class="body"><%= @thread_parent.body %></p>
+      </div>
+    </article>
+
+    <%= render "thread_replies" %>
+  </div>
+
+  <%= form_with url: slack_messages_path, method: :post, class: "thread-composer", data: { action: "conversation#send" } do |f| %>
+    <%= f.hidden_field "message[channel_id]", value: @channel.id %>
+    <%= f.hidden_field "message[parent_message_id]", value: @thread_parent.id %>
+    <%= f.text_field "message[body]", placeholder: "Reply in thread", required: true, autocomplete: "off" %>
+  <% end %>
+</aside>

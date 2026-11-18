@@ -41,7 +41,10 @@ module Slack
       @thread_parent = @channel.messages.top_level.find_by(id: params[:thread]) if params[:thread]
       @thread_replies = @thread_parent ? @thread_parent.replies.includes(:chat_user).order(:created_at, :id) : []
 
-      # Thread fragment: just the replies list, for the live-update morph.
+      # Thread panel fragment: just the right-hand thread aside, skipping channel messages & sidebar.
+      return render partial: "thread_panel", layout: false if params[:fragment] == "thread" && @thread_parent
+
+      # Thread replies-only fragment: just the replies list, for the live-update morph.
       return render partial: "thread_replies", layout: false if params[:fragment] && @thread_parent
 
       @messages = conversation_window
@@ -52,6 +55,12 @@ module Slack
       # rather than in the partial because show.html.erb reserves the slot
       # from it too.
       @has_more = InstantRecord.browser? || older_rows_exist?(@messages.first)
+
+      # Channel pane fragment: swaps the conversation pane in-place without sidebar queries or layout.
+      if params[:fragment] == "pane"
+        @pending_count = InstantRecord.browser? ? InstantRecord.pending_count : 0
+        return render partial: "pane", layout: false
+      end
 
       # Scroll-up fragment fetches need none of the page chrome below.
       return render partial: "messages", layout: false if params[:fragment]
