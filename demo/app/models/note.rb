@@ -1,6 +1,10 @@
 class Note < ApplicationRecord
   include InstantRecord::Syncable
 
+  # PostgreSQL can reuse prepared queries while the migration demo changes
+  # this table. An explicit projection gives each schema its own query.
+  self.enumerate_columns_in_select_statements = true
+
   validates :title, presence: true, length: { maximum: 200 }
   validates :body, length: { maximum: 10_000 }
 

@@ -9,7 +9,7 @@ class MigrationPathsTest < ActiveSupport::TestCase
   test "the app's migration paths are absolute and include the gem's own" do
     assert paths.any?, "no migration paths configured"
     paths.each { |path| assert path.start_with?("/"), "#{path} is not absolute" }
-    assert paths.any? { |path| path.include?("instant_record") },
+    assert_includes paths, InstantRecord::Engine.root.join("db/migrate").to_s,
       "the engine's migrations are not on the path, so the browser cannot apply them"
   end
 
