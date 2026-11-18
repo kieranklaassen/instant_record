@@ -68,10 +68,10 @@ Offline and Slow connections.
 Spinel compiles code ahead of time. Arbitrary Ruby evaluation, file uploads,
 encrypted attributes, and server-only Rails subsystems are outside this browser
 backend. Use the existing `instant_record:build` task for the interpreted
-ruby.wasm/PGlite backend. Each tab has its own SQLite connection, but tabs in
-the same browser profile save to a single IndexedDB snapshot. While offline,
-write in one tab at a time. If two tabs write before syncing, the later snapshot
-can overwrite the other tab's pending changes, and closing that tab loses them.
+ruby.wasm/PGlite backend. Tabs on the same origin and browser profile share
+one durable SQLite snapshot. Each write picks up the latest revision and saves
+the changed records and outbox together before the browser confirms the write.
+Pending changes survive closing every tab and sync when the app reopens online.
 Changes to existing columns need an explicit browser-side
 migration. The demo’s Ship v2 page demonstrates one. The sync server remains authoritative across clients.
 
