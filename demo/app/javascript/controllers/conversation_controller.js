@@ -163,6 +163,7 @@ export default class extends Controller {
   async send(event) {
     event.preventDefault()
     const form = event.target
+    const isThread = form.classList.contains("thread-composer")
 
     const input = form.querySelector("input[type='text']")
     const typed = input.value
@@ -171,28 +172,40 @@ export default class extends Controller {
     input.focus()
 
     try {
-      // redirect: "manual" because create redirects, and following it would
-      // make the browser re-render the whole page in the VM just to throw the
-      // result away. The redirect comes back opaque (status 0), which is the
-      // success path here; a real error still has a status to check.
-      const response = await fetch(form.action, {
+      // Single round trip: ?fragment=1 returns just the newly created row wrapped
+      // in its <ol>, avoiding a follow-up 50-row channel query and render.
+      const url = new URL(form.action, window.location.origin)
+      url.searchParams.set("fragment", "1")
+      const response = await fetch(url.pathname + url.search, {
         method: "POST",
         body,
-        redirect: "manual",
       })
-      if (response.type !== "opaqueredirect" && !response.ok) {
-        throw new Error(`send failed: ${response.status}`)
+      if (!response.ok) throw new Error(`send failed: ${response.status}`)
+
+      const html = (await response.text()).trim()
+      const template = document.createElement("template")
+      template.innerHTML = html
+
+      if (isThread && this.hasThreadListTarget) {
+        const replies = template.content.querySelector("ol.thread-replies")
+        if (replies) {
+          mergeRows(this.threadListTarget, replies)
+          return
+        }
+      } else {
+        const fresh = template.content.querySelector("ol.messages")
+        if (fresh) {
+          mergeRows(this.listTarget, fresh)
+          this.scrollToBottom()
+          return
+        }
       }
 
-      // The local write is already committed; show it now rather than waiting
-      // for a tick. Unlike a tick this waits its turn — but only for a while:
-      // barging in on a slow history load would risk the re-entrancy the guard
-      // exists to prevent, and the tick the write just scheduled will bring the
-      // message in anyway.
+      // Fallback if the response wasn't a fragment (e.g. blank body).
       if (await this.whenIdle()) {
         this.busy = true
         try {
-          await this.merge({ stickToBottom: true })
+          await this.merge({ stickToBottom: !isThread })
         } finally {
           this.busy = false
         }

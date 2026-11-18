@@ -17,10 +17,25 @@ module Slack
       # of this channel, so a forged id gets a rejection, not a stray row.
       parent_id = params.dig(:message, :parent_message_id).presence
 
+      message = nil
       if body.present?
         # Author is always the visitor — never trusted from the form.
-        Message.create!(channel: channel, chat_user_id: ChatUser::VISITOR_ID,
+        message = Message.create!(channel: channel, chat_user_id: ChatUser::VISITOR_ID,
           body: body, parent_message_id: parent_id)
+      end
+
+      if params[:fragment] && message
+        @channel = channel
+        if parent_id
+          @thread_parent = Message.find(parent_id)
+          @thread_replies = [message]
+          return render partial: "slack/channels/thread_replies", layout: false
+        else
+          @messages = [message]
+          @reply_counts = {}
+          @has_more = true
+          return render partial: "slack/channels/messages", layout: false
+        end
       end
 
       # Replying in a thread returns to the thread: the panel is URL state.
