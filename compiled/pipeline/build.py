@@ -13,9 +13,11 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO_ROOT = os.path.dirname(ROOT)
 
 # ── build knobs ──────────────────────────────────────────────────────────────
 SPINEL_FLAGS = []  # extra flags for `spinel --target=wasm32-wasi`
+WASM_OPT_LEVEL = "-O2"
 SQLITE_CFLAGS = [
     "-O2", "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_OMIT_SHARED_CACHE", "-DSQLITE_OMIT_WAL",
     "-DSQLITE_MAX_MMAP_SIZE=0", "-DSQLITE_DEFAULT_SYNCHRONOUS=0", "-DSQLITE_OMIT_DEPRECATED",
@@ -40,6 +42,7 @@ def toolchain():
 
 
 T = toolchain()
+GEM_SRC = os.environ.get("GEM_SRC") or REPO_ROOT
 B = os.path.join(ROOT, ".build")
 WASI_CFLAGS = ["--target=wasm32-wasip1", "-D_WASI_EMULATED_MMAN", "-D_WASI_EMULATED_SIGNAL", "-D_WASI_EMULATED_PROCESS_CLOCKS", "-D_WASI_EMULATED_GETPID"]
 
@@ -76,17 +79,68 @@ def sqlite_library():
 
 
 def input_digest():
-    """Everything a build depends on inside this repo, so an unchanged checkout is not rebuilt."""
+    """Everything a build depends on inside this checkout, so an unchanged checkout is not rebuilt."""
     digest = hashlib.sha256()
     paths = [os.path.join(ROOT, "toolchain.env"), os.path.join(ROOT, "web/index.html"), os.path.join(ROOT, "web/vite.config.js")]
-    for folder in ["pipeline", "web/src"]:
-        for base, _dirs, names in os.walk(os.path.join(ROOT, folder)):
-            paths += [os.path.join(base, name) for name in names if not name.endswith(".pyc")]
-    for path in sorted(paths):
-        digest.update(path[len(ROOT):].encode())
+    for base_root, folders in [(ROOT, ["pipeline", "web/src"]), (GEM_SRC, ["lib/instant_record", "demo/app"])]:
+        for folder in folders:
+            full = os.path.join(base_root, folder)
+            if not os.path.isdir(full):
+                continue
+            for base, _dirs, names in os.walk(full):
+                paths += [os.path.join(base, name) for name in names if not name.endswith(".pyc")]
+    for path in sorted(set(paths)):
+        digest.update(os.path.relpath(path, REPO_ROOT).encode())
         digest.update(open(path, "rb").read())
     digest.update(SYNC_ENDPOINT.encode())
     return digest.hexdigest()
+
+
+def compile_reactor(tree, flags, sqlite, path_env):
+    """Emit C library via Spinel (--ext-init/--ext-entry) and link as a WASI reactor."""
+    build_dir = os.path.join(tree, "build")
+    os.makedirs(build_dir, exist_ok=True)
+    app_c = os.path.join(build_dir, "app.c")
+    wasm = os.path.join(build_dir, "app.wasm")
+    shim_c = os.path.join(ROOT, "pipeline/reactor_shim.c")
+
+    run([
+        "spinel", "--target=wasm32-wasi", "-c",
+        "--ext-init", "app_boot",
+        "--ext-entry", "WasmBridge.handle_request,WasmBridge.handle_sync",
+        *flags, *SPINEL_FLAGS,
+        "main_wasm.rb", "-o", app_c,
+    ], cwd=tree, env={**path_env, "CPATH": T["SQLITE_SRC"]}, log="spinel.log")
+
+    spinel_home = T["SPINEL_HOME"]
+    clang = os.path.join(T["WASI_SDK"], "bin/clang")
+    pkg_objs = [
+        os.path.join(spinel_home, "packages/json/sp_json_wasi.o"),
+        os.path.join(spinel_home, "packages/stringio/sp_stringio_wasi.o"),
+        os.path.join(spinel_home, "packages/zlib/sp_zlib_wasi.o"),
+    ]
+    run([
+        clang, *WASI_CFLAGS, "-mexec-model=reactor", WASM_OPT_LEVEL,
+        "-Wno-all", "-ffunction-sections", "-fdata-sections", "-ffp-contract=off",
+        "-DSP_INT_OVERFLOW_MODE_RAISE",
+        "-I" + os.path.join(spinel_home, "lib"),
+        "-I" + os.path.join(spinel_home, "lib/regexp"),
+        "-I" + os.path.join(spinel_home, "lib/wasi"),
+        "-I" + T["SQLITE_SRC"],
+        "-I" + build_dir,
+        "-mllvm", "-wasm-enable-sjlj",
+        "-mllvm", "-wasm-use-legacy-eh=false",
+        app_c, shim_c,
+        *pkg_objs,
+        os.path.join(spinel_home, "lib/wasm32-wasi/libspinel_rt.a"),
+        "-L" + sqlite, "-lsqlite3",
+        "-lm", "-lsetjmp",
+        "-lwasi-emulated-signal", "-lwasi-emulated-process-clocks",
+        "-lwasi-emulated-getpid", "-lwasi-emulated-mman",
+        "-Wl,-z,stack-size=8388608", "-Wl,--gc-sections",
+        "-o", wasm,
+    ], cwd=tree, env=path_env, log="clang.log")
+    return wasm
 
 
 def main():
@@ -104,8 +158,8 @@ def main():
 
     # 1. The demo's Todo and Slack source, plus the gem's own files, with the source seams applied.
     app = os.path.join(B, "app-src")
-    run([python, os.path.join(ROOT, "pipeline/carve.py"), T["GEM_SRC"], app])
-    run([python, os.path.join(ROOT, "pipeline/vendor_gem.py"), T["GEM_SRC"], app])
+    run([python, os.path.join(ROOT, "pipeline/carve.py"), GEM_SRC, app])
+    run([python, os.path.join(ROOT, "pipeline/vendor_gem.py"), GEM_SRC, app])
 
     # 2. Roundhouse: Rails app -> Spinel project.
     emit = os.path.join(B, "emit")
@@ -114,19 +168,16 @@ def main():
     toml = os.path.join(emit, "spin.toml")
     open(toml, "w").write(open(toml).read().replace('\nallocator = "jemalloc"', '\n# allocator = "jemalloc"  (wasm build: no jemalloc)'))
 
-    # 3. One-shot entry and the single-threaded copy for wasm32-wasi.
+    # 3. Persistent reactor entry and the single-threaded copy for wasm32-wasi.
     tree = os.path.join(B, "wasm-tree")
     clean(tree)
     run([python, os.path.join(ROOT, "pipeline/make_wasm_entry.py"), emit])
     run([python, os.path.join(ROOT, "pipeline/make_wasm_tree.py"), emit, tree])
 
-    # 4. Spinel: Ruby -> C -> wasm, with SQLite linked in.
+    # 4. Spinel: Ruby -> C -> WASI reactor wasm, with SQLite linked in.
     sqlite = sqlite_library()
-    os.makedirs(os.path.join(tree, "build"), exist_ok=True)
     flags = run(["spin", "flags"], cwd=tree, env=path_env).split()
-    wasm = os.path.join(tree, "build/app.wasm")
-    run(["spinel", "--target=wasm32-wasi", *flags, *SPINEL_FLAGS, "main_wasm.rb", "--link", "-L" + sqlite, "-o", wasm],
-        cwd=tree, env={**path_env, "CPATH": T["SQLITE_SRC"]}, log="spinel.log")
+    wasm = compile_reactor(tree, flags, sqlite, path_env)
     final = wasm
     if STRIP:
         final = os.path.join(tree, "build/app.stripped.wasm")

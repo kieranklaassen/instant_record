@@ -1,10 +1,11 @@
-// Host for the compiled app (hand-written). Runs the wasm module once per request or per sync
-// pass on an in-memory WASI filesystem that outlives the runs:
+// Host for the compiled app (hand-written). Boots the WASI reactor wasm module ONCE per worker
+// lifetime on an in-memory WASI filesystem, keeping the Spinel GC slab and SQLite connection live
+// across requests and sync passes:
 //   /storage   the app's SQLite file (and its secret key)
-//   /host      the seam the vendored gem's transport and notifier talk through:
-//                request   the gem writes "METHOD URL\nbody"
-//                response  opening it makes the host perform that request, synchronously
-//                notify    the gem writes "records_changed" when a sync pass moved rows
+//   /host      in / out   request/sync input and output buffers
+//              request    the gem writes "METHOD URL\nbody"
+//              response   opening it makes the host perform that request, synchronously
+//              notify     the gem writes "records_changed" when a sync pass moved rows
 // Works the same in Node (tests) and in a browser worker; only `exchange` differs.
 import { WASI, File, OpenFile, Directory, PreopenDirectory, ConsoleStdout } from "@bjorn3/browser_wasi_shim";
 
@@ -18,7 +19,8 @@ class ResponseFile extends File {
   }
 
   path_open(oflags, rights, fdFlags) {
-    const text = decoder.decode(this.host.requestFile.data);
+    const reqFile = this.host.hostDir.contents.get("request") || this.host.requestFile;
+    const text = decoder.decode(reqFile.data);
     const newline = text.indexOf("\n");
     const [method, url] = text.slice(0, newline).split(" ");
     let status = 0;
@@ -39,17 +41,34 @@ export class AppHost {
   constructor(module, { exchange, env = {} }) {
     this.module = module;
     this.exchange = exchange;
-    this.env = { SPINEL_GC_SLAB_MB: "8", RAILS_ENV: "production", SECRET_KEY_BASE: randomHex(64), ...env };
+    this.env = {
+      SPINEL_GC_SLAB_MB: "8",
+      DATABASE_POOL_SIZE: "1",
+      RAILS_ENV: "production",
+      SECRET_KEY_BASE: randomHex(64),
+      ...env,
+    };
     this.storage = new Directory(new Map());
+    this.inFile = new File(new Uint8Array());
+    this.outFile = new File(new Uint8Array());
     this.requestFile = new File(new Uint8Array());
     this.notifyFile = new File(new Uint8Array());
+    this.hostDir = new Directory(new Map([
+      ["in", this.inFile],
+      ["out", this.outFile],
+      ["request", this.requestFile],
+      ["response", new ResponseFile(this)],
+      ["notify", this.notifyFile],
+    ]));
     this.root = new Map([
       ["storage", this.storage],
       ["tmp", new Directory(new Map())],
-      ["host", new Directory(new Map([["request", this.requestFile], ["response", new ResponseFile(this)], ["notify", this.notifyFile]]))],
+      ["host", this.hostDir],
     ]);
     this.cookies = new Map();
     this.exchanges = [];
+    this.errors = [];
+    this.instance = null;
   }
 
   // The SQLite file's bytes, for persisting between page loads (null before the first run).
@@ -62,34 +81,51 @@ export class AppHost {
     this.storage.contents.set("development.sqlite3", new File(bytes));
   }
 
-  run(env, stdinBytes) {
-    const out = new File(new Uint8Array());
-    const errors = [];
+  // Lazily instantiate and boot the WASI reactor once (after restoreDatabase has placed any saved
+  // SQLite file into /storage).
+  ensureBooted() {
+    if (this.instance) return;
     const fds = [
-      new OpenFile(new File(stdinBytes)),
-      new OpenFile(out),
-      ConsoleStdout.lineBuffered((line) => errors.push(line)),
+      new OpenFile(new File(new Uint8Array())),
+      new OpenFile(new File(new Uint8Array())),
+      ConsoleStdout.lineBuffered((line) => this.errors.push(line)),
       new PreopenDirectory("/", this.root),
     ];
-    const wasi = new WASI(["app"], Object.entries({ ...this.env, ...env }).map(([key, value]) => `${key}=${value}`), fds, { debug: false });
-    // The shim throws on socket calls; WASI preview 1 hosts answer "not supported" instead, which
-    // is what the compiled runtime expects when it probes at startup.
+    const wasi = new WASI(
+      ["app"],
+      Object.entries(this.env).map(([key, value]) => `${key}=${value}`),
+      fds,
+      { debug: false },
+    );
     const imports = { ...wasi.wasiImport };
     for (const name of ["sock_accept", "sock_recv", "sock_send", "sock_shutdown"]) imports[name] = () => 58; // ENOTSUP
     const instance = new WebAssembly.Instance(this.module, { wasi_snapshot_preview1: imports });
+    wasi.initialize(instance);
+    instance.exports.wasm_boot();
+    this.instance = instance;
+  }
+
+  call(exportName, inputBytes) {
+    this.errors = [];
+    this.ensureBooted();
+    this.inFile.data = inputBytes;
+    this.hostDir.contents.set("in", this.inFile);
+    this.outFile.data = new Uint8Array();
+    this.hostDir.contents.set("out", this.outFile);
     let exit;
     try {
-      exit = wasi.start(instance);
+      exit = this.instance.exports[exportName]();
     } catch (error) {
       exit = `trap: ${error.message}`;
     }
-    return { exit, out: out.data, errors };
+    const outEntry = this.hostDir.contents.get("out") || this.outFile;
+    return { exit, out: outEntry.data, errors: this.errors.slice() };
   }
 
   // One HTTP request through the app's own router and controllers.
   request(method, path, { body = "", contentType = "application/x-www-form-urlencoded" } = {}) {
     // Rails forms send PATCH and DELETE as POST plus a _method field. The socket server applies
-    // that override while reading the request; the one-shot entry skips that reader, so do it here.
+    // that override while reading the request; the reactor entry skips that reader, so do it here.
     if (method === "POST" && contentType.startsWith("application/x-www-form-urlencoded")) {
       const text = typeof body === "string" ? body : decoder.decode(body);
       const override = new URLSearchParams(text).get("_method");
@@ -100,11 +136,11 @@ export class AppHost {
     const head = `${method} ${path} HTTP/1.1\r\nHost: localhost\r\n` +
       (cookie ? `Cookie: ${cookie}\r\n` : "") +
       (payload.length ? `Content-Type: ${contentType}\r\nContent-Length: ${payload.length}\r\n` : "") + "\r\n";
-    const stdin = new Uint8Array(head.length + payload.length);
-    stdin.set(encoder.encode(head));
-    stdin.set(payload, head.length);
+    const input = new Uint8Array(head.length + payload.length);
+    input.set(encoder.encode(head));
+    input.set(payload, head.length);
 
-    const result = this.run({ WASM_MODE: "request" }, stdin);
+    const result = this.call("wasm_request", input);
     const text = decoder.decode(result.out);
     const split = text.indexOf("\n\n");
     const lines = (split < 0 ? text : text.slice(0, split)).split("\n");
@@ -130,13 +166,15 @@ export class AppHost {
   // One pass of the gem's own sync loop (InstantRecord::Client.sync_pass).
   sync(endpoint) {
     this.notifyFile.data = new Uint8Array();
+    this.hostDir.contents.set("notify", this.notifyFile);
     this.exchanges = [];
-    const result = this.run({ WASM_MODE: "sync", SYNC_ENDPOINT: endpoint }, new Uint8Array());
+    const result = this.call("wasm_sync", encoder.encode(endpoint || ""));
     const text = decoder.decode(result.out);
+    const notifyEntry = this.hostDir.contents.get("notify") || this.notifyFile;
     return {
       changed: text.startsWith("changed"),
       pending: Number(/pending=(\d+)/.exec(text)?.[1] ?? -1),
-      notified: decoder.decode(this.notifyFile.data) === "records_changed",
+      notified: decoder.decode(notifyEntry.data) === "records_changed",
       exchanges: this.exchanges,
       exit: result.exit,
       errors: result.errors,
