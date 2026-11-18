@@ -40,7 +40,11 @@ const BOTTOM_SLACK_PX = 60
 const HISTORY_LABEL_DELAY_MS = 200
 
 export default class extends Controller {
-  static targets = ["scroller", "list", "sentinel", "threadList"]
+  static targets = ["pane", "scroller", "list", "sentinel", "threadPanel", "threadList"]
+
+  initialize() {
+    this.navigation = 0
+  }
 
   connect() {
     this.busy = false
@@ -48,7 +52,111 @@ export default class extends Controller {
     this.scrollToBottom()
   }
 
+  disconnect() {
+    this.navigation++
+  }
+
   // --- Actions ---------------------------------------------------------------
+
+  // Delegated click handler on .slack: channel switches, thread opens, and thread
+  // closes swap only the affected pane via lightweight fragments instead of a
+  // full-page Turbo Drive body replacement.
+  async navigate(event) {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return
+
+    const channelLink = event.target.closest(".sidebar a[href]")
+    if (channelLink) {
+      event.preventDefault()
+      await this.switchChannel(channelLink.getAttribute("href"), { push: true })
+      return
+    }
+
+    const threadLink = event.target.closest("a.thread-link[href]")
+    if (threadLink) {
+      event.preventDefault()
+      await this.openThread(threadLink.getAttribute("href"), { push: true })
+      return
+    }
+
+    const closeLink = event.target.closest("a.thread-close[href]")
+    if (closeLink) {
+      event.preventDefault()
+      this.closeThread(closeLink.getAttribute("href"), { push: true })
+    }
+  }
+
+  async popstate() {
+    const url = new URL(window.location.href)
+    const thread = url.searchParams.get("thread")
+    const current = await this.switchChannel(url.pathname, { push: false })
+    if (thread && current) await this.openThread(url.pathname + url.search, { push: false })
+  }
+
+  async switchChannel(href, { push = true } = {}) {
+    const url = new URL(href, window.location.origin)
+    const navigation = ++this.navigation
+    this.highlightChannel(url.pathname)
+    if (push && url.pathname === window.location.pathname && !window.location.search) return true
+
+    const fragmentUrl = new URL(url.pathname, window.location.origin)
+    fragmentUrl.searchParams.set("fragment", "pane")
+
+    const pane = await fetchElement(fragmentUrl, "main.conversation")
+    if (navigation !== this.navigation) return false
+    if (!pane) {
+      window.location.href = href
+      return
+    }
+
+    this.paneTarget.replaceWith(pane)
+    this.removeThreadPanel()
+    this.exhausted = this.listTarget.dataset.hasMore !== "true"
+    if (push) history.pushState({}, "", url.pathname)
+    this.scheduleScrollToBottom()
+    return true
+  }
+
+  async openThread(href, { push = true } = {}) {
+    const navigation = ++this.navigation
+    const url = new URL(href, window.location.origin)
+    this.highlightChannel(url.pathname)
+    const fragmentUrl = new URL(url.href)
+    fragmentUrl.searchParams.set("fragment", "thread")
+
+    const panel = await fetchElement(fragmentUrl, "aside.thread-panel")
+    if (navigation !== this.navigation) return
+    if (!panel) {
+      window.location.href = href
+      return
+    }
+
+    if (this.hasThreadPanelTarget) {
+      this.threadPanelTarget.replaceWith(panel)
+    } else {
+      this.element.append(panel)
+    }
+    this.element.classList.add("thread-open")
+    if (push) history.pushState({}, "", url.pathname + url.search)
+  }
+
+  closeThread(href, { push = true } = {}) {
+    this.navigation++
+    this.highlightChannel(new URL(href, window.location.origin).pathname)
+    this.removeThreadPanel()
+    if (push) history.pushState({}, "", new URL(href, window.location.origin).pathname)
+  }
+
+  removeThreadPanel() {
+    if (this.hasThreadPanelTarget) this.threadPanelTarget.remove()
+    this.element.classList.remove("thread-open")
+  }
+
+  highlightChannel(pathname) {
+    for (const li of this.element.querySelectorAll(".sidebar li")) {
+      const a = li.querySelector("a[href]")
+      li.classList.toggle("active", !!a && new URL(a.getAttribute("href"), window.location.origin).pathname === pathname)
+    }
+  }
 
   // scroll->conversation#scrolled
   scrolled() {
@@ -71,41 +179,56 @@ export default class extends Controller {
   async send(event) {
     event.preventDefault()
     const form = event.target
+    const isThread = form.classList.contains("thread-composer")
 
     const input = form.querySelector("input[type='text']")
     const typed = input.value
-    const body = new FormData(form)
+    const body = new URLSearchParams(new FormData(form))
     input.value = ""
     input.focus()
 
     try {
-      // redirect: "manual" because create redirects, and following it would
-      // make the browser re-render the whole page in the VM just to throw the
-      // result away. The redirect comes back opaque (status 0), which is the
-      // success path here; a real error still has a status to check.
-      const response = await fetch(form.action, {
+      // Single round trip: ?fragment=1 returns just the newly created row wrapped
+      // in its <ol>, avoiding a follow-up 50-row channel query and render.
+      const url = new URL(form.action, window.location.origin)
+      url.searchParams.set("fragment", "1")
+      const response = await fetch(url.pathname + url.search, {
         method: "POST",
         body,
-        redirect: "manual",
       })
-      if (response.type !== "opaqueredirect" && !response.ok) {
-        throw new Error(`send failed: ${response.status}`)
+      if (!response.ok) throw new Error(`send failed: ${response.status}`)
+
+      const html = (await response.text()).trim()
+      if (!form.isConnected) return
+      const template = document.createElement("template")
+      template.innerHTML = html
+
+      if (isThread && this.hasThreadListTarget) {
+        const replies = template.content.querySelector("ol.thread-replies")
+        if (replies) {
+          mergeRows(this.threadListTarget, replies)
+          return
+        }
+      } else {
+        const fresh = template.content.querySelector("ol.messages")
+        if (fresh) {
+          mergeRows(this.listTarget, fresh)
+          this.scheduleScrollToBottom()
+          return
+        }
       }
 
-      // The local write is already committed; show it now rather than waiting
-      // for a tick. Unlike a tick this waits its turn — but only for a while:
-      // barging in on a slow history load would risk the re-entrancy the guard
-      // exists to prevent, and the tick the write just scheduled will bring the
-      // message in anyway.
+      // Fallback if the response wasn't a fragment (e.g. blank body).
       if (await this.whenIdle()) {
         this.busy = true
         try {
-          await this.merge({ stickToBottom: true })
+          await this.merge({ stickToBottom: !isThread })
         } finally {
           this.busy = false
         }
       }
     } catch {
+      if (!form.isConnected) return
       input.value = typed
       form.submit() // plain navigation fallback
     }
@@ -124,21 +247,23 @@ export default class extends Controller {
 
     // Offline or a bad response: keep what's on screen and let the next tick
     // retry.
-    const fresh = await fetchList(this.listTarget.dataset.fragmentUrl, "ol.messages")
-    if (!fresh) return
+    const list = this.listTarget
+    const fresh = await fetchList(list.dataset.fragmentUrl, "ol.messages")
+    if (!fresh || !list.isConnected) return
 
-    mergeRows(this.listTarget, fresh)
+    mergeRows(list, fresh)
     if (stick) this.scrollToBottom()
 
     // The open thread panel refreshes on the same signal with the same morph —
     // replies are rows with data-id like everything else. Its own fragment URL
     // carries the ?thread param, so the server renders just the replies list.
     if (this.hasThreadListTarget) {
+      const thread = this.threadListTarget
       const replies = await fetchList(
-        this.threadListTarget.dataset.threadFragmentUrl,
+        thread.dataset.threadFragmentUrl,
         "ol.thread-replies",
       )
-      if (replies) mergeRows(this.threadListTarget, replies)
+      if (replies && thread.isConnected) mergeRows(thread, replies)
     }
   }
 
@@ -156,8 +281,9 @@ export default class extends Controller {
     if (!before.created_at || !before.id) return
 
     this.busy = true
+    const list = this.listTarget
     const announce = setTimeout(
-      () => this.setSlot("loading", "Loading history…"),
+      () => { if (list.isConnected) this.setSlot("loading", "Loading history…") },
       HISTORY_LABEL_DELAY_MS,
     )
 
@@ -173,6 +299,7 @@ export default class extends Controller {
           before,
           limit: PAGE_SIZE,
         })
+        if (!list.isConnected) return
         // busy means a sync pass held the VM — transient, so leave it be and
         // let the next scroll retry. Only a real failure says offline.
         if (reply.busy) return this.setSlot("idle", "")
@@ -181,6 +308,7 @@ export default class extends Controller {
       }
 
       const page = await this.fetchOlderPage(before)
+      if (!list.isConnected) return
       if (!page) return this.offline("history page fetch failed")
 
       this.prepend(page)
@@ -260,26 +388,37 @@ export default class extends Controller {
   scrollToBottom() {
     this.scrollerTarget.scrollTop = this.scrollerTarget.scrollHeight
   }
+
+  // Defer scrollHeight read to the pre-paint animation frame so DOM mutations
+  // settle without triggering a forced synchronous layout during click handling.
+  scheduleScrollToBottom() {
+    requestAnimationFrame(() => {
+      if (this.hasScrollerTarget) this.scrollToBottom()
+    })
+  }
 }
 
 // --- Stateless helpers -------------------------------------------------------
 
 const swControlled = () =>
-  "serviceWorker" in navigator && !!navigator.serviceWorker.controller
+  !!(window.__spinel?.worker || navigator.serviceWorker?.controller)
 
-// All callers want the same thing from a render: one list out of the fragment,
-// or null if the page couldn't be reached. A thrown fetch and a non-ok
-// response mean the same thing to them, so they're answered the same way.
-const fetchList = async (url, selector) => {
+const fetchElement = async (url, selector) => {
   try {
     const response = await fetch(url)
     if (!response.ok) return null
-    const doc = new DOMParser().parseFromString(await response.text(), "text/html")
-    return doc.querySelector(selector)
+    const template = document.createElement("template")
+    template.innerHTML = (await response.text()).trim()
+    return template.content.querySelector(selector)
   } catch {
     return null
   }
 }
+
+// All callers want the same thing from a render: one list out of the fragment,
+// or null if the page couldn't be reached. A thrown fetch and a non-ok
+// response mean the same thing to them, so they're answered the same way.
+const fetchList = (url, selector) => fetchElement(url, selector)
 
 const fetchHistoryViaWorker = (request) =>
   new Promise((resolve) => {
@@ -294,7 +433,8 @@ const fetchHistoryViaWorker = (request) =>
       clearTimeout(timer)
       resolve(event.data || { ok: false, error: "empty reply" })
     }
-    navigator.serviceWorker.controller.postMessage(
+    const worker = window.__spinel?.worker || navigator.serviceWorker.controller
+    worker.postMessage(
       { type: "instant_record.fetch_history", request },
       [channel.port2],
     )
@@ -304,21 +444,32 @@ const fetchHistoryViaWorker = (request) =>
 // pass keeps order: matched rows advance the anchor, new rows land after it.
 // Rows without a data-id are markers and are left alone.
 const mergeRows = (current, fresh) => {
+  const incoming = [...fresh.children]
+  if (incoming.length === 1 && incoming[0].dataset.id) {
+    const freshLi = incoming[0]
+    const existing = current.querySelector(`:scope > li[data-id="${CSS.escape(freshLi.dataset.id)}"]`)
+    if (existing) {
+      if (existing.outerHTML !== freshLi.outerHTML) existing.replaceWith(freshLi)
+    } else {
+      current.append(freshLi)
+    }
+    return
+  }
+
   const existing = new Map(
     [...current.children].filter((li) => li.dataset.id).map((li) => [li.dataset.id, li]),
   )
 
   let anchor = null
-  for (const freshLi of fresh.children) {
+  for (const freshLi of incoming) {
     const id = freshLi.dataset.id
     if (!id) continue
 
     const node = existing.get(id)
     if (node) {
       if (node.outerHTML !== freshLi.outerHTML) {
-        const updated = freshLi.cloneNode(true)
-        node.replaceWith(updated)
-        anchor = updated
+        node.replaceWith(freshLi)
+        anchor = freshLi
       } else {
         anchor = node
       }
@@ -327,9 +478,8 @@ const mergeRows = (current, fresh) => {
 
     // A row we don't have. It belongs after the last row we matched; with no
     // match yet it belongs at the end, since this page is the newest slice.
-    const added = freshLi.cloneNode(true)
-    anchor ? anchor.after(added) : current.append(added)
-    anchor = added
+    anchor ? anchor.after(freshLi) : current.append(freshLi)
+    anchor = freshLi
   }
 }
 

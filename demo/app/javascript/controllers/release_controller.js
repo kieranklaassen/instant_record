@@ -6,6 +6,21 @@ import { Controller } from "@hotwired/stimulus"
 export default class extends Controller {
   static targets = ["button"]
 
+  // Refresh server-driven values without replacing the form or its focused field.
+  async refresh() {
+    const request = Symbol()
+    this.currentRefresh = request
+    const response = await fetch(location.pathname)
+    if (!response.ok) return
+    const template = document.createElement("template")
+    template.innerHTML = await response.text()
+    if (!this.element.isConnected || this.currentRefresh !== request) return
+    for (const selector of ["dl.facts", "table.notes"]) {
+      const next = template.content.querySelector(selector)
+      if (next) this.element.querySelector(selector)?.replaceWith(next)
+    }
+  }
+
   ship() {
     this.buttonTarget.disabled = true
     this.buttonTarget.value = "Migrating…"

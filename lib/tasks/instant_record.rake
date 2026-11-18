@@ -1,4 +1,17 @@
 namespace :instant_record do
+  desc "Compile this Rails app to a static browser site using Roundhouse, Spinel and SQLite"
+  task compile: :environment do
+    require "instant_record/compiler"
+    Rails.application.eager_load!
+    output = InstantRecord::Compiler.build(
+      root: Rails.root,
+      models: InstantRecord.syncable_models.map(&:name),
+      toolchain: ENV.fetch("INSTANT_RECORD_TOOLCHAIN") { Rails.root.join("config/instant_record_toolchain.env") },
+      endpoint: ENV.fetch("SYNC_ENDPOINT") { Rails.application.config.instant_record.mount_path || InstantRecord::DEFAULT_MOUNT_PATH }
+    )
+    puts "Compiled browser site: #{output}"
+  end
+
   desc "Build the browser bundle: compiles the Ruby wasm core (once) and packs app.wasm"
   task :build do
     require "wasmify-rails"

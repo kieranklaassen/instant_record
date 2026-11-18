@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>InstantRecord — compiled</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <link rel="icon" href="data:,">
+    <script>
+      // Start compiling the app from the first line of the shell. The worker that will run it
+      // only starts once the page's own script has loaded; the compiled module is handed to it.
+      window.__wasmStart = performance.now();
+      window.__wasm = WebAssembly.compileStreaming(fetch("%VITE_WASM_URL%", { cache: location.search.includes("instant_record_cold_boot=1") ? "reload" : "default" })).then(
+        function (module) { window.__wasmMs = performance.now() - window.__wasmStart; return module; },
+        function () { return null; });
+    </script>
+  </head>
+  <body>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

@@ -267,6 +267,24 @@ navigator.serviceWorker.controller.postMessage(
 
 The Slack demo's infinite scroll is the reference wiring — IntersectionObserver sentinel, scroll anchoring, in-place DOM updates — in the Stimulus controller `demo/app/javascript/controllers/conversation_controller.js`.
 
+## Compile a Rails app for the browser
+
+The gem includes an experimental ahead-of-time compiler. Roundhouse and Spinel
+compile the app’s routes, controllers, views, and syncable models into a WebAssembly
+reactor. A dedicated worker runs it against local SQLite and syncs with your Rails server.
+
+After installing the toolchain and filling in `config/instant_record_toolchain.env`, run:
+
+```sh
+bin/rails db:migrate
+bin/rails instant_record:compile
+```
+
+The static site is written to `tmp/instant_record/compiled/web/dist`. The default
+sync endpoint is `/instant_record`. Use `SYNC_ENDPOINT` for a separately hosted
+Rails server. The compiled demo includes Todo, Chat, Ship v2, local database
+inspection and Receipts. [Toolchain setup and supported features](compiled/README.md).
+
 ## Running the demo
 
 Requirements: Ruby 3.3.3, Node, PostgreSQL, [wasmtime](https://wasmtime.dev) and [wasi-vfs](https://github.com/kateinoigakukun/wasi-vfs).

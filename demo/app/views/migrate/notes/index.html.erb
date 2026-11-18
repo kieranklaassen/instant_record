@@ -1,7 +1,8 @@
 <% content_for(:title, "Ship v2 — InstantRecord") %>
 <% has_word_count = @columns.include?(Release::COLUMN) %>
 
-<div class="page">
+<div class="page" data-controller="release" data-instant-refresh
+     data-action="instant-record:records-changed@window->release#refresh">
   <header class="page-header">
     <p class="micro-label">Demo 03</p>
     <h1>Ship v2</h1>
@@ -23,7 +24,7 @@
 
   <ol class="run">
     <li>Write a couple of notes. Each one commits locally and syncs.</li>
-    <li>Switch <strong>Offline</strong> on in the inspector, write two more. Those stay in the outbox.</li>
+    <li>Switch <strong>Offline</strong> on in the <a href="#inspector">Sync inspector</a>, then write two more notes. Those stay in the outbox.</li>
     <li>Read the three numbers below.</li>
     <li>Press <strong>Ship v2</strong>.</li>
     <li>Read them again, and look at the list: the same rows, with the timestamps they already had, now carrying a word count derived from the body text that was already there.</li>
@@ -61,7 +62,7 @@
       </p>
 
       <%= form_with url: migrate_ship_path, method: :post,
-                    data: { turbo: false, controller: "release", action: "submit->release#ship" } do |f| %>
+                    data: { turbo: false, action: "submit->release#ship" } do |f| %>
         <%= f.submit "Ship v2", data: { release_target: "button" } %>
       <% end %>
     <% else %>
@@ -124,29 +125,11 @@
     </p>
 
     <p>
-      <strong>The sync server is still on v1, on purpose.</strong>
-      <code>db/schema.rb</code> is one file shared by both runtimes and it is
-      what a fresh browser loads at boot, so the only way this browser can be
-      genuinely behind is for the server to be behind too. Two consequences,
-      both real:
+      <strong>The sync server can stay on v1.</strong>
+      Both versions save the title and body. A v2 browser calculates
+      <code>word_count</code> from the body, including for notes received from other browsers.
     </p>
 
-    <ul>
-      <li>
-        The mutations you queued before shipping were captured at v1 and drain
-        cleanly. The backfilled <code><%= Release::COLUMN %></code> never leaves
-        this browser — the server is not told about it.
-      </li>
-      <li>
-        A note written <em>after</em> v2 carries <code><%= Release::COLUMN %></code>
-        upward, and the server rejects a column it has never heard of: the batch
-        fails and the outbox jams. Watch <code>POST /mutations</code> start
-        failing in the inspector. There is no schema negotiation in this
-        protocol, so the ordinary rule holds — migrate the server first, ship the
-        client second. Opening this page on the sync server itself and pressing
-        Ship v2 there is that first half.
-      </li>
-    </ul>
 
     <p>
       <strong>PGlite is inferred, not measured.</strong> The tests behind this

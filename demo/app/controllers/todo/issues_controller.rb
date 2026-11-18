@@ -21,27 +21,41 @@ module Todo
     end
 
     def index
-      @issues = issues_scope.order(created_at: :desc)
-      @pending_count = InstantRecord.browser? ? InstantRecord.pending_count : 0
+      load_list
+      render partial: "list", layout: false if params[:fragment]
     end
 
     def create
       Issue.create!(issue_params)
-      redirect_to todo_root_path
+      respond_after_write
     end
 
     def update
       issue = Issue.find(params[:id])
       issue.update!(state: params[:done] == "1" ? "done" : "open")
-      redirect_to todo_root_path
+      respond_after_write
     end
 
     def destroy
       Issue.find(params[:id]).destroy!
-      redirect_to todo_root_path
+      respond_after_write
     end
 
     private
+
+    def load_list
+      @issues = issues_scope.order(created_at: :desc)
+      @pending_count = InstantRecord.browser? ? InstantRecord.pending_count : 0
+    end
+
+    def respond_after_write
+      if params[:fragment]
+        load_list
+        render partial: "list", layout: false
+      else
+        redirect_to todo_root_path
+      end
+    end
 
     # In the browser this is all local data (already scoped by the server at
     # sync time); on a real server this is where current_user scoping lives.

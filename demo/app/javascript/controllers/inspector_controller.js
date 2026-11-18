@@ -3,7 +3,7 @@ import { Controller } from "@hotwired/stimulus"
 // A live view of the sync flow, always on, shared by every demo (it lives in
 // the layout).
 //
-// Everything comes from the service worker (see rails.sw.js), which is the only
+// Everything comes from the worker that runs the app, which is the only
 // place that sees both halves of the flow: same-origin requests the wasm VM
 // serves — navigations and form posts included, which a page-side fetch wrapper
 // would miss entirely — and the sync traffic Ruby's transport makes from inside
@@ -53,8 +53,11 @@ const record = (entry) => {
   listeners.forEach((listener) => listener(stamped))
 }
 
-if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.addEventListener("message", (event) => {
+const worker = window.__spinel?.worker
+const endpoint = () => worker || navigator.serviceWorker?.controller
+const messages = worker || navigator.serviceWorker
+if (messages) {
+  messages.addEventListener("message", (event) => {
     const type = event.data?.type
     if (type === "instant_record.debug") record(event.data.entry)
     else if (type === "instant_record.debug_backlog") adopt(event.data)
@@ -77,7 +80,7 @@ const adopt = ({ entries: backlog, streamOpen: open }) => {
 }
 
 const tellWorker = (settings, backlog = false) => {
-  navigator.serviceWorker?.controller?.postMessage({
+  endpoint()?.postMessage({
     type: "instant_record.simulate",
     settings,
     backlog,
@@ -169,7 +172,7 @@ export default class extends Controller {
     this.draw()
     // The worker holds the real buffer; without this the next page load adopts
     // it again and everything just cleared comes straight back.
-    navigator.serviceWorker?.controller?.postMessage({ type: "instant_record.clear_log" })
+    endpoint()?.postMessage({ type: "instant_record.clear_log" })
   }
 
   push() {
@@ -207,10 +210,7 @@ export default class extends Controller {
       const part = this.element.querySelector(`[data-flow="${flow}"]`)
       if (!part) continue
 
-      // Restart the animation rather than letting a second event be swallowed
-      // by the first one's still-running keyframes.
-      part.removeAttribute("data-active")
-      void part.getBoundingClientRect()
+      // Extend a burst without forcing synchronous layout on each segment.
       part.setAttribute("data-active", flow)
 
       clearTimeout(this.pulseTimers.get(flow))

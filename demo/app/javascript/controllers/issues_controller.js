@@ -1,23 +1,10 @@
 import { Controller } from "@hotwired/stimulus"
 
-// Todo without page reloads: submits go over fetch, and the list morphs in
-// place — add, update, and (unlike the chat conversation) remove by data-id.
-// Removal is safe here because this list is complete: the page renders every
-// issue, so a row missing from a fresh render really is gone. The chat list
-// is a window over history, where a missing row only means "not in the
-// window", which is why its morph never removes.
-//
-// Scroll and focus survive because nothing outside a changed row is touched:
-// the composer keeps its caret, and the reader keeps their place.
-//
-// Usage (see app/views/todo/issues/index.html.erb):
-//   <div data-controller="issues"
-//        data-instant-refresh
-//        data-action="instant-record:records-changed@window->issues#sync">
-//     <form data-action="submit->issues#submit">…</form>
-//     <ul class="issues" data-issues-target="list">…</ul>
-//     …<span data-issues-target="open|done|pending">…
-//   </div>
+// Todo without page reloads: submits go over fetch with ?fragment=1, so the
+// controller writes and returns the updated <ul> partial in a single round trip
+// with no layout render or second GET. The list morphs in place — add, update,
+// and remove by data-id — so scroll position and composer focus survive every
+// change.
 export default class extends Controller {
   static targets = ["list", "open", "done", "pending"]
 
@@ -25,15 +12,12 @@ export default class extends Controller {
     this.busy = false
   }
 
-  // Every form on the page — create, toggle, delete — posts here instead of
-  // navigating. The write is already local in the browser runtime, so the
-  // refetch right after paints it without a reload.
   async submit(event) {
     event.preventDefault()
     const form = event.target
     const input = form.querySelector("input[type='text']")
     const typed = input?.value
-    const body = new FormData(form)
+    const body = new URLSearchParams(new FormData(form))
     if (form.dataset.method) body.set("_method", form.dataset.method)
     if (input) {
       input.value = ""
@@ -41,14 +25,13 @@ export default class extends Controller {
     }
 
     try {
-      // redirect: "manual" — create/update/destroy all redirect, and following
-      // it would render a page we're about to diff away. The opaque redirect
-      // (status 0) is the success path; a real error still has a status.
-      const response = await fetch(form.action, { method: "POST", body, redirect: "manual" })
-      if (response.type !== "opaqueredirect" && !response.ok) {
-        throw new Error(`submit failed: ${response.status}`)
-      }
-      await this.sync()
+      const url = withFragment(form.action)
+      const response = await fetch(url, { method: "POST", body })
+      if (!response.ok) throw new Error(`submit failed: ${response.status}`)
+
+      const fresh = parseList(await response.text())
+      if (fresh) this.applyList(fresh)
+      else await this.sync()
     } catch {
       if (input) input.value = typed
       form.submit() // plain navigation fallback
@@ -60,41 +43,49 @@ export default class extends Controller {
     if (this.busy) return
     this.busy = true
     try {
-      const doc = await fetchPage(window.location.pathname)
-      if (!doc) return
-
-      const fresh = doc.querySelector("ul.issues")
-      if (fresh) morphRows(this.listTarget, fresh)
-
-      // The red field's numbers live outside the list; swap their text only.
-      for (const name of ["open", "done", "pending"]) {
-        const target = `${name}Target`
-        const freshValue = doc.querySelector(`[data-issues-target="${name}"]`)
-        if (this[`has${name[0].toUpperCase()}${name.slice(1)}Target`] && freshValue) {
-          this[target].textContent = freshValue.textContent
-        }
-      }
+      const response = await fetch(withFragment(window.location.pathname))
+      if (!response.ok) return
+      const fresh = parseList(await response.text())
+      if (fresh) this.applyList(fresh)
+    } catch {
+      // keep current DOM until next signal
     } finally {
       this.busy = false
     }
   }
+
+  applyList(fresh) {
+    morphRows(this.listTarget, fresh)
+    if (this.hasOpenTarget && fresh.dataset.open !== undefined) {
+      this.openTarget.textContent = fresh.dataset.open
+    }
+    if (this.hasDoneTarget && fresh.dataset.done !== undefined) {
+      this.doneTarget.textContent = fresh.dataset.done
+    }
+    if (this.hasPendingTarget && fresh.dataset.pending !== undefined) {
+      this.pendingTarget.textContent = fresh.dataset.pending
+    }
+  }
 }
 
-const fetchPage = async (url) => {
-  try {
-    const response = await fetch(url)
-    if (!response.ok) return null
-    return new DOMParser().parseFromString(await response.text(), "text/html")
-  } catch {
-    return null
-  }
+const withFragment = (href) => {
+  const url = new URL(href, window.location.origin)
+  url.searchParams.set("fragment", "1")
+  return url.pathname + url.search
+}
+
+const parseList = (html) => {
+  const template = document.createElement("template")
+  template.innerHTML = html.trim()
+  return template.content.querySelector("ul.issues")
 }
 
 // One ascending pass, keyed by data-id: matched rows are replaced when their
 // markup changed, new rows land after the last match, and rows absent from
 // the fresh render are removed.
 const morphRows = (current, fresh) => {
-  const freshIds = new Set([...fresh.children].map((li) => li.dataset.id).filter(Boolean))
+  const incoming = [...fresh.children]
+  const freshIds = new Set(incoming.map((li) => li.dataset.id).filter(Boolean))
   for (const li of [...current.children]) {
     if (li.dataset.id && !freshIds.has(li.dataset.id)) li.remove()
   }
@@ -104,24 +95,22 @@ const morphRows = (current, fresh) => {
   )
 
   let anchor = null
-  for (const freshLi of fresh.children) {
+  for (const freshLi of incoming) {
     const id = freshLi.dataset.id
     if (!id) continue
 
     const node = existing.get(id)
     if (node) {
       if (node.outerHTML !== freshLi.outerHTML) {
-        const updated = freshLi.cloneNode(true)
-        node.replaceWith(updated)
-        anchor = updated
+        node.replaceWith(freshLi)
+        anchor = freshLi
       } else {
         anchor = node
       }
       continue
     }
 
-    const added = freshLi.cloneNode(true)
-    anchor ? anchor.after(added) : current.prepend(added)
-    anchor = added
+    anchor ? anchor.after(freshLi) : current.prepend(freshLi)
+    anchor = freshLi
   }
 }

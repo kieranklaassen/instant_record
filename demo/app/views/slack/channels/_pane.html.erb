@@ -1,0 +1,40 @@
+<main class="conversation" data-conversation-target="pane">
+  <header class="conversation-header">
+    <div class="room">
+      <h2>
+        <% if @channel.dm? %>
+          <span class="micro-label">DM</span> <%= @channel.dm_user&.name || @channel.name %>
+        <% else %>
+          <span class="hash">#</span><%= @channel.name %>
+        <% end %>
+      </h2>
+      <span class="room-meta">
+        Runtime <strong><%= InstantRecord.browser? ? "browser" : "server" %></strong>
+      </span>
+    </div>
+    <% if InstantRecord.browser? %>
+      <span class="pending-badge">Pending <%= @pending_count %></span>
+    <% end %>
+  </header>
+
+  <div class="message-scroll"
+       data-conversation-target="scroller"
+       data-action="scroll->conversation#scrolled">
+    <%# Rendered here rather than created in JS so the first paint already
+        reserves the slot's height — injecting it on connect shifted the whole
+        list down by 44px on every load. The conversation controller adopts
+        this element and converts it in place when history runs out. %>
+    <% if @has_more %>
+      <div class="history-sentinel"
+           data-state="idle"
+           data-conversation-target="sentinel"></div>
+    <% end %>
+    <%= render "messages" %>
+  </div>
+
+  <%= form_with url: slack_messages_path, method: :post, class: "composer", data: { action: "conversation#send" } do |f| %>
+    <%= f.hidden_field "message[channel_id]", value: @channel.id %>
+    <%= f.text_field "message[body]", placeholder: @channel.dm? ? "Message #{@channel.dm_user&.name}" : "Message ##{@channel.name}", required: true, autofocus: true, autocomplete: "off" %>
+    <%= f.submit "Send" %>
+  <% end %>
+</main>

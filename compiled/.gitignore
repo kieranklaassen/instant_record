@@ -1,0 +1,7 @@
+.build/
+web/dist/
+web/node_modules
+.context/
+.worktrees/
+__pycache__/
+toolchain.env

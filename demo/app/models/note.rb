@@ -14,9 +14,14 @@ class Note < ApplicationRecord
   # it here.
   before_save :count_words, if: -> { has_attribute?(:word_count) }
 
+  # Older clients include their derived count in queued mutations. Accept
+  # the field on either schema and compute the authoritative count from body.
+  def word_count=(_client_count)
+  end
+
   private
 
   def count_words
-    self.word_count = body.to_s.split.size
+    self[:word_count] = body.to_s.split.size
   end
 end

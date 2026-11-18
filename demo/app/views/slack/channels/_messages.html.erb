@@ -19,6 +19,7 @@
       <span class="micro-label">Beginning of <%= @channel.dm? ? "this conversation" : "##{@channel.name}" %></span>
     </li>
   <% end %>
+  <% channel_href = slack_channel_path(@channel) %>
   <% @messages.each do |message| %>
     <% reply_count = @reply_counts&.fetch(message.id, nil) %>
     <li class="<%= "own" if message.from_visitor? %>"
@@ -34,9 +35,7 @@
           <% end %>
         </div>
         <p class="body"><%= message.body %></p>
-        <%= link_to reply_count ? "#{reply_count} #{"reply".pluralize(reply_count)} ⟶" : "Reply in thread",
-              slack_channel_path(@channel, thread: message.id),
-              class: "thread-link #{"has-replies" if reply_count}" %>
+        <a class="thread-link <%= "has-replies" if reply_count %>" href="<%= "#{channel_href}?thread=#{message.id}" %>"><%= reply_count ? "#{reply_count} #{"reply".pluralize(reply_count)} ⟶" : "Reply in thread" %></a>
       </div>
     </li>
   <% end %>

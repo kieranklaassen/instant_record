@@ -29,6 +29,7 @@
   <ul class="demo-grid">
     <li>
       <%= link_to todo_root_path, class: "demo-card" do %>
+        <%= image_tag "previews/todo.png", alt: "", width: 840, height: 285, style: "width:100%;height:auto", loading: "lazy", decoding: "async" %>
         <p class="card-no">01</p>
         <h2>Todo</h2>
         <p class="card-copy">Optimistic local writes, and a server-only validation that rejects a
@@ -38,6 +39,7 @@
     </li>
     <li>
       <%= link_to slack_root_path, class: "demo-card" do %>
+        <%= image_tag "previews/chat.png", alt: "", width: 666, height: 226, style: "width:100%;height:auto", loading: "lazy", decoding: "async" %>
         <p class="card-no">02</p>
         <h2>Chat</h2>
         <p class="card-copy">Channels, DMs, threads, and users who reply from the server —
@@ -47,6 +49,7 @@
     </li>
     <li>
       <%= link_to migrate_root_path, class: "demo-card" do %>
+        <%= image_tag "previews/migration.png", alt: "", width: 672, height: 228, style: "width:100%;height:auto", loading: "lazy", decoding: "async" %>
         <p class="card-no">03</p>
         <h2>Ship v2</h2>
         <p class="card-copy">Fill a local database, leave writes unsynced, then run a migration
@@ -56,6 +59,7 @@
     </li>
     <li>
       <%= link_to console_root_path, class: "demo-card" do %>
+        <%= image_tag "previews/console.png", alt: "", width: 840, height: 285, style: "width:100%;height:auto", loading: "lazy", decoding: "async" %>
         <p class="card-no">04</p>
         <h2>Console</h2>
         <p class="card-copy">No UI, no seeds, nothing staged — an ActiveRecord prompt against the

@@ -23,6 +23,10 @@ Gem::Specification.new do |spec|
   # the gem installs into an app that can never build its own schema.
   spec.files = Dir["{app,config,db,lib}/**/*", "CHANGELOG.md", "LICENSE.txt", "README.md"]
 
+  spec.files.concat Dir["compiled/pipeline/**/*.{py,rb,erb,c,h}", "compiled/web/src/**/*.js",
+                        "compiled/web/{index.html,vite.config.js,package.json,package-lock.json}",
+                        "compiled/README.md", "compiled/toolchain.env.example"]
+
   spec.add_dependency "rails", ">= 8.0"
   spec.add_dependency "wasmify-rails", "~> 0.5"
 end
