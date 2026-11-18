@@ -29,7 +29,7 @@ SQLITE_CFLAGS = [
 ]
 STRIP = True  # llvm-strip the module (names and debug sections)
 SYNC_ENDPOINT = os.environ.get("SYNC_ENDPOINT", "http://127.0.0.1:3210/instant_record")
-REACTOR_EXPORTS = "WasmBridge.handle_request,WasmBridge.handle_sync,WasmBridge.handle_stream,WasmBridge.cursor"
+REACTOR_EXPORTS = "WasmBridge.handle_request,WasmBridge.handle_sync,WasmBridge.sync_plan,WasmBridge.handle_stream,WasmBridge.cursor"
 # ─────────────────────────────────────────────────────────────────────────────
 
 

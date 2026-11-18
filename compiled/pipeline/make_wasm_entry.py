@@ -44,6 +44,14 @@ module WasmBridge
     0
   end
 
+  # Capture the exact outgoing batch before the worker yields to browser requests.
+  def self.sync_plan
+    mutations = InstantRecord::Client.pending_mutations
+    push = mutations.empty? ? "" : JSON.generate({ mutations: mutations })
+    File.write("/host/out", JSON.generate({ push: push, bootstrap: !InstantRecord::Client.bootstrapped? }))
+    0
+  end
+
   def self.handle_sync
     endpoint = File.read("/host/in").strip
     InstantRecord.config.endpoint = endpoint if endpoint.length > 0
@@ -59,7 +67,7 @@ module WasmBridge
   end
 
   def self.cursor
-    File.write("/host/out", "cursor=" + InstantRecord::Client.cursor.to_s + " pending=" + InstantRecord::Client.pending_count.to_s)
+    File.write("/host/out", "cursor=" + InstantRecord::Client.cursor.to_s + " pending=" + InstantRecord::Client.pending_count.to_s + " bootstrap=" + (InstantRecord::Client.bootstrapped? ? "ready" : "needed"))
     0
   end
 end

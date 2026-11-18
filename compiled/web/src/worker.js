@@ -9,12 +9,19 @@ const QUIET_MS = 30;
 const DRAIN_RETRY_BASE_MS = 500;
 const DRAIN_RETRY_CAP_MS = 10000;
 
-function exchange(method, url, body) {
-  const xhr = new XMLHttpRequest();
-  xhr.open(method, url, false); // synchronous on purpose (used only for bootstrap & outbox drain)
-  if (method === "POST") xhr.setRequestHeader("Content-Type", "application/json");
-  xhr.send(method === "POST" ? body : null);
-  return { status: xhr.status, body: xhr.responseText };
+async function fetchReply(method, path, body = "") {
+  const url = SYNC_ENDPOINT + path;
+  try {
+    const options = { method, signal: AbortSignal.timeout(30000) };
+    if (method === "POST") {
+      options.headers = { "Content-Type": "application/json" };
+      options.body = body;
+    }
+    const response = await fetch(url, options);
+    return { method, url, body, status: response.status, text: await response.text() };
+  } catch {
+    return { method, url, body, status: 0, text: "" };
+  }
 }
 
 // ── persistence: single cached IndexedDB handle ──
@@ -58,6 +65,8 @@ let currentCursor = null;
 let saveTimer = null;
 let kickTimer = null;
 let pollInFlight = false;
+let draining = null;
+let localRevision = 0;
 let drainDelayMs = DRAIN_RETRY_BASE_MS;
 
 async function persistDatabaseNow() {
@@ -80,19 +89,46 @@ function kickSync(delay = QUIET_MS) {
   kickTimer = setTimeout(syncPass, delay);
 }
 
-async function syncPass() {
+function syncPass() {
   clearTimeout(kickTimer);
   kickTimer = null;
-  if (!host) return null;
-
-  const result = host.sync(SYNC_ENDPOINT);
-  currentCursor = result.cursor;
-  if (result.changed || result.notified) {
-    await persistDatabaseNow();
+  if (!draining) {
+    const revision = localRevision;
+    draining = drain(revision).finally(() => {
+      draining = null;
+      if (revision !== localRevision) kickSync();
+    });
   }
-  if (result.notified) self.postMessage({ type: "records_changed" });
+  return draining;
+}
 
-  if (result.pending > 0) {
+async function drain(revision, initial = false) {
+  const plan = host.syncPlan();
+  const push = plan.push ? await fetchReply("POST", "/mutations", plan.push) : null;
+  const snapshot = plan.bootstrap ? await fetchReply("GET", "/bootstrap") : null;
+
+  // An edit made during the network wait takes precedence over an old rejection or
+  // snapshot. Retry from SQLite with the original mutation IDs for idempotent replay.
+  if (revision !== localRevision) return { changed: false, retried: true };
+  const result = host.sync(SYNC_ENDPOINT, (method, url, body) => {
+    const reply = method === "POST" ? push : snapshot;
+    if (!reply || reply.method !== method || reply.url !== url || reply.body !== body) {
+      throw new Error("Unexpected request while applying prepared sync responses");
+    }
+    return { status: reply.status, body: reply.text };
+  });
+  const needsBootstrap = plan.bootstrap && !host.syncState().bootstrapped;
+  currentCursor = needsBootstrap ? null : result.cursor;
+  if (result.changed || result.notified) {
+    if (initial) {
+      scheduleSave(); // The first page already renders the snapshot.
+    } else {
+      await persistDatabaseNow();
+      if (result.notified) self.postMessage({ type: "records_changed" });
+    }
+  }
+
+  if (result.pending > 0 || needsBootstrap) {
     kickSync(drainDelayMs);
     drainDelayMs = Math.min(drainDelayMs * 2, DRAIN_RETRY_CAP_MS);
   } else {
@@ -105,18 +141,22 @@ async function syncPass() {
 // async fetch keeps the worker event loop unblocked for user clicks, and an empty body
 // skips Wasm entirely.
 async function pollChanges() {
-  if (!host || pollInFlight) return;
+  if (!host || pollInFlight || draining || kickTimer) return;
+  const revision = localRevision;
   pollInFlight = true;
   try {
     if (currentCursor === null) {
       const state = host.syncState();
+      if (state.pending > 0 || !state.bootstrapped) {
+        kickSync(0);
+        return;
+      }
       currentCursor = state.cursor;
-      if (state.pending > 0) kickSync(0);
     }
     const response = await fetch(`${SYNC_ENDPOINT}/events?after=${currentCursor}&window=0`);
     if (!response.ok) return;
     const text = await response.text();
-    if (!text.trim()) return;
+    if (!text.trim() || draining || kickTimer || revision !== localRevision) return;
 
     const consumed = host.consumeStream(text);
     currentCursor = consumed.cursor;
@@ -133,6 +173,14 @@ async function pollChanges() {
 
 const saved = loadMany(["development.sqlite3", "secret_key_base"]);
 
+function afterRequest(method) {
+  if (method === "GET" || method === "HEAD") return;
+  localRevision++;
+  scheduleSave();
+  drainDelayMs = DRAIN_RETRY_BASE_MS;
+  kickSync();
+}
+
 function navigate({ method, path, body, contentType }) {
   const started = performance.now();
   let result = host.request(method, path, { body: body ?? "", contentType: contentType || "application/x-www-form-urlencoded" });
@@ -146,13 +194,7 @@ function navigate({ method, path, body, contentType }) {
     redirected = true;
     result = host.request("GET", finalPath);
   }
-  if (method !== "GET") {
-    scheduleSave();
-    drainDelayMs = DRAIN_RETRY_BASE_MS;
-    kickSync(QUIET_MS);
-  } else if (kickTimer) {
-    kickSync(QUIET_MS);
-  }
+  afterRequest(method);
   return { result: { ...result, ms: performance.now() - started }, redirected, finalPath };
 }
 
@@ -166,13 +208,11 @@ async function boot(payload = {}) {
   const secret = savedSecret || [...crypto.getRandomValues(new Uint8Array(64))].map((b) => b.toString(16).padStart(2, "0")).join("");
   if (!savedSecret) await store("secret_key_base", secret);
 
-  host = new AppHost(module, { exchange, env: { SECRET_KEY_BASE: secret } });
+  host = new AppHost(module, { env: { SECRET_KEY_BASE: secret } });
   if (savedDatabase) {
     host.restoreDatabase(savedDatabase);
   } else {
-    const first = host.sync(SYNC_ENDPOINT);
-    currentCursor = first.cursor;
-    if (first.changed) scheduleSave();
+    await drain(localRevision, true);
   }
 
   const first = payload.path ? navigate({ method: "GET", path: payload.path }) : null;
@@ -188,13 +228,7 @@ self.onmessage = async (event) => {
     if (type === "request") {
       const started = performance.now();
       const result = host.request(payload.method, payload.path, { body: payload.body ?? "", contentType: payload.contentType || "application/x-www-form-urlencoded" });
-      if (payload.method !== "GET") {
-        scheduleSave();
-        drainDelayMs = DRAIN_RETRY_BASE_MS;
-        kickSync(QUIET_MS);
-      } else if (kickTimer) {
-        kickSync(QUIET_MS);
-      }
+      afterRequest(payload.method);
       return self.postMessage({ id, result: { ...result, ms: performance.now() - started } });
     }
     if (type === "sync") return self.postMessage({ id, result: await syncPass() });

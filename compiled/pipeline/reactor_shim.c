@@ -6,6 +6,7 @@
 #include <stdio.h>
 
 static void call_request(void *ctx) { (void)ctx; sp_WasmBridge_s_handle_request(); }
+static void call_plan(void *ctx)    { (void)ctx; sp_WasmBridge_s_sync_plan(); }
 static void call_sync(void *ctx)    { (void)ctx; sp_WasmBridge_s_handle_sync(); }
 static void call_stream(void *ctx)  { (void)ctx; sp_WasmBridge_s_handle_stream(); }
 static void call_cursor(void *ctx)  { (void)ctx; sp_WasmBridge_s_cursor(); }
@@ -26,6 +27,9 @@ void wasm_boot(void) { app_boot(); }
 
 __attribute__((export_name("wasm_request")))
 int wasm_request(void) { return run_guarded(call_request); }
+
+__attribute__((export_name("wasm_sync_plan")))
+int wasm_sync_plan(void) { return run_guarded(call_plan); }
 
 __attribute__((export_name("wasm_sync")))
 int wasm_sync(void) { return run_guarded(call_sync); }

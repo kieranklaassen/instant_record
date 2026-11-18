@@ -164,11 +164,24 @@ export class AppHost {
   }
 
   // One pass of the gem's own sync loop (InstantRecord::Client.sync_pass).
-  sync(endpoint) {
+  syncPlan() {
+    const result = this.call("wasm_sync_plan", new Uint8Array());
+    if (result.exit !== 0) throw new Error(result.errors.join("\n") || "Failed to read the sync plan");
+    return JSON.parse(decoder.decode(result.out));
+  }
+
+  sync(endpoint, exchange = this.exchange) {
     this.notifyFile.data = new Uint8Array();
     this.hostDir.contents.set("notify", this.notifyFile);
     this.exchanges = [];
-    const result = this.call("wasm_sync", encoder.encode(endpoint || ""));
+    const previousExchange = this.exchange;
+    let result;
+    try {
+      this.exchange = exchange;
+      result = this.call("wasm_sync", encoder.encode(endpoint || ""));
+    } finally {
+      this.exchange = previousExchange;
+    }
     const text = decoder.decode(result.out);
     const notifyEntry = this.hostDir.contents.get("notify") || this.notifyFile;
     return {
@@ -202,6 +215,7 @@ export class AppHost {
     const result = this.call("wasm_cursor", new Uint8Array());
     const text = decoder.decode(result.out);
     return {
+      bootstrapped: text.includes("bootstrap=ready"),
       cursor: Number(/cursor=(\d+)/.exec(text)?.[1] ?? 0),
       pending: Number(/pending=(\d+)/.exec(text)?.[1] ?? 0),
     };
