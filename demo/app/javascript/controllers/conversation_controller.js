@@ -42,10 +42,18 @@ const HISTORY_LABEL_DELAY_MS = 200
 export default class extends Controller {
   static targets = ["pane", "scroller", "list", "sentinel", "threadPanel", "threadList"]
 
+  initialize() {
+    this.navigation = 0
+  }
+
   connect() {
     this.busy = false
     this.exhausted = this.listTarget.dataset.hasMore !== "true"
     this.scrollToBottom()
+  }
+
+  disconnect() {
+    this.navigation++
   }
 
   // --- Actions ---------------------------------------------------------------
@@ -80,19 +88,21 @@ export default class extends Controller {
   async popstate() {
     const url = new URL(window.location.href)
     const thread = url.searchParams.get("thread")
-    await this.switchChannel(url.pathname, { push: false })
-    if (thread) await this.openThread(url.pathname + url.search, { push: false })
+    const current = await this.switchChannel(url.pathname, { push: false })
+    if (thread && current) await this.openThread(url.pathname + url.search, { push: false })
   }
 
   async switchChannel(href, { push = true } = {}) {
     const url = new URL(href, window.location.origin)
-    if (push && url.pathname === window.location.pathname && !window.location.search) return
+    const navigation = ++this.navigation
+    this.highlightChannel(url.pathname)
+    if (push && url.pathname === window.location.pathname && !window.location.search) return true
 
     const fragmentUrl = new URL(url.pathname, window.location.origin)
     fragmentUrl.searchParams.set("fragment", "pane")
 
-    this.highlightChannel(url.pathname)
     const pane = await fetchElement(fragmentUrl, "main.conversation")
+    if (navigation !== this.navigation) return false
     if (!pane) {
       window.location.href = href
       return
@@ -103,14 +113,18 @@ export default class extends Controller {
     this.exhausted = this.listTarget.dataset.hasMore !== "true"
     if (push) history.pushState({}, "", url.pathname)
     this.scheduleScrollToBottom()
+    return true
   }
 
   async openThread(href, { push = true } = {}) {
+    const navigation = ++this.navigation
     const url = new URL(href, window.location.origin)
+    this.highlightChannel(url.pathname)
     const fragmentUrl = new URL(url.href)
     fragmentUrl.searchParams.set("fragment", "thread")
 
     const panel = await fetchElement(fragmentUrl, "aside.thread-panel")
+    if (navigation !== this.navigation) return
     if (!panel) {
       window.location.href = href
       return
@@ -126,6 +140,8 @@ export default class extends Controller {
   }
 
   closeThread(href, { push = true } = {}) {
+    this.navigation++
+    this.highlightChannel(new URL(href, window.location.origin).pathname)
     this.removeThreadPanel()
     if (push) history.pushState({}, "", new URL(href, window.location.origin).pathname)
   }
@@ -183,6 +199,7 @@ export default class extends Controller {
       if (!response.ok) throw new Error(`send failed: ${response.status}`)
 
       const html = (await response.text()).trim()
+      if (!form.isConnected) return
       const template = document.createElement("template")
       template.innerHTML = html
 
@@ -211,6 +228,7 @@ export default class extends Controller {
         }
       }
     } catch {
+      if (!form.isConnected) return
       input.value = typed
       form.submit() // plain navigation fallback
     }
@@ -229,21 +247,23 @@ export default class extends Controller {
 
     // Offline or a bad response: keep what's on screen and let the next tick
     // retry.
-    const fresh = await fetchList(this.listTarget.dataset.fragmentUrl, "ol.messages")
-    if (!fresh) return
+    const list = this.listTarget
+    const fresh = await fetchList(list.dataset.fragmentUrl, "ol.messages")
+    if (!fresh || !list.isConnected) return
 
-    mergeRows(this.listTarget, fresh)
+    mergeRows(list, fresh)
     if (stick) this.scrollToBottom()
 
     // The open thread panel refreshes on the same signal with the same morph —
     // replies are rows with data-id like everything else. Its own fragment URL
     // carries the ?thread param, so the server renders just the replies list.
     if (this.hasThreadListTarget) {
+      const thread = this.threadListTarget
       const replies = await fetchList(
-        this.threadListTarget.dataset.threadFragmentUrl,
+        thread.dataset.threadFragmentUrl,
         "ol.thread-replies",
       )
-      if (replies) mergeRows(this.threadListTarget, replies)
+      if (replies && thread.isConnected) mergeRows(thread, replies)
     }
   }
 
@@ -261,8 +281,9 @@ export default class extends Controller {
     if (!before.created_at || !before.id) return
 
     this.busy = true
+    const list = this.listTarget
     const announce = setTimeout(
-      () => this.setSlot("loading", "Loading history…"),
+      () => { if (list.isConnected) this.setSlot("loading", "Loading history…") },
       HISTORY_LABEL_DELAY_MS,
     )
 
@@ -278,6 +299,7 @@ export default class extends Controller {
           before,
           limit: PAGE_SIZE,
         })
+        if (!list.isConnected) return
         // busy means a sync pass held the VM — transient, so leave it be and
         // let the next scroll retry. Only a real failure says offline.
         if (reply.busy) return this.setSlot("idle", "")
@@ -286,6 +308,7 @@ export default class extends Controller {
       }
 
       const page = await this.fetchOlderPage(before)
+      if (!list.isConnected) return
       if (!page) return this.offline("history page fetch failed")
 
       this.prepend(page)
