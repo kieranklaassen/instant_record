@@ -1,7 +1,7 @@
 import { Controller } from "@hotwired/stimulus"
 
 // Fills the receipts page with figures measured in this browser. Two sources:
-// the service worker's boot ledger (bytes and phase timings it measured while
+// the dedicated worker's boot ledger (bytes and phase timings it measured while
 // booting), and a probe this controller runs now — the same Rails action fetched
 // twice at the same moment, once locally and once over the network.
 //
@@ -10,7 +10,7 @@ import { Controller } from "@hotwired/stimulus"
 // splash and this controller both keep the last ledger of each kind in
 // localStorage. Cold and warm are told apart by what was measured — whether the
 // bundle crossed the network — never by which visit it was.
-const STORE = window.__spinel ? "instant_record.compiled.boot." : "instant_record.boot."
+const STORE = "instant_record.compiled.boot."
 const SOURCES = ["network", "cache"]
 
 const fmtMs = (value) => {
@@ -33,37 +33,16 @@ export default class extends Controller {
     // while a probe is still in flight, and a resolved fetch must not write to
     // a page that is gone.
     this.live = true
-    this.listener = (event) => this.receive(event.data || {})
-    navigator.serviceWorker?.addEventListener("message", this.listener)
-
     this.showRuntime()
     SOURCES.forEach((source) => this.showBoot(source, this.stored(source)))
     this.showBootNote()
     this.showBundle(SOURCES.map((source) => this.stored(source)))
-
-    // The worker that booted this tab may have done so before this page
-    // existed; its ledger is still there to ask for.
-    navigator.serviceWorker?.controller?.postMessage({
-      type: "instant_record.boot_ledger",
-    })
 
     this.probe()
   }
 
   disconnect() {
     this.live = false
-    navigator.serviceWorker?.removeEventListener("message", this.listener)
-  }
-
-  receive(data) {
-    if (data.type !== "instant_record.boot_done" || data.ledger.totalMs === null) return
-
-    const source = this.bundleSource(data.ledger)
-    if (source === "unknown") return
-
-    localStorage.setItem(STORE + source, JSON.stringify(data.ledger))
-    this.showBoot(source, data.ledger)
-    this.showBundle([data.ledger])
   }
 
   // --- The probe -------------------------------------------------------------
@@ -216,13 +195,6 @@ export default class extends Controller {
     return raw ? JSON.parse(raw) : null
   }
 
-  bundleSource(ledger) {
-    const bundle = ledger.entries.find((entry) => entry.phase === "bundle")
-    if (!bundle || bundle.cached === null || bundle.cached === undefined) return "unknown"
-
-    return bundle.cached ? "cache" : "network"
-  }
-
   // --- A repeatable cold boot ------------------------------------------------
 
   async wipe() {
@@ -235,35 +207,6 @@ export default class extends Controller {
       removal.onsuccess = () => window.location.assign("/?instant_record_cold_boot=1")
       return
     }
-    const worker = navigator.serviceWorker?.controller
-
-    if (!worker) {
-      this.status("This page is being served by the server, so there is no local runtime here to wipe.")
-      return
-    }
-
-    if (
-      !confirm(
-        "Delete this app's local database, caches and service worker, then reload into a first-visit boot?\n\nAnything written locally and not yet synced is lost.",
-      )
-    ) {
-      return
-    }
-
-    this.wipeTarget.disabled = true
-    this.status("Closing the local database and unregistering the worker…")
-
-    // The worker lets go first — the stream it holds open, the database, the
-    // caches, its own registration.
-    await new Promise((resolve) => {
-      const channel = new MessageChannel()
-      channel.port1.onmessage = resolve
-      worker.postMessage({ type: "instant_record.wipe_local_data" }, [channel.port2])
-    })
-
-    // Then the splash: it deletes the database (only a page no worker controls
-    // can) and itemises the first-visit boot that follows.
-    window.location.href = "/?instant_record_cold_boot=1"
   }
 
   // --- Writing figures -------------------------------------------------------
@@ -288,24 +231,14 @@ export default class extends Controller {
     this.statusTarget.textContent = text
   }
 
-  // A worker controlling this tab is what makes the page local: it is the thing
-  // that served this HTML out of the wasm bundle.
   get localRuntime() {
-    return Boolean(window.__spinel || navigator.serviceWorker?.controller)
+    return Boolean(window.__spinel)
   }
 
   showRuntime() {
-    if (window.__spinel) {
-      this.figure("runtime", "Compiled Rails is serving this page from SQLite in your tab.")
-      return
-    }
-    this.figure(
-      "runtime",
-      this.localRuntime
-        ? "This page was rendered by Rails on ruby.wasm, in this tab."
-        : "This page was rendered by the server: no local runtime is controlling this tab, so the two columns below are the same round trip and there is nothing local to compare.",
-    )
-
-    if (!this.localRuntime) this.wipeTarget.disabled = true
+    this.figure("runtime", this.localRuntime
+      ? "Spinel compiled this Rails app to WebAssembly. SQLite serves local data in this tab."
+      : "This page was rendered by the Rails server.")
+    this.wipeTarget.disabled = !this.localRuntime
   }
 }

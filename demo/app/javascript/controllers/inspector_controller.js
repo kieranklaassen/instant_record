@@ -54,10 +54,8 @@ const record = (entry) => {
 }
 
 const worker = window.__spinel?.worker
-const endpoint = () => worker || navigator.serviceWorker?.controller
-const messages = worker || navigator.serviceWorker
-if (messages) {
-  messages.addEventListener("message", (event) => {
+if (worker) {
+  worker.addEventListener("message", (event) => {
     const type = event.data?.type
     if (type === "instant_record.debug") record(event.data.entry)
     else if (type === "instant_record.debug_backlog") adopt(event.data)
@@ -80,7 +78,7 @@ const adopt = ({ entries: backlog, streamOpen: open }) => {
 }
 
 const tellWorker = (settings, backlog = false) => {
-  endpoint()?.postMessage({
+  worker?.postMessage({
     type: "instant_record.simulate",
     settings,
     backlog,
@@ -98,9 +96,9 @@ const reachedTheServer = (entry) =>
 const flowsFor = (entry) => {
   switch (entry.kind) {
     case "local":
-      // Served by the local runtime: view → wasm Rails → PGlite, with no
+      // Served by the local runtime: view → wasm Rails → SQLite, with no
       // network anywhere on the path.
-      return ["page", "local", "wasm", "db", "pglite"]
+      return ["page", "local", "wasm", "db", "sqlite"]
     case "sync":
       if (entry.method === "POST") {
         return reachedTheServer(entry)
@@ -172,7 +170,7 @@ export default class extends Controller {
     this.draw()
     // The worker holds the real buffer; without this the next page load adopts
     // it again and everything just cleared comes straight back.
-    endpoint()?.postMessage({ type: "instant_record.clear_log" })
+    worker?.postMessage({ type: "instant_record.clear_log" })
   }
 
   push() {

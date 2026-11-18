@@ -31,17 +31,12 @@ require "active_support/isolated_execution_state"
 require "instant_record/version"
 require "instant_record/configuration"
 require "instant_record/runtime_scoped"
-require "wasmify-rails" # browser build tasks + PGlite adapter; inert outside wasm builds
 require "instant_record/engine" if defined?(Rails::Engine)
 
 module InstantRecord
   class << self
-    # True when running inside the browser (ruby.wasm). Delegates to
-    # wasmify-rails' Kernel#on_wasm?; kept as a method so it stays the
-    # single stub point for tests and the public name for apps.
-    def browser?
-      on_wasm?
-    end
+    # The compiler replaces this method in the browser bundle.
+    def browser? = false
 
     def config
       @config ||= Configuration.new
@@ -105,24 +100,10 @@ module InstantRecord
       }
     end
 
-    # Bring this runtime's database up to the app's schema. Stands in for a bare
-    # `ActiveRecord::Tasks::DatabaseTasks.prepare_all` at boot, which cannot see
-    # the app's migrations from the browser VM's working directory and so leaves
-    # a returning visitor on the schema they first booted with — see LocalSchema.
-    def prepare_database! = LocalSchema.prepare!
-
-    # Begin background sync (browser runtime only; a no-op on the server).
-    # The gem's service worker shim schedules `tick` on config.sync_interval.
-    # cold_boot: false skips the boot-time window eviction — the service
-    # worker passes it when it was restarted under already-open tabs (an idle
-    # SW restart mid-read must not trim scrollback the reader is holding).
+    # Begin background sync in the browser.
     def start(cold_boot: true)
       return false unless browser?
 
-      # Sync narration flows to the inspector from here on: Ruby authors the
-      # entries, the worker's report pipe carries them (see
-      # Client::Instrumentation).
-      Client::Instrumentation.attach
       Client.request_eviction if cold_boot
       @started = true
     end
@@ -351,7 +332,6 @@ module InstantRecord
 end
 
 ActiveSupport.on_load(:active_record) do
-  require "instant_record/local_schema"
   require "instant_record/sync_window"
   require "instant_record/syncable"
   require "instant_record/outbox_mutation"

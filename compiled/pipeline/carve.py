@@ -21,8 +21,7 @@ REMOVE = [
     # Browser dependencies come from the compiled runtime. The server's lockfile
     # would also bring Rack's request throttling middleware into the Wasm build.
     "Gemfile.lock", "config/initializers/rack_attack.rb",
-    # The interpreted backend reads its endpoint from Ruby's JS module.
-    # The compiled worker receives the same setting from SYNC_ENDPOINT.
+    # The compiled worker gets its endpoint from SYNC_ENDPOINT.
     "config/initializers/instant_record.rb",
     "app/controllers/source_controller.rb",
     "app/controllers/slack/resets_controller.rb",
@@ -73,19 +72,13 @@ shutil.copytree(overlay, os.path.join(app, "app"), dirs_exist_ok=True)
 migration_view = os.path.join(app, "app/views/migrate/notes/index.html.erb")
 with open(migration_view) as f:
     migration = f.read().replace("local Postgres", "local SQLite database").replace("turbo: false", "turbo: true")
-# The original scope section discusses a PGlite deployment. Keep the applicable
-# server-schema limitation here and describe the actual local transaction.
+# Adapt the Rails migration view to the compiled SQLite implementation.
 migration = migration.replace("<% has_word_count = @columns.include?(Release::COLUMN) %>", "")
 migration = migration.replace("<% if has_word_count %>", "<% unless @release_pending %>")
 migration = migration.replace("a\n        migration-local model with <code>update_columns</code>, so nothing\n        queues", "a direct SQLite update in the same transaction")
 migration = migration.replace("The\n          migration is an <code>add_column</code> inside <code>change</code>, so\n          this is its real reversal — not a separate undo written by hand.", "Rollback uses <code>ALTER TABLE</code> and removes the local migration version.")
-start = migration.index("    <p>\n      <strong>No deploy handover.")
-end = migration.index("    <p>\n      <strong>The sync server", start)
-migration = migration[:start] + migration[end:]
-start = migration.index("    <p>\n      <strong>PGlite is inferred")
-end = migration.index("    </p>", start) + len("    </p>")
 with open(migration_view, "w") as f:
-    f.write(migration[:start] + migration[end:])
+    f.write(migration)
 
 # Slack::Seeds: the browser-side controller reads its constants; the seeding routines are
 # server-only (and use find_or_create_by blocks the compiler refuses).

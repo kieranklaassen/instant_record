@@ -30,6 +30,10 @@ try {
   })));
   await go("/todo");
   await ready("issues");
+  const facts = await page.locator(".todo-facts").textContent();
+  assert.match(facts, /Spinel/);
+  assert.match(facts, /SQLite/);
+  assert.doesNotMatch(facts, /ruby\.wasm|PGlite/i);
   await page.locator("[data-inspector-target=offline]").check();
   const title = "offline " + id;
   await page.locator("form.todo-form input[type=text]").fill(title);

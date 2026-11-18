@@ -3,9 +3,8 @@ require "test_helper"
 # The claim Demo 03 makes: a migration applied to a local database that already
 # holds rows AND undrained outbox mutations loses neither.
 #
-# Runs in the server runtime against Postgres. PGlite is Postgres compiled to
-# wasm and takes the same DDL, but that is inference, not what these tests
-# measure. The browser needs a ~5 minute wasm rebuild to check.
+# This suite runs on server Postgres. compiled/test/full-demo.mjs exercises
+# the corresponding migration against SQLite in the compiled browser app.
 class ReleaseTest < ActiveSupport::TestCase
   setup { @verbose_was, ActiveRecord::Migration.verbose = ActiveRecord::Migration.verbose, false }
 

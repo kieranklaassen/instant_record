@@ -401,7 +401,7 @@ export default class extends Controller {
 // --- Stateless helpers -------------------------------------------------------
 
 const swControlled = () =>
-  !!(window.__spinel?.worker || navigator.serviceWorker?.controller)
+  !!window.__spinel?.worker
 
 const fetchElement = async (url, selector) => {
   try {
@@ -433,7 +433,7 @@ const fetchHistoryViaWorker = (request) =>
       clearTimeout(timer)
       resolve(event.data || { ok: false, error: "empty reply" })
     }
-    const worker = window.__spinel?.worker || navigator.serviceWorker.controller
+    const worker = window.__spinel.worker
     worker.postMessage(
       { type: "instant_record.fetch_history", request },
       [channel.port2],

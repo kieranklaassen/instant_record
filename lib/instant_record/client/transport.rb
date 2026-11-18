@@ -31,58 +31,37 @@ module InstantRecord
         end
       end
 
-      # Browser implementation over the JS fetch API via ruby.wasm's `js`
-      # gem. Every `.await` is an asyncify suspension point, so this class
-      # must only run under `evalAsync`.
-      class JsFetch
-        def initialize
-          require "js"
-        end
+      # The dedicated worker supplies network responses through the WASI host.
+      class WorkerFetch
+        REQUEST = "/host/request".freeze
+        RESPONSE = "/host/response".freeze
 
         def get_json(path)
-          response = JS.global.fetch(url(path)).await
-          raise Error, "GET #{path} -> #{response[:status]}" unless response[:ok] == JS::True
-
-          JSON.parse(response.text.await.to_s)
+          JSON.parse(exchange("GET", path, ""))
         end
 
         def post_json(path, payload)
-          options = JS.eval("return {}")
-          options[:method] = "POST"
-          headers = JS.eval("return {}")
-          headers["Content-Type"] = "application/json"
-          options[:headers] = headers
-          options[:body] = JSON.generate(payload)
-
-          response = JS.global.fetch(url(path), options).await
-          raise Error, "POST #{path} -> #{response[:status]}" unless response[:ok] == JS::True
-
-          JSON.parse(response.text.await.to_s)
+          JSON.parse(exchange("POST", path, JSON.generate(payload)))
         end
 
-        # Streams an SSE response, yielding one parsed event hash at a time.
-        # The server closes its bounded window; we return when the body ends.
+        # The host returns the whole catch-up stream at once (the loop polls with window=0).
         def each_event(path, &block)
-          response = JS.global.fetch(url(path)).await
-          raise Error, "GET #{path} -> #{response[:status]}" unless response[:ok] == JS::True
-
           parser = SseParser.new(&block)
-          reader = response[:body].getReader
-          decoder = JS.global[:TextDecoder].new
-          @stream_options ||= JS.eval("return {stream: true}")
-
-          loop do
-            result = reader.read.await
-            break if result[:done] == JS::True
-
-            parser.feed(decoder.decode(result[:value], @stream_options).to_s)
-          end
+          parser.feed(exchange("GET", path, ""))
         end
 
         private
 
-        def url(path)
-          "#{InstantRecord.config.endpoint}#{path}"
+        # Request file: first line "METHOD URL", then the body. Response file: first line the
+        # status, then the body. Status 0 is a network failure.
+        def exchange(method, path, body)
+          File.write(REQUEST, "#{method} #{InstantRecord.config.endpoint}#{path}\n#{body}")
+          response = File.read(RESPONSE)
+          newline = response.index("\n") || response.length
+          status = response[0, newline].to_i
+          raise Error, "#{method} #{path} -> #{status}" unless status >= 200 && status < 300
+
+          response[(newline + 1)..] || ""
         end
       end
     end

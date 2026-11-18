@@ -34,8 +34,8 @@
       <p class="stat-big" data-issues-target="done"><%= format("%02d", done_issues) %></p>
     </div>
     <div class="facts">
-      <p>Runtime<br><strong><%= InstantRecord.browser? ? "ruby.wasm" : "CRuby" %></strong></p>
-      <p>Store<br><strong><%= InstantRecord.browser? ? "PGlite" : "Postgres" %></strong></p>
+      <p>Runtime<br><strong><%= InstantRecord.browser? ? "Spinel (WebAssembly)" : "CRuby" %></strong></p>
+      <p>Store<br><strong><%= InstantRecord.browser? ? "SQLite" : "Postgres" %></strong></p>
       <% if InstantRecord.browser? %>
         <p>Pending<br><strong id="pending-count" data-issues-target="pending"><%= @pending_count %> <%= "mutation".pluralize(@pending_count) %></strong></p>
       <% end %>

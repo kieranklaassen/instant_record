@@ -80,23 +80,4 @@ class InstrumentationTest < Minitest::Test
     assert_equal "drain", payload[:phase]
     assert_equal "offline", payload[:error]
   end
-
-  def test_forwarder_shapes_entries_the_inspector_already_renders
-    entry = InstantRecord::Client::Instrumentation.send(:entry_for, "drain",
-      { posted: 3, rejected: 1, reasons: ["Body is too long"] }, 12)
-    assert_equal "sync-pass", entry[:kind]
-    assert_equal "drained 3, 1 rejected: Body is too long", entry[:path]
-    assert_equal 12, entry[:ms]
-
-    assert_nil InstantRecord::Client::Instrumentation.send(:entry_for, "poll", { applied: 0 }, 1),
-      "an empty poll is not news"
-
-    entry = InstantRecord::Client::Instrumentation.send(:entry_for, "fetch_history",
-      { applied: 50, has_more: false }, 40)
-    assert_equal "history", entry[:kind]
-    assert_includes entry[:path], "(beginning)"
-
-    entry = InstantRecord::Client::Instrumentation.send(:entry_for, "offline", { phase: "drain" }, 0)
-    assert_equal "offline", entry[:status]
-  end
 end

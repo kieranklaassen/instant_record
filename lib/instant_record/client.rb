@@ -3,12 +3,9 @@ require "time"
 require "active_support/notifications"
 require "instant_record/client/transport"
 require "instant_record/client/notifier"
-require "instant_record/client/instrumentation"
 
 module InstantRecord
-  # Browser-side sync client. Ruby owns the whole sync loop — transport
-  # included — via JS fetch interop; the service worker shim only schedules
-  # `InstantRecord.tick` (wasm Ruby cannot sleep without blocking the VM).
+  # Ruby reconciles local records and queued mutations. The worker handles network I/O.
   module Client
     # Columns the gem keeps for its own bookkeeping. A remote value that differs
     # in these alone is not a change to the row, it is our own write being
@@ -25,16 +22,16 @@ module InstantRecord
         @applying_remote = false
       end
 
-      # Seams: real implementations are JS-interop-backed and browser-only;
+      # Seams: real implementations are worker-backed and browser-only;
       # tests inject doubles so the loop runs under CRuby.
       attr_writer :transport, :notifier
 
       def transport
-        @transport ||= Transport::JsFetch.new
+        @transport ||= Transport::WorkerFetch.new
       end
 
       def notifier
-        @notifier ||= Notifier::JsClients.new
+        @notifier ||= Notifier::Worker.new
       end
 
       # One full pass: outbox up, changes down, tabs notified when anything
@@ -490,7 +487,7 @@ module InstantRecord
       # Every meaningful sync outcome is announced through
       # ActiveSupport::Notifications — the seam a host app subscribes to for
       # logging or metrics, and the one the browser runtime's forwarder turns
-      # into inspector entries (see Client::Instrumentation). Ruby authors the
+      # for server-side subscribers. The compiled worker reports to the inspector.
       # narrative because Ruby is what knows: the worker can only say it made a
       # request; this side knows what the pass actually did. Free-standing
       # events (no block) fire instantly; wrapped ones carry duration and, on a

@@ -6,8 +6,8 @@
       <p class="micro-label kicker">Four demos</p>
       <h1>Rails models<br>that run in<br>the browser.</h1>
       <p class="lede">
-        Compiled to WebAssembly, rendered in a service worker, backed by
-        Postgres in the tab. Writes commit locally, queue in a durable outbox,
+        Compiled to WebAssembly, rendered in a dedicated worker, backed by
+        SQLite in the tab. Writes commit locally, queue in a durable outbox,
         and sync when you're online. Everyone else's changes stream back down
         over server-sent events.
       </p>
@@ -18,8 +18,8 @@
         <p class="stat-huge">04</p>
       </div>
       <div class="facts">
-        <p>Runtime<br><strong><%= InstantRecord.browser? ? "ruby.wasm" : "CRuby" %></strong></p>
-        <p>Store<br><strong><%= InstantRecord.browser? ? "PGlite" : "Postgres" %></strong></p>
+        <p>Runtime<br><strong><%= InstantRecord.browser? ? "Spinel" : "CRuby" %></strong></p>
+        <p>Store<br><strong><%= InstantRecord.browser? ? "SQLite" : "Postgres" %></strong></p>
         <p>Sync<br><strong>Outbox + SSE</strong></p>
       </div>
       <p class="micro-label foot">Go offline; keep working</p>
@@ -71,7 +71,7 @@
 
   <div class="board-band">
     <span>Rendered by Rails inside your browser — runtime:
-      <strong><%= InstantRecord.browser? ? "browser (ruby.wasm + PGlite)" : "server (CRuby + Postgres)" %></strong></span>
+      <strong><%= InstantRecord.browser? ? "browser (Spinel + SQLite)" : "server (CRuby + Postgres)" %></strong></span>
     <%= link_to "What this cost on your device ⟶", receipts_path %>
   </div>
 

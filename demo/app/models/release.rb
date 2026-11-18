@@ -1,19 +1,6 @@
 # The v2 release the /migrate demo ships on demand.
 #
-# Why the migration does not live in db/migrate/: the service worker boots the
-# browser runtime with InstantRecord.prepare_database!, which loads db/schema.rb
-# into an empty local database and then runs every pending migration it finds in
-# config.paths["db/migrate"]. Anything parked there is
-# therefore already applied by the time a page renders — there is no pending
-# state left to demonstrate. This migration lives in db/v2_migrate/ instead:
-# outside the default path, so boot never sees it, db/schema.rb never records
-# it, and it stays pending until Ship v2 runs it through an explicit
-# MigrationContext. db/ is one of the packed directories in config/wasmify.yml,
-# so the extra folder travels inside app.wasm like the rest of the schema.
-#
-# The server is deliberately left on v1: db/schema.rb is a single file shared by
-# both runtimes, so the only way a browser can be genuinely behind is for the
-# server to be behind too. What that costs is spelled out on the page.
+# The teaching migration lives outside db/migrate so it runs only on request.
 class Release
   MIGRATIONS_PATH = Rails.root.join("db/v2_migrate").to_s
 

@@ -1,6 +1,3 @@
-// Tab side (hand-written). Stands where the gem's service worker stands in the ruby.wasm build:
-// every same-origin page request goes to the compiled app in the worker instead of the network,
-// so the demo's own HTML, importmap, Turbo and Stimulus controllers run unchanged on top of it.
 import { watchRelease } from "./release-updates.js";
 let releaseRequired;
 const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
@@ -211,7 +208,7 @@ if (resource?.decodedBodySize) {
     { phase: "bundle", ms: resource.responseEnd - resource.startTime, bytes: resource.decodedBodySize,
       wireBytes: cached ? 0 : resource.encodedBodySize, cached },
     { phase: "compile", ms: Math.max(0, compileEnd - resource.responseEnd) },
-    { phase: "pglite", ms: boot.storageMs }, { phase: "vm", ms: boot.runtimeMs },
+    { phase: "sqlite", ms: boot.storageMs }, { phase: "vm", ms: boot.runtimeMs },
     { phase: "schema", ms: boot.bootstrapMs }, { phase: "render", ms: result.ms },
   ] };
   window.__spinel.ledger = ledger;

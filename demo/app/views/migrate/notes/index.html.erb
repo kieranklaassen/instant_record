@@ -116,26 +116,11 @@
     <h2 class="micro-label">What this does not stage</h2>
 
     <p>
-      <strong>No deploy handover.</strong> The migration runs inside the runtime
-      that is already booted. A real deploy installs a new service worker, which
-      boots a <em>second</em> Ruby VM against the same PGlite store while the old
-      one may still be ticking a sync pass. That double-VM window is a known
-      hole and it is not exercised here. Read this page as evidence about DDL
-      over live local data, nothing more.
-    </p>
-
-    <p>
       <strong>The sync server can stay on v1.</strong>
       Both versions save the title and body. A v2 browser calculates
       <code>word_count</code> from the body, including for notes received from other browsers.
     </p>
 
 
-    <p>
-      <strong>PGlite is inferred, not measured.</strong> The tests behind this
-      claim — rows survive, the column is backfilled, the outbox does not move —
-      run against server Postgres. PGlite is Postgres compiled to wasm and takes
-      the same DDL, but nothing on this page proves that independently.
-    </p>
   </section>
 </div>

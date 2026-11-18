@@ -76,7 +76,7 @@
           the moving parts and the direction of travel are visible rather than
           inferred from a list of paths. %>
       <svg id="inspector-flow" viewBox="0 0 320 272" role="img"
-           aria-label="Sync architecture: your page and Rails on ruby.wasm in this browser, syncing to Rails and Postgres on the server">
+           aria-label="Sync architecture: your page and Compiled Rails in this browser, syncing to Rails and Postgres on the server">
         <defs>
           <marker id="flow-arrow" viewBox="0 0 8 8" refX="4" refY="4"
                   markerWidth="4" markerHeight="4" orient="auto-start-reverse">
@@ -86,7 +86,7 @@
 
         <g class="flow-zone">
           <rect x="8" y="16" width="304" height="112" />
-          <text class="flow-zone-label" x="12" y="11">This browser · service worker</text>
+          <text class="flow-zone-label" x="12" y="11">This browser · dedicated worker</text>
         </g>
 
         <g class="flow-node" data-flow="page">
@@ -96,12 +96,12 @@
 
         <g class="flow-node" data-flow="wasm">
           <rect x="24" y="64" width="272" height="26" />
-          <text x="160" y="81">Rails on ruby.wasm</text>
+          <text x="160" y="81">Compiled Rails</text>
         </g>
 
-        <g class="flow-node" data-flow="pglite">
+        <g class="flow-node" data-flow="sqlite">
           <rect x="24" y="102" width="272" height="20" />
-          <text x="160" y="116">PGlite — Postgres in this tab</text>
+          <text x="160" y="116">SQLite in this tab</text>
         </g>
 
         <g class="flow-zone">
@@ -135,42 +135,11 @@
         <%# Each label sits outside its own wire; crowded into the middle they
             collide with each other. %>
         <text class="flow-edge-label" x="88" y="144" text-anchor="end">writes up<tspan x="88" dy="9">HTTP POST</tspan><tspan x="88" dy="9">/mutations</tspan></text>
-        <text class="flow-edge-label" x="232" y="144">changes down<tspan x="232" dy="9">SSE, held open</tspan><tspan x="232" dy="9">/events</tspan></text>
+        <text class="flow-edge-label" x="232" y="144">changes down<tspan x="232" dy="9">polled every second</tspan><tspan x="232" dy="9">/events</tspan></text>
       </svg>
 
       <ol class="inspector-log" data-inspector-target="log"></ol>
     </aside>
 
-    <div id="new-version" hidden>
-      <span class="micro-label">A new build is ready</span>
-      <button type="button" onclick="window.location.reload()">Reload</button>
-    </div>
-
-    <script>
-      // Two things arrive from the service worker.
-      //
-      // sw_updated: a new bundle took over. Ask rather than reload — an
-      // unannounced reload throws away whatever is in a composer. Nothing
-      // else is at risk: unsynced writes live in the outbox in PGlite, so
-      // they survive a reload whenever it happens.
-      //
-      // records_changed: a sync pass applied changes. Pages with a
-      // data-instant-refresh root fold them in without re-rendering (see
-      // controllers/conversation_controller.js); the rest reload.
-      if ("serviceWorker" in navigator) {
-        navigator.serviceWorker.addEventListener("message", (event) => {
-          const type = event.data && event.data.type;
-          if (type === "sw_updated") {
-            document.getElementById("new-version")?.removeAttribute("hidden");
-          } else if (type === "records_changed") {
-            if (document.querySelector("[data-instant-refresh]")) {
-              window.dispatchEvent(new CustomEvent("instant-record:records-changed"));
-            } else {
-              window.location.reload();
-            }
-          }
-        });
-      }
-    </script>
   </body>
 </html>

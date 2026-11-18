@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0
+
+Roundhouse and Spinel now provide the gem’s sole browser runtime. The generated app runs against SQLite. The install generator writes the compiler configuration, and both `instant_record:compile` and `instant_record:build` build the compiled site.
+
+For apps upgrading from the former ruby.wasm/PGlite backend, sync pending writes before switching. The compiled runtime bootstraps SQLite from Rails. It does not import an old PGlite database. Existing compiled SQLite profiles continue to use their saved rows and outbox.
+
 ## Unreleased
 
 - Instrumentation via `ActiveSupport::Notifications`: the sync client announces `bootstrap`, `drain` (with rejection counts and reasons), `poll`, `stream`, `fetch_history`, and `offline` as `<event>.instant_record` — the standard seam for host-app logging and metrics, with no new dependency. In the browser runtime a forwarder (`Client::Instrumentation`) turns these into sync-inspector entries, moving narration authorship from the service worker's fetch inference ("POST /mutations 200") to the runtime that knows what happened ("drained 3, 1 rejected: Body is too long"). The worker keeps transport, backlog, scheduler, and boot narration — the parts that are genuinely its own.
