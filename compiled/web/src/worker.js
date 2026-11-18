@@ -87,12 +87,12 @@ async function store(key, value) {
     tx.objectStore("files").put(value, key);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error("IndexedDB transaction aborted"));
   });
 }
 
 let host = null;
 let currentCursor = null;
-let saveTimer = null;
 let kickTimer = null;
 let pollInFlight = false;
 let draining = null;
@@ -100,18 +100,8 @@ let localRevision = 0;
 let drainDelayMs = DRAIN_RETRY_BASE_MS;
 
 async function persistDatabaseNow() {
-  clearTimeout(saveTimer);
-  saveTimer = null;
   const bytes = host?.databaseBytes();
   if (bytes) await store("development.sqlite3", bytes.slice());
-}
-
-function scheduleSave() {
-  if (saveTimer) return;
-  saveTimer = setTimeout(() => {
-    saveTimer = null;
-    persistDatabaseNow();
-  }, 200);
 }
 
 function kickSync(delay = QUIET_MS) {
@@ -151,12 +141,8 @@ async function drain(revision, initial = false) {
   if (push || snapshot) report({ kind: "sync-pass", path: `${result.pending} pending` });
   currentCursor = needsBootstrap ? null : result.cursor;
   if (result.changed || result.notified) {
-    if (initial) {
-      scheduleSave(); // The first page already renders the snapshot.
-    } else {
-      await persistDatabaseNow();
-      if (result.notified) self.postMessage({ type: "records_changed" });
-    }
+    await persistDatabaseNow();
+    if (!initial && result.notified) self.postMessage({ type: "records_changed" });
   }
 
   if (result.pending > 0 || needsBootstrap) {
@@ -224,10 +210,12 @@ const saved = loadMany(["development.sqlite3", "secret_key_base"]).then(files =>
   return files;
 });
 
-function afterRequest(method) {
+async function afterRequest(method) {
   if (method === "GET" || method === "HEAD") return;
   localRevision++;
-  scheduleSave();
+  // A reload terminates this worker. Commit to IndexedDB before the UI sees
+  // success so an immediate reload can recover the write and its outbox row.
+  await persistDatabaseNow();
   drainDelayMs = DRAIN_RETRY_BASE_MS;
   kickSync();
 }
@@ -239,7 +227,7 @@ function localRequest(method, path, options) {
   return result;
 }
 
-function navigate({ method, path, body, contentType }) {
+async function navigate({ method, path, body, contentType }) {
   const started = performance.now();
   let result = localRequest(method, path, { body: body ?? "", contentType: contentType || "application/x-www-form-urlencoded" });
   let redirected = false;
@@ -252,7 +240,7 @@ function navigate({ method, path, body, contentType }) {
     redirected = true;
     result = localRequest("GET", finalPath);
   }
-  afterRequest(method);
+  await afterRequest(method);
   return { result: { ...result, ms: performance.now() - started }, redirected, finalPath };
 }
 
@@ -277,7 +265,7 @@ async function boot(payload = {}) {
   if (!savedDatabase) await drain(localRevision, true);
   const bootstrapMs = performance.now() - bootstrapStart;
 
-  const first = payload.path ? navigate({ method: "GET", path: payload.path }) : null;
+  const first = payload.path ? await navigate({ method: "GET", path: payload.path }) : null;
   setInterval(pollChanges, POLL_EVERY_MS);
   return { compileMs: compiled - started, restored: !!savedDatabase, storageMs, runtimeMs, bootstrapMs, first };
 }
@@ -317,11 +305,11 @@ self.onmessage = async (event) => {
       return self.postMessage({ id, result: reply });
     }
     if (type === "boot") return self.postMessage({ id, result: await boot(payload) });
-    if (type === "navigate") return self.postMessage({ id, result: navigate(payload) });
+    if (type === "navigate") return self.postMessage({ id, result: await navigate(payload) });
     if (type === "request") {
       const started = performance.now();
       const result = localRequest(payload.method, payload.path, { body: payload.body ?? "", contentType: payload.contentType || "application/x-www-form-urlencoded" });
-      afterRequest(payload.method);
+      await afterRequest(payload.method);
       return self.postMessage({ id, result: { ...result, ms: performance.now() - started } });
     }
     if (type === "save") return self.postMessage({ id, result: await persistDatabaseNow() });

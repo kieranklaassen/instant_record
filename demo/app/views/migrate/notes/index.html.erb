@@ -1,7 +1,8 @@
 <% content_for(:title, "Ship v2 — InstantRecord") %>
 <% has_word_count = @columns.include?(Release::COLUMN) %>
 
-<div class="page">
+<div class="page" data-controller="release" data-instant-refresh
+     data-action="instant-record:records-changed@window->release#refresh">
   <header class="page-header">
     <p class="micro-label">Demo 03</p>
     <h1>Ship v2</h1>
@@ -23,7 +24,7 @@
 
   <ol class="run">
     <li>Write a couple of notes. Each one commits locally and syncs.</li>
-    <li>Switch <strong>Offline</strong> on in the inspector, write two more. Those stay in the outbox.</li>
+    <li>Switch <strong>Offline</strong> on in the <a href="#inspector">Sync inspector</a>, then write two more notes. Those stay in the outbox.</li>
     <li>Read the three numbers below.</li>
     <li>Press <strong>Ship v2</strong>.</li>
     <li>Read them again, and look at the list: the same rows, with the timestamps they already had, now carrying a word count derived from the body text that was already there.</li>
@@ -61,7 +62,7 @@
       </p>
 
       <%= form_with url: migrate_ship_path, method: :post,
-                    data: { turbo: false, controller: "release", action: "submit->release#ship" } do |f| %>
+                    data: { turbo: false, action: "submit->release#ship" } do |f| %>
         <%= f.submit "Ship v2", data: { release_target: "button" } %>
       <% end %>
     <% else %>
@@ -84,6 +85,9 @@
     <% end %>
   </section>
 
+  <% unless @release_pending %>
+    <p class="note">While the sync server is on v1, new v2 notes stay in this tab only while offline. On sync, Rails rejects the new column and the rejected note disappears. Roll back to v1 before writing a note you want to sync.</p>
+  <% end %>
   <%= form_with url: migrate_notes_path, method: :post, class: "note-form", data: { turbo: false } do |f| %>
     <%= f.text_field "note[title]", placeholder: "Note title", required: true %>
     <%= f.text_area "note[body]", placeholder: "Body — the word count is derived from this", rows: 2 %>
@@ -139,12 +143,9 @@
       </li>
       <li>
         A note written <em>after</em> v2 carries <code><%= Release::COLUMN %></code>
-        upward, and the server rejects a column it has never heard of: the batch
-        fails and the outbox jams. Watch <code>POST /mutations</code> start
-        failing in the inspector. There is no schema negotiation in this
-        protocol, so the ordinary rule holds — migrate the server first, ship the
-        client second. Opening this page on the sync server itself and pressing
-        Ship v2 there is that first half.
+        upward. A v1 server rejects that note. The client removes the rejected
+        create and continues syncing the rest of the outbox. To accept v2 notes,
+        the server needs the same migration.
       </li>
     </ul>
 

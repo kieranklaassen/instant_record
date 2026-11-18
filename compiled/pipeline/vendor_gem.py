@@ -4,6 +4,7 @@
 Everything not listed under SEAMS is the gem's file, byte for byte. The seams are the places
 where the gem talks to ruby.wasm's JavaScript bridge or leans on runtime metaprogramming.
 """
+import hashlib
 import os
 import shutil
 import sys
@@ -214,6 +215,11 @@ for folder, _dirs, names in os.walk(os.path.join(app, "app/controllers")):
 edit("app/models/concerns/syncable.rb", "self.id ||= SecureRandom.uuid", "self.id = SecureRandom.uuid if id.blank?")
 
 if not os.environ.get("INSTANT_RECORD_APP"):
+    # The demo's :app stylesheet tag expands these files during translation.
+    # Give each URL a content hash so returning tabs pick up responsive fixes.
+    for sheet in Path(app, "app/assets/stylesheets").glob("*.css"):
+        digest = hashlib.sha256(sheet.read_bytes()).hexdigest()[:10]
+        sheet.rename(sheet.with_name(f"{sheet.stem}-{digest}.css"))
     # The generated Note class has the v1 fields. Capture the optional v2 column
     # in outbound creates/updates when the user has shipped that local migration.
     edit("app/models/concerns/syncable.rb", "    InstantRecord::OutboxMutation.create!(",

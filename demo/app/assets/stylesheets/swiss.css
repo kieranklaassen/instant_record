@@ -167,7 +167,13 @@ body { padding-left: 24rem; }
 
 @media (max-width: 60rem) {
   body { padding-left: 0; }
-  #inspector { display: none; }
+  #inspector {
+    position: static;
+    width: 100%;
+    height: min(70vh, 36rem);
+    border-right: 0;
+    border-top: 2px solid var(--red);
+  }
 }
 
 /* Sits in the same band as the site nav across the page: 46px tall, the same

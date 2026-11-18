@@ -177,7 +177,6 @@ async function submitLocalForm(event) {
     window.addEventListener("submit", submitLocalForm);
     return;
   }
-  await call("save");
   if (response.redirected) location.assign(response.finalPath);
   else {
     document.open();
