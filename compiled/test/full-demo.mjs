@@ -89,11 +89,12 @@ try {
   await fresh.getByText(title,{exact:true}).waitFor();
   await go("/migrate");
   await row.waitFor();
-  assert.equal(await secondRow.count(), 0, "v1 server rejects a v2 create");
+  await secondRow.waitFor();
   await page.getByPlaceholder("Note title").fill("unfinished draft");
   await page.locator(".note-form textarea").fill("still editing");
   const peerTitle = "peer " + id;
   await fresh.goto(new URL("/migrate",origin).href);
+  await fresh.getByText(secondTitle, {exact:true}).waitFor();
   await fresh.getByPlaceholder("Note title").fill(peerTitle);
   await fresh.locator(".note-form textarea").fill("from another tab");
   await fresh.getByRole("button", {name:"Write note"}).click();

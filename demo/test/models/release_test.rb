@@ -120,44 +120,23 @@ class ReleaseTest < ActiveSupport::TestCase
     assert_equal 4, Note.find_by!(title: "after").word_count
   end
 
-  # The edge, pinned so it stays documented rather than discovered. Shipping v2
-  # in the browser leaves the client one migration ahead of the sync server, and
-  # MutationApplier assigns a mutation's payload straight onto the model. A
-  # column the server has never heard of used to raise: the whole batch 500d, the
-  # client kept the outbox row on the transport error, and it retried the same
-  # mutation forever — one write blocking every write queued behind it.
-  #
-  # It is a rejection now. The write is still lost (there is no schema
-  # negotiation in this protocol, and the deploy order — server first, client
-  # second — is the whole defence), but it is lost loudly and once: the client
-  # rolls its local record back and the queue keeps draining. Said as plainly on
-  # the page.
-  test "a v2-shaped mutation is rejected by a v1 server instead of jamming the outbox" do
-    refute_includes Release.local_columns, Release::COLUMN, "this test needs a v1 server"
-    record_id = SecureRandom.uuid
+  test "a v1 server saves notes from clients that still send word_count" do
+    assert Release.pending?
+    id = SecureRandom.uuid
+    mutation = { id: "shipped-ahead", record_type: "Note", record_id: id, operation: "create",
+                 changes: { title: "written after v2", body: "a b", word_count: 99 } }
+    result = InstantRecord::MutationApplier.apply(mutation)
+    assert_equal "applied", result[:status]
+    assert_equal "a b", Note.find(id).body
+    assert_equal result, InstantRecord::MutationApplier.apply(mutation)
+    Release.ship
+    assert_equal 2, Note.find(id).word_count
+  end
 
-    result = InstantRecord::MutationApplier.apply({
-      id: "shipped-ahead",
-      record_type: "Note",
-      record_id: record_id,
-      operation: "create",
-      changes: { "title" => "written after v2", "body" => "a b", Release::COLUMN => 2 }
-    })
-
-    assert_equal "rejected", result[:status]
-    assert_match(/#{Release::COLUMN}/, result[:reason], "the client is told which column the server lacks")
-    refute Note.exists?(record_id), "nothing partial may be stored"
-
-    # The client retries the mutation id it never got an answer for; the
-    # idempotency ledger answers with the same rejection rather than re-raising.
-    replay = InstantRecord::MutationApplier.apply({
-      id: "shipped-ahead",
-      record_type: "Note",
-      record_id: record_id,
-      operation: "create",
-      changes: { "title" => "written after v2", "body" => "a b", Release::COLUMN => 2 }
-    })
-    assert_equal result, replay
+  test "a v2 server derives the count when a client sends a stale value" do
+    Release.ship
+    note = Note.create!(title: "new", body: "two words", word_count: 99)
+    assert_equal 2, note.reload.word_count
   end
 
   private

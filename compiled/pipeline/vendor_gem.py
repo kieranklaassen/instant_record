@@ -220,14 +220,6 @@ if not os.environ.get("INSTANT_RECORD_APP"):
     for sheet in Path(app, "app/assets/stylesheets").glob("*.css"):
         digest = hashlib.sha256(sheet.read_bytes()).hexdigest()[:10]
         sheet.rename(sheet.with_name(f"{sheet.stem}-{digest}.css"))
-    # The generated Note class has the v1 fields. Capture the optional v2 column
-    # in outbound creates/updates when the user has shipped that local migration.
-    edit("app/models/concerns/syncable.rb", "    InstantRecord::OutboxMutation.create!(",
-         """    if self.class.name == "Note" && operation != "destroy" && !Release.pending?
-      changes_payload["word_count"] = attributes["body"].to_s.split.size
-    end
-
-    InstantRecord::OutboxMutation.create!(""")
     # The source drawer loads generated source fragments for this build.
     target = os.path.join(app, "app/views/layouts/application.html.erb")
     source = open(target).read()

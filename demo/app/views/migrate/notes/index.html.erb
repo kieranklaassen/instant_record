@@ -85,9 +85,6 @@
     <% end %>
   </section>
 
-  <% unless @release_pending %>
-    <p class="note">While the sync server is on v1, new v2 notes stay in this tab only while offline. On sync, Rails rejects the new column and the rejected note disappears. Roll back to v1 before writing a note you want to sync.</p>
-  <% end %>
   <%= form_with url: migrate_notes_path, method: :post, class: "note-form", data: { turbo: false } do |f| %>
     <%= f.text_field "note[title]", placeholder: "Note title", required: true %>
     <%= f.text_area "note[body]", placeholder: "Body — the word count is derived from this", rows: 2 %>
@@ -128,26 +125,11 @@
     </p>
 
     <p>
-      <strong>The sync server is still on v1, on purpose.</strong>
-      <code>db/schema.rb</code> is one file shared by both runtimes and it is
-      what a fresh browser loads at boot, so the only way this browser can be
-      genuinely behind is for the server to be behind too. Two consequences,
-      both real:
+      <strong>The sync server can stay on v1.</strong>
+      Both versions save the title and body. A v2 browser calculates
+      <code>word_count</code> from the body, including for notes received from other browsers.
     </p>
 
-    <ul>
-      <li>
-        The mutations you queued before shipping were captured at v1 and drain
-        cleanly. The backfilled <code><%= Release::COLUMN %></code> never leaves
-        this browser — the server is not told about it.
-      </li>
-      <li>
-        A note written <em>after</em> v2 carries <code><%= Release::COLUMN %></code>
-        upward. A v1 server rejects that note. The client removes the rejected
-        create and continues syncing the rest of the outbox. To accept v2 notes,
-        the server needs the same migration.
-      </li>
-    </ul>
 
     <p>
       <strong>PGlite is inferred, not measured.</strong> The tests behind this
