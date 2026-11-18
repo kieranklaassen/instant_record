@@ -27,12 +27,20 @@ function idb() {
     open.onerror = () => reject(open.error);
   }));
 }
-async function load(key) {
+async function loadMany(keys) {
   const db = await idb();
   return new Promise((resolve, reject) => {
-    const get = db.transaction("files").objectStore("files").get(key);
-    get.onsuccess = () => resolve(get.result ?? null);
-    get.onerror = () => reject(get.error);
+    const store = db.transaction("files").objectStore("files");
+    const out = new Array(keys.length);
+    let remaining = keys.length;
+    keys.forEach((key, index) => {
+      const req = store.get(key);
+      req.onsuccess = () => {
+        out[index] = req.result ?? null;
+        if (--remaining === 0) resolve(out);
+      };
+      req.onerror = () => reject(req.error);
+    });
   });
 }
 async function store(key, value) {
@@ -100,7 +108,11 @@ async function pollChanges() {
   if (!host || pollInFlight) return;
   pollInFlight = true;
   try {
-    if (currentCursor === null) currentCursor = host.cursor();
+    if (currentCursor === null) {
+      const state = host.syncState();
+      currentCursor = state.cursor;
+      if (state.pending > 0) kickSync(0);
+    }
     const response = await fetch(`${SYNC_ENDPOINT}/events?after=${currentCursor}&window=0`);
     if (!response.ok) return;
     const text = await response.text();
@@ -119,7 +131,7 @@ async function pollChanges() {
   }
 }
 
-const saved = Promise.all([load("development.sqlite3"), load("secret_key_base")]);
+const saved = loadMany(["development.sqlite3", "secret_key_base"]);
 
 function navigate({ method, path, body, contentType }) {
   const started = performance.now();

@@ -22,9 +22,10 @@
       <h3 class="micro-label">Direct messages</h3>
       <ul>
         <% @dms.each do |dm| %>
+          <% dm_user = @users_by_id ? @users_by_id[dm.dm_user_id] : dm.dm_user %>
           <li class="<%= "active" if dm == @channel %>">
             <%= link_to slack_channel_path(dm) do %>
-              <span class="dot"></span><span class="name"><%= dm.dm_user&.name || dm.name %></span>
+              <span class="dot"></span><span class="name"><%= dm_user&.name || dm.name %></span>
             <% end %>
           </li>
         <% end %>

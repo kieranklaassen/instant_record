@@ -102,7 +102,7 @@ export default class extends Controller {
     this.removeThreadPanel()
     this.exhausted = this.listTarget.dataset.hasMore !== "true"
     if (push) history.pushState({}, "", url.pathname)
-    this.scrollToBottom()
+    this.scheduleScrollToBottom()
   }
 
   async openThread(href, { push = true } = {}) {
@@ -167,7 +167,7 @@ export default class extends Controller {
 
     const input = form.querySelector("input[type='text']")
     const typed = input.value
-    const body = new FormData(form)
+    const body = new URLSearchParams(new FormData(form))
     input.value = ""
     input.focus()
 
@@ -196,7 +196,7 @@ export default class extends Controller {
         const fresh = template.content.querySelector("ol.messages")
         if (fresh) {
           mergeRows(this.listTarget, fresh)
-          this.scrollToBottom()
+          this.scheduleScrollToBottom()
           return
         }
       }
@@ -365,6 +365,14 @@ export default class extends Controller {
   scrollToBottom() {
     this.scrollerTarget.scrollTop = this.scrollerTarget.scrollHeight
   }
+
+  // Defer scrollHeight read to the pre-paint animation frame so DOM mutations
+  // settle without triggering a forced synchronous layout during click handling.
+  scheduleScrollToBottom() {
+    requestAnimationFrame(() => {
+      if (this.hasScrollerTarget) this.scrollToBottom()
+    })
+  }
 }
 
 // --- Stateless helpers -------------------------------------------------------
@@ -412,21 +420,32 @@ const fetchHistoryViaWorker = (request) =>
 // pass keeps order: matched rows advance the anchor, new rows land after it.
 // Rows without a data-id are markers and are left alone.
 const mergeRows = (current, fresh) => {
+  const incoming = [...fresh.children]
+  if (incoming.length === 1 && incoming[0].dataset.id) {
+    const freshLi = incoming[0]
+    const existing = current.querySelector(`:scope > li[data-id="${CSS.escape(freshLi.dataset.id)}"]`)
+    if (existing) {
+      if (existing.outerHTML !== freshLi.outerHTML) existing.replaceWith(freshLi)
+    } else {
+      current.append(freshLi)
+    }
+    return
+  }
+
   const existing = new Map(
     [...current.children].filter((li) => li.dataset.id).map((li) => [li.dataset.id, li]),
   )
 
   let anchor = null
-  for (const freshLi of fresh.children) {
+  for (const freshLi of incoming) {
     const id = freshLi.dataset.id
     if (!id) continue
 
     const node = existing.get(id)
     if (node) {
       if (node.outerHTML !== freshLi.outerHTML) {
-        const updated = freshLi.cloneNode(true)
-        node.replaceWith(updated)
-        anchor = updated
+        node.replaceWith(freshLi)
+        anchor = freshLi
       } else {
         anchor = node
       }
@@ -435,9 +454,8 @@ const mergeRows = (current, fresh) => {
 
     // A row we don't have. It belongs after the last row we matched; with no
     // match yet it belongs at the end, since this page is the newest slice.
-    const added = freshLi.cloneNode(true)
-    anchor ? anchor.after(added) : current.append(added)
-    anchor = added
+    anchor ? anchor.after(freshLi) : current.append(freshLi)
+    anchor = freshLi
   }
 }
 

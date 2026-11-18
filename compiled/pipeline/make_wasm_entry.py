@@ -59,7 +59,7 @@ module WasmBridge
   end
 
   def self.cursor
-    File.write("/host/out", InstantRecord::Client.cursor.to_s)
+    File.write("/host/out", "cursor=" + InstantRecord::Client.cursor.to_s + " pending=" + InstantRecord::Client.pending_count.to_s)
     0
   end
 end

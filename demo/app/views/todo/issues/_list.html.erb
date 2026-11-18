@@ -7,18 +7,19 @@
     data-done="<%= format("%02d", done_issues) %>"
     data-pending="<%= pending_text %>">
   <% @issues.each_with_index do |issue, index| %>
+    <% issue_href = todo_issue_path(issue) %>
     <li class="<%= issue.state %>" data-id="<%= issue.id %>">
       <span class="issue-no"><%= format("%02d", index + 1) %></span>
       <%# The checkbox is the control: ticking it submits the form it sits
           in; the issues controller catches the submit and morphs instead
           of navigating. %>
-      <%= form_with url: todo_issue_path(issue), method: :patch, class: "toggle", data: { turbo: false, action: "submit->issues#submit" } do %>
+      <%= form_with url: issue_href, method: :patch, class: "toggle", data: { turbo: false, action: "submit->issues#submit" } do %>
         <%= label_tag "issue-#{issue.id}-done", issue.title, class: "title" %>
         <%= check_box_tag "done", "1", issue.state == "done",
                           id: "issue-#{issue.id}-done",
                           onchange: "this.form.requestSubmit()" %>
       <% end %>
-      <%= button_to "×", todo_issue_path(issue), method: :delete, form: { data: { turbo: false, action: "submit->issues#submit" } } %>
+      <%= button_to "×", issue_href, method: :delete, form: { data: { turbo: false, action: "submit->issues#submit" } } %>
     </li>
   <% end %>
 </ul>

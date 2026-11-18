@@ -17,7 +17,7 @@ export default class extends Controller {
     const form = event.target
     const input = form.querySelector("input[type='text']")
     const typed = input?.value
-    const body = new FormData(form)
+    const body = new URLSearchParams(new FormData(form))
     if (form.dataset.method) body.set("_method", form.dataset.method)
     if (input) {
       input.value = ""
@@ -84,7 +84,8 @@ const parseList = (html) => {
 // markup changed, new rows land after the last match, and rows absent from
 // the fresh render are removed.
 const morphRows = (current, fresh) => {
-  const freshIds = new Set([...fresh.children].map((li) => li.dataset.id).filter(Boolean))
+  const incoming = [...fresh.children]
+  const freshIds = new Set(incoming.map((li) => li.dataset.id).filter(Boolean))
   for (const li of [...current.children]) {
     if (li.dataset.id && !freshIds.has(li.dataset.id)) li.remove()
   }
@@ -94,24 +95,22 @@ const morphRows = (current, fresh) => {
   )
 
   let anchor = null
-  for (const freshLi of fresh.children) {
+  for (const freshLi of incoming) {
     const id = freshLi.dataset.id
     if (!id) continue
 
     const node = existing.get(id)
     if (node) {
       if (node.outerHTML !== freshLi.outerHTML) {
-        const updated = freshLi.cloneNode(true)
-        node.replaceWith(updated)
-        anchor = updated
+        node.replaceWith(freshLi)
+        anchor = freshLi
       } else {
         anchor = node
       }
       continue
     }
 
-    const added = freshLi.cloneNode(true)
-    anchor ? anchor.after(added) : current.prepend(added)
-    anchor = added
+    anchor ? anchor.after(freshLi) : current.prepend(freshLi)
+    anchor = freshLi
   }
 }

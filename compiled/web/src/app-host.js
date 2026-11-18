@@ -198,9 +198,13 @@ export class AppHost {
     };
   }
 
-  cursor() {
+  syncState() {
     const result = this.call("wasm_cursor", new Uint8Array());
-    return Number(decoder.decode(result.out).trim()) || 0;
+    const text = decoder.decode(result.out);
+    return {
+      cursor: Number(/cursor=(\d+)/.exec(text)?.[1] ?? 0),
+      pending: Number(/pending=(\d+)/.exec(text)?.[1] ?? 0),
+    };
   }
 }
 

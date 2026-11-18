@@ -174,6 +174,30 @@ def optimize_wasm(tree, wasm):
     return final
 
 
+def inject_preloads(dist):
+    """Preload the worker bundle and app stylesheets while wasm compiles.
+
+    JS libraries are intentionally not preloaded here so main-thread script parsing does not
+    compete with WebAssembly.compileStreaming or resolve bare importmap specifiers prematurely.
+    """
+    links = []
+    harness_dir = os.path.join(dist, "harness")
+    if os.path.isdir(harness_dir):
+        for name in sorted(os.listdir(harness_dir)):
+            if name.startswith("worker-") and name.endswith(".js"):
+                links.append(f'    <link rel="modulepreload" href="/harness/{name}">')
+    assets_dir = os.path.join(dist, "assets")
+    if os.path.isdir(assets_dir):
+        for name in sorted(os.listdir(assets_dir)):
+            if name.endswith(".css"):
+                links.append(f'    <link rel="preload" as="style" href="/assets/{name}">')
+    if not links:
+        return
+    index_path = os.path.join(dist, "index.html")
+    html = open(index_path).read()
+    open(index_path, "w").write(html.replace("  </head>", "\n".join(links) + "\n  </head>", 1))
+
+
 def main():
     os.makedirs(B, exist_ok=True)
     os.makedirs(T["CACHE"], exist_ok=True)
@@ -230,6 +254,7 @@ def main():
     for name in ["turbo.min.js", "stimulus.min.js", "stimulus-loading.js"]:
         found = subprocess.run(["find", T["RAILS_GEMS"], "-name", name], stdout=subprocess.PIPE, text=True).stdout.split("\n")[0]
         shutil.copy(found, assets)
+    inject_preloads(dist)
     print(f"built web/dist with app-{digest}.wasm ({os.path.getsize(final)} bytes)")
     open(stamp, "w").write(wanted)
 

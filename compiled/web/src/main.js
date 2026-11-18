@@ -27,32 +27,71 @@ const isLocal = (url) => url.origin === location.origin &&
 // One page request; the worker follows the app's redirects and returns the final answer.
 const appRequest = (method, path, body, contentType) => call("navigate", { method, path, body, contentType });
 
+const encodeFormData = (form) => {
+  const fields = new URLSearchParams();
+  for (const [name, value] of form.entries()) if (typeof value === "string") fields.append(name, value);
+  return fields.toString();
+};
+
+const headerValue = (headers, target) => {
+  if (!headers) return undefined;
+  if (headers instanceof Headers) return headers.get(target) || undefined;
+  const lower = target.toLowerCase();
+  if (Array.isArray(headers)) {
+    const pair = headers.find(([k]) => k.toLowerCase() === lower);
+    return pair?.[1];
+  }
+  for (const [k, v] of Object.entries(headers)) if (k.toLowerCase() === lower) return v;
+  return undefined;
+};
+
 // The same seam a service worker's fetch handler is, from inside the page.
 const networkFetch = window.fetch.bind(window);
 window.fetch = async (input, init) => {
-  const request = new Request(input, init);
-  const url = new URL(request.url);
+  const isUrlInput = typeof input === "string" || input instanceof URL;
+  const url = isUrlInput ? new URL(input, location.href) : new URL(input.url);
   if (!isLocal(url)) return networkFetch(input, init);
 
-  const method = request.method.toUpperCase();
+  let method;
   let body;
-  let contentType = request.headers.get("content-type") || undefined;
-  if (method !== "GET" && method !== "HEAD") {
-    if (contentType && contentType.startsWith("multipart/form-data")) {
-      // The one-shot entry feeds the app's HTTP parser directly and skips the socket server's
-      // multipart reader, so plain form fields travel urlencoded. File uploads are not carried.
-      const form = await request.formData();
-      const fields = new URLSearchParams();
-      for (const [name, value] of form.entries()) if (typeof value === "string") fields.append(name, value);
-      body = fields.toString();
-      contentType = "application/x-www-form-urlencoded";
-    } else {
-      body = new Uint8Array(await request.arrayBuffer());
+  let contentType;
+  let redirect;
+
+  if (isUrlInput) {
+    method = (init?.method || "GET").toUpperCase();
+    redirect = init?.redirect || "follow";
+    contentType = headerValue(init?.headers, "content-type");
+    if (method !== "GET" && method !== "HEAD" && init?.body != null) {
+      const raw = init.body;
+      if (raw instanceof FormData) {
+        body = encodeFormData(raw);
+        contentType = "application/x-www-form-urlencoded";
+      } else if (raw instanceof URLSearchParams) {
+        body = raw.toString();
+        contentType ||= "application/x-www-form-urlencoded";
+      } else if (typeof raw === "string") {
+        body = raw;
+      } else {
+        body = new Uint8Array(await new Response(raw).arrayBuffer());
+      }
+    }
+  } else {
+    const request = init ? new Request(input, init) : input;
+    method = request.method.toUpperCase();
+    redirect = request.redirect;
+    contentType = request.headers.get("content-type") || undefined;
+    if (method !== "GET" && method !== "HEAD") {
+      if (contentType && contentType.startsWith("multipart/form-data")) {
+        body = encodeFormData(await request.formData());
+        contentType = "application/x-www-form-urlencoded";
+      } else {
+        body = new Uint8Array(await request.arrayBuffer());
+      }
     }
   }
   const path = url.pathname + url.search;
 
-  if (request.redirect === "manual") {
+  if (redirect === "manual") {
     // The demo's controllers post with redirect: "manual" and only need to know it went through.
     const result = await call("request", { method, path, body, contentType });
     const ok = result.status < 400;
@@ -60,10 +99,14 @@ window.fetch = async (input, init) => {
   }
   const { result, redirected, finalPath } = await appRequest(method, path, body, contentType);
   const headers = result.headers.filter(([name]) => !/^(content-length|transfer-encoding)$/i.test(name));
-  // The socket server adds this default when it writes a response; the one-shot entry skips that
+  // The socket server adds this default when it writes a response; the reactor entry skips that
   // writer, and without it Turbo treats the page as a download and falls back to a full load.
   if (!headers.some(([name]) => name.toLowerCase() === "content-type")) headers.push(["Content-Type", "text/html; charset=utf-8"]);
   const response = new Response(result.body, { status: result.status, headers });
+  if (typeof result.body === "string") {
+    const bodyText = result.body;
+    response.text = () => Promise.resolve(bodyText);
+  }
   Object.defineProperty(response, "url", { value: new URL(finalPath, location.origin).href });
   Object.defineProperty(response, "redirected", { value: redirected });
   return response;

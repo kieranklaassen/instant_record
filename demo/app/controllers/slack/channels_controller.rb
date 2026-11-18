@@ -48,7 +48,7 @@ module Slack
       return render partial: "thread_replies", layout: false if params[:fragment] && @thread_parent
 
       @messages = conversation_window
-      @reply_counts = Message.where(parent_message_id: @messages.map(&:id)).group(:parent_message_id).count
+      @reply_counts = @messages.empty? ? {} : Message.where(parent_message_id: @messages.map(&:id)).group(:parent_message_id).count
       # The browser can't rule out older pages — its database holds only the
       # synced window — so it renders optimistically and the first history
       # probe settles it. The server runtime is authoritative. Decided here
@@ -68,7 +68,9 @@ module Slack
       @channels = Channel.channels
       @channel_counts = Message.top_level.group(:channel_id).count
       @dms = Channel.dms
-      @users = ChatUser.order(:name)
+      @users = ChatUser.order(:name).to_a
+      @users_by_id = {}
+      @users.each { |u| @users_by_id[u.id] = u }
       @pending_count = InstantRecord.browser? ? InstantRecord.pending_count : 0
     end
 
