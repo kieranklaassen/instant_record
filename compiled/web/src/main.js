@@ -19,7 +19,7 @@ const call = (type, payload) => new Promise((resolve, reject) => {
 });
 
 const marks = { start: performance.now() };
-window.__spinel = { marks, call, worker };
+window.__spinel = { marks, call, worker, sourceVersion: import.meta.env.VITE_SOURCE_VERSION };
 
 // Restore the switches before even the first bootstrap can reach Rails.
 try {
@@ -59,6 +59,11 @@ const networkFetch = window.fetch.bind(window);
 window.fetch = async (input, init) => {
   const isUrlInput = typeof input === "string" || input instanceof URL;
   const url = isUrlInput ? new URL(input, location.href) : new URL(input.url);
+  if (url.origin === location.origin && url.searchParams.has("instant_record_network")) {
+    const response = await call("serverRequest", { path: url.pathname + url.search, method: init?.method || "GET" });
+    if (!response.status) throw new TypeError("Sync server unreachable");
+    return new Response(response.text || null, { status: response.status });
+  }
   if (!isLocal(url)) return networkFetch(input, init);
 
   let method;
@@ -145,3 +150,57 @@ document.open();
 document.write(result.status === 200 ? result.body : `<pre>${result.status}\n${(result.errors || []).join("\n")}</pre>`);
 document.close();
 marks.rendered = performance.now();
+
+
+// Turbo and Stimulus handle their own forms first. An ordinary Rails form still
+// submits locally in apps without either library.
+async function submitLocalForm(event) {
+  if (event.defaultPrevented || !(event.target instanceof HTMLFormElement)) return;
+  const form = event.target;
+  const button = event.submitter;
+  const target = button?.getAttribute("formtarget") || form.target;
+  const url = new URL(button?.getAttribute("formaction") || form.action, location.href);
+  const method = (button?.getAttribute("formmethod") || form.method).toUpperCase();
+  if (!isLocal(url) || method !== "POST" || (target && target !== "_self")) return;
+  event.preventDefault();
+  const fields = new FormData(form, button || undefined);
+  const file = [...fields.values()].find(value => value instanceof File && value.name);
+  if (file) {
+    window.alert("This compiled runtime does not support file uploads.");
+    return;
+  }
+  const response = await appRequest(method, url.pathname + url.search, encodeFormData(fields), "application/x-www-form-urlencoded");
+  if (response.result.status >= 400) {
+    document.open();
+    document.write(response.result.body || "<p>Request failed</p>");
+    document.close();
+    window.addEventListener("submit", submitLocalForm);
+    return;
+  }
+  await call("save");
+  if (response.redirected) location.assign(response.finalPath);
+  else {
+    document.open();
+    document.write(response.result.body);
+    document.close();
+    window.addEventListener("submit", submitLocalForm);
+  }
+}
+window.addEventListener("submit", submitLocalForm);
+
+// Resource Timing distinguishes a cached module from a network response and gives
+// compressed and decoded byte counts without downloading the module a second time.
+const resource = performance.getEntriesByName(new URL(import.meta.env.VITE_WASM_URL, location.origin).href).at(-1);
+if (resource?.decodedBodySize) {
+  const cached = resource.transferSize === 0;
+  const compileEnd = window.__wasmStart + marks.compileMs;
+  const ledger = { at: Date.now(), totalMs: marks.rendered - result.ms, entries: [
+    { phase: "bundle", ms: resource.responseEnd - resource.startTime, bytes: resource.decodedBodySize,
+      wireBytes: cached ? 0 : resource.encodedBodySize, cached },
+    { phase: "compile", ms: Math.max(0, compileEnd - resource.responseEnd) },
+    { phase: "pglite", ms: boot.storageMs }, { phase: "vm", ms: boot.runtimeMs },
+    { phase: "schema", ms: boot.bootstrapMs }, { phase: "render", ms: result.ms },
+  ] };
+  window.__spinel.ledger = ledger;
+  try { localStorage.setItem("instant_record.compiled.boot." + (cached ? "cache" : "network"), JSON.stringify(ledger)); } catch {}
+}

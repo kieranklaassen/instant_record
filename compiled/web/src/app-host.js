@@ -211,6 +211,12 @@ export class AppHost {
     };
   }
 
+  history(key, response = "") {
+    const result = this.call("wasm_history", encoder.encode(JSON.stringify({ key, response })));
+    if (result.exit !== 0) throw new Error(result.errors.join("\n") || String(result.exit));
+    return JSON.parse(decoder.decode(result.out));
+  }
+
   syncState() {
     const result = this.call("wasm_cursor", new Uint8Array());
     const text = decoder.decode(result.out);

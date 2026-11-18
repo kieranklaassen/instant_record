@@ -39,7 +39,10 @@ export default class extends Controller {
 
     this.bodyTarget.textContent = "Reading the bundle…"
     try {
-      const response = await fetch(this.urlValue)
+      const build = window.__spinel?.sourceVersion
+      const demo = window.location.pathname.split("/")[1] || "home"
+      const url = build ? `/assets/source/${build}/${demo}.html` : this.urlValue
+      const response = await fetch(url)
       if (!response.ok) throw new Error(`source failed: ${response.status}`)
       this.bodyTarget.innerHTML = await response.text()
       this.loaded = true

@@ -19,8 +19,8 @@ function report(entry) {
   if (simulation.report) self.postMessage({ type: "instant_record.debug", entry: stamped });
 }
 
-async function fetchReply(method, path, body = "") {
-  const url = SYNC_ENDPOINT + path;
+async function fetchReply(method, path, body = "", endpoint = SYNC_ENDPOINT) {
+  const url = endpoint + path;
   const started = performance.now();
   const poll = path.startsWith("/events?");
   let status = 0;
@@ -201,7 +201,28 @@ async function pollChanges() {
   }
 }
 
-const saved = loadMany(["development.sqlite3", "secret_key_base"]);
+async function loadHistory(request) {
+  const query = new URLSearchParams({ type: request.type, before_created_at: request.before.created_at,
+    before_id: request.before.id, limit: String(request.limit) });
+  if (request.partition != null) query.set("partition", request.partition);
+  const key = query.toString();
+  const local = host.history(key);
+  if (local.ok) return local;
+  const revision = localRevision;
+  const reply = await fetchReply("GET", "/records?" + key);
+  if (reply.status !== 200) return { ok: false, error: "History unavailable" };
+  if (revision !== localRevision) return { ok: false, busy: true };
+  const result = host.history(key, reply.text);
+  await persistDatabaseNow();
+  return result;
+}
+
+const storageStart = performance.now();
+let storageMs;
+const saved = loadMany(["development.sqlite3", "secret_key_base"]).then(files => {
+  storageMs = performance.now() - storageStart;
+  return files;
+});
 
 function afterRequest(method) {
   if (method === "GET" || method === "HEAD") return;
@@ -248,13 +269,17 @@ async function boot(payload = {}) {
   host = new AppHost(module, { env: { SECRET_KEY_BASE: secret } });
   if (savedDatabase) {
     host.restoreDatabase(savedDatabase);
-  } else {
-    await drain(localRevision, true);
   }
+  const initStart = performance.now();
+  host.ensureBooted();
+  const runtimeMs = performance.now() - initStart;
+  const bootstrapStart = performance.now();
+  if (!savedDatabase) await drain(localRevision, true);
+  const bootstrapMs = performance.now() - bootstrapStart;
 
   const first = payload.path ? navigate({ method: "GET", path: payload.path }) : null;
   setInterval(pollChanges, POLL_EVERY_MS);
-  return { compileMs: compiled - started, restored: !!savedDatabase, first };
+  return { compileMs: compiled - started, restored: !!savedDatabase, storageMs, runtimeMs, bootstrapMs, first };
 }
 
 self.onmessage = async (event) => {
@@ -276,6 +301,21 @@ self.onmessage = async (event) => {
       }
       return;
     }
+    if (type === "instant_record.fetch_history") {
+      const port = event.ports[0];
+      try { port.postMessage(await loadHistory(event.data.request)); }
+      catch (error) { port.postMessage({ ok: false, error: error.message }); }
+      return;
+    }
+    if (type === "serverRequest") {
+      const url = new URL(payload.path, self.location.origin);
+      const allowed = (payload.method === "GET" && url.pathname === "/receipts/probe") ||
+        (payload.method === "POST" && url.pathname === "/slack/reset");
+      if (!allowed) throw new Error("Unknown demo server action");
+      const root = SYNC_ENDPOINT.replace(/\/instant_record\/?$/, "");
+      const reply = await fetchReply(payload.method, url.pathname + url.search, "", root);
+      return self.postMessage({ id, result: reply });
+    }
     if (type === "boot") return self.postMessage({ id, result: await boot(payload) });
     if (type === "navigate") return self.postMessage({ id, result: navigate(payload) });
     if (type === "request") {
@@ -284,6 +324,7 @@ self.onmessage = async (event) => {
       afterRequest(payload.method);
       return self.postMessage({ id, result: { ...result, ms: performance.now() - started } });
     }
+    if (type === "save") return self.postMessage({ id, result: await persistDatabaseNow() });
     if (type === "sync") return self.postMessage({ id, result: await syncPass() });
   } catch (error) {
     self.postMessage({ id, error: String(error && error.message ? error.message : error) });

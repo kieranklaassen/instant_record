@@ -11,9 +11,11 @@ import os
 import shutil
 import subprocess
 import sys
+from source_pages import write_source_pages
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO_ROOT = os.path.dirname(ROOT)
+APP_SOURCE = os.environ.get("INSTANT_RECORD_APP")
 
 # ── build knobs ──────────────────────────────────────────────────────────────
 SPINEL_FLAGS = []  # extra flags for `spinel --target=wasm32-wasi`
@@ -28,14 +30,14 @@ SQLITE_CFLAGS = [
     "-DSQLITE_OMIT_AUTOVACUUM", "-DSQLITE_OMIT_BLOB_LITERAL",
 ]
 STRIP = True  # llvm-strip the module (names and debug sections)
-SYNC_ENDPOINT = os.environ.get("SYNC_ENDPOINT", "http://127.0.0.1:3210/instant_record")
-REACTOR_EXPORTS = "WasmBridge.handle_request,WasmBridge.handle_sync,WasmBridge.sync_plan,WasmBridge.handle_stream,WasmBridge.cursor"
+SYNC_ENDPOINT = os.environ.get("SYNC_ENDPOINT", "http://127.0.0.1:3210/instant_record").rstrip("/")
+REACTOR_EXPORTS = "WasmBridge.handle_request,WasmBridge.handle_sync,WasmBridge.sync_plan,WasmBridge.handle_stream,WasmBridge.cursor,WasmBridge.history"
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 def toolchain():
     values = {}
-    for line in open(os.path.join(ROOT, "toolchain.env")):
+    for line in open(os.environ.get("INSTANT_RECORD_TOOLCHAIN", os.path.join(ROOT, "toolchain.env"))):
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -102,8 +104,17 @@ def sqlite_library():
 def input_digest():
     """Everything a build depends on inside this checkout, so an unchanged checkout is not rebuilt."""
     digest = hashlib.sha256()
-    paths = [os.path.join(ROOT, "toolchain.env"), os.path.join(ROOT, "web/index.html"), os.path.join(ROOT, "web/vite.config.js")]
-    for base_root, folders in [(ROOT, ["pipeline", "web/src"]), (GEM_SRC, ["lib/instant_record", "demo/app"])]:
+    paths = [os.environ.get("INSTANT_RECORD_TOOLCHAIN", os.path.join(ROOT, "toolchain.env")), os.path.join(ROOT, "web/index.html"), os.path.join(ROOT, "web/vite.config.js")]
+    paths.extend(os.path.join(ROOT, "web", name) for name in ("package.json", "package-lock.json"))
+    paths.append(os.path.join(GEM_SRC, "lib/instant_record.rb"))
+    inputs = [(ROOT, ["pipeline", "web/src"]), (GEM_SRC, ["lib/instant_record", "app/models/instant_record"])]
+    app_source = APP_SOURCE or os.path.join(GEM_SRC, "demo")
+    inputs.append((app_source, ["app", "config/routes", "config/locales"]))
+    for name in ("config/routes.rb", "config/application.rb", "config/importmap.rb", "db/schema.rb", "Gemfile"):
+        if os.path.isfile(os.path.join(app_source, name)):
+            paths.append(os.path.join(app_source, name))
+    digest.update(os.environ.get("INSTANT_RECORD_MODELS", "").encode())
+    for base_root, folders in inputs:
         for folder in folders:
             full = os.path.join(base_root, folder)
             if not os.path.isdir(full):
@@ -216,28 +227,39 @@ def main():
     python = sys.executable
     path_env = {"PATH": os.path.join(T["SPINEL_HOME"], "bin") + os.pathsep + os.environ["PATH"], "WASI_SDK": T["WASI_SDK"]}
 
-    # 1. The demo's Todo and Slack source, plus the gem's own files, with the source seams applied.
+    # 1. Stage the Rails app and adapt the gem's sync client to the browser host.
     app = os.path.join(B, "app-src")
-    run([python, os.path.join(ROOT, "pipeline/carve.py"), GEM_SRC, app])
+    if APP_SOURCE:
+        run([python, os.path.join(ROOT, "pipeline/prepare_app.py"), APP_SOURCE, app])
+    else:
+        run([python, os.path.join(ROOT, "pipeline/carve.py"), GEM_SRC, app])
     run([python, os.path.join(ROOT, "pipeline/vendor_gem.py"), GEM_SRC, app])
 
     # 2. Roundhouse: Rails app -> Spinel project.
     emit = os.path.join(B, "emit")
     clean(emit)
     run([T["ROUNDHOUSE_BIN"], "--target", "spinel", "-o", emit, app], log="emit.log")
-    # Roundhouse emits plain asset URLs. Give the inspector a content-based cache key
-    # so existing tabs get its matching worker protocol after an ordinary reload.
-    inspector_asset = "/assets/controllers/inspector_controller.js"
-    with open(os.path.join(app, "app/javascript/controllers/inspector_controller.js"), "rb") as f:
-        inspector_version = hashlib.sha256(f.read()).hexdigest()[:10]
+    # Roundhouse emits plain controller URLs. Version them so reloads pick up matching protocols.
+    controller_dir = os.path.join(app, "app/javascript/controllers")
     for config in ("config/importmap.rb", "config/application.rb"):
         path = os.path.join(emit, config)
+        if not os.path.isfile(path) or not os.path.isdir(controller_dir):
+            continue
         with open(path) as f:
             source = f.read()
+        for name in os.listdir(controller_dir):
+            if not name.endswith(".js") or not os.path.isfile(os.path.join(controller_dir, name)):
+                continue
+            with open(os.path.join(controller_dir, name), "rb") as f:
+                version = hashlib.sha256(f.read()).hexdigest()[:10]
+            asset = "/assets/controllers/" + name
+            source = source.replace(asset, asset + "?v=" + version)
         with open(path, "w") as f:
-            f.write(source.replace(inspector_asset, f"{inspector_asset}?v={inspector_version}"))
+            f.write(source)
     toml = os.path.join(emit, "spin.toml")
-    open(toml, "w").write(open(toml).read().replace('\nallocator = "jemalloc"', '\n# allocator = "jemalloc"  (wasm build: no jemalloc)'))
+    with open(toml) as f:
+        spin_config = f.read()
+    open(toml, "w").write(spin_config.replace('\nallocator = "jemalloc"', '\n# allocator = "jemalloc"  (wasm build: no jemalloc)'))
 
     # 3. Persistent reactor entry and the single-threaded copy for wasm32-wasi.
     tree = os.path.join(B, "wasm-tree")
@@ -257,20 +279,34 @@ def main():
     if not os.path.exists(modules):
         os.symlink(T["WEB_NODE_MODULES"], modules)
     digest = hashlib.sha256(open(final, "rb").read()).hexdigest()[:10]
-    dist = os.path.join(web, "dist")
-    run(["npx", "vite", "build"], cwd=web, env={"VITE_WASM_URL": f"/app-{digest}.wasm", "VITE_SYNC_ENDPOINT": SYNC_ENDPOINT}, log="vite.log")
+    output = os.path.join(web, "dist")
+    dist = os.path.join(B, "site")
+    run(["npx", "vite", "build", "--outDir", dist, "--emptyOutDir"], cwd=web, env={"VITE_WASM_URL": f"/app-{digest}.wasm",
+        "VITE_SYNC_ENDPOINT": SYNC_ENDPOINT, "VITE_SOURCE_VERSION": wanted[:12]}, log="vite.log")
     shutil.copy(final, os.path.join(dist, f"app-{digest}.wasm"))
     assets = os.path.join(dist, "assets")
     os.makedirs(os.path.join(assets, "controllers"), exist_ok=True)
-    for name in os.listdir(os.path.join(emit, "static/assets")):
-        shutil.copy(os.path.join(emit, "static/assets", name), assets)
-    shutil.copy(os.path.join(app, "app/javascript/application.js"), assets)
-    for name in os.listdir(os.path.join(app, "app/javascript/controllers")):
-        shutil.copy(os.path.join(app, "app/javascript/controllers", name), os.path.join(assets, "controllers"))
+    for js_dir in (os.path.join(emit, "static/assets"), os.path.join(app, "app/javascript")):
+        if os.path.isdir(js_dir):
+            shutil.copytree(js_dir, assets, dirs_exist_ok=True)
     for name in ["turbo.min.js", "stimulus.min.js", "stimulus-loading.js"]:
         found = subprocess.run(["find", T["RAILS_GEMS"], "-name", name], stdout=subprocess.PIPE, text=True).stdout.split("\n")[0]
-        shutil.copy(found, assets)
+        if found:
+            shutil.copy(found, assets)
+    if not APP_SOURCE:
+        write_source_pages(app, dist, wanted[:12])
     inject_preloads(dist)
+    previous = os.path.join(B, "previous-site")
+    clean(previous)
+    if os.path.isdir(output):
+        os.replace(output, previous)
+    try:
+        os.replace(dist, output)
+    except OSError:
+        if os.path.isdir(previous):
+            os.replace(previous, output)
+        raise
+    clean(previous)
     print(f"built web/dist with app-{digest}.wasm ({os.path.getsize(final)} bytes)")
     open(stamp, "w").write(wanted)
 

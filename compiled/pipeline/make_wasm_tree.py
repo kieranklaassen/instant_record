@@ -237,11 +237,12 @@ for base, _dirs, names in os.walk(os.path.join(target, "app/views")):
 # is also `channel`, so "is this the open channel" compares a row with itself and every channel
 # is marked active. Rename the loop variable in the emitted partial.
 sidebar = os.path.join(target, "app/views/slack/channels/_sidebar.rb")
-text = open(sidebar).read()
-start = text.index("channels.each do |channel|")
-stop = text.index("dms.each do", start)
-loop = re.sub(r"\bchannel\b", "channel_row", text[start:stop]).replace("channel_row == channel_row", "channel_row == channel")
-open(sidebar, "w").write(text[:start] + loop + text[stop:])
+if not os.environ.get("INSTANT_RECORD_APP"):
+    text = open(sidebar).read()
+    start = text.index("channels.each do |channel|")
+    stop = text.index("dms.each do", start)
+    loop = re.sub(r"\bchannel\b", "channel_row", text[start:stop]).replace("channel_row == channel_row", "channel_row == channel")
+    open(sidebar, "w").write(text[:start] + loop + text[stop:])
 
 boot = os.path.join(target, "boot.rb")
 text = open(boot).read()
@@ -423,7 +424,7 @@ end
 }
 
 pruned_lines = 0
-for rel, stub in PRUNED_STUBS.items():
+for rel, stub in (PRUNED_STUBS.items() if not os.environ.get("INSTANT_RECORD_APP") else ()):
     path = os.path.join(target, rel)
     if os.path.exists(path):
         pruned_lines += open(path).read().count("\n")

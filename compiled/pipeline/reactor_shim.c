@@ -9,6 +9,7 @@ static void call_request(void *ctx) { (void)ctx; sp_WasmBridge_s_handle_request(
 static void call_plan(void *ctx)    { (void)ctx; sp_WasmBridge_s_sync_plan(); }
 static void call_sync(void *ctx)    { (void)ctx; sp_WasmBridge_s_handle_sync(); }
 static void call_stream(void *ctx)  { (void)ctx; sp_WasmBridge_s_handle_stream(); }
+static void call_history(void *ctx) { (void)ctx; sp_WasmBridge_s_history(); }
 static void call_cursor(void *ctx)  { (void)ctx; sp_WasmBridge_s_cursor(); }
 
 static int run_guarded(void (*fn)(void *)) {
@@ -39,3 +40,7 @@ int wasm_stream(void) { return run_guarded(call_stream); }
 
 __attribute__((export_name("wasm_cursor")))
 int wasm_cursor(void) { return run_guarded(call_cursor); }
+
+
+__attribute__((export_name("wasm_history")))
+int wasm_history(void) { return run_guarded(call_history); }

@@ -10,7 +10,7 @@ import { Controller } from "@hotwired/stimulus"
 // splash and this controller both keep the last ledger of each kind in
 // localStorage. Cold and warm are told apart by what was measured — whether the
 // bundle crossed the network — never by which visit it was.
-const STORE = "instant_record.boot."
+const STORE = window.__spinel ? "instant_record.compiled.boot." : "instant_record.boot."
 const SOURCES = ["network", "cache"]
 
 const fmtMs = (value) => {
@@ -226,6 +226,15 @@ export default class extends Controller {
   // --- A repeatable cold boot ------------------------------------------------
 
   async wipe() {
+    if (window.__spinel) {
+      if (!confirm("Delete the local database for this demo and reload? Unsynced writes will be lost.")) return
+      window.__spinel.worker.terminate()
+      const removal = indexedDB.deleteDatabase("instant-record-spinel")
+      removal.onblocked = () => this.status("Close other tabs of this demo to finish clearing its database.")
+      removal.onerror = () => this.status("Could not clear the database. Reload to reopen the app.")
+      removal.onsuccess = () => window.location.assign("/?instant_record_cold_boot=1")
+      return
+    }
     const worker = navigator.serviceWorker?.controller
 
     if (!worker) {
@@ -282,10 +291,14 @@ export default class extends Controller {
   // A worker controlling this tab is what makes the page local: it is the thing
   // that served this HTML out of the wasm bundle.
   get localRuntime() {
-    return Boolean(navigator.serviceWorker?.controller)
+    return Boolean(window.__spinel || navigator.serviceWorker?.controller)
   }
 
   showRuntime() {
+    if (window.__spinel) {
+      this.figure("runtime", "Compiled Rails is serving this page from SQLite in your tab.")
+      return
+    }
     this.figure(
       "runtime",
       this.localRuntime

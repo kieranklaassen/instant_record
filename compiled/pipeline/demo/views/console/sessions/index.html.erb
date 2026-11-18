@@ -1,0 +1,14 @@
+<% content_for(:title, "Console — InstantRecord") %>
+<div class="page console">
+  <header class="page-header">
+    <h1>Console</h1>
+    <p class="lede">Inspect the SQLite database in this tab. Each link runs a compiled ActiveRecord query against the same records used by Todo and Chat.</p>
+  </header>
+  <nav class="console-snippets" aria-label="Local queries">
+    <a href="/console?query=count">Issue.count</a>
+    <a href="/console?query=recent_issues">Ten newest issue titles</a>
+    <a href="/console?query=channels">Channel names</a>
+    <a href="/console?query=pending">Pending mutations</a>
+  </nav>
+  <pre class="console-result"><%= @output.empty? ? "(no rows)" : @output %></pre>
+</div>

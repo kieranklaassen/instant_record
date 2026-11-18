@@ -1,0 +1,47 @@
+<% content_for(:title, "InstantRecord Demos") %>
+<main class="demo-home">
+  <div class="home-board">
+    <header class="board-hero">
+      <div class="hero-copy">
+        <h1>Rails models<br>that run in<br>the browser.</h1>
+        <p class="lede">Write to SQLite in this tab, even offline. Open the Sync inspector to see local requests, queued changes, and acknowledgments from Rails.</p>
+      </div>
+      <aside class="hero-facts">
+        <p class="micro-label">Runtime</p>
+        <p class="stat-huge">Wasm</p>
+        <div class="facts">
+          <p>Compiler<br><strong>Roundhouse + Spinel</strong></p>
+          <p>Local store<br><strong>SQLite</strong></p>
+          <p>Sync server<br><strong>Rails + Postgres</strong></p>
+        </div>
+      </aside>
+    </header>
+    <ul class="demo-grid">
+      <li><a href="/todo" class="demo-card">
+        <h2>Todo</h2>
+        <p class="card-copy">Create and check off issues offline. Reconnect to see which writes the server accepts.</p>
+        <span class="go">Open Todo →</span>
+      </a></li>
+      <li><a href="/slack" class="demo-card">
+        <h2>Chat</h2>
+        <p class="card-copy">Switch channels, send a message, and reply in a thread.</p>
+        <span class="go">Open Chat →</span>
+      </a></li>
+      <li><a href="/migrate" class="demo-card">
+        <h2>Ship v2</h2>
+        <p class="card-copy">Run a migration over a local database with unsynced writes.</p>
+        <span class="go">Open example →</span>
+      </a></li>
+      <li><a href="/console" class="demo-card">
+        <h2>Console</h2>
+        <p class="card-copy">Inspect local records and the sync outbox with compiled ActiveRecord queries.</p>
+        <span class="go">Open example →</span>
+      </a></li>
+    </ul>
+    <div class="board-band"><span>Measured on this device</span><a href="/receipts">View performance receipts →</a></div>
+    <footer class="project-strip">
+      <p>InstantRecord is an MIT-licensed Ruby gem. The source drawer shows the code behind each demo.</p>
+      <p class="project-links"><a href="https://github.com/kieranklaassen/instant_record">InstantRecord on GitHub →</a></p>
+    </footer>
+  </div>
+</main>

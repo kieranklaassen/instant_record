@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Copy the gem's demo app and keep only the Todo and Slack demos, unmodified.
+"""Prepare all demo pages for the compiled browser runtime.
 
 usage: carve.py <instant_record checkout> <target app dir>
 
@@ -16,14 +16,18 @@ demo = os.path.join(gem, "demo")
 shutil.rmtree(app, ignore_errors=True)
 shutil.copytree(demo, app, ignore=shutil.ignore_patterns("log", "tmp", "pwa", "node_modules", "storage", ".bundle"))
 
-# The other four demos (console, migrate, receipts, source), the home page, the server-only
-# reset endpoint, tests and build tooling are not part of this build.
+# Source drawers are static build artifacts. Slack reset runs on the sync server.
 REMOVE = [
-    "app/controllers/console", "app/controllers/migrate", "app/controllers/receipts_controller.rb",
-    "app/controllers/source_controller.rb", "app/controllers/home_controller.rb",
+    # Browser dependencies come from the compiled runtime. The server's lockfile
+    # would also bring Rack's request throttling middleware into the Wasm build.
+    "Gemfile.lock", "config/initializers/rack_attack.rb",
+    # The interpreted backend reads its endpoint from Ruby's JS module.
+    # The compiled worker receives the same setting from SYNC_ENDPOINT.
+    "config/initializers/instant_record.rb",
+    "app/controllers/source_controller.rb",
     "app/controllers/slack/resets_controller.rb",
-    "app/views/console", "app/views/migrate", "app/views/receipts", "app/views/source", "app/views/home", "app/views/pwa",
-    "app/models/note.rb", "app/models/release.rb", "app/helpers/source_helper.rb",
+    "app/views/source", "app/views/pwa",
+    "app/helpers/source_helper.rb",
     "test", "db/v2_migrate", "db/seeds.rb", "config/routes", "script", "lib/tasks",
 ]
 for rel in REMOVE:
@@ -45,9 +49,43 @@ open(os.path.join(app, "config/routes.rb"), "w").write('''Rails.application.rout
     root "channels#index" # /slack
   end
 
-  root "todo/issues#index"
+  namespace :migrate do
+    root "notes#index"
+    resources :notes, only: [:create]
+    post "ship", to: "releases#create"
+    delete "ship", to: "releases#destroy"
+  end
+  namespace :console do
+    root "sessions#index"
+  end
+  get "receipts", to: "receipts#index", as: :receipts
+  get "receipts/probe", to: "receipts#probe", as: :receipts_probe
+  get "home", to: "home#index"
+  root "home#index"
 end
 ''')
+
+# Views and model seams specific to the SQLite reactor.
+overlay = os.path.join(os.path.dirname(__file__), "demo")
+shutil.copytree(overlay, os.path.join(app, "app"), dirs_exist_ok=True)
+
+# Use the demo's own templates, with SQLite metadata and worker-routed form visits.
+migration_view = os.path.join(app, "app/views/migrate/notes/index.html.erb")
+with open(migration_view) as f:
+    migration = f.read().replace("local Postgres", "local SQLite database").replace("turbo: false", "turbo: true")
+# The original scope section discusses a PGlite deployment. Keep the applicable
+# server-schema limitation here and describe the actual local transaction.
+migration = migration.replace("<% has_word_count = @columns.include?(Release::COLUMN) %>", "")
+migration = migration.replace("<% if has_word_count %>", "<% unless @release_pending %>")
+migration = migration.replace("a\n        migration-local model with <code>update_columns</code>, so nothing\n        queues", "a direct SQLite update in the same transaction")
+migration = migration.replace("The\n          migration is an <code>add_column</code> inside <code>change</code>, so\n          this is its real reversal — not a separate undo written by hand.", "Rollback uses <code>ALTER TABLE</code> and removes the local migration version.")
+start = migration.index("    <p>\n      <strong>No deploy handover.")
+end = migration.index("    <p>\n      <strong>The sync server", start)
+migration = migration[:start] + migration[end:]
+start = migration.index("    <p>\n      <strong>PGlite is inferred")
+end = migration.index("    </p>", start) + len("    </p>")
+with open(migration_view, "w") as f:
+    f.write(migration[:start] + migration[end:])
 
 # Slack::Seeds: the browser-side controller reads its constants; the seeding routines are
 # server-only (and use find_or_create_by blocks the compiler refuses).

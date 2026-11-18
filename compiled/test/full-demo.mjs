@@ -1,0 +1,90 @@
+// Run against the compiled app and an isolated, seeded Rails sync server.
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { chromium } from "../bench/env.mjs";
+
+const origin = process.argv[2];
+const browser = await chromium.launch({channel: "chrome"});
+const page = await browser.newPage();
+page.setDefaultTimeout(20000);
+const id = randomUUID();
+const errors = [];
+page.on("pageerror", e => errors.push(e.message));
+const ready = name => page.waitForFunction(name => window.Stimulus?.controllers.some(c => c.identifier === name), name);
+const go = async path => { await page.goto(new URL(path, origin).href); await ready("inspector"); };
+try {
+  await go("/");
+  assert.deepEqual(await page.locator(".demo-card").evaluateAll(cards => cards.map(c => c.getAttribute("href"))), ["/todo","/slack","/migrate","/console"]);
+  await page.getByRole("link",{name:/performance receipts/i}).waitFor();
+  await go("/todo");
+  await ready("issues");
+  await page.locator("[data-inspector-target=offline]").check();
+  const title = "offline " + id;
+  await page.locator("form.todo-form input[type=text]").fill(title);
+  await page.locator("form.todo-form").evaluate(f => f.requestSubmit());
+  await page.getByText(title, {exact:true}).waitFor();
+  await page.locator('#source-drawer summary').click();
+  await page.locator('.source-path').filter({hasText:'app/models/issue.rb'}).waitFor();
+  await page.waitForTimeout(250); // Let IndexedDB finish saving before a hard navigation.
+  await go("/migrate");
+  await page.locator('input[placeholder="Note title"]').fill("note " + id);
+  await page.locator("form.note-form textarea").fill("one two three");
+  await page.locator('form.note-form').evaluate(f => f.requestSubmit());
+  const row = page.locator("tr").filter({hasText:"note " + id});
+  await row.waitFor();
+  const pending = await page.locator("dl.facts dd").nth(1).innerText();
+  await page.getByRole("button",{name:"Ship v2"}).click();
+  await page.getByRole("button",{name:"Roll back to v1"}).waitFor();
+  assert.equal(await row.locator("td.num").innerText(), "3");
+  assert.equal(await page.locator("dl.facts dd").nth(1).innerText(), pending);
+  await page.waitForTimeout(250);
+  await go("/migrate");
+  await page.getByRole("button",{name:"Roll back to v1"}).click();
+  await page.getByRole("button",{name:"Ship v2"}).waitFor();
+  await row.waitFor();
+  assert.equal(await row.locator("td.num").count(), 0);
+  console.log("Landing, source drawer, offline note, migration, reload and rollback passed.");
+
+  await go("/receipts");
+  const figure = key => page.locator('[data-figure="' + key + '"]').first();
+  await page.waitForFunction(() => document.querySelector('[data-figure="local.query"]')?.textContent.includes("ms"));
+  assert.match(await figure("runtime").innerText(), /SQLite/);
+  assert.match(await figure("bundle.bytes").innerText(), /MB/);
+  assert.equal(await figure("server.query").innerText(), "unreachable");
+  await go("/console");
+  await page.getByRole("link", {name:"Ten newest issue titles"}).click();
+  await page.locator(".console-result").filter({hasText:title}).waitFor();
+  await page.getByRole("link", {name:"Pending mutations"}).click();
+  await page.waitForFunction(() => Number(document.querySelector(".console-result")?.textContent.trim()) >= 2);
+  assert.equal(await page.locator("textarea").count(), 0);
+  await go("/todo");
+  await page.locator("[data-inspector-target=offline]").uncheck();
+  await page.waitForFunction(() => document.querySelector("#pending-count")?.textContent.trim().startsWith("0 "));
+  await go("/receipts");
+  await page.waitForFunction(() => document.querySelector('[data-figure="server.query"]')?.textContent.includes("ms"));
+  const fresh = await browser.newPage();
+  await fresh.goto(new URL("/todo",origin).href);
+  await fresh.getByText(title,{exact:true}).waitFor();
+  await go("/slack");
+  await ready("conversation");
+  const messages = page.locator("ol.messages li[data-id]");
+  const initial = await messages.count();
+  assert.ok(initial > 0);
+  await page.locator('[data-conversation-target~="scroller"]').evaluate(scroller => {
+    scroller.scrollTop = 0;
+    scroller.dispatchEvent(new Event("scroll"));
+  });
+  await page.waitForFunction(count => document.querySelectorAll("ol.messages li[data-id]").length > count, initial);
+  await go("/receipts");
+  await ready("measure");
+  page.once("dialog", dialog => dialog.accept());
+  await page.getByRole("button", {name: "Wipe local data and boot cold"}).click();
+  await page.locator(".home-board").waitFor();
+  await go("/todo");
+  await page.getByText(title, {exact:true}).waitFor();
+  assert.deepEqual(errors, []);
+  console.log("Compiled receipts, cold reset, local ActiveRecord queries, server reconciliation and Slack scrollback passed.");
+} catch(error) {
+  console.error("Failure on",page.url(), (await page.locator("body").innerText()).slice(-1200),errors);
+  throw error;
+} finally { await browser.close(); }
