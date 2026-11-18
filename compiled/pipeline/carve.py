@@ -24,7 +24,7 @@ REMOVE = [
     # The compiled worker gets its endpoint from SYNC_ENDPOINT.
     "config/initializers/instant_record.rb",
     "app/controllers/source_controller.rb",
-    "app/controllers/slack/resets_controller.rb",
+    "app/controllers/slack/resets_controller.rb", "app/controllers/email/sync_controller.rb", "app/models/mailbox.rb",
     "app/views/source", "app/views/pwa",
     "app/helpers/source_helper.rb",
     "test", "db/v2_migrate", "db/seeds.rb", "config/routes", "script", "lib/tasks",
@@ -54,6 +54,8 @@ open(os.path.join(app, "config/routes.rb"), "w").write('''Rails.application.rout
     post "ship", to: "releases#create"
     delete "ship", to: "releases#destroy"
   end
+  get "email", to: "email/mailboxes#index"
+  post "email", to: "email/mailboxes#create"
   namespace :console do
     root "sessions#index"
   end
@@ -87,3 +89,9 @@ source = open(seeds).read()
 cut = source.index("    module_function")
 open(seeds, "w").write(source[:cut] + "    # Browser build: the seeding routines (apply, backfill) are server-only and left out;\n"
                        "    # the constants above are what the browser-side controller reads.\n  end\nend\n")
+
+# The server appends under a locked mailbox. The local model writes to the
+# ordinary InstantRecord outbox and the worker sends it to the selected inbox.
+letter = os.path.join(app, "app/models/mail_entry.rb")
+source = open(letter).read().replace("class MailEntry < ApplicationRecord", "class MailEntry < ApplicationRecord\n  include InstantRecord::Syncable")
+open(letter, "w").write(source)

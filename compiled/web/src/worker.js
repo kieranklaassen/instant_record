@@ -2,9 +2,11 @@
 // retry-only outbox draining, and non-blocking async change polling (window=0, so the
 // worker never blocks on network I/O during user clicks and Puma threads are never held).
 import { AppHost } from "./app-host.js";
-import { withFiles } from "./snapshot-store.js";
+import { mailboxScope } from "./mailbox-scope.js";
+import { openSnapshot, withFiles } from "./snapshot-store.js";
 
-const SYNC_ENDPOINT = import.meta.env.VITE_SYNC_ENDPOINT || "/instant_record";
+const publicEndpoint = import.meta.env.VITE_SYNC_ENDPOINT || "/instant_record";
+let syncEndpoint = publicEndpoint;
 const POLL_EVERY_MS = 1000;
 const QUIET_MS = 30;
 const DRAIN_RETRY_BASE_MS = 500;
@@ -20,7 +22,7 @@ function report(entry) {
   if (simulation.report) self.postMessage({ type: "instant_record.debug", entry: stamped });
 }
 
-async function fetchReply(method, path, body = "", endpoint = SYNC_ENDPOINT) {
+async function fetchReply(method, path, body = "", endpoint = syncEndpoint) {
   const url = endpoint + path;
   const started = performance.now();
   const poll = path.startsWith("/events?");
@@ -63,10 +65,7 @@ const legacySchema = import.meta.env.VITE_SCHEMA_BASELINE;
 const migrationHistory = JSON.parse(import.meta.env.VITE_MIGRATION_HISTORY);
 const schemaDigest = import.meta.env.VITE_SCHEMA_DIGEST;
 let snapshotRevision;
-const changes = new BroadcastChannel("instant-record-spinel-changes");
-changes.onmessage = () => {
-  if (host) self.postMessage({ type: "records_changed" });
-};
+let changes;
 
 let host = null;
 let currentCursor = null;
@@ -146,7 +145,7 @@ async function drain(initial = false) {
       kickSync();
       return { changed: false, retried: true };
     }
-    const result = host.sync(SYNC_ENDPOINT, (method, url, body) => {
+    const result = host.sync(syncEndpoint, (method, url, body) => {
       const reply = method === "POST" ? push : snapshot;
       if (!reply || reply.method !== method || reply.url !== url || reply.body !== body) {
         throw new Error("Unexpected request while applying prepared sync responses");
@@ -265,6 +264,11 @@ function navigate({ method, path, body, contentType }) {
 }
 
 async function boot(payload = {}) {
+  const scope = mailboxScope(payload.path || "/");
+  openSnapshot(scope);
+  changes = new BroadcastChannel("instant-record-spinel-changes" + (scope ? "/" + scope : ""));
+  changes.onmessage = () => { if (host) self.postMessage({ type: "records_changed" }); };
+  if (scope) syncEndpoint = publicEndpoint.replace(/\/instant_record\/?$/, "") + "/email/sync/" + scope;
   const started = performance.now();
   const module = payload.module || await WebAssembly.compileStreaming(fetch(import.meta.env.VITE_WASM_URL || "/app.wasm"));
   const compiled = performance.now();
@@ -351,7 +355,7 @@ self.onmessage = async (event) => {
       const allowed = (payload.method === "GET" && url.pathname === "/receipts/probe") ||
         (payload.method === "POST" && url.pathname === "/slack/reset");
       if (!allowed) throw new Error("Unknown demo server action");
-      const root = SYNC_ENDPOINT.replace(/\/instant_record\/?$/, "");
+      const root = publicEndpoint.replace(/\/instant_record\/?$/, "");
       const reply = await fetchReply(payload.method, url.pathname + url.search, "", root);
       return self.postMessage({ id, result: reply });
     }

@@ -1,3 +1,4 @@
+import { mailboxScope } from "./mailbox-scope.js";
 import { watchRelease } from "./release-updates.js";
 let releaseRequired;
 const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
@@ -25,6 +26,7 @@ const call = (type, payload) => new Promise((resolve, reject) => {
   worker.postMessage({ id, type, payload });
 });
 
+const initialScope = mailboxScope(location.href);
 const marks = { start: performance.now() };
 window.__spinel = { marks, call, worker, sourceVersion: import.meta.env.VITE_SOURCE_VERSION };
 
@@ -159,6 +161,13 @@ if (finalPath !== location.pathname + location.search) history.replaceState(null
 document.open();
 document.write(result.status === 200 ? result.body : `<pre>${result.status}\n${(result.errors || []).join("\n")}</pre>`);
 document.close();
+document.addEventListener("turbo:before-visit", event => {
+  if (mailboxScope(event.detail.url) !== initialScope) {
+    event.preventDefault();
+    location.assign(event.detail.url);
+  }
+});
+
 marks.rendered = performance.now();
 
 

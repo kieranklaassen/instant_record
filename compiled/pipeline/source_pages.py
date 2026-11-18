@@ -5,6 +5,7 @@ from pathlib import Path
 
 PAGES = {
     "home": ("home", "index", ()),
+    "email": ("email/mailboxes", "index", ("mail_entry", "mail_directory")),
     "todo": ("todo/issues", "index", ("issue",)),
     "slack": ("slack/channels", "show", ("channel", "chat_user", "message")),
     "migrate": ("migrate/notes", "index", ("note", "release")),

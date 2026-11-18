@@ -1,0 +1,17 @@
+<section class="mail-list"><h2><%= @inbox.capitalize %> inbox</h2>
+  <% if @mail_entries.empty? %><p>No open conversations.</p><% end %>
+  <% @mail_entries.each do |mail_entry| %>
+    <a href="/email?member=<%= @member %>&amp;inbox=<%= @inbox %>&amp;thread=<%= mail_entry.id %>"><strong><%= mail_entry.subject %></strong><span><%= mail_entry.address %></span></a>
+  <% end %>
+</section>
+<% if @selected %>
+  <article class="mail-thread"><a href="/email?member=<%= @member %>&amp;inbox=<%= @inbox %>">← All conversations</a>
+    <h2><%= @selected.subject %></h2><p><%= @selected.address %> · <%= @inbox %>@example.test</p><strong><%= @selected.author %></strong><p><%= @selected.body %></p>
+    <% @replies.each do |reply| %><div><strong><%= reply.author %></strong><p><%= reply.body %></p></div><% end %>
+    <%= form_with url: "/email", method: :post do |f| %>
+      <input type="hidden" name="member" value="<%= @member %>"><input type="hidden" name="inbox" value="<%= @inbox %>">
+      <input type="hidden" name="kind" value="archive"><input type="hidden" name="parent_id" value="<%= @selected.id %>">
+      <button>Archive conversation</button>
+    <% end %>
+  </article>
+<% end %>
