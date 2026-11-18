@@ -7,7 +7,7 @@ Gem::Specification.new do |spec|
   spec.email       = ["kieranklaassen@gmail.com"]
 
   spec.summary     = "Rails models that run in the browser, sync to your server, and keep working offline"
-  spec.description = "InstantRecord boots real Active Record inside the browser with ruby.wasm and wasmify-rails, persists to PGlite, and writes optimistically through a durable outbox that syncs to a Rails + Postgres server."
+  spec.description = "Compile Rails apps to WebAssembly with Roundhouse and Spinel. Records persist in local SQLite and sync to Rails through a durable outbox."
   spec.homepage    = "https://github.com/kieranklaassen/instant_record"
   spec.license     = "MIT"
 
@@ -28,5 +28,6 @@ Gem::Specification.new do |spec|
                         "compiled/README.md", "compiled/toolchain.env.example"]
 
   spec.add_dependency "rails", ">= 8.0"
-  spec.add_dependency "wasmify-rails", "~> 0.5"
+  spec.add_dependency "sqlite3", ">= 2.1"
+  spec.add_dependency "prism", ">= 1.0"
 end

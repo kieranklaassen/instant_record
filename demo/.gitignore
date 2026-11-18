@@ -8,16 +8,17 @@ storage/*
 public/assets
 .env*
 
-# ruby.wasm build artifacts (huge)
+# Local build artifacts
 build/
 rubies/
 dist/
 node_modules/
 *.wasm
 
-# PWA build artifacts deployed into public/ (rsync from pwa/dist)
+# Ignore previously generated static shells during upgrades
 public/boot.html
 public/index.html
 public/rails.sw.js
 public/favicon.ico
 public/assets/
+public/instant_record_compiled/

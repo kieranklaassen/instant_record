@@ -2,50 +2,23 @@ require "rails/generators"
 
 module InstantRecord
   module Generators
-    # Prepares a Rails app for InstantRecord's browser runtime:
-    # wasmify environment, PGlite database config, and a PWA shell
-    # wired with the InstantRecord sync driver.
     class InstallGenerator < Rails::Generators::Base
-      source_root File.expand_path("templates", __dir__)
+      source_root File.expand_path("../../../../compiled", __dir__)
 
-      def run_wasmify_install
-        rake "wasmify:install"
-      end
-
-      def generate_pwa_shell
-        rake "wasmify:pwa"
-      end
-
-      def configure_pglite_database
-        gsub_file "config/database.yml", '{ "nulldb" }', '{ "pglite" }'
-        inject_into_file "config/database.yml", "  js_interface: pglite4rails\n",
-          after: /^wasm:\n  adapter: .*\n/
-      end
-
-      def install_sync_driver
-        copy_file "rails.sw.js", "pwa/rails.sw.js", force: true
-        copy_file "database.js", "pwa/database.js", force: true
-        # Auto-booting splash: registers the worker and reloads into the app.
-        # (wasmify's boot.html stays available as a debug page.)
-        copy_file "index.html", "pwa/index.html", force: true
-      end
-
-      def use_pglite_in_pwa
-        gsub_file "pwa/package.json", /"wasmify-rails": "\^[\d.]+"/, '"wasmify-rails": "^0.2.3"'
-        gsub_file "pwa/package.json", %r{"@sqlite\.org/sqlite-wasm": "[^"]+"}, '"@electric-sql/pglite": "^0.3.0"'
-        gsub_file "pwa/vite.config.js", %r{exclude: \["@sqlite\.org/sqlite-wasm"\]}, 'exclude: ["@electric-sql/pglite"]'
+      def install_toolchain_config
+        copy_file "toolchain.env.example", "config/instant_record_toolchain.env"
       end
 
       def show_next_steps
         say <<~MSG
+          Set the paths in config/instant_record_toolchain.env.
+          Include InstantRecord::Syncable in your synced models, then run:
 
-          InstantRecord is set up. Next:
+            bin/rails db:migrate
+            bin/rails instant_record:compile
 
-            1. Mark the gems your app needs in the browser with `group: [:default, :wasm]` in the Gemfile
-            2. bin/rails db:migrate                # engine tables (outbox, change log, ...)
-            3. bin/rails instant_record:build      # compile + pack the browser bundle
-            4. cd pwa && yarn install && yarn dev  # boot it
-
+          The browser site is in tmp/instant_record/compiled/web/dist.
+          See the gem's compiled/README.md for toolchain setup and deployment.
         MSG
       end
     end

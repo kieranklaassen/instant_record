@@ -2,7 +2,7 @@ require "securerandom"
 
 module InstantRecord
   # Makes a model local-first syncable. The same file loads in both runtimes:
-  # in the browser (ruby.wasm) every write also records an outbox mutation in
+  # in the compiled browser app every write also records an outbox mutation in
   # the same local transaction; on the server the concern only provides the
   # shared column conventions (uuid ids, server_version, sync_state).
   module Syncable

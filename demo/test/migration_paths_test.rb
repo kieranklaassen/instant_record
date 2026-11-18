@@ -1,11 +1,6 @@
 require "test_helper"
 
-# The browser VM starts at "/" while the app is mounted at "/rails", so a
-# relative migration path resolves to nothing there and `prepare_all` silently
-# finds no pending migrations — leaving a returning client on whatever schema
-# its local database was created with. InstantRecord::LocalSchema catches such a
-# database up using these paths instead of the relative default; this pins the
-# property that makes them safe to use from any working directory.
+# The compiled migration plan uses the host app’s absolute migration paths.
 class MigrationPathsTest < ActiveSupport::TestCase
   def paths
     Rails.application.config.paths["db/migrate"].existent

@@ -13,7 +13,7 @@
     <p class="lede">
       This is a proof of concept with an expensive first visit, and this page is
       the itemised bill. Every figure was measured on this machine by the code
-      that incurred it: the boot ledger by the service worker as it booted, the
+      that incurred it: the boot ledger by the dedicated worker as it booted, the
       timings below by asking this app the same question twice — once locally,
       once over the network to the server. Nothing is quoted from a README,
       nothing is rounded in our favour, and anything this browser will not report
@@ -25,7 +25,7 @@
   <section>
     <h2>The bundle</h2>
     <p class="meta">
-      CRuby, Rails, the gems and this app, compiled to one WebAssembly module.
+      The Spinel runtime, Rails and this app, compiled to one WebAssembly module.
       Counted byte by byte as it streamed into the compiler on the last boot this
       browser recorded — MB here means 10<sup>6</sup> bytes.
     </p>
@@ -70,9 +70,9 @@
       </thead>
       <tbody>
         <tr>
-          <th scope="row">Database opened<span class="bought">PGlite — a Postgres in wasm, kept in IndexedDB</span></th>
-          <td class="figure" data-measure-target="cell" data-figure="network.pglite">—</td>
-          <td class="figure" data-measure-target="cell" data-figure="cache.pglite">—</td>
+          <th scope="row">Database opened<span class="bought">Local SQLite file read from IndexedDB</span></th>
+          <td class="figure" data-measure-target="cell" data-figure="network.sqlite">—</td>
+          <td class="figure" data-measure-target="cell" data-figure="cache.sqlite">—</td>
         </tr>
         <tr>
           <th scope="row">Bundle downloaded<span class="bought">streamed into the compiler as it arrived</span></th>
@@ -80,7 +80,7 @@
           <td class="figure" data-measure-target="cell" data-figure="cache.bundle">—</td>
         </tr>
         <tr>
-          <th scope="row">CRuby compiled<span class="bought">the tail after the last byte; the rest overlapped the download</span></th>
+          <th scope="row">WebAssembly compiled<span class="bought">the tail after the last byte; the rest overlapped the download</span></th>
           <td class="figure" data-measure-target="cell" data-figure="network.compile">—</td>
           <td class="figure" data-measure-target="cell" data-figure="cache.compile">—</td>
         </tr>
@@ -90,7 +90,7 @@
           <td class="figure" data-measure-target="cell" data-figure="cache.vm">—</td>
         </tr>
         <tr>
-          <th scope="row">Schema prepared<span class="bought">your migrations, against the local Postgres</span></th>
+          <th scope="row">Bootstrap<span class="bought">initial sync when the tab has no saved database</span></th>
           <td class="figure" data-measure-target="cell" data-figure="network.schema">—</td>
           <td class="figure" data-measure-target="cell" data-figure="cache.schema">—</td>
         </tr>
@@ -170,7 +170,7 @@
     <ul class="method">
       <li>
         <strong>Measured.</strong> Bundle bytes are counted as the module streams
-        into the compiler. Boot phases are timed by the service worker around the
+        into the compiler. Boot phases are timed by the dedicated worker around the
         work itself. Round trips are timed by this page; the query and write
         figures are timed inside Ruby, in the runtime that ran them.
       </li>
@@ -189,15 +189,9 @@
         blank instead of assuming.
       </li>
       <li>
-        <strong>Repeatable.</strong> “Wipe local data and boot cold” drops the
-        caches and the service worker, then reloads into the splash, which deletes
-        the local database before installing a new worker — a page no worker
-        controls is the only thing that can. Two limits, both stated on the way
-        through: the browser's own HTTP cache is not ours to clear, so app.wasm may
-        still come from disk (which is why the ledger measures where the bundle came
-        from instead of inferring it), and a browser that will not release the old
-        database says so on the splash rather than booting on it and calling that a
-        first visit.
+        <strong>Repeatable.</strong> Clearing this tab’s local SQLite database discards
+        pending writes after confirmation. The next load requests a fresh copy of the
+        compiled module and measures the download and bootstrap again.
       </li>
     </ul>
   </section>

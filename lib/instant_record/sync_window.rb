@@ -40,7 +40,7 @@ module InstantRecord
 
     private
 
-    # ROW_NUMBER() runs identically on Postgres, PGlite, and SQLite >= 3.25 —
+    # ROW_NUMBER() runs identically on Postgres and SQLite >= 3.25 —
     # the three engines the same model file can find itself on.
     def ranked_ids_sql(comparison)
       validate_columns!

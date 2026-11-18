@@ -2,12 +2,7 @@
 # README. (A hardcoded bundle size in that README drifted 20MB from reality
 # before this page existed; a number the page measures at runtime cannot.)
 #
-# Ordinary Rails, twice over: these actions run in the browser on ruby.wasm +
-# PGlite when the service worker serves the page, and on the server on CRuby +
-# Postgres when it does not. Nothing here asks which. The page times the same
-# probe both ways — locally, and again with the marker that sends one request to
-# the real server — so "the network is never in the hot path" becomes two
-# numbers the visitor produced side by side.
+# Server-side timing probe for comparison with the compiled SQLite probe.
 class ReceiptsController < ApplicationController
   extend InstantRecord::RuntimeScoped
 

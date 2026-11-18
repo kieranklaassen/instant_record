@@ -9,7 +9,7 @@ module Todo
     server_only do
       # Real apps put authentication and per-user scoping here: sessions,
       # cookies, and secrets exist only on the server. The browser runtime
-      # renders from local PGlite, which only ever holds data the server chose
+      # renders from local SQLite, which only ever holds data the server chose
       # to sync down — so scoping is enforced at the sync boundary, not here.
       #
       #   before_action :authenticate_user!

@@ -12,7 +12,7 @@
     </p>
     <%# No runtime branch anywhere on this page. The adapter names itself, which
         is both shorter and a fact you can check rather than a label we chose:
-        PGliteAdapter in the browser, PostgreSQLAdapter on the server — and
+        SQLite in the browser, PostgreSQLAdapter on the server — and
         adapter_name says "PostgreSQL" in both, because in both it is Postgres. %>
     <p class="meta">
       Adapter: <strong><%= ApplicationRecord.connection.class.name.demodulize %></strong>

@@ -32,10 +32,8 @@ for application builds. Point `INSTANT_RECORD_TOOLCHAIN` at another config if de
 
 ## Build and serve
 
-The build machine needs the SQLite adapter and Prism in the app's bundle. For
-a PostgreSQL app, add `gem "sqlite3", ">= 2.1", require: false` and
-`gem "prism", require: false` to the Gemfile and run `bundle install`.
-These gems generate SQL on the build machine. The sync server keeps its existing database.
+The gem includes SQLite and Prism for compiling migrations on the build machine.
+The Rails sync server keeps its existing database.
 
 ```sh
 bin/rails db:migrate
@@ -70,7 +68,7 @@ The hook publishes an immutable release directory and atomically switches the
 compiled assets on the configured hostname. Sync requests continue through Rails.
 Keep the previous release directory in the image or shared asset store during a
 rollout so a tab that just received the old HTML can still fetch its worker and Wasm.
-The existing `build_on_precompile = true` setting selects ruby.wasm/PGlite.
+`build_on_precompile = true` also selects the compiled build.
 
 Open compiled tabs check the release manifest on focus, on reconnect, and once
 a minute while visible. An idle tab reloads. After input, the tab offers a
@@ -123,8 +121,7 @@ Offline and Slow connections.
 
 Spinel compiles code ahead of time. Arbitrary Ruby evaluation, file uploads,
 encrypted attributes, and server-only Rails subsystems are outside this browser
-backend. Use the existing `instant_record:build` task for the interpreted
-ruby.wasm/PGlite backend. Tabs on the same origin and browser profile share
+backend. Tabs on the same origin and browser profile share
 one durable SQLite snapshot. Each write picks up the latest revision and saves
 the changed records and outbox together before the browser confirms the write.
 Pending changes survive closing every tab and sync when the app reopens online.
@@ -162,7 +159,7 @@ switch clean for it:
   the host.
 - Copy `deploy/rails.sw.js` into `deploy/site/` before building the image. The old worker's
   browser asks for that path on its next visit; this file takes the old worker's place, removes
-  itself, deletes the old local database and reloads the tab.
+  itself, reloads the tab and leaves the old local database intact.
 - `nginx.conf` answers `/app.wasm` with 404. That stops the old worker from starting its app,
   and from opening its change stream, on that one last visit.
 

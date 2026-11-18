@@ -3,4 +3,4 @@
 # the README). Falcon gives every stream a fiber instead, and config/application
 # .rb switches ActiveSupport to fiber-scoped state when it detects Falcon.
 web: bundle exec falcon serve --bind http://localhost:${PORT:-3000}
-pwa: cd pwa && yarn dev --host
+browser: PORT=5173 node ../compiled/bench/serve.mjs

@@ -12,7 +12,7 @@ Building that today means a JavaScript sync engine, a client-side store, an API 
 
 InstantRecord is a bet that Rails developers can have local-first without leaving Ruby:
 
-- **Instant** — `Issue.create!` commits to a Postgres running inside the browser and the UI re-renders immediately. The network is never in the hot path.
+- **Instant** — `Issue.create!` commits to SQLite in the browser and the UI re-renders immediately. The network is never in the hot path.
 - **Durable** — every write records a mutation in the same local transaction, so nothing is lost to a crash, a reload, or a dead connection.
 - **Convergent** — a background loop drains mutations to your Rails server (the source of truth) and streams everyone else's changes back over SSE.
 - **Still just Rails** — the same `ApplicationRecord` model file runs on both sides. Validations, scopes, callbacks — no API client, no duplicate schema, no JavaScript data layer.
@@ -21,20 +21,20 @@ InstantRecord is a bet that Rails developers can have local-first without leavin
 
 ## The Two Runtimes
 
-The same model file loads into two Ruby runtimes, each backed by its own Postgres:
+The same model file loads into two Ruby runtimes, each with its own database:
 
 |  | In the browser | On the server |
 |---|---|---|
-| Ruby | CRuby compiled to WebAssembly, inside a **service worker** | CRuby + Puma |
-| Database | [PGlite](https://pglite.dev) — Postgres-in-wasm, persisted to IndexedDB | PostgreSQL |
+| Ruby | Rails code compiled by Spinel to WebAssembly in a dedicated worker | CRuby + Puma |
+| Database | SQLite, persisted to IndexedDB | PostgreSQL |
 | Writes | **Optimistic** — instant local commit, queued for sync | **Authoritative** — validated, versioned, logged |
-| Your controllers & views | Run here when the page is served by the service worker | Run here at `localhost:3000` |
+| Your controllers & views | Run here when the page is served by the dedicated worker | Run here at `localhost:3000` |
 
 ```mermaid
 flowchart LR
   subgraph tab [Your browser tab]
-    UI[Your views] --> VM["Your Rails app on ruby.wasm"]
-    VM --> PG[(PGlite)]
+    UI[Your views] --> VM["Your compiled Rails app"]
+    VM --> DB[(SQLite)]
   end
   VM -->|mutations up| S[Your Rails app on a server]
   S --> P[(Postgres)]
@@ -50,7 +50,7 @@ flowchart LR
 gem "instant_record"
 ```
 
-[wasmify-rails](https://github.com/palkan/wasmify-rails) comes along as a dependency — it provides the browser build tasks and the PGlite database adapter.
+The browser build uses the [Roundhouse and Spinel toolchain](compiled/README.md#install-the-toolchain).
 
 ### 2. Make a model syncable
 
@@ -96,30 +96,25 @@ InstantRecord.sync(Issue, Todo)
 
 ### 3. Build the browser bundle
 
-Your app compiles to a wasm module that boots in a service worker. One generator sets everything up — the wasm environment, the PGlite database config, and a PWA shell wired with the sync driver:
+Install the compiler configuration and set the paths for your build machine:
 
 ```sh
 bin/rails generate instant_record:install
-bin/rails instant_record:build     # compiles the Ruby core (once) + packs app.wasm
+bin/rails db:migrate
+bin/rails instant_record:compile
 ```
 
-**Deploying:** the bundle is a build artifact, like precompiled assets. Either build it in your deploy pipeline with `bin/rails instant_record:build`, or opt in to building during asset precompilation:
-
-```ruby
-# config/application.rb
-config.instant_record.build_on_precompile = true
-```
-
-(Off by default — the build needs the wasm toolchain and network access for ruby.wasm artifacts.)
+Serve the generated site from `tmp/instant_record/compiled/web/dist`. See
+[building and deploying](compiled/README.md) for the toolchain and Rails hosting settings.
 
 ### 4. Write your app like it's normal Rails
 
-No special APIs in your controllers or views. When the page is served by the service worker, this code executes **in the browser**, reading and writing the local database:
+No special APIs in your controllers or views. When the page is served by the dedicated worker, this code executes **in the browser**, reading and writing the local database:
 
 ```ruby
 class IssuesController < ApplicationController
   def index
-    @issues = Issue.order(created_at: :desc)   # instant: local Postgres read
+    @issues = Issue.order(created_at: :desc)   # instant: local SQLite read
   end
 
   def create
@@ -201,17 +196,8 @@ A `server_only` controller filter protects the server-rendered surface; it canno
 
 ### 5. Sync just happens
 
-The sync loop is Ruby, configured in Ruby:
-
-```ruby
-# config/initializers/instant_record.rb (optional — these are the defaults)
-InstantRecord.configure do |config|
-  config.endpoint = "/instant_record"   # absolute URL for cross-origin setups
-  config.sync_interval = 3              # base backoff for retrying a stuck outbox
-end
-```
-
-The browser shell calls `InstantRecord.start` once at boot; from there Ruby owns the drain, the change stream, reconnects, and reconciliation. (`InstantRecord.sync_now` forces a pass manually.) The only JavaScript left is a timer — wasm Ruby can't sleep without blocking the VM, so the service worker provides the clock and nothing else.
+The dedicated worker drains queued writes and polls the Rails changes endpoint.
+To host the sync server on a different origin, set `SYNC_ENDPOINT` when compiling.
 
 Behind the scenes:
 
@@ -291,41 +277,32 @@ release, and returning profiles migrate their local database before rendering.
 
 ## Running the demo
 
-Requirements: Ruby 3.3.3, Node, PostgreSQL, [wasmtime](https://wasmtime.dev) and [wasi-vfs](https://github.com/kateinoigakukun/wasi-vfs).
+Install Ruby 3.3.3, PostgreSQL and the [compiler toolchain](compiled/README.md#install-the-toolchain).
+Copy `compiled/toolchain.env.example` to `compiled/toolchain.env` and fill in the tool paths.
 
 ```sh
-# Gem tests
 bundle install && bundle exec rake test
-
-# One-time setup
 cd demo
 bundle install
 bin/rails db:prepare
 bin/rails test
-cd pwa && yarn install && cd ..
-
-# One-time browser build (~5 min)
-bin/rails instant_record:build    # writes pwa/public/app.wasm (~62 MB)
-
-# Run it — sync server on :3000, PWA on :5173
+SYNC_ENDPOINT=http://localhost:3000/instant_record python3 ../compiled/pipeline/build.py
 bin/dev
 ```
 
-`bin/dev` runs both processes under foreman (see `demo/Procfile.dev`): the Rails sync server, and the Vite server that hosts the service worker, `app.wasm`, and PGlite's wasm.
-
-Open http://localhost:5173/boot.html, wait for **Service Worker Ready**, then open http://localhost:5173/ — that page is rendered by Rails in your browser.
+Open http://localhost:5173/ for the compiled demo. Rails serves sync on port 3000.
 
 Things to try:
 
 - **Instant writes** — create an issue; it appears immediately with a `pending` badge that flips to `synced`.
-- **Two clients** — open http://127.0.0.1:5173/ too (different origin = separate service worker + separate local database). Changes propagate between windows through the server. A fresh client catches up automatically.
+- **Two clients** — open http://127.0.0.1:5173/ too (different origin = separate local database). Changes propagate between windows through the server. A fresh client catches up automatically.
 - **Infinite scroll** — `/slack` seeds thousands of messages in `#general`, but a fresh client only syncs the newest 50 per conversation. Scroll to the top and older pages stream in; messages arriving mid-read update the page without a reload or a scroll jump.
 - **Offline** — stop the Rails server, create issues (they stay `pending`), reload the tab (still there), restart the server and watch them drain.
 - **Rejection** — create an issue titled `reject me`. It appears optimistically, the server refuses it, and it disappears on reconcile.
 
 ## Scaling the SSE stream
 
-Every client holds one persistent SSE connection — the service worker keeps it open in JavaScript and hands each event to Ruby, because Ruby awaiting a chunk itself would suspend the sync guard and starve outbox drains for the length of the window. Concurrent streams therefore scale with open tabs; plan your server accordingly. The engine's stream endpoint is a plain Rack streaming body (no `ActionController::Live`, no thread per stream) that releases its database connection between polls, so it runs well on both servers; the ceiling is the server's concurrency model. Measured on the demo (M-series MacBook, dev mode):
+The compiled demo checks for new changes once a second using short HTTP requests. Clients that choose to hold an SSE stream open need a server sized for their concurrent streams. The engine's stream endpoint is a plain Rack streaming body (no `ActionController::Live`, no thread per stream) that releases its database connection between polls, so it runs well on both servers; the ceiling is the server's concurrency model. Measured on the demo (M-series MacBook, dev mode):
 
 | Server | Concurrent SSE clients | Result |
 |---|---|---|
@@ -359,13 +336,12 @@ There is no heartbeat in the browser: a sync pass runs on a local write, at boot
 
 Measured on the demo (Chrome, M-series MacBook):
 
-- Rails 8.1.3 boots under wasm32-wasi with the full gem bundle, including this gem.
-- Warm boot — VM init plus PGlite schema prepare — in **~1.8 seconds**; the `app.wasm` module is **61.9 MB** raw, **17.1 MB** gzipped over the wire.
+- The browser compiles and loads the Spinel WebAssembly module, opens SQLite and handles requests locally. Visit `/receipts` for measurements on your own device.
 - Instant optimistic create with local persistence across reloads.
 - Two independent clients converging through POST + SSE, including fresh-client catch-up.
 - Server rejection reconciled by rolling the local record back.
 - ~5,000 seeded messages in one channel: a fresh client bootstraps only the newest window per conversation, older pages stream in on scroll, and a cold boot evicts the local database back to the window.
-- 226 tests (116 gem + 110 demo) covering the atomic outbox, idempotent apply, last-write-wins both ways, cursor resume, rejection reconcile, bootstrap hydration, keyset history pages, eviction, migration over a populated local store, and schema skew in both directions.
+- Browser tests exercise multi-tab offline writes, release upgrades, local migrations, retries and server reconciliation.
 
 ## Roadmap ideas
 
