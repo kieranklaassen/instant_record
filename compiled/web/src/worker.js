@@ -2,6 +2,7 @@
 // retry-only outbox draining, and non-blocking async change polling (window=0, so the
 // worker never blocks on network I/O during user clicks and Puma threads are never held).
 import { AppHost } from "./app-host.js";
+import { withFiles } from "./snapshot-store.js";
 
 const SYNC_ENDPOINT = import.meta.env.VITE_SYNC_ENDPOINT || "/instant_record";
 const POLL_EVERY_MS = 1000;
@@ -54,42 +55,13 @@ async function fetchReply(method, path, body = "", endpoint = SYNC_ENDPOINT) {
   return { method, url, body, status, text };
 }
 
-// ── persistence: single cached IndexedDB handle ──
-let dbPromise = null;
-function idb() {
-  return (dbPromise ||= new Promise((resolve, reject) => {
-    const open = indexedDB.open("instant-record-spinel", 1);
-    open.onupgradeneeded = () => open.result.createObjectStore("files");
-    open.onsuccess = () => resolve(open.result);
-    open.onerror = () => reject(open.error);
-  }));
-}
-async function loadMany(keys) {
-  const db = await idb();
-  return new Promise((resolve, reject) => {
-    const store = db.transaction("files").objectStore("files");
-    const out = new Array(keys.length);
-    let remaining = keys.length;
-    keys.forEach((key, index) => {
-      const req = store.get(key);
-      req.onsuccess = () => {
-        out[index] = req.result ?? null;
-        if (--remaining === 0) resolve(out);
-      };
-      req.onerror = () => reject(req.error);
-    });
-  });
-}
-async function store(key, value) {
-  const db = await idb();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction("files", "readwrite");
-    tx.objectStore("files").put(value, key);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error || new Error("IndexedDB transaction aborted"));
-  });
-}
+const DATABASE = "development.sqlite3";
+const REVISION = "snapshot_revision";
+let snapshotRevision;
+const changes = new BroadcastChannel("instant-record-spinel-changes");
+changes.onmessage = () => {
+  if (host) self.postMessage({ type: "records_changed" });
+};
 
 let host = null;
 let currentCursor = null;
@@ -99,9 +71,40 @@ let draining = null;
 let localRevision = 0;
 let drainDelayMs = DRAIN_RETRY_BASE_MS;
 
-async function persistDatabaseNow() {
-  const bytes = host?.databaseBytes();
-  if (bytes) await store("development.sqlite3", bytes.slice());
+// Keep each tab's hot reactor until a peer changes the durable revision.
+async function withSnapshot(mode, operation) {
+  let wrote = false;
+  try {
+    const result = await withFiles(mode, async (get, put) => {
+      const revision = await get(REVISION);
+      if (revision !== snapshotRevision) {
+        const bytes = await get(DATABASE);
+        const previous = host;
+        const restored = new AppHost(previous.module, { env: previous.env });
+        restored.cookies = previous.cookies;
+        if (bytes) restored.restoreDatabase(bytes);
+        restored.ensureBooted();
+        host = restored;
+        snapshotRevision = revision;
+        localRevision++;
+        currentCursor = null;
+      }
+      return operation(() => {
+        const bytes = host.databaseBytes();
+        if (!bytes) throw new Error("SQLite did not produce a database snapshot");
+        snapshotRevision = (revision ?? 0) + 1;
+        put(DATABASE, bytes);
+        put(REVISION, snapshotRevision);
+        wrote = true;
+      });
+    });
+    if (wrote) changes.postMessage(snapshotRevision);
+    return result;
+  } catch (error) {
+    // Discard uncommitted in-memory changes before the next operation.
+    snapshotRevision = Symbol("reload");
+    throw error;
+  }
 }
 
 function kickSync(delay = QUIET_MS) {
@@ -114,7 +117,7 @@ function syncPass() {
   kickTimer = null;
   if (!draining) {
     const revision = localRevision;
-    draining = drain(revision).finally(() => {
+    draining = drain().finally(() => {
       draining = null;
       if (revision !== localRevision) kickSync();
     });
@@ -122,35 +125,41 @@ function syncPass() {
   return draining;
 }
 
-async function drain(revision, initial = false) {
-  const plan = host.syncPlan();
+async function drain(initial = false) {
+  const { plan, revision } = await withSnapshot("readonly", () => ({ plan: host.syncPlan(), revision: snapshotRevision }));
   const push = plan.push ? await fetchReply("POST", "/mutations", plan.push) : null;
   const snapshot = plan.bootstrap ? await fetchReply("GET", "/bootstrap") : null;
 
   // An edit made during the network wait takes precedence over an old rejection or
   // snapshot. Retry from SQLite with the original mutation IDs for idempotent replay.
-  if (revision !== localRevision) return { changed: false, retried: true };
-  const result = host.sync(SYNC_ENDPOINT, (method, url, body) => {
-    const reply = method === "POST" ? push : snapshot;
-    if (!reply || reply.method !== method || reply.url !== url || reply.body !== body) {
-      throw new Error("Unexpected request while applying prepared sync responses");
+  const result = await withSnapshot("readwrite", save => {
+    if (revision !== snapshotRevision) {
+      kickSync();
+      return { changed: false, retried: true };
     }
-    return { status: reply.status, body: reply.text };
-  });
-  const needsBootstrap = plan.bootstrap && !host.syncState().bootstrapped;
-  if (push || snapshot) report({ kind: "sync-pass", path: `${result.pending} pending` });
-  currentCursor = needsBootstrap ? null : result.cursor;
-  if (result.changed || result.notified) {
-    await persistDatabaseNow();
-    if (!initial && result.notified) self.postMessage({ type: "records_changed" });
-  }
+    const result = host.sync(SYNC_ENDPOINT, (method, url, body) => {
+      const reply = method === "POST" ? push : snapshot;
+      if (!reply || reply.method !== method || reply.url !== url || reply.body !== body) {
+        throw new Error("Unexpected request while applying prepared sync responses");
+      }
+      return { status: reply.status, body: reply.text };
+    });
+    const needsBootstrap = plan.bootstrap && !host.syncState().bootstrapped;
+    if (push || snapshot) report({ kind: "sync-pass", path: `${result.pending} pending` });
+    currentCursor = needsBootstrap ? null : result.cursor;
+    if (result.changed || result.notified) {
+      save();
+    }
 
-  if (result.pending > 0 || needsBootstrap) {
-    kickSync(drainDelayMs);
-    drainDelayMs = Math.min(drainDelayMs * 2, DRAIN_RETRY_CAP_MS);
-  } else {
-    drainDelayMs = DRAIN_RETRY_BASE_MS;
-  }
+    if (result.pending > 0 || needsBootstrap) {
+      kickSync(drainDelayMs);
+      drainDelayMs = Math.min(drainDelayMs * 2, DRAIN_RETRY_CAP_MS);
+    } else {
+      drainDelayMs = DRAIN_RETRY_BASE_MS;
+    }
+    return result;
+  });
+  if (!initial && result.notified) self.postMessage({ type: "records_changed" });
   return result;
 }
 
@@ -159,7 +168,7 @@ async function drain(revision, initial = false) {
 // skips Wasm entirely.
 async function pollChanges() {
   if (!host || pollInFlight || draining || kickTimer) return;
-  const revision = localRevision;
+  const revision = snapshotRevision;
   pollInFlight = true;
   try {
     if (currentCursor === null) {
@@ -172,14 +181,18 @@ async function pollChanges() {
     }
     const { status, text } = await fetchReply("GET", `/events?after=${currentCursor}&window=0`);
     if (status !== 200) return;
-    if (!text.trim() || draining || kickTimer || revision !== localRevision) return;
+    if (!text.trim() || draining || kickTimer || revision !== snapshotRevision) return;
 
-    const consumed = host.consumeStream(text);
-    currentCursor = consumed.cursor;
-    if (consumed.applied > 0 || consumed.notified) {
-      await persistDatabaseNow();
-      self.postMessage({ type: "records_changed" });
-    }
+    const changed = await withSnapshot("readwrite", save => {
+      if (draining || kickTimer || revision !== snapshotRevision) return;
+      const consumed = host.consumeStream(text);
+      currentCursor = consumed.cursor;
+      if (consumed.applied > 0 || consumed.notified) {
+        save();
+        return true;
+      }
+    });
+    if (changed) self.postMessage({ type: "records_changed" });
   } catch {
     // offline: try again on the next interval
   } finally {
@@ -194,30 +207,39 @@ async function loadHistory(request) {
   const key = query.toString();
   const local = host.history(key);
   if (local.ok) return local;
-  const revision = localRevision;
+  const revision = snapshotRevision;
   const reply = await fetchReply("GET", "/records?" + key);
   if (reply.status !== 200) return { ok: false, error: "History unavailable" };
-  if (revision !== localRevision) return { ok: false, busy: true };
-  const result = host.history(key, reply.text);
-  await persistDatabaseNow();
-  return result;
+  return withSnapshot("readwrite", save => {
+    if (revision !== snapshotRevision) return { ok: false, busy: true };
+    const result = host.history(key, reply.text);
+    save();
+    return result;
+  });
 }
 
 const storageStart = performance.now();
 let storageMs;
-const saved = loadMany(["development.sqlite3", "secret_key_base"]).then(files => {
+const saved = withFiles("readwrite", async (get, put) => {
+  const [database, revision, savedSecret] = await Promise.all([get(DATABASE), get(REVISION), get("secret_key_base")]);
+  const secret = savedSecret || [...crypto.getRandomValues(new Uint8Array(64))].map(b => b.toString(16).padStart(2, "0")).join("");
+  if (!savedSecret) put("secret_key_base", secret);
   storageMs = performance.now() - storageStart;
-  return files;
+  return [database, revision, secret];
 });
 
-async function afterRequest(method) {
-  if (method === "GET" || method === "HEAD") return;
-  localRevision++;
-  // A reload terminates this worker. Commit to IndexedDB before the UI sees
-  // success so an immediate reload can recover the write and its outbox row.
-  await persistDatabaseNow();
-  drainDelayMs = DRAIN_RETRY_BASE_MS;
-  kickSync();
+function runRequest(method, render) {
+  const writing = method !== "GET" && method !== "HEAD";
+  return withSnapshot(writing ? "readwrite" : "readonly", save => {
+    const result = render();
+    if (writing) {
+      localRevision++;
+      save();
+      drainDelayMs = DRAIN_RETRY_BASE_MS;
+      kickSync();
+    }
+    return result;
+  });
 }
 
 function localRequest(method, path, options) {
@@ -227,7 +249,7 @@ function localRequest(method, path, options) {
   return result;
 }
 
-async function navigate({ method, path, body, contentType }) {
+function navigate({ method, path, body, contentType }) {
   const started = performance.now();
   let result = localRequest(method, path, { body: body ?? "", contentType: contentType || "application/x-www-form-urlencoded" });
   let redirected = false;
@@ -240,19 +262,17 @@ async function navigate({ method, path, body, contentType }) {
     redirected = true;
     result = localRequest("GET", finalPath);
   }
-  await afterRequest(method);
   return { result: { ...result, ms: performance.now() - started }, redirected, finalPath };
 }
 
 async function boot(payload = {}) {
   const started = performance.now();
-  const [module, [savedDatabase, savedSecret]] = await Promise.all([
+  const [module, [savedDatabase, revision, secret]] = await Promise.all([
     payload.module || WebAssembly.compileStreaming(fetch(import.meta.env.VITE_WASM_URL || "/app.wasm")),
     saved,
   ]);
   const compiled = performance.now();
-  const secret = savedSecret || [...crypto.getRandomValues(new Uint8Array(64))].map((b) => b.toString(16).padStart(2, "0")).join("");
-  if (!savedSecret) await store("secret_key_base", secret);
+  snapshotRevision = revision;
 
   host = new AppHost(module, { env: { SECRET_KEY_BASE: secret } });
   if (savedDatabase) {
@@ -262,10 +282,10 @@ async function boot(payload = {}) {
   host.ensureBooted();
   const runtimeMs = performance.now() - initStart;
   const bootstrapStart = performance.now();
-  if (!savedDatabase) await drain(localRevision, true);
+  if (!savedDatabase) await drain(true);
   const bootstrapMs = performance.now() - bootstrapStart;
 
-  const first = payload.path ? await navigate({ method: "GET", path: payload.path }) : null;
+  const first = payload.path ? await runRequest("GET", () => navigate({ method: "GET", path: payload.path })) : null;
   setInterval(pollChanges, POLL_EVERY_MS);
   return { compileMs: compiled - started, restored: !!savedDatabase, storageMs, runtimeMs, bootstrapMs, first };
 }
@@ -305,14 +325,13 @@ self.onmessage = async (event) => {
       return self.postMessage({ id, result: reply });
     }
     if (type === "boot") return self.postMessage({ id, result: await boot(payload) });
-    if (type === "navigate") return self.postMessage({ id, result: await navigate(payload) });
+    if (type === "navigate") return self.postMessage({ id, result: await runRequest(payload.method, () => navigate(payload)) });
     if (type === "request") {
       const started = performance.now();
-      const result = localRequest(payload.method, payload.path, { body: payload.body ?? "", contentType: payload.contentType || "application/x-www-form-urlencoded" });
-      await afterRequest(payload.method);
+      const result = await runRequest(payload.method, () => localRequest(payload.method, payload.path, { body: payload.body ?? "", contentType: payload.contentType || "application/x-www-form-urlencoded" }));
       return self.postMessage({ id, result: { ...result, ms: performance.now() - started } });
     }
-    if (type === "save") return self.postMessage({ id, result: await persistDatabaseNow() });
+    if (type === "save") return self.postMessage({ id, result: await withSnapshot("readwrite", save => save()) });
     if (type === "sync") return self.postMessage({ id, result: await syncPass() });
   } catch (error) {
     self.postMessage({ id, error: String(error && error.message ? error.message : error) });

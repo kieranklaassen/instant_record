@@ -6,7 +6,14 @@ const waiting = new Map();
 let nextId = 1;
 worker.onmessage = (event) => {
   const { id, result, error, type } = event.data;
-  if (type === "records_changed") return recordsChanged();
+  if (type === "storage_upgrade_blocked") {
+    document.body.textContent = "Close or reload other tabs running the previous version of this app. Your saved changes will be kept.";
+    return;
+  }
+  if (type === "records_changed") {
+    if (marks.rendered) recordsChanged();
+    return;
+  }
   const entry = waiting.get(id);
   if (!entry) return;
   waiting.delete(id);
