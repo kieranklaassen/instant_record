@@ -174,11 +174,33 @@ export class AppHost {
     return {
       changed: text.startsWith("changed"),
       pending: Number(/pending=(\d+)/.exec(text)?.[1] ?? -1),
+      cursor: Number(/cursor=(\d+)/.exec(text)?.[1] ?? 0),
       notified: decoder.decode(notifyEntry.data) === "records_changed",
       exchanges: this.exchanges,
       exit: result.exit,
       errors: result.errors,
     };
+  }
+
+  // Feed an SSE batch fetched asynchronously by the worker into InstantRecord::Client.consume_stream.
+  consumeStream(chunk) {
+    this.notifyFile.data = new Uint8Array();
+    this.hostDir.contents.set("notify", this.notifyFile);
+    const result = this.call("wasm_stream", encoder.encode(chunk));
+    const text = decoder.decode(result.out);
+    const notifyEntry = this.hostDir.contents.get("notify") || this.notifyFile;
+    return {
+      applied: Number(/applied=(\d+)/.exec(text)?.[1] ?? 0),
+      cursor: Number(/cursor=(\d+)/.exec(text)?.[1] ?? 0),
+      notified: decoder.decode(notifyEntry.data) === "records_changed",
+      exit: result.exit,
+      errors: result.errors,
+    };
+  }
+
+  cursor() {
+    const result = this.call("wasm_cursor", new Uint8Array());
+    return Number(decoder.decode(result.out).trim()) || 0;
   }
 }
 

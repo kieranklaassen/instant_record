@@ -1,27 +1,31 @@
-// Dedicated worker (hand-written): owns the compiled app, its in-memory filesystem and the sync
-// timer. A worker, not a service worker, because the gem's sync transport needs a synchronous
-// HTTP call from inside a wasm run, and synchronous XHR only exists in dedicated workers.
+// Dedicated worker: owns the persistent WASI reactor app, a cached IndexedDB handle,
+// retry-only outbox draining, and non-blocking async change polling (window=0, so the
+// worker never blocks on network I/O during user clicks and Puma threads are never held).
 import { AppHost } from "./app-host.js";
 
 const SYNC_ENDPOINT = import.meta.env.VITE_SYNC_ENDPOINT || "/instant_record";
-const SYNC_EVERY_MS = 1000;
+const POLL_EVERY_MS = 1000;
+const QUIET_MS = 30;
+const DRAIN_RETRY_BASE_MS = 500;
+const DRAIN_RETRY_CAP_MS = 10000;
 
 function exchange(method, url, body) {
   const xhr = new XMLHttpRequest();
-  xhr.open(method, url, false); // synchronous on purpose
+  xhr.open(method, url, false); // synchronous on purpose (used only for bootstrap & outbox drain)
   if (method === "POST") xhr.setRequestHeader("Content-Type", "application/json");
   xhr.send(method === "POST" ? body : null);
   return { status: xhr.status, body: xhr.responseText };
 }
 
-// ── persistence: the SQLite file and the app secret live in IndexedDB between page loads ──
+// ── persistence: single cached IndexedDB handle ──
+let dbPromise = null;
 function idb() {
-  return new Promise((resolve, reject) => {
+  return (dbPromise ||= new Promise((resolve, reject) => {
     const open = indexedDB.open("instant-record-spinel", 1);
     open.onupgradeneeded = () => open.result.createObjectStore("files");
     open.onsuccess = () => resolve(open.result);
     open.onerror = () => reject(open.error);
-  });
+  }));
 }
 async function load(key) {
   const db = await idb();
@@ -42,47 +46,81 @@ async function store(key, value) {
 }
 
 let host = null;
+let currentCursor = null;
 let saveTimer = null;
+let kickTimer = null;
+let pollInFlight = false;
+let drainDelayMs = DRAIN_RETRY_BASE_MS;
+
+async function persistDatabaseNow() {
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  const bytes = host?.databaseBytes();
+  if (bytes) await store("development.sqlite3", bytes.slice());
+}
+
 function scheduleSave() {
   if (saveTimer) return;
-  saveTimer = setTimeout(async () => {
+  saveTimer = setTimeout(() => {
     saveTimer = null;
-    const bytes = host.databaseBytes();
-    if (bytes) await store("development.sqlite3", bytes.slice());
+    persistDatabaseNow();
   }, 200);
 }
 
-// A write should reach the server soon, but not ahead of the page's own next request: the page
-// that just posted asks for its refreshed view straight away, and a sync pass started first would
-// make it wait behind a wasm run and an HTTP round trip. So the pass a write asks for starts once
-// the worker has been quiet for a moment.
-const QUIET_MS = 30;
-let kickTimer = null;
-function kickSync() {
+function kickSync(delay = QUIET_MS) {
   clearTimeout(kickTimer);
-  kickTimer = setTimeout(syncPass, QUIET_MS);
+  kickTimer = setTimeout(syncPass, delay);
 }
 
 async function syncPass() {
   clearTimeout(kickTimer);
   kickTimer = null;
+  if (!host) return null;
+
   const result = host.sync(SYNC_ENDPOINT);
+  currentCursor = result.cursor;
   if (result.changed || result.notified) {
-    // Save before telling the tab: a page without an in-place refresh reloads on this message,
-    // and the reloaded page must find the rows that were just applied.
-    const bytes = host.databaseBytes();
-    if (bytes) await store("development.sqlite3", bytes.slice());
+    await persistDatabaseNow();
   }
   if (result.notified) self.postMessage({ type: "records_changed" });
+
+  if (result.pending > 0) {
+    kickSync(drainDelayMs);
+    drainDelayMs = Math.min(drainDelayMs * 2, DRAIN_RETRY_CAP_MS);
+  } else {
+    drainDelayMs = DRAIN_RETRY_BASE_MS;
+  }
   return result;
 }
 
-// Start reading what an earlier visit saved as soon as the worker exists, not when the boot
-// message arrives.
+// Non-blocking catch-up poll: window=0 returns immediately (zero held server threads),
+// async fetch keeps the worker event loop unblocked for user clicks, and an empty body
+// skips Wasm entirely.
+async function pollChanges() {
+  if (!host || pollInFlight) return;
+  pollInFlight = true;
+  try {
+    if (currentCursor === null) currentCursor = host.cursor();
+    const response = await fetch(`${SYNC_ENDPOINT}/events?after=${currentCursor}&window=0`);
+    if (!response.ok) return;
+    const text = await response.text();
+    if (!text.trim()) return;
+
+    const consumed = host.consumeStream(text);
+    currentCursor = consumed.cursor;
+    if (consumed.applied > 0 || consumed.notified) {
+      await persistDatabaseNow();
+      self.postMessage({ type: "records_changed" });
+    }
+  } catch {
+    // offline: try again on the next interval
+  } finally {
+    pollInFlight = false;
+  }
+}
+
 const saved = Promise.all([load("development.sqlite3"), load("secret_key_base")]);
 
-// One page request through the app, following its redirects here so the page gets the final
-// answer in one round trip.
 function navigate({ method, path, body, contentType }) {
   const started = performance.now();
   let result = host.request(method, path, { body: body ?? "", contentType: contentType || "application/x-www-form-urlencoded" });
@@ -98,16 +136,16 @@ function navigate({ method, path, body, contentType }) {
   }
   if (method !== "GET") {
     scheduleSave();
-    kickSync(); // a local write: push it up as soon as the page has what it asked for
+    drainDelayMs = DRAIN_RETRY_BASE_MS;
+    kickSync(QUIET_MS);
   } else if (kickTimer) {
-    kickSync(); // still busy with the page: keep the pending pass behind it
+    kickSync(QUIET_MS);
   }
   return { result: { ...result, ms: performance.now() - started }, redirected, finalPath };
 }
 
 async function boot(payload = {}) {
   const started = performance.now();
-  // The shell starts compiling the module itself and passes it in; compile here only if it did not.
   const [module, [savedDatabase, savedSecret]] = await Promise.all([
     payload.module || WebAssembly.compileStreaming(fetch(import.meta.env.VITE_WASM_URL || "/app.wasm")),
     saved,
@@ -115,19 +153,18 @@ async function boot(payload = {}) {
   const compiled = performance.now();
   const secret = savedSecret || [...crypto.getRandomValues(new Uint8Array(64))].map((b) => b.toString(16).padStart(2, "0")).join("");
   if (!savedSecret) await store("secret_key_base", secret);
+
   host = new AppHost(module, { exchange, env: { SECRET_KEY_BASE: secret } });
   if (savedDatabase) {
     host.restoreDatabase(savedDatabase);
   } else {
-    // First visit: nothing local to show yet. Take the server's snapshot now, before the first
-    // page is rendered, instead of rendering an empty page, waiting for the sync timer and
-    // reloading. If the server cannot be reached the pass fails fast and the page renders empty.
     const first = host.sync(SYNC_ENDPOINT);
+    currentCursor = first.cursor;
     if (first.changed) scheduleSave();
   }
-  setInterval(syncPass, SYNC_EVERY_MS);
-  // Answer the page's first request in the same round trip as the boot.
+
   const first = payload.path ? navigate({ method: "GET", path: payload.path }) : null;
+  setInterval(pollChanges, POLL_EVERY_MS);
   return { compileMs: compiled - started, restored: !!savedDatabase, first };
 }
 
@@ -137,14 +174,14 @@ self.onmessage = async (event) => {
     if (type === "boot") return self.postMessage({ id, result: await boot(payload) });
     if (type === "navigate") return self.postMessage({ id, result: navigate(payload) });
     if (type === "request") {
-      // A single request with no redirect following, for callers that asked for redirect: "manual".
       const started = performance.now();
       const result = host.request(payload.method, payload.path, { body: payload.body ?? "", contentType: payload.contentType || "application/x-www-form-urlencoded" });
       if (payload.method !== "GET") {
         scheduleSave();
-        kickSync();
+        drainDelayMs = DRAIN_RETRY_BASE_MS;
+        kickSync(QUIET_MS);
       } else if (kickTimer) {
-        kickSync();
+        kickSync(QUIET_MS);
       }
       return self.postMessage({ id, result: { ...result, ms: performance.now() - started } });
     }

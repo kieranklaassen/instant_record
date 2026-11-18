@@ -17,14 +17,16 @@ REPO_ROOT = os.path.dirname(ROOT)
 
 # ── build knobs ──────────────────────────────────────────────────────────────
 SPINEL_FLAGS = []  # extra flags for `spinel --target=wasm32-wasi`
-WASM_OPT_LEVEL = "-O2"
+WASM_OPT_LEVEL = "-Oz"
+WASM_OPT_PASS = "-Oz"  # binaryen wasm-opt pass (skipped if wasm-opt is not on PATH)
 SQLITE_CFLAGS = [
-    "-O2", "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_OMIT_SHARED_CACHE", "-DSQLITE_OMIT_WAL",
+    "-Oz", "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_OMIT_SHARED_CACHE", "-DSQLITE_OMIT_WAL",
     "-DSQLITE_MAX_MMAP_SIZE=0", "-DSQLITE_DEFAULT_SYNCHRONOUS=0", "-DSQLITE_OMIT_DEPRECATED",
     "-DSQLITE_OMIT_PROGRESS_CALLBACK", "-DSQLITE_TEMP_STORE=2",
 ]
 STRIP = True  # llvm-strip the module (names and debug sections)
 SYNC_ENDPOINT = os.environ.get("SYNC_ENDPOINT", "http://127.0.0.1:3210/instant_record")
+REACTOR_EXPORTS = "WasmBridge.handle_request,WasmBridge.handle_sync,WasmBridge.handle_stream,WasmBridge.cursor"
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -44,7 +46,21 @@ def toolchain():
 T = toolchain()
 GEM_SRC = os.environ.get("GEM_SRC") or REPO_ROOT
 B = os.path.join(ROOT, ".build")
-WASI_CFLAGS = ["--target=wasm32-wasip1", "-D_WASI_EMULATED_MMAN", "-D_WASI_EMULATED_SIGNAL", "-D_WASI_EMULATED_PROCESS_CLOCKS", "-D_WASI_EMULATED_GETPID"]
+WASI_CFLAGS = [
+    "--target=wasm32-wasip1",
+    "-D_WASI_EMULATED_MMAN",
+    "-D_WASI_EMULATED_SIGNAL",
+    "-D_WASI_EMULATED_PROCESS_CLOCKS",
+    "-D_WASI_EMULATED_GETPID",
+]
+WASM_OPT_FEATURES = [
+    "--enable-exception-handling",
+    "--enable-bulk-memory",
+    "--enable-nontrapping-float-to-int",
+    "--enable-sign-ext",
+    "--enable-mutable-globals",
+    "--enable-reference-types",
+]
 
 
 def run(args, cwd=None, env=None, log=None):
@@ -73,7 +89,7 @@ def sqlite_library():
         os.makedirs(out, exist_ok=True)
         clang = os.path.join(T["WASI_SDK"], "bin/clang")
         run([clang, *WASI_CFLAGS, *SQLITE_CFLAGS, "-c", os.path.join(T["SQLITE_SRC"], "sqlite3.c"), "-o", os.path.join(out, "sqlite3.o")])
-        run([clang, *WASI_CFLAGS, "-O2", "-I" + T["SQLITE_SRC"], "-c", shim, "-o", os.path.join(out, "rh_shim.o")])
+        run([clang, *WASI_CFLAGS, WASM_OPT_LEVEL, "-I" + T["SQLITE_SRC"], "-c", shim, "-o", os.path.join(out, "rh_shim.o")])
         run([os.path.join(T["WASI_SDK"], "bin/llvm-ar"), "rcs", os.path.join(out, "libsqlite3.a"), os.path.join(out, "sqlite3.o"), os.path.join(out, "rh_shim.o")])
     return out
 
@@ -107,7 +123,7 @@ def compile_reactor(tree, flags, sqlite, path_env):
     run([
         "spinel", "--target=wasm32-wasi", "-c",
         "--ext-init", "app_boot",
-        "--ext-entry", "WasmBridge.handle_request,WasmBridge.handle_sync",
+        "--ext-entry", REACTOR_EXPORTS,
         *flags, *SPINEL_FLAGS,
         "main_wasm.rb", "-o", app_c,
     ], cwd=tree, env={**path_env, "CPATH": T["SQLITE_SRC"]}, log="spinel.log")
@@ -141,6 +157,21 @@ def compile_reactor(tree, flags, sqlite, path_env):
         "-o", wasm,
     ], cwd=tree, env=path_env, log="clang.log")
     return wasm
+
+
+def optimize_wasm(tree, wasm):
+    """Strip debug/name sections and run binaryen wasm-opt when installed."""
+    final = wasm
+    if STRIP:
+        stripped = os.path.join(tree, "build/app.stripped.wasm")
+        run([os.path.join(T["WASI_SDK"], "bin/llvm-strip"), "-o", stripped, final])
+        final = stripped
+    wasm_opt = shutil.which("wasm-opt")
+    if wasm_opt and WASM_OPT_PASS:
+        opted = os.path.join(tree, "build/app.opt.wasm")
+        run([wasm_opt, WASM_OPT_PASS, *WASM_OPT_FEATURES, final, "-o", opted], cwd=tree, log="wasm-opt.log")
+        final = opted
+    return final
 
 
 def main():
@@ -178,10 +209,7 @@ def main():
     sqlite = sqlite_library()
     flags = run(["spin", "flags"], cwd=tree, env=path_env).split()
     wasm = compile_reactor(tree, flags, sqlite, path_env)
-    final = wasm
-    if STRIP:
-        final = os.path.join(tree, "build/app.stripped.wasm")
-        run([os.path.join(T["WASI_SDK"], "bin/llvm-strip"), "-o", final, wasm])
+    final = optimize_wasm(tree, wasm)
 
     # 5. The host harness and the demo's own assets, laid out as a static site.
     web = os.path.join(ROOT, "web")
