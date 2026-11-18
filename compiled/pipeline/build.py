@@ -7,6 +7,7 @@ Toolchains and the gem checkout live outside this repo; toolchain.env names them
 The knobs an optimization is most likely to turn are the constants right below.
 """
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -110,6 +111,11 @@ def input_digest():
     inputs = [(ROOT, ["pipeline", "web/src"]), (GEM_SRC, ["lib/instant_record", "app/models/instant_record"])]
     app_source = APP_SOURCE or os.path.join(GEM_SRC, "demo")
     inputs.append((app_source, ["app", "config/routes", "config/locales"]))
+    if APP_SOURCE:
+        inputs.append((app_source, ["db/browser_migrate"]))
+        for directory in json.loads(os.environ.get("INSTANT_RECORD_MIGRATION_PATHS", "null")) or [os.path.join(app_source, "db/migrate")]:
+            inputs.append((directory, ["."]))
+        digest.update(os.environ.get("INSTANT_RECORD_MIGRATION_BASELINE", "").encode())
     for name in ("config/routes.rb", "config/application.rb", "config/importmap.rb", "db/schema.rb", "Gemfile"):
         if os.path.isfile(os.path.join(app_source, name)):
             paths.append(os.path.join(app_source, name))
@@ -230,8 +236,13 @@ def main():
     # 1. Stage the Rails app and adapt the gem's sync client to the browser host.
     app = os.path.join(B, "app-src")
     if APP_SOURCE:
+        plan_path = os.path.join(B, "browser-migrations.json")
+        run(["ruby", os.path.join(ROOT, "pipeline/browser_migrations.rb"), APP_SOURCE, plan_path])
+        with open(plan_path) as file:
+            plan = json.load(file)
         run([python, os.path.join(ROOT, "pipeline/prepare_app.py"), APP_SOURCE, app])
     else:
+        plan = {"version": 0, "baseline": 0, "migrations": {}}
         run([python, os.path.join(ROOT, "pipeline/carve.py"), GEM_SRC, app])
     run([python, os.path.join(ROOT, "pipeline/vendor_gem.py"), GEM_SRC, app])
 
@@ -264,7 +275,8 @@ def main():
     # 3. Persistent reactor entry and the single-threaded copy for wasm32-wasi.
     tree = os.path.join(B, "wasm-tree")
     clean(tree)
-    run([python, os.path.join(ROOT, "pipeline/make_wasm_entry.py"), emit])
+    run([python, os.path.join(ROOT, "pipeline/make_wasm_entry.py"), emit], env={
+        "INSTANT_RECORD_MIGRATION_PLAN": os.path.join(B, "browser-migrations.json") if APP_SOURCE else ""})
     run([python, os.path.join(ROOT, "pipeline/make_wasm_tree.py"), emit, tree])
 
     # 4. Spinel: Ruby -> C -> WASI reactor wasm, with SQLite linked in.
@@ -282,7 +294,13 @@ def main():
     output = os.path.join(web, "dist")
     dist = os.path.join(B, "site")
     run(["npx", "vite", "build", "--outDir", dist, "--emptyOutDir"], cwd=web, env={"VITE_WASM_URL": f"/app-{digest}.wasm",
-        "VITE_SYNC_ENDPOINT": SYNC_ENDPOINT, "VITE_SOURCE_VERSION": wanted[:12]}, log="vite.log")
+        "VITE_SYNC_ENDPOINT": SYNC_ENDPOINT, "VITE_SOURCE_VERSION": wanted[:12],
+        "VITE_SCHEMA_VERSION": str(plan["version"]),
+        "VITE_SCHEMA_BASELINE": "" if plan["baseline"] is None else str(plan["baseline"]),
+        "VITE_MIGRATION_HISTORY": json.dumps(plan.get("history", {})),
+        "VITE_SCHEMA_DIGEST": hashlib.sha256(open(os.path.join(emit, "config/schema.rb"), "rb").read()).hexdigest()}, log="vite.log")
+    with open(os.path.join(dist, "instant-record-release.json"), "w") as release:
+        json.dump({"version": wanted}, release)
     shutil.copy(final, os.path.join(dist, f"app-{digest}.wasm"))
     assets = os.path.join(dist, "assets")
     os.makedirs(os.path.join(assets, "controllers"), exist_ok=True)

@@ -57,6 +57,11 @@ async function fetchReply(method, path, body = "", endpoint = SYNC_ENDPOINT) {
 
 const DATABASE = "development.sqlite3";
 const REVISION = "snapshot_revision";
+const SCHEMA = "rails_schema_version";
+const targetSchema = Number(import.meta.env.VITE_SCHEMA_VERSION);
+const legacySchema = import.meta.env.VITE_SCHEMA_BASELINE;
+const migrationHistory = JSON.parse(import.meta.env.VITE_MIGRATION_HISTORY);
+const schemaDigest = import.meta.env.VITE_SCHEMA_DIGEST;
 let snapshotRevision;
 const changes = new BroadcastChannel("instant-record-spinel-changes");
 changes.onmessage = () => {
@@ -78,11 +83,15 @@ async function withSnapshot(mode, operation) {
     const result = await withFiles(mode, async (get, put) => {
       const revision = await get(REVISION);
       if (revision !== snapshotRevision) {
+        if ((await get(SCHEMA)) !== targetSchema) {
+          self.postMessage({ type: "release_required" });
+          throw new Error("A newer Rails release migrated this database. Reload to continue.");
+        }
         const bytes = await get(DATABASE);
         const previous = host;
         const restored = new AppHost(previous.module, { env: previous.env });
         restored.cookies = previous.cookies;
-        if (bytes) restored.restoreDatabase(bytes);
+        if (bytes) restored.restoreDatabase(bytes, targetSchema);
         restored.ensureBooted();
         host = restored;
         snapshotRevision = revision;
@@ -218,16 +227,6 @@ async function loadHistory(request) {
   });
 }
 
-const storageStart = performance.now();
-let storageMs;
-const saved = withFiles("readwrite", async (get, put) => {
-  const [database, revision, savedSecret] = await Promise.all([get(DATABASE), get(REVISION), get("secret_key_base")]);
-  const secret = savedSecret || [...crypto.getRandomValues(new Uint8Array(64))].map(b => b.toString(16).padStart(2, "0")).join("");
-  if (!savedSecret) put("secret_key_base", secret);
-  storageMs = performance.now() - storageStart;
-  return [database, revision, secret];
-});
-
 function runRequest(method, render) {
   const writing = method !== "GET" && method !== "HEAD";
   return withSnapshot(writing ? "readwrite" : "readonly", save => {
@@ -267,27 +266,59 @@ function navigate({ method, path, body, contentType }) {
 
 async function boot(payload = {}) {
   const started = performance.now();
-  const [module, [savedDatabase, revision, secret]] = await Promise.all([
-    payload.module || WebAssembly.compileStreaming(fetch(import.meta.env.VITE_WASM_URL || "/app.wasm")),
-    saved,
-  ]);
+  const module = payload.module || await WebAssembly.compileStreaming(fetch(import.meta.env.VITE_WASM_URL || "/app.wasm"));
   const compiled = performance.now();
-  snapshotRevision = revision;
-
-  host = new AppHost(module, { env: { SECRET_KEY_BASE: secret } });
-  if (savedDatabase) {
-    host.restoreDatabase(savedDatabase);
-  }
-  const initStart = performance.now();
-  host.ensureBooted();
-  const runtimeMs = performance.now() - initStart;
+  let storageMs, runtimeMs;
+  const restored = await withFiles("readwrite", async (get, put) => {
+    const [bytes, version, revision, savedSecret, history, previousDigest] = await Promise.all([
+      get(DATABASE), get(SCHEMA), get(REVISION), get("secret_key_base"), get("migration_history"), get("schema_digest"),
+    ]);
+    storageMs = performance.now() - compiled;
+    if (bytes && version == null && !legacySchema) throw new Error("Set compiled_migration_baseline to the schema version of the previously deployed browser app.");
+    const previous = version ?? Number(legacySchema);
+    if (bytes && (previous > targetSchema || (legacySchema && previous < Number(legacySchema)))) {
+      throw new Error("This release cannot migrate the saved schema version " + previous + ".");
+    }
+    if (history) {
+      const priorVersions = new Set([...Object.keys(history), ...Object.keys(migrationHistory)]);
+      for (const key of priorVersions) {
+        if (Number(key) <= previous && migrationHistory[key] !== history[key]) {
+          throw new Error("Published migration " + key + " changed. Add a new migration instead.");
+        }
+      }
+    }
+    if (version === targetSchema && previousDigest && previousDigest !== schemaDigest) {
+      throw new Error("The compiled schema changed without a new Rails migration version.");
+    }
+    if (bytes && previous < targetSchema && !(targetSchema in migrationHistory)) {
+      throw new Error("Missing browser migration for schema version " + targetSchema + ".");
+    }
+    const secret = savedSecret || [...crypto.getRandomValues(new Uint8Array(64))].map(b => b.toString(16).padStart(2, "0")).join("");
+    if (!savedSecret) put("secret_key_base", secret);
+    const candidate = new AppHost(module, { env: { SECRET_KEY_BASE: secret } });
+    if (bytes) candidate.restoreDatabase(bytes, previous);
+    const initStart = performance.now();
+    candidate.ensureBooted();
+    runtimeMs = performance.now() - initStart;
+    snapshotRevision = revision;
+    if (version !== targetSchema || !previousDigest) {
+      snapshotRevision = (revision ?? 0) + 1;
+      put(DATABASE, candidate.databaseBytes());
+      put(REVISION, snapshotRevision);
+      put(SCHEMA, targetSchema);
+      put("migration_history", migrationHistory);
+      put("schema_digest", schemaDigest);
+    }
+    host = candidate;
+    return !!bytes;
+  });
   const bootstrapStart = performance.now();
-  if (!savedDatabase) await drain(true);
+  if (!restored) await drain(true);
   const bootstrapMs = performance.now() - bootstrapStart;
 
   const first = payload.path ? await runRequest("GET", () => navigate({ method: "GET", path: payload.path })) : null;
   setInterval(pollChanges, POLL_EVERY_MS);
-  return { compileMs: compiled - started, restored: !!savedDatabase, storageMs, runtimeMs, bootstrapMs, first };
+  return { compileMs: compiled - started, restored, storageMs, runtimeMs, bootstrapMs, first };
 }
 
 self.onmessage = async (event) => {

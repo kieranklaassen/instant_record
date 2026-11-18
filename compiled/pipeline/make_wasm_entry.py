@@ -126,6 +126,22 @@ InstantRecord::Client.streaming = true
 '''
 models = ["Issue", "ChatUser", "Channel", "Message", "Note"]
 if os.environ.get("INSTANT_RECORD_APP"):
+    with open(os.environ["INSTANT_RECORD_MIGRATION_PLAN"]) as file:
+        plan = json.load(file)
+    # Run the actual pending DDL/backfills on the visitor's SQLite rows,
+    # before model discovery or the first request. The worker commits the
+    # migrated image and its version together only after boot succeeds.
+    # WASI Spinel integers are 32-bit. Compare fixed-width decimal strings
+    # so a normal 14-digit Rails migration timestamp never overflows.
+    steps = ['if restored', '  previous = File.read("/host/schema_version")']
+    for version, statements in plan["migrations"].items():
+        steps.append(f'  if previous < "{int(version):020d}"')
+        for sql in statements:
+            literal = json.dumps(sql, ensure_ascii=False).replace("#{", "\\#{").replace("#@", "\\#@").replace("#$", "\\#$")
+            steps.append("    Db.exec(" + literal + ")")
+        steps.append("  end")
+    steps.append("end")
+    entry = entry.replace("# Earlier demos", "\n".join(steps) + "\n\n# Earlier demos")
     models = json.loads(os.environ["INSTANT_RECORD_MODELS"])
     if not models or not all(re.fullmatch(r"[A-Z]\w*(?:::[A-Z]\w*)*", name) for name in models):
         sys.exit("Declare at least one named model that includes InstantRecord::Syncable.")

@@ -7,7 +7,9 @@ namespace :instant_record do
       root: Rails.root,
       models: InstantRecord.syncable_models.map(&:name),
       toolchain: ENV.fetch("INSTANT_RECORD_TOOLCHAIN") { Rails.root.join("config/instant_record_toolchain.env") },
-      endpoint: ENV.fetch("SYNC_ENDPOINT") { Rails.application.config.instant_record.mount_path || InstantRecord::DEFAULT_MOUNT_PATH }
+      endpoint: ENV.fetch("SYNC_ENDPOINT") { Rails.application.config.instant_record.mount_path || InstantRecord::DEFAULT_MOUNT_PATH },
+      baseline: Rails.application.config.instant_record.compiled_migration_baseline,
+      migration_paths: Rails.application.config.paths["db/migrate"].existent
     )
     puts "Compiled browser site: #{output}"
   end
@@ -56,11 +58,17 @@ end
 #
 # Off by default: the build needs the wasm toolchain and network access for
 # ruby.wasm artifacts, which not every deploy environment has.
-if Rake::Task.task_defined?("assets:precompile")
-  Rake::Task["assets:precompile"].enhance do
-    next if ENV["INSTANT_RECORD_SKIP_BUILD"]
-    next unless Rails.application.config.instant_record.build_on_precompile
-
+Rake::Task.define_task("assets:precompile").enhance do
+  next if ENV["INSTANT_RECORD_SKIP_BUILD"]
+  case Rails.application.config.instant_record.build_on_precompile
+  when :compiled
+    Rake::Task["instant_record:compile"].invoke
+    InstantRecord::Compiler.publish(Rails.root)
+  when true
     Rake::Task["instant_record:build"].invoke
+  when false, nil
+    # The host app manages its own build.
+  else
+    raise ArgumentError, "build_on_precompile must be false, true, or :compiled"
   end
 end

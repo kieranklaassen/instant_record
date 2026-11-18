@@ -1,11 +1,14 @@
 // Tab side (hand-written). Stands where the gem's service worker stands in the ruby.wasm build:
 // every same-origin page request goes to the compiled app in the worker instead of the network,
 // so the demo's own HTML, importmap, Turbo and Stimulus controllers run unchanged on top of it.
+import { watchRelease } from "./release-updates.js";
+let releaseRequired;
 const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
 const waiting = new Map();
 let nextId = 1;
 worker.onmessage = (event) => {
   const { id, result, error, type } = event.data;
+  if (type === "release_required") return releaseRequired?.();
   if (type === "storage_upgrade_blocked") {
     document.body.textContent = "Close or reload other tabs running the previous version of this app. Your saved changes will be kept.";
     return;
@@ -145,7 +148,10 @@ function recordsChanged() {
 
 // The shell began compiling the module before this script loaded; pass it on, and ask for the
 // current page in the same message so boot and first render are one round trip.
-const boot = await call("boot", { module: await window.__wasm, path: location.pathname + location.search });
+const boot = await call("boot", { module: await window.__wasm, path: location.pathname + location.search }).catch(error => {
+  document.body.textContent = "The app could not open this release. Your saved database was kept. " + error.message;
+  throw error;
+});
 marks.booted = performance.now();
 marks.compileMs = window.__wasmMs ?? boot.compileMs;
 const { result, finalPath } = boot.first;
@@ -193,6 +199,7 @@ async function submitLocalForm(event) {
   }
 }
 window.addEventListener("submit", submitLocalForm);
+releaseRequired = watchRelease(networkFetch, import.meta.env.VITE_SOURCE_VERSION, () => waiting.size > 0);
 
 // Resource Timing distinguishes a cached module from a network response and gives
 // compressed and decoded byte counts without downloading the module a second time.

@@ -77,8 +77,9 @@ export class AppHost {
     return file ? file.data : null;
   }
 
-  restoreDatabase(bytes) {
+  restoreDatabase(bytes, schemaVersion = 0) {
     this.storage.contents.set("development.sqlite3", new File(bytes));
+    this.hostDir.contents.set("schema_version", new File(encoder.encode(String(schemaVersion).padStart(20, "0"))));
   }
 
   // Lazily instantiate and boot the WASI reactor once (after restoreDatabase has placed any saved
@@ -101,7 +102,11 @@ export class AppHost {
     for (const name of ["sock_accept", "sock_recv", "sock_send", "sock_shutdown"]) imports[name] = () => 58; // ENOTSUP
     const instance = new WebAssembly.Instance(this.module, { wasi_snapshot_preview1: imports });
     wasi.initialize(instance);
-    instance.exports.wasm_boot();
+    try {
+      instance.exports.wasm_boot();
+    } catch (error) {
+      throw new Error(this.errors.join("\n") || error.message, { cause: error });
+    }
     this.instance = instance;
   }
 

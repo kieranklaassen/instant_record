@@ -5,6 +5,17 @@ module InstantRecord
     config.instant_record = ActiveSupport::OrderedOptions.new
     config.instant_record.mount_path = DEFAULT_MOUNT_PATH
     config.instant_record.build_on_precompile = false
+
+    initializer "instant_record.compiled_site" do |app|
+      host = app.config.instant_record.compiled_host
+      if host.present?
+        require "instant_record/compiled_site"
+        app.middleware.insert_after Rack::Sendfile, InstantRecord::CompiledSite, host: host,
+          root: app.root.join("public/instant_record_compiled/current").to_s,
+          sync_path: app.config.instant_record.mount_path || DEFAULT_MOUNT_PATH
+      end
+    end
+
     # How long GET /events tails for new changes before closing (the client
     # reconnects from its cursor). Clients may request less via ?window=.
     #

@@ -1,7 +1,6 @@
-// Version 2 fences out workers from older builds that overwrite the SQLite
-// file without checking its revision. Upgrading keeps the existing files.
+// Version 3 fences out older workers that do not check the persisted schema.
 const opened = new Promise((resolve, reject) => {
-  const request = indexedDB.open("instant-record-spinel", 2);
+  const request = indexedDB.open("instant-record-spinel", 3);
   request.onupgradeneeded = event => {
     if (event.oldVersion === 0) request.result.createObjectStore("files");
   };

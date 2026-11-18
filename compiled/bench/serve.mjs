@@ -28,7 +28,7 @@ createServer(async (request, response) => {
   }
   const body = await readFile(file);
   const type = TYPES[extname(file)] || "application/octet-stream";
-  const headers = { "content-type": type, "cache-control": /index\.html$/.test(file) ? "no-cache" : "public, max-age=31536000, immutable" };
+  const headers = { "content-type": type, "cache-control": /(?:index\.html|instant-record-release\.json)$/.test(file) ? "no-cache" : "public, max-age=31536000, immutable" };
   const shown = file.slice(dist.length);
   if (/gzip/.test(request.headers["accept-encoding"] || "") && body.length > 512 && type !== "image/png") {
     const key = file + ":" + body.length + ":" + (await stat(file)).mtimeMs; // a rebuild must not be served stale
