@@ -28,10 +28,15 @@ REMOVE = [
     "config/initializers/inertia_rails.rb",
     "app/controllers/source_controller.rb", "app/controllers/assistant/replies_controller.rb",
     "app/controllers/slack/resets_controller.rb", "app/controllers/email/sync_controller.rb", "app/models/mailbox.rb",
+    # The shell snapshot is built and served by the sync server.
+    "app/models/mail_shell.rb", "app/jobs/email/shell_build_job.rb",
     "app/views/source", "app/views/pwa",
     "app/helpers/source_helper.rb",
     "test", "db/v2_migrate", "db/seeds.rb", "config/routes", "script", "lib/tasks",
 ]
+# Screens are the phone's (build_native.py). The browser draws with React.
+if not os.environ.get("INSTANT_RECORD_NATIVE"):
+    REMOVE.append("app/screens")
 for rel in REMOVE:
     path = os.path.join(app, rel)
     if os.path.isdir(path):
