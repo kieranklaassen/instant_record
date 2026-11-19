@@ -16,7 +16,7 @@ class MailboxScreenTest < ActiveSupport::TestCase
 
     assert_equal [@newer.id, @older.id], rows.map(&:id)
     assert_equal %w[thread thread], rows.map { |row| row.props["link"] }
-    assert_equal({ "member" => "maya", "inbox" => "support", "thread" => @newer.id }, rows.first.params)
+    assert_equal({ "member" => "maya", "inbox" => "support", "thread" => @newer.id }, rows.first.link_params)
     assert_equal({ "id" => @newer.id }, rows.first.args)
     assert_includes texts(rows.first), "October invoice"
   end
@@ -70,7 +70,7 @@ class MailboxScreenTest < ActiveSupport::TestCase
     assert_equal ["leading", "person.crop.circle"], [menu.props["position"], menu.props["image"]]
     assert_equal %w[Support Billing], menu.children.map(&:text)
     assert_equal %w[mailbox mailbox], menu.children.map { |item| item.props["link"] }
-    assert_equal [at("maya/support"), at("maya/billing")], menu.children.map(&:params)
+    assert_equal [at("maya/support"), at("maya/billing")], menu.children.map(&:link_params)
     assert_equal ["true", nil], menu.children.map { |item| item.props["selected"] }
     assert_equal [nil, "true"], toolbar("maya/billing").first.children.map { |item| item.props["selected"] }
     assert_equal %w[Support], toolbar("theo/support").first.children.map(&:text)
@@ -80,7 +80,7 @@ class MailboxScreenTest < ActiveSupport::TestCase
     all, unread, mark = toolbar("maya/support").last.children
 
     assert_equal ["trailing", "slider.horizontal.3"], toolbar("maya/support").last.props.values_at("position", "image")
-    assert_equal [["All", at("maya/support"), "true"], ["Unread", at("maya/support/unread"), nil]], [all, unread].map { |item| [item.text, item.params, item.props["selected"]] }
+    assert_equal [["All", at("maya/support"), "true"], ["Unread", at("maya/support/unread"), nil]], [all, unread].map { |item| [item.text, item.link_params, item.props["selected"]] }
     assert_equal ["Mark all read", "read_all", {}], [mark.text, mark.action, mark.args]
     assert_equal [nil, "true"], toolbar("maya/support/unread").last.children.first(2).map { |item| item.props["selected"] }
   end
@@ -90,8 +90,8 @@ class MailboxScreenTest < ActiveSupport::TestCase
 
     assert_equal [@older.id], rows_for("maya/support/unread").map(&:id)
     assert_equal [@newer.id, @older.id], rows_for("maya/support").map(&:id)
-    assert_equal @older.id, rows_for("maya/support/unread").first.params["thread"]
-    assert_nil rows_for("maya/support/unread").first.params["filter"]
+    assert_equal @older.id, rows_for("maya/support/unread").first.link_params["thread"]
+    assert_nil rows_for("maya/support/unread").first.link_params["filter"]
   end
 
   test "mark all read reads the listed mail for this member alone, once" do
@@ -127,7 +127,7 @@ class MailboxScreenTest < ActiveSupport::TestCase
   test "a message whose id is a word the screen uses is still that message" do
     odd = @support.append!(id: "unread", author: "rae", attributes: { kind: "message", address: "rae@example.test", subject: "Odd id", body: "Hello" })
 
-    assert_equal "unread", rows_for("maya/support").first.params["thread"]
+    assert_equal "unread", rows_for("maya/support").first.link_params["thread"]
     MailboxScreen.new(at("maya/support")).perform("archive", { "id" => odd.id }, {})
     assert_not_includes rows_for("maya/support").map(&:id), "unread"
   end

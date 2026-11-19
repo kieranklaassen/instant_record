@@ -110,7 +110,7 @@ class NativeScreenTest < ActiveSupport::TestCase
     row = rows(LettersScreen.new.render).first
 
     assert_equal "a1", row.id
-    assert_equal ["letter", { "id" => "a1" }], [row.props["link"], row.params]
+    assert_equal ["letter", { "id" => "a1" }], [row.props["link"], row.link_params]
     assert_equal ["read", { "id" => "a1" }], [row.action, row.args]
   end
 
@@ -157,7 +157,7 @@ class NativeScreenTest < ActiveSupport::TestCase
     inbox, sent, empty = toolbar(MenuScreen.new("box" => "sent")).first.children
 
     assert_equal %w[item item item], [inbox, sent, empty].map(&:kind)
-    assert_equal ["Inbox", "menu", { "box" => "inbox" }, "tray"], [inbox.text, inbox.props["link"], inbox.params, inbox.props["image"]]
+    assert_equal ["Inbox", "menu", { "box" => "inbox" }, "tray"], [inbox.text, inbox.props["link"], inbox.link_params, inbox.props["image"]]
     assert_equal ["empty", { "box" => "sent" }, "destructive"], [empty.action, empty.args, empty.props["role"]]
     assert_nil empty.props["link"]
   end

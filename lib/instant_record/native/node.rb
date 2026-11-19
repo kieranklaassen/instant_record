@@ -3,16 +3,21 @@ module InstantRecord
     # One element of a screen. Every element is this class with these fields,
     # whatever it draws: the compiler that builds the phone app infers one type
     # for a whole tree, and the renderer switches on `kind`.
+    #
+    # `link_params` are the params of the screen a link opens ("params" in the
+    # JSON). The accessor is not called `params`: the compiler types a method
+    # by its name across the whole app, and a Rails app already has a `params`
+    # that holds anything.
     class Node
       attr_reader :kind, :props, :children
-      attr_accessor :id, :text, :action, :params, :args
+      attr_accessor :id, :text, :action, :link_params, :args
 
       def initialize(kind)
         @kind = kind
         @id = ""
         @text = ""
         @action = ""
-        @params = {}
+        @link_params = {}
         @args = {}
         @props = {}
         @children = []
@@ -41,7 +46,7 @@ module InstantRecord
         # shared method would have to convert between them.
         out << ",\"params\":{"
         first = true
-        @params.each do |name, value|
+        @link_params.each do |name, value|
           out << "," unless first
           first = false
           out << Node.quote(name.to_s) << ":" << Node.quote(value.to_s)

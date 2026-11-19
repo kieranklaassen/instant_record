@@ -58,14 +58,12 @@ module InstantRecord
     # file through an ahead-of-time compiler with no `method_missing`, no
     # `instance_eval` and no `send` to a computed name.
     class Screen
-      attr_reader :params
-
       # `params` are what the screen was opened with, strings by name. Every
       # hash a screen gives to `params:` or `args:` holds strings too: write
       # `entry.id.to_s` for a value that comes from a record, since the
       # phone's compiler types a hash by what it holds and refuses another.
       def initialize(params = {})
-        @params = params
+        @given = params
         @open = []
       end
 
@@ -79,7 +77,7 @@ module InstantRecord
 
       # One of the params, or "" when the screen was opened without it.
       def param(name)
-        @params.fetch(name, "").to_s
+        @given.fetch(name, "").to_s
       end
 
       def body
@@ -131,7 +129,7 @@ module InstantRecord
         node.id = id
         node.action = action
         node.args = args
-        node.params = params
+        node.link_params = params
         node.set("link", link)
         inside(node) { yield }
       end
@@ -188,7 +186,7 @@ module InstantRecord
       def item(title, action: "", args: {}, link: "", params: {}, image: "", role: "", selected: false)
         node = add("item")
         act(node, title, action, args, role)
-        node.params = params
+        node.link_params = params
         node.set("link", link)
         node.set("image", image)
         node.set("selected", "true") if selected
