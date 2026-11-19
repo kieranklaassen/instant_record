@@ -23,4 +23,14 @@ class AssistantRepliesTest < ActionDispatch::IntegrationTest
       assert_response :unprocessable_entity
     end
   end
+
+  test "earlier turns are accepted as bounded pairs of text" do
+    post "/assistant/replies", params: { prompt: "Explain offline sync", history: [["What is an outbox?", "A table."]] * 6 }, as: :json
+    assert_response :success
+
+    [[["only a prompt"]], [["a", "b"]] * 7, [["a", "x" * 2001]], "a string", [["a", 1]], [{ prompt: "a", reply: "b" }]].each do |invalid|
+      post "/assistant/replies", params: { prompt: "Explain offline sync", history: invalid }, as: :json
+      assert_response :unprocessable_entity, invalid.inspect.first(40)
+    end
+  end
 end

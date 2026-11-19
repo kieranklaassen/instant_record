@@ -59,5 +59,8 @@ group :development do
   gem "web-console"
 end
 
+# The Assistant demo asks a model through RubyLLM when a provider key is set.
+gem "ruby_llm", "~> 2.2"
+
 # The Inbox demo is an Inertia page in React; the other demos stay on Hotwire.
 gem "inertia_rails", "~> 3.23"

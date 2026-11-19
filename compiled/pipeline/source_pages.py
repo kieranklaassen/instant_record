@@ -33,8 +33,10 @@ def write_source_pages(app, dist, version, demo):
             files.append((samples, root / samples))
             history = "app/controllers/assistant/history_controller.rb"
             files.append((history, root / history))
-            server = "app/controllers/assistant/replies_controller.rb"
-            files.append((server, Path(demo) / server))
+            local = "app/javascript/controllers/assistant_local_model.js"
+            files.append((local, root / local))
+            for server in ("app/controllers/assistant/replies_controller.rb", "app/models/assistant/reply.rb"):
+                files.append((server, Path(demo) / server))
         if key == "migrate":
             files[1] = ("compiled/pipeline/sqlite_release.rb", Path(__file__).with_name("sqlite_release.rb"))
         parts = ['<p class="source-note">Source used by this compiled build. Marked lines use InstantRecord.</p>']
