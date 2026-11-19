@@ -24,6 +24,7 @@ ActiveRecord::Schema.define do
   create_table :items, id: :string, force: true do |t|
     t.string :title
     t.string :state
+    t.string :owner
     t.integer :server_version, null: false, default: 0
     t.string :sync_state, null: false, default: "synced"
     t.timestamps

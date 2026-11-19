@@ -1,4 +1,4 @@
-get "assistant", to: "assistant/chats#index"
-get "assistant/history", to: "assistant/history#index"
-post "assistant/replies", to: "assistant/replies#create"
-match "assistant/replies", to: "assistant/replies#preflight", via: :options
+namespace :assistant do
+  resources :turns, only: [:create, :update]
+  root "turns#index" # /assistant
+end

@@ -1,6 +1,8 @@
 require "test_helper"
 
 class SeedsTest < ActiveSupport::TestCase
+  include ActiveJob::TestHelper
+
   test "seeding twice adds no rows" do
     Slack::Seeds.apply
     counts = [ChatUser.count, Channel.count, Message.count]
@@ -53,5 +55,18 @@ class SeedsTest < ActiveSupport::TestCase
     Slack::Seeds.apply_backfill
 
     assert_equal count, Message.where("id LIKE 'backfill-channel-general-%'").count
+  end
+
+  test "the Assistant's example chats seed once, each with history to scroll through" do
+    require Rails.root.join("db/seeds/assistant_chats")
+    assert_no_enqueued_jobs { AssistantChats.apply }
+    counts = [AssistantChat.count, AssistantTurn.count]
+
+    AssistantChats.apply
+
+    assert_equal counts, [AssistantChat.count, AssistantTurn.count]
+    assert_equal AssistantChat::EXAMPLES, AssistantChat.order(created_at: :desc).pluck(:id)
+    assert_operator AssistantTurn.where(assistant_chat_id: "chat-scrollback").count, :>, 40
+    assert_equal 0, AssistantTurn.where(reply: "").count
   end
 end

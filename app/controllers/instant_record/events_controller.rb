@@ -19,8 +19,9 @@ module InstantRecord
     }.freeze
 
     class EventStream
-      def initialize(cursor:, deadline:, heartbeat: 15.0)
+      def initialize(cursor:, deadline:, heartbeat: 15.0, scope: nil)
         @cursor = cursor
+        @scope = scope
         @deadline = deadline
         @heartbeat = heartbeat
         @last_write = Time.current
@@ -28,7 +29,7 @@ module InstantRecord
 
       def each
         loop do
-          Change.poll(@cursor).each do |change|
+          Change.poll(@cursor, scope: @scope).each do |change|
             @cursor = change.id
             @last_write = Time.current
             yield "id: #{change.id}\nevent: change\ndata: #{change.as_event.to_json}\n\n"
@@ -61,6 +62,7 @@ module InstantRecord
       headers.merge!(EVENT_STREAM_HEADERS).merge!(InstantRecord::CORS_HEADERS)
       self.response_body = EventStream.new(
         cursor: cursor,
+        scope: InstantRecord.request_scope(request),
         deadline: Time.current + window_seconds,
         heartbeat: Rails.application.config.instant_record.sse_heartbeat_seconds.to_f
       )

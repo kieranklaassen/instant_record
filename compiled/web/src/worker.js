@@ -13,6 +13,9 @@ const QUIET_MS = 30;
 const DRAIN_RETRY_BASE_MS = 500;
 const DRAIN_RETRY_CAP_MS = 10000;
 
+// This browser's sync scope: an unguessable token the page keeps (main.js) and every sync
+// request carries, so the server can keep a scoped model's rows to the browser that owns them.
+let syncScope = "";
 let simulation = { offline: false, latencyMs: 0, report: false };
 const history = [];
 
@@ -43,7 +46,8 @@ async function fetchReply(method, path, body = "", endpoint = syncEndpoint) {
       options.headers = { "Content-Type": "application/json" };
       options.body = body;
     }
-    const response = await fetch(url, options);
+    const scoped = syncScope ? url + (url.includes("?") ? "&" : "?") + "scope=" + encodeURIComponent(syncScope) : url;
+    const response = await fetch(scoped, options);
     text = await response.text();
     outcome = status = response.status;
   } catch {
@@ -152,10 +156,12 @@ function syncPass() {
   return draining;
 }
 
-async function drain(initial = false) {
+// `early` is a bootstrap asked for before the app was up (earlyBootstrap). One that did not
+// arrive is asked for again here.
+async function drain(initial = false, early = null) {
   const { plan, revision } = await withSnapshot("readonly", () => ({ plan: host.syncPlan(), revision: snapshotRevision }));
   const push = plan.push ? await fetchReply("POST", "/mutations", plan.push) : null;
-  const snapshot = plan.bootstrap ? await fetchReply("GET", "/bootstrap") : null;
+  const snapshot = plan.bootstrap ? (early?.status === 200 ? early : await fetchReply("GET", "/bootstrap")) : null;
 
   // An edit made during the network wait takes precedence over an old rejection or
   // snapshot. Retry from SQLite with the original mutation IDs for idempotent replay.
@@ -387,8 +393,23 @@ async function fetchShell(scope, path) {
   }
 }
 
+// A browser with no database of its own will ask for a first sync as soon as the app is up.
+// Nothing in the question depends on the app, so it is asked while the module compiles and the
+// answer is waiting when the app wants it. A build that loads a shell has no use for it.
+async function earlyBootstrap(path) {
+  const asked = new URL(path || "/", self.location.origin).searchParams.get("shell") === "1";
+  if (shellFingerprint && (shellAlways || asked)) return null;
+  try {
+    if ((await withFiles("readonly", get => get(SCHEMA))) != null) return null;
+    return await fetchReply("GET", "/bootstrap");
+  } catch {
+    return null;
+  }
+}
+
 async function boot(payload = {}) {
   const scope = mailboxScope(payload.path || "/");
+  syncScope = typeof payload.scope === "string" ? payload.scope : "";
   openSnapshot(scope);
   changes = new BroadcastChannel("instant-record-spinel-changes" + (scope ? "/" + scope : ""));
   changes.onmessage = () => { if (host) self.postMessage({ type: "records_changed" }); };
@@ -396,6 +417,7 @@ async function boot(payload = {}) {
   const started = performance.now();
   // The shell downloads while the module compiles.
   const shellFetch = fetchShell(scope, payload.path);
+  const bootstrapFetch = earlyBootstrap(payload.path);
   const module = payload.module || await WebAssembly.compileStreaming(fetch(import.meta.env.VITE_WASM_URL || "/app.wasm"));
   const compiled = performance.now();
   let storageMs, runtimeMs;
@@ -466,7 +488,7 @@ async function boot(payload = {}) {
     restored = await open();
   }
   const bootstrapStart = performance.now();
-  if (!restored && !shell) await drain(true);
+  if (!restored && !shell) await drain(true, await bootstrapFetch);
   // The shell is as old as its cursor. Ask for what came after it now, not at the first
   // interval, and do not hold the first page for the answer.
   if (shell) pollChanges();
@@ -519,14 +541,13 @@ self.onmessage = async (event) => {
     }
     if (type === "serverRequest") {
       const url = new URL(payload.path, self.location.origin);
-      const chat = import.meta.env.VITE_SHARED_INBOX_DEMO && payload.method === "POST" && url.pathname === "/assistant/replies";
-      const allowed = chat || (payload.method === "GET" && url.pathname === "/receipts/probe") ||
+      const allowed = (payload.method === "GET" && url.pathname === "/receipts/probe") ||
         (payload.method === "POST" && (url.pathname === "/slack/reset" ||
           (import.meta.env.VITE_SHARED_INBOX_DEMO && url.pathname === new URL(syncEndpoint, self.location.origin).pathname + "/incoming" &&
             url.pathname.startsWith("/email/sync/"))));
       if (!allowed) throw new Error("Unknown demo server action");
       const root = publicEndpoint.replace(/\/instant_record\/?$/, "");
-      const reply = await fetchReply(payload.method, url.pathname + url.search, chat ? payload.body : "", root);
+      const reply = await fetchReply(payload.method, url.pathname + url.search, "", root);
       return self.postMessage({ id, result: reply });
     }
     if (type === "boot") return self.postMessage({ id, result: await boot(payload) });

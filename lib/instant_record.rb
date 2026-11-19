@@ -89,6 +89,17 @@ module InstantRecord
       end
     end
 
+    # The scope a record belongs to, or nil for a record every client may see.
+    def scope_of(record)
+      column = record.class.instant_record_sync_scope
+      record[column].presence if column
+    end
+
+    # The scope of the client behind a sync request (see Syncable.sync_scope).
+    def request_scope(request)
+      config.scope_from.call(request).to_s.presence
+    end
+
     # The wire shape for one record, shared by the bootstrap and records
     # endpoints and mirroring Change#as_event: clients apply all three through
     # the same upsert path.

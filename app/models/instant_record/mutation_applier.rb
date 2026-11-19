@@ -3,13 +3,16 @@ module InstantRecord
   # change-log row, and idempotency-ledger row, in one transaction. This is
   # the server half of the sync protocol; the HTTP layer above it is thin.
   class MutationApplier
-    def self.apply(mutation)
-      new(mutation).apply
+    # `scope` is the sender's (InstantRecord.request_scope). It only matters
+    # to a model that declares sync_scope.
+    def self.apply(mutation, scope = nil)
+      new(mutation, scope).apply
     end
 
-    def initialize(mutation)
+    def initialize(mutation, scope = nil)
       @mutation = mutation
       @changes = (mutation[:changes] || {}).to_h
+      @scope = scope.presence
     end
 
     # Replayed mutation ids return their original result without re-applying.
@@ -53,6 +56,16 @@ module InstantRecord
     private
 
     def perform(model)
+      # A scoped model's rows are the sender's own: the scope column is never
+      # taken from the client, and another scope's row is as good as absent.
+      if (column = model.instant_record_sync_scope)
+        return { status: "rejected", reason: "a scope is required" } unless @scope
+        @changes = @changes.except(column)
+        @changes[column] = @scope if @mutation[:operation] == "create"
+        existing = model.find_by(id: @mutation[:record_id])
+        return { status: "rejected", reason: "record not found" } if existing && existing[column] != @scope
+      end
+
       case @mutation[:operation]
       when "create"
         record = model.new(@changes.merge("id" => @mutation[:record_id]))
@@ -83,7 +96,7 @@ module InstantRecord
       when "destroy"
         record = model.find_by(id: @mutation[:record_id])
         record&.destroy!
-        log_destroy(model)
+        log_destroy(model, record)
         { status: "applied" }
       else
         { status: "rejected", reason: "unknown operation" }
@@ -101,17 +114,19 @@ module InstantRecord
         record_id: record.id,
         operation: operation,
         version: record.server_version,
-        attributes_payload: InstantRecord.wire_attributes(record.attributes)
+        attributes_payload: InstantRecord.wire_attributes(record.attributes),
+        scope: InstantRecord.scope_of(record)
       )
     end
 
-    def log_destroy(model)
+    def log_destroy(model, record)
       Change.create!(
         record_type: model.name,
         record_id: @mutation[:record_id],
         operation: "destroy",
         version: 0,
-        attributes_payload: {}
+        attributes_payload: {},
+        scope: record && InstantRecord.scope_of(record)
       )
     end
 

@@ -27,8 +27,9 @@ module InstantRecord
 
     def serialize_rows(model)
       window = model.instant_record_sync_window
-      scope = window ? window.in_window : model.all
-      scope.map { |record| InstantRecord.record_payload(record) }
+      rows = window ? window.in_window : model.all
+      rows.merge(model.instant_record_visible_to(InstantRecord.request_scope(request)))
+        .map { |record| InstantRecord.record_payload(record) }
     end
   end
 end
