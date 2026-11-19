@@ -8,7 +8,14 @@
 // The page stays an ordinary Inertia page: props in, visits out. These make
 // its live props follow the local database and, in the compiled runtime, let
 // that database answer its visits.
-import { localHttpClient } from "./http.js"
+//
+// Beside those are the pieces a list page is built from, none of which knows
+// what the rows are: LiveList and useLiveWindow (a virtual list that widens
+// with the scroll), useKeyboardNavigation (a focused row), useShortcuts (one
+// table of key bindings), useSelection (rows picked, with ranges),
+// useUndoable (writes held so they can be taken back) and write (a form post
+// that visits nothing).
+import { localHttpClient, write } from "./http.js"
 import { liveTransport } from "./live.js"
 import { local } from "./window.js"
 
@@ -24,8 +31,14 @@ export const instantRecord = () => ({
   ...(local() ? { http: localHttpClient, ...pageInAttribute() } : {}),
 })
 
-export { localHttpClient, liveTransport }
+export { localHttpClient, liveTransport, write }
 export { local, useHistory, useLiveParam, useLiveSearch, useLiveWindow, useStableRows, widenWindow } from "./window.js"
 export { resolveFocus } from "./focus.js"
 export { useKeyboardNavigation } from "./keyboard.js"
+export { chord, keycaps, match } from "./chord.js"
+export { useShortcuts } from "./shortcuts.js"
+export { rangeBetween } from "./range.js"
+export { useSelection } from "./selection.js"
+export { heldActions } from "./held.js"
+export { useUndoable } from "./undo.js"
 export { default as LiveList } from "./LiveList.js"

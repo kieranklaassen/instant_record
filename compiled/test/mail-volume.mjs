@@ -68,7 +68,7 @@ try {
     assert.ok(mounted.length <= 150, "the virtual list mounted " + mounted.length + " rows");
     assert.equal(new Set(mounted).size, mounted.length);
     for (const id of mounted) ids.add(id);
-    if (!deep && ids.size >= 125) deep = { href: await rows.last().getAttribute("href"), subject: await rows.last().locator("strong").textContent() };
+    if (!deep && ids.size >= 125) deep = { href: await rows.last().locator("a").getAttribute("href"), subject: await rows.last().locator("strong").textContent() };
     assert.equal(await open(), reader);
     stalled = ids.size === before ? stalled + 1 : 0;
   }

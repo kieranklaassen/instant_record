@@ -4,7 +4,7 @@ Date: 2026-11-19. Answers `docs/brainstorms/2026-11-19-inbox-inertia-react-requi
 
 ## The answer
 
-InstantRecord works under Inertia, and the page stays an ordinary Inertia page. Its state is its props and its address. Reading is a partial reload, writing is a form post, and nothing holds a second copy of the data.
+InstantRecord works under Inertia, and the page stays an ordinary Inertia page. Its state is its props and its address. Reading is a partial reload, writing is a form post, and nothing holds a second copy of the data. What the page does hold is small and short-lived: the marks, held archives and replies that are on their way, laid over the props until the next reload answers.
 
 Inertia 3 already has the two seams this needed, and the gem's `frontend/` package fills each with one small file:
 
@@ -20,11 +20,11 @@ Inertia 3 already has the two seams this needed, and the gem's `frontend/` packa
 3. The controller answers from the local database. Inertia merges the props and re-renders.
 4. Rows are memoized on their own data, so a change to one conversation redraws one row. The list is virtual, so only the rows on screen exist.
 
-A write is `router.post` or `useForm`, with Inertia's `optimistic` option for archive and read. Rails redirects back and the answer carries fresh props.
+A new conversation is `useForm`: Rails redirects back and the answer carries fresh props. A reply, a mark and an archive are `write`, a form post that does not visit, followed by one partial reload, with the change drawn at once from the page's own overlay.
 
 ## What it cost
 
-About 400 lines, none of which knows about mail. They ship in the gem, in `frontend/`, as a package an app installs with `npm install "$(bundle show instant_record)/frontend"`:
+About 400 lines at first, about 900 after the polish, none of which knows about mail. They ship in the gem, in `frontend/`, as a package an app installs with `npm install "$(bundle show instant_record)/frontend"`:
 
 | File | Job |
 | --- | --- |
@@ -32,7 +32,12 @@ About 400 lines, none of which knows about mail. They ship in the gem, in `front
 | `http.js` | The HTTP client for the compiled runtime |
 | `window.js` | `useLiveWindow` (a list prop that widens with the scroll), `useLiveParam` (a query parameter and the props that depend on it), `useStableRows` |
 | `LiveList.js` | A react-virtuoso list that holds the reader's place while rows arrive above |
-| `keyboard.js`, `focus.js` | `useKeyboardNavigation`: a focused row, a key map, a scroll registry, focus that survives a redraw |
+| `keyboard.js`, `focus.js` | `useKeyboardNavigation`: a focused row, a scroll registry, focus that survives a redraw |
+| `chord.js`, `shortcuts.js` | `useShortcuts`: one table of bindings (keys, label, group, when it applies) that the key handler, the key list and the key caps on buttons all read |
+| `range.js`, `selection.js` | `useSelection`: a set of selected ids with an anchor, a range to any row, select all |
+| `held.js`, `undo.js` | `useUndoable`: a write held for five seconds so it can be taken back, sent when the time passes or the page is left |
+
+The second half of that table came with the polish of 2026-11-19 (`docs/plans/2026-11-19-0536-feat-inbox-polish-plan.md`), which also added `write` to `http.js`: a form post that does not visit, so marking twenty rows does not redraw the page twenty times. The files that hold logic and no React (`chord.js`, `range.js`, `held.js`, `focus.js`) are the ones with node tests, since the package has no dependencies of its own to import React from.
 
 In Ruby, `lib/instant_record/inertia.rb` adds `live:` to `render inertia:`. It names the synced models each prop is made from, and the page object carries `liveProps` with one event per model.
 
@@ -77,6 +82,13 @@ What that run found and fixed:
 - a compiled build served by its deploy (nginx, the service worker's cache): `/assets/inbox.js` has no digest in its name there, so a cache that keeps it must be told when it changes;
 - any browser but Chromium.
 
+## Two things the polish got wrong first
+
+- **A refused form opened Inertia's error window.** `onHttpException` on a `useForm` post suppresses that window only when it returns `false`. A callback that shows its own notice and returns nothing gets both.
+- **A key that submits skips the browser's validation.** Mod+Enter called the form's post directly, so `required` and `type=email` never ran. A submit from a key asks first: `fields.reportValidity()`, then post.
+
 ## Left out on purpose
 
-Shift+J / Shift+K range selection and bulk actions, as the requirements say. Search came after this was written: `/` focuses it, and `compiled/test/offline-inbox.mjs` runs it, the background fill and the shell snapshot (`?shell=1`) with this page in a compiled build.
+Search came after this was written: `/` focuses it, and `compiled/test/offline-inbox.mjs` runs it, the background fill and the shell snapshot (`?shell=1`) with this page in a compiled build. Range selection, bulk actions and undo were left out of the first round and built in the polish that followed. That polish leaves out, on purpose: undo for a sent reply (the write landing at once is what the demo shows), an unarchive on the server (undo holds the write instead, so the mail log stays append-only), and one request for a bulk action (it is one light write per conversation and then one reload).
+
+The polish ran in Chromium against the Rails-served page only: keys, selection, archive and undo, the reply flow, two members, a narrow window and a refused write. None of the polish has run in the compiled runtime, which was verified before it landed. `compiled/test/shared-inbox.mjs` and `compiled/test/mail-volume.mjs` were brought to the new markup (a row's link is `.mail-row-link`, the reply box opens from `.mail-reply-prompt`, the button is Send) without a toolchain to run them. There `write` goes to `window.fetch`, not through the Inertia client `http.js` hands to the local database, so whether the worker answers it is the first thing to check.

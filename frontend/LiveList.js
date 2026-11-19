@@ -26,7 +26,8 @@ function useSteadyStart(rows, anchor) {
 //   onEnd     called as the reader nears the last row (useLiveWindow's `older`)
 //   register  from useKeyboardNavigation, so keys can bring any row into view
 //   openAt    the index to open on, read once (a reload returns to its row)
-export default function LiveList({ rows, children, onEnd, register, openAt = 0, className }) {
+//   onTop     called with whether the list is scrolled to its top
+export default function LiveList({ rows, children, onEnd, register, openAt = 0, onTop, className }) {
   const list = useRef(null)
   const anchor = useRef(null)
   const start = useSteadyStart(rows, anchor)
@@ -45,6 +46,7 @@ export default function LiveList({ rows, children, onEnd, register, openAt = 0, 
     computeItemKey: (_, row) => row.id,
     increaseViewportBy: 600,
     endReached: () => onEnd?.(),
+    atTopStateChange: onTop,
     rangeChanged: ({ startIndex }) => {
       const { rows, start } = now.current
       // At the top a new row should show, so nothing is held there.

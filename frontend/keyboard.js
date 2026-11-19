@@ -1,26 +1,23 @@
-// Keyboard navigation for one list: a focused row, a key map, a registry the
-// virtual list answers so a row it has not drawn can be scrolled into view,
-// and focus that survives whatever redraws the list.
+// Keyboard navigation for one list: a focused row, a registry the virtual
+// list answers so a row it has not drawn can be scrolled into view, and focus
+// that survives whatever redraws the list. The keys themselves are bindings
+// (shortcuts.js): bind j to `move(1)` and k to `move(-1)`.
 import { useCallback, useEffect, useRef, useState } from "react"
 import { resolveFocus } from "./focus.js"
 
-const typing = (target) =>
-  target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))
-
-// useKeyboardNavigation({ ids, keys, startAt, more, onNeed })
+// useKeyboardNavigation({ ids, startAt, more, onNeed })
 //
 //   ids      the list's row ids, in order
-//   keys     { key: handler } for everything but movement
 //   startAt  the row to start on (the one the address names)
 //   more     whether rows exist past the end of `ids`
 //   onNeed   called with an index past the end, to load that far
 //
 // Answers { focusedId, focusedIndex, focus, move, register }.
-export function useKeyboardNavigation({ ids, keys, startAt, more, onNeed }) {
+export function useKeyboardNavigation({ ids, startAt, more, onNeed }) {
   const [focused, setFocused] = useState(() => ({ id: startAt || null, index: Math.max(ids.indexOf(startAt), 0) }))
   const scroller = useRef(null)
   const live = useRef({})
-  live.current = { ids, keys, focused, more, onNeed }
+  live.current = { ids, focused, more, onNeed }
 
   // Whatever redraws the list, focus stays on its row, or passes to the row
   // that took its place.
@@ -53,23 +50,6 @@ export function useKeyboardNavigation({ ids, keys, startAt, more, onNeed }) {
     setFocused({ id: ids[at], index: at })
     scroller.current?.(at)
     return ids[at]
-  }, [])
-
-  useEffect(() => {
-    const press = (event) => {
-      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return
-      if (typing(event.target)) {
-        // Keys belong to the text while a field has focus. Escape hands them back.
-        if (event.key === "Escape") event.target.blur()
-        return
-      }
-      const handler = live.current.keys[event.key]
-      if (!handler) return
-      event.preventDefault()
-      handler(event)
-    }
-    window.addEventListener("keydown", press)
-    return () => window.removeEventListener("keydown", press)
   }, [])
 
   return { focusedId: focused.id, focusedIndex: focused.index, focus, move, register }
