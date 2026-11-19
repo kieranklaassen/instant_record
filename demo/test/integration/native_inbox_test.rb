@@ -344,6 +344,13 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
     assert_equal [@older.id], MailEntry.open_messages.where(mailbox_id: "support").pluck(:id)
   end
 
+  test "the feedback screen hands the app's own form who is writing" do
+    form = @phone.render("feedback", SUPPORT).dig("children", 0, "children", 0)
+
+    assert_equal ["swift", "FeedbackForm"], form.values_at("kind", "text")
+    assert_equal [%w[from maya], %w[inbox support]], form["children"].map { |prop| [prop.dig("props", "name"), prop["text"]] }
+  end
+
   test "a file that will not open leaves the app in the one it had" do
     @phone.sync
     held = rows.map { |row| row["id"] }

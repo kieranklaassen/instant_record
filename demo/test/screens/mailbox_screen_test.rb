@@ -113,6 +113,13 @@ class MailboxScreenTest < ActiveSupport::TestCase
     assert_equal [nil, "true"], toolbar("maya/support/unread").last.children.first(2).map { |item| item.props["selected"] }
   end
 
+  test "the trailing menu ends with a way to send feedback, opened over the mailbox" do
+    feedback = toolbar("maya/support/unread").last.children.last
+
+    assert_equal ["Send feedback", "feedback", nil], [feedback.text, feedback.props["link"], feedback.props["replace"]]
+    assert_equal at("maya/support"), feedback.link_params
+  end
+
   test "unread only lists what this member has not read" do
     read(@newer)
 
@@ -128,7 +135,7 @@ class MailboxScreenTest < ActiveSupport::TestCase
       MailboxScreen.new(at("maya/support")).perform("read_all", {}, {})
     end
     assert_empty rows_for("maya/support/unread")
-    assert_equal %w[All Unread], toolbar("maya/support").last.children.map(&:text)
+    assert_equal ["All", "Unread", "Send feedback"], toolbar("maya/support").last.children.map(&:text)
     assert_equal 2, rows_for("theo/support/unread").size
     assert_no_difference -> { MailEntry.count } do
       MailboxScreen.new(at("jo/support")).perform("read_all", {}, {})

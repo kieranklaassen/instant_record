@@ -52,6 +52,7 @@ class MailboxScreen < InstantRecord::Native::Screen
           item "All", replace: "mailbox", params: place, selected: !unread_only?
           item "Unread", replace: "mailbox", params: unread_place, selected: unread_only?
           item "Mark #{waiting} as read", action: "read_all", image: "read" if waiting > 0
+          item "Send feedback", link: "feedback", params: place, image: "compose"
         end
       end
     end
