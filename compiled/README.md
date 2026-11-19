@@ -141,19 +141,20 @@ cd demo && INSTANT_RECORD_NATIVE_HOST=../compiled/.build-native/host bin/rails t
 A screen is a Ruby class (`InstantRecord::Native::Screen`) whose `body` describes
 what to draw and whose `perform` answers a tap. The library has five functions,
 declared in `pipeline/native/instant_record_native.h`: `ir_boot` opens the
-SQLite file, and `ir_call` runs `render`, `action`, `sync`, `stream` and the rest the header
-lists, each taking and returning a string. A render
-returns the screen as JSON. The library never opens a connection: when it needs
-the server it calls the host back with one request and the host answers.
+SQLite file, and `ir_call` runs `render`, `action`, `open`, `sync`, `stream` and
+the rest the header lists, each taking and returning a string. A render and an
+action take one JSON object, with the screen's name and its named params, and a
+render returns the screen as JSON. `open` closes the database and opens another,
+for an app that changes account. The library never opens a connection: when it
+needs the server it calls the host back with one request and the host answers.
 
 `pipeline/native/host.c` is that host with no screen, driven over standard
 input. The test starts it, answers its requests from the Rails app, and checks
-that the mailbox renders the same bytes as under CRuby, that an archive made
-with no connection waits in the outbox and reaches the server later, that the
-database survives a restart, and that a rejected write is undone.
-
-A screen can also hand props to a view written in SwiftUI (`swift "Name" do
-prop ... end`), as a Rails action hands a React page its props.
+that the mailbox renders the same bytes as under CRuby, that values reach a
+screen whatever characters they hold, that an archive or a reply made with no
+connection waits in the outbox and reaches the server later, that two databases
+are switched between without booting again, that older mail loads a page at a
+time, that the database survives a restart, and that a rejected write is undone.
 
 ### On iPhone
 
@@ -164,29 +165,28 @@ python3 compiled/pipeline/build_native.py iphonesimulator
 builds the same library for the iOS simulator, with Spinel's runtime and the
 packages the app uses compiled from Spinel's sources beside it
 (`.build-native/iphonesimulator/libinstant_record_app.a` and
-`libspinel_rt.a`). `native/ios` holds a SwiftUI renderer and the Inbox as an
-app that links them. [native/ios/README.md](../native/ios/README.md) has the
-build steps and the two ways to draw a screen.
+`libspinel_rt.a`). In a Rails app, `bin/rails "instant_record:native[iphonesimulator]"`
+does the same for that app, and `bin/rails generate instant_record:ios` writes
+its iPhone app. [native/ios/README.md](../native/ios/README.md) has the view
+layer, the renderer, sync, the development mode and the tests.
 
 What ran, on macOS arm64 with Xcode 27.2 and the iPhone 17 simulator on iOS
 26.5:
 
-- The library and host build on macOS with no change, and the test above
-  passes there (9 runs).
+- The library and host build on macOS, and the test above passes there
+  (15 runs).
 - Spinel's generated C, its runtime and SQLite compile and link for the
-  simulator with one change: the iOS SDK has no `<sys/random.h>`, so the shim
-  uses `arc4random_buf` on Apple platforms.
-- In the simulator the Inbox lists mail from its local database, opens a
-  conversation and marks it read, archives with a swipe, switches inbox and
-  filter from its bar menus, and archives with the server stopped. The
-  archive reached the server on the next launch after it came back.
+  simulator. The iOS SDK has no `<sys/random.h>`, so the shim uses
+  `arc4random_buf` on Apple platforms.
+- `native/ios/ui-test.sh` passes: the Inbox opens and replies to a
+  conversation, archives, switches inbox, loads older mail, shows a message
+  that arrives from elsewhere, and sends an archive made with the server
+  stopped once it returns, with no touch.
+- A fresh `rails new` app with one synced model and one screen was
+  generated, built and launched twice in the simulator.
 
 What did not: nothing was built for a device, signed, or run on a phone. The
-app syncs when asked (launch, foreground, a tap, a pull) and does not hold
-the event stream, so a change from elsewhere waits for the next of those.
-Opening a second database calls `ir_boot` again and leaves the first file
-open. The build is for this repository's demo and has no rake task for
-another app.
+app polls while it is in front and does not hold the event stream.
 
 ## Deploying it
 

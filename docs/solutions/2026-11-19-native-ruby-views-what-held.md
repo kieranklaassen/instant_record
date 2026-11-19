@@ -27,3 +27,16 @@ The demo, with screens written in Ruby (`InstantRecord::Native::Screen`), goes t
 - The screen-name rule is written twice: `InstantRecord::Native.screen_name` in Ruby, and `camelize` in `make_native_entry.py`. Nothing checks that they agree.
 - The header asks the host for one serial queue and does not say the host must time its network exchange out.
 - `libspinel_rt.a` is linked beside `libinstant_record_app.a`, not inside it.
+
+## Later the same day: what the phone taught
+
+Answers `docs/plans/2026-11-19-0929-fix-native-ios-hardening-plan.md`. Ran on macOS arm64 and in the iPhone 17 simulator.
+
+- **Spinel compiles for iOS.** Its generated C and its runtime built for the simulator with one change, `arc4random_buf` in place of `getentropy`.
+- **A hash of strings is the way to pass values.** `row ..., with: { "id" => entry.id.to_s }` and `JSON.parse` of nested objects compile. A value in `with:` that is not a string (`entry.id` straight from a model) compiles and then fails at run time with "wrong argument type Hash (expected Hash)". Write `to_s`.
+- **A module included in two screens goes through Roundhouse**, with `server_only` and `browser_only` halves in it.
+- **`fetch_history` is not how a screen pages.** It needs a sync window the model does not declare, keeps its marks in memory, and does not exist on the server's model. The mailbox asks the records address through the client's transport and keeps the page's receipt in `SyncMetadata`.
+- **A destructive swipe and an asynchronous answer collide.** With the destructive role the list removes the row itself at once, and the app's own update arrives a moment later from another thread. The two could meet in one batch update and crash. The swipe is tinted red instead.
+- **Run the largest text size.** The hand-written summary card squeezed its words into one narrow column there. Nothing else would have shown it.
+- **The Open items above are closed**: inputs are JSON, the screen-name rule is one Ruby method the build calls, and the header says the exchange needs a timeout.
+- **Another app did not build until three things in this repository were fixed**: screens were not staged, the schema version was asked of a host slot that does not exist, and the gem did not ship the Swift package.

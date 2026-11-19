@@ -1,11 +1,13 @@
 require "test_helper"
 require "rails/generators/test_case"
+require "tmpdir"
 require "generators/instant_record/ios/ios_generator"
 
 class IosGeneratorTest < Rails::Generators::TestCase
   tests InstantRecord::Generators::IosGenerator
-  destination File.expand_path("../../tmp/generators/ios", __dir__)
-  setup :prepare_destination
+  # A folder for each test: the suite runs in several processes at once.
+  setup { self.destination_root = Dir.mktmpdir("ios-generator") }
+  teardown { FileUtils.remove_entry(destination_root) }
 
   test "writes an app that names its first screen and its server, and a project for it" do
     run_generator %w[Shop --screen catalog --server http://localhost:4000 --bundle-id com.acme.Shop]
