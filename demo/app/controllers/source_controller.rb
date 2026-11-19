@@ -15,6 +15,7 @@ class SourceController < ApplicationController
   # table here; which models a page rendered is not something a path can tell us.
   # A demo missing from this list still gets its controller and view.
   MODELS = {
+    "email" => %w[app/models/mail_entry.rb app/models/mail_directory.rb],
     "todo" => %w[app/models/issue.rb],
     "slack" => %w[app/models/channel.rb app/models/chat_user.rb app/models/message.rb],
     "migrate" => %w[app/models/note.rb app/models/release.rb],

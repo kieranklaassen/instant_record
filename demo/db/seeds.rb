@@ -7,3 +7,5 @@
 # seed rows at the server as client mutations. Browsers receive seed data via
 # the downstream change-log sync instead.
 Slack::Seeds.apply unless InstantRecord.browser?
+
+Mailbox::WELCOME.each_key { |name| Mailbox.open_demo(name) }

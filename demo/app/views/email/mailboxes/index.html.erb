@@ -1,0 +1,31 @@
+<% content_for(:title, "Shared inbox · InstantRecord") %>
+<main class="maildesk" data-controller="mailbox" data-instant-refresh>
+  <header><a href="/" data-turbo="false">← All demos</a><h1>Shared inbox</h1>
+    <p>Choose a demo teammate to open their mailboxes. Messages stay inside this demo.</p></header>
+  <nav aria-label="Demo teammate" class="mail-people">
+    <% ["maya", "theo", "jo"].each do |person| %>
+      <a data-turbo="false" href="/email?member=<%= person %>&amp;inbox=<%= MailDirectory.inboxes(person).first %>" aria-current="<%= person == @member %>"><%= person.capitalize %></a>
+    <% end %>
+  </nav>
+  <nav aria-label="Mailboxes" class="mail-folders">
+    <% @inboxes.each do |box| %>
+      <a data-turbo="false" href="/email?member=<%= @member %>&amp;inbox=<%= box %>" aria-current="<%= box == @inbox %>"><%= box.capitalize %></a>
+    <% end %>
+  </nav>
+  <div data-mailbox-target="mail"><%= render "mail" %></div>
+  <%= form_with url: "/email", method: :post, class: "mail-compose" do |f| %>
+    <input type="hidden" name="member" value="<%= @member %>"><input type="hidden" name="inbox" value="<%= @inbox %>">
+    <% if @selected %>
+      <h2>Reply to <%= @selected.address %></h2>
+      <input type="hidden" name="kind" value="reply"><input type="hidden" name="parent_id" value="<%= @selected.id %>">
+      <label>Reply<textarea name="body" maxlength="5000" required></textarea></label>
+      <button>Send reply</button>
+    <% else %>
+      <h2>New conversation</h2><input type="hidden" name="kind" value="message">
+      <label>To<input type="email" name="address" placeholder="person@example.test" maxlength="254" required></label>
+      <label>Subject<input name="subject" maxlength="180" required></label>
+      <label>Message<textarea name="body" maxlength="5000" required></textarea></label>
+      <button>Send message</button>
+    <% end %>
+  <% end %>
+</main>

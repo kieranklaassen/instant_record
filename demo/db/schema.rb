@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_07_25_000101) do
+ActiveRecord::Schema[8.1].define(version: 2026_11_18_000100) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -93,6 +93,26 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_25_000101) do
     t.string "sync_state", default: "synced", null: false
     t.string "title", null: false
     t.datetime "updated_at", null: false
+  end
+
+  create_table "mail_entries", id: :string, force: :cascade do |t|
+    t.string "address"
+    t.string "author", null: false
+    t.text "body"
+    t.datetime "created_at", null: false
+    t.string "kind", null: false
+    t.string "mailbox_id", null: false
+    t.string "parent_id"
+    t.integer "server_version", default: 0, null: false
+    t.string "subject"
+    t.string "sync_state", default: "synced", null: false
+    t.datetime "updated_at", null: false
+    t.index ["mailbox_id", "server_version"], name: "index_mail_entries_on_mailbox_id_and_server_version"
+    t.index ["parent_id"], name: "index_mail_entries_on_parent_id"
+  end
+
+  create_table "mailboxes", id: :string, force: :cascade do |t|
+    t.integer "revision", default: 0, null: false
   end
 
   create_table "messages", id: :string, force: :cascade do |t|

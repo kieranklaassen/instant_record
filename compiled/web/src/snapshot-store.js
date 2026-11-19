@@ -1,13 +1,16 @@
 // Version 3 fences out older workers that do not check the persisted schema.
-const opened = new Promise((resolve, reject) => {
-  const request = indexedDB.open("instant-record-spinel", 3);
-  request.onupgradeneeded = event => {
-    if (event.oldVersion === 0) request.result.createObjectStore("files");
-  };
-  request.onblocked = () => self.postMessage({ type: "storage_upgrade_blocked" });
-  request.onsuccess = () => resolve(request.result);
-  request.onerror = () => reject(request.error);
-});
+let opened;
+export function openSnapshot(scope) {
+  opened = new Promise((resolve, reject) => {
+    const request = indexedDB.open(scope ? "instant-record-spinel/mail/" + scope : "instant-record-spinel", 3);
+    request.onupgradeneeded = event => {
+      if (event.oldVersion === 0) request.result.createObjectStore("files");
+    };
+    request.onblocked = () => self.postMessage({ type: "storage_upgrade_blocked" });
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
 
 // IndexedDB serializes readwrite transactions across workers. Only await
 // requests from this transaction inside the callback, never network I/O.

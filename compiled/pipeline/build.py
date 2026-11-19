@@ -242,7 +242,7 @@ def main():
             plan = json.load(file)
         run([python, os.path.join(ROOT, "pipeline/prepare_app.py"), APP_SOURCE, app])
     else:
-        plan = {"version": 0, "baseline": 0, "migrations": {}}
+        plan = {"version": 1, "baseline": 0, "migrations": {}, "history": {"1": "add-mail-tables"}}
         run([python, os.path.join(ROOT, "pipeline/carve.py"), GEM_SRC, app])
     run([python, os.path.join(ROOT, "pipeline/vendor_gem.py"), GEM_SRC, app])
 
@@ -294,6 +294,7 @@ def main():
     output = os.path.join(web, "dist")
     dist = os.path.join(B, "site")
     run(["npx", "vite", "build", "--outDir", dist, "--emptyOutDir"], cwd=web, env={"VITE_WASM_URL": f"/app-{digest}.wasm",
+        "VITE_SHARED_INBOX_DEMO": "" if APP_SOURCE else "1",
         "VITE_SYNC_ENDPOINT": SYNC_ENDPOINT, "VITE_SOURCE_VERSION": wanted[:12],
         "VITE_SCHEMA_VERSION": str(plan["version"]),
         "VITE_SCHEMA_BASELINE": "" if plan["baseline"] is None else str(plan["baseline"]),

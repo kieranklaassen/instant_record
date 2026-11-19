@@ -1,0 +1,15 @@
+.maildesk { max-width: 58rem; margin: 2rem auto 5rem; padding: 0 1.2rem; color: #183634; }
+.maildesk header h1 { font-size: clamp(2.6rem, 7vw, 5.2rem); letter-spacing: -.055em; line-height: 1; margin: 1.2rem 0 .6rem; }
+.maildesk h2 { font-size: 1.25rem; margin: 1rem 0; }
+.maildesk a { color: inherit; }
+.mail-people, .mail-folders { display: flex; gap: .35rem; flex-wrap: wrap; margin: 1rem 0; }
+.mail-people a, .mail-folders a { padding: .45rem .85rem; border: 1px solid #779791; border-radius: .25rem; text-decoration: none; }
+.maildesk a[aria-current=true], .maildesk button { background: #164e49; color: white; }
+.mail-list, .mail-thread, .mail-compose { border-top: 1px solid #a8bab6; padding: .7rem 0 1.2rem; }
+.mail-list a { display: flex; justify-content: space-between; gap: 1rem; padding: .8rem; background: #edf4f1; margin-bottom: .25rem; }
+.mail-thread p { white-space: pre-wrap; }
+.maildesk strong, .mail-thread p { overflow-wrap: anywhere; }
+.mail-compose label { display: grid; gap: .25rem; margin-bottom: .8rem; }
+.mail-compose input, .mail-compose textarea { padding: .65rem; font: inherit; width: 100%; box-sizing: border-box; }
+.mail-compose textarea { min-height: 5rem; }
+.maildesk button { border: 0; border-radius: .25rem; padding: .65rem 1rem; cursor: pointer; font: inherit; }

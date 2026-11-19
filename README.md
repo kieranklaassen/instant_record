@@ -266,7 +266,7 @@ bin/rails instant_record:compile
 
 The static site is written to `tmp/instant_record/compiled/web/dist`. The default
 sync endpoint is `/instant_record`. Use `SYNC_ENDPOINT` for a separately hosted
-Rails server. The compiled demo includes Todo, Chat, Ship v2, local database
+Rails server. The compiled demo includes Todo, Chat, Shared inbox, Ship v2, local database
 inspection and Receipts. [Toolchain setup and supported features](compiled/README.md).
 
 To ship the optimized browser app with a Rails deploy, set
@@ -296,6 +296,7 @@ Things to try:
 
 - **Instant writes** — create an issue; it appears immediately with a `pending` badge that flips to `synced`.
 - **Two clients** — open http://127.0.0.1:5173/ too (different origin = separate local database). Changes propagate between windows through the server. A fresh client catches up automatically.
+- **Shared inbox** — Open `/email` as Maya, who shares Support with Theo and Billing with Jo. Reply offline in Support and reconnect to see it arrive for Theo. Each persona and inbox has a separate SQLite snapshot, outbox and sync cursor. The public persona picker is for fictional mail.
 - **Infinite scroll** — `/slack` seeds thousands of messages in `#general`, but a fresh client only syncs the newest 50 per conversation. Scroll to the top and older pages stream in; messages arriving mid-read update the page without a reload or a scroll jump.
 - **Offline** — stop the Rails server, create issues (they stay `pending`), reload the tab (still there), restart the server and watch them drain.
 - **Rejection** — create an issue titled `reject me`. It appears optimistically, the server refuses it, and it disappears on reconcile.
