@@ -5,6 +5,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 // True where the page runs beside a local database (the compiled runtime).
 export const local = () => typeof window !== "undefined" && !!window.__spinel
+// True where every row is at hand: no local database, or one whose fill is done.
+// Out here because useLiveWindow has a `window` of its own.
+const whole = () => !local() || window.__spinel.history?.done === true
 
 // The local database holds a window of each model. This asks the worker to
 // widen it past `before`, and answers { ok, has_more }. With no local
@@ -142,8 +145,7 @@ export function useLiveWindow({ prop, window, model, cursor, search = "", pageSi
       // may lie past a gap (a search brought them in), so the page below the
       // last row is asked for even when there are local rows to show. A page
       // asked for before is answered by the worker without the server.
-      const whole = !local() || window.__spinel.history?.done === true
-      if (last && (!window.more || !whole)) {
+      if (last && (!window.more || !whole())) {
         const reply = await widenWindow({ type: model, before: cursor(last), limit: pageSize, ...(search ? { search } : {}) })
         if (!reply.ok) throw new Error(reply.error)
         if (reply.has_more === false) setExhausted(true)
