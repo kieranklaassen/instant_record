@@ -60,7 +60,7 @@ module Email
 
     def payloads(page)
       messages = page.to_a
-      actions = @mailbox.mail_entries.where(parent_id: messages.map(&:id), kind: %w[reply archive]).order(:server_version)
+      actions = @mailbox.mail_entries.where(parent_id: messages.map(&:id), kind: MailEntry::ACTIONS).order(:server_version)
       (messages + actions).map { |entry| InstantRecord.record_payload(entry) }
     end
 

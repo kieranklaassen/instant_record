@@ -39,6 +39,22 @@ module Email
         @selected = messages.find_by(id: params[:thread]) || @mail_entries.first
       end
       @replies = entries.where(kind: "reply", parent_id: @selected&.id).order(:created_at).to_a
+      unread = messages.where(MailEntry::UNREAD, member: @member)
+      @unread_count = unread.count
+      @unread = []
+      if @mail_entries.any?
+        shown = unread.where("created_at >= :oldest AND created_at <= :newest", oldest: @mail_entries.last.created_at, newest: @mail_entries.first.created_at)
+        shown.each { |message| @unread << message.id }
+      end
+      @unread << @selected.id if @selected && !@unread.include?(@selected.id) && unread.exists?(id: @selected.id)
+      # Opening a conversation reads it. Background refreshes and the default
+      # first row do not, so a row marked unread stays unread until clicked.
+      if @selected && params[:fragment].to_s.empty? && params[:thread].to_s == @selected.id && @unread.include?(@selected.id)
+        @address = ""
+        append_entry("read", @selected.id, "", "")
+        @unread.delete(@selected.id)
+        @unread_count -= 1
+      end
       render partial: "mail", layout: false if params[:fragment]
     end
 
@@ -51,7 +67,7 @@ module Email
       subject = params[:subject].to_s.strip
       body = params[:body].to_s.strip
       @address = params[:address].to_s.strip
-      return head :unprocessable_entity unless %w[message reply archive].include?(kind)
+      return head :unprocessable_entity unless kind == "message" || MailEntry::ACTIONS.include?(kind)
       if kind == "message"
         return head :unprocessable_entity if @address.blank? || @address.length > 254 || subject.blank? || body.blank?
       else
@@ -62,7 +78,7 @@ module Email
       entry = append_entry(kind, parent, subject, body)
       target = "/email?member=#{@member}&inbox=#{@inbox}"
       target += "&thread=#{entry.id}" if kind == "message"
-      target += "&thread=#{parent}" if kind == "reply"
+      target += "&thread=#{parent}" if kind == "reply" || kind == "read"
       redirect_to target, status: :see_other
     end
 

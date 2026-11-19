@@ -128,4 +128,37 @@ class ScopedInboxTest < ActionDispatch::IntegrationTest
     get "/email/sync/theo/support/events?after=1"
     assert_match(/id: 2.*id: 3/m, response.body)
   end
+
+  test "each teammate reads mail on their own and can mark it unread again" do
+    first = Mailbox.find("support").generate_incoming!
+    second = Mailbox.find("support").generate_incoming!
+    get "/email", params: { member: "maya", inbox: "support" }
+    assert_select ".mail-row[data-unread=true]", 2
+    assert_select ".mail-unread-count", "2 unread"
+
+    get "/email", params: { member: "maya", inbox: "support", thread: first.id, fragment: "1" }
+    assert_select ".mail-row[data-unread=true]", 2
+
+    get "/email", params: { member: "maya", inbox: "support", thread: first.id }
+    assert_select ".mail-row[data-id='#{first.id}'][data-unread=false]"
+    assert_select ".mail-row[data-id='#{second.id}'][data-unread=true]"
+    assert_select "button", "Mark unread"
+    assert_equal 1, MailEntry.where(kind: "read", author: "maya", parent_id: first.id).count
+    get "/email", params: { member: "maya", inbox: "support", thread: first.id }
+    assert_equal 1, MailEntry.where(kind: "read", parent_id: first.id).count
+
+    get "/email", params: { member: "theo", inbox: "support" }
+    assert_select ".mail-row[data-unread=true]", 2
+
+    post "/email", params: { member: "maya", inbox: "support", kind: "unread", parent_id: first.id }
+    assert_redirected_to "/email?member=maya&inbox=support"
+    follow_redirect!
+    assert_select ".mail-row[data-unread=true]", 2
+
+    post "/email", params: { member: "theo", inbox: "support", kind: "message", address: "rae@example.test", subject: "Sent", body: "Hi" }
+    follow_redirect!
+    assert_select ".mail-row[data-unread=false] strong", "Sent"
+    get "/email/sync/theo/support/bootstrap"
+    assert_includes response.parsed_body["records"].map { |row| row.dig("attributes", "kind") }, "unread"
+  end
 end
