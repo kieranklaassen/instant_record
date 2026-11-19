@@ -8,14 +8,16 @@ import Foundation
 /// seconds, then twice that, up to a minute.
 final class StreamClient {
     private let transport: Transport
-    private let address: () async -> String?
-    private let feed: (String) async -> Void
+    private let address: () async -> (address: String, store: AppHost.Store)?
+    private let feed: (String, AppHost.Store) async -> Void
     private let session: URLSession
     private var task: Task<Void, Never>?
 
-    /// `address` is where to ask from the app's present cursor, or nil while
-    /// there is nothing to follow. `feed` takes one event's text.
-    init(transport: Transport, address: @escaping () async -> String?, feed: @escaping (String) async -> Void) {
+    /// `address` is where to ask from the app's present cursor and the
+    /// database that address belongs to, or nil while there is nothing to
+    /// follow. `feed` takes one event's text and that same database, so an
+    /// event that arrives after the app has moved to another is not given to it.
+    init(transport: Transport, address: @escaping () async -> (address: String, store: AppHost.Store)?, feed: @escaping (String, AppHost.Store) async -> Void) {
         self.transport = transport
         self.address = address
         self.feed = feed
@@ -39,7 +41,7 @@ final class StreamClient {
         var wait: UInt64 = 5
         while !Task.isCancelled {
             do {
-                guard let address = await address(), let request = transport.request("GET " + address + "\n") else {
+                guard let (address, store) = await address(), let request = transport.request("GET " + address + "\n") else {
                     try await Task.sleep(nanoseconds: 1_000_000_000)
                     continue
                 }
@@ -49,7 +51,7 @@ final class StreamClient {
                 for try await byte in bytes {
                     event.append(byte)
                     if event.count >= 2, event[event.count - 1] == 10, event[event.count - 2] == 10 {
-                        await feed(String(decoding: event, as: UTF8.self))
+                        await feed(String(decoding: event, as: UTF8.self), store)
                         event = []
                     }
                 }

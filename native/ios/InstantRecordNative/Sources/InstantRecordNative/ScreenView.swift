@@ -31,7 +31,7 @@ public struct AppView: View {
 
     @ViewBuilder private var banner: some View {
         if let message = host.status.message {
-            let failed = !host.status.error.isEmpty
+            let failed = !host.status.error.isEmpty || !host.status.syncError.isEmpty
             HStack(alignment: .firstTextBaseline) {
                 Label(message, systemImage: failed ? "exclamationmark.triangle" : host.status.offline ? "wifi.slash" : "arrow.triangle.2.circlepath")
                     .font(.footnote)

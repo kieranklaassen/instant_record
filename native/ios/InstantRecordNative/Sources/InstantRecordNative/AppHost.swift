@@ -22,15 +22,21 @@ public final class AppHost: ObservableObject {
         }
     }
 
-    /// How sync stands, for the line the app shows: what went wrong, then
-    /// whether it is offline, then how many changes wait.
+    /// What the app's one line says: what went wrong with a tap or a screen,
+    /// then what went wrong with sync, then whether it is offline, then how
+    /// many changes wait.
     public struct Status: Equatable {
         public var pending = 0
         public var offline = false
+        /// What a tap, an opened screen or a draw reported. It stays until it
+        /// is dismissed, or, for a screen that could not be drawn, until it can.
         public var error = ""
+        /// What the last sync pass reported. The next pass that succeeds clears it.
+        public var syncError = ""
 
         public var message: String? {
             if !error.isEmpty { return error }
+            if !syncError.isEmpty { return syncError }
             if offline { return "Offline. Changes will send when you are back." }
             if pending > 0 { return pending == 1 ? "1 change waiting to send" : "\(pending) changes waiting to send" }
             return nil
@@ -80,6 +86,9 @@ public final class AppHost: ObservableObject {
     private var schedule: SyncSchedule!
     private var stream: StreamClient!
     private var refreshing: [() -> Void] = []
+    private var inFront = false
+    // True while the error on show is a screen that could not be drawn.
+    private var undrawn = false
     // Read and written on the engine's thread only.
     private var open: Store?
     private var prepared: [String: String]?
@@ -101,7 +110,7 @@ public final class AppHost: ObservableObject {
         self.exchange = exchange ?? transport.exchange
         visible = [root]
         schedule = SyncSchedule(pace: pace, clock: clock) { [weak self] in self?.pass() }
-        stream = StreamClient(transport: transport, address: { [weak self] in await self?.streamAddress() }, feed: { [weak self] in await self?.feed($0) })
+        stream = StreamClient(transport: transport, address: { [weak self] in await self?.streamAddress() }, feed: { [weak self] in await self?.feed($0, from: $1) })
         reachability.watch { [weak self] in self?.schedule.reachable() }
     }
 
@@ -134,11 +143,13 @@ public final class AppHost: ObservableObject {
     /// follows the server's events, which is how changes from elsewhere arrive.
     public func front(_ on: Bool) {
         schedule.front(on)
-        if on && engine.syncs && follows { stream.start() } else { stream.stop() }
+        inFront = on
+        follow()
     }
 
     /// A pull on a list: sync now, and return when that pass has ended and
     /// the screens have been drawn again.
+    @MainActor
     public func refresh() async {
         await withCheckedContinuation { done in
             refreshing.append { done.resume() }
@@ -213,6 +224,16 @@ public final class AppHost: ObservableObject {
     /// The error on show has been read.
     public func dismissError() {
         status.error = ""
+        status.syncError = ""
+        undrawn = false
+    }
+
+    // Follow the server's events while in front, from the database now open.
+    // Called again when another database opens, which drops the request
+    // held for the one that was left.
+    private func follow() {
+        stream.stop()
+        if inFront && engine.syncs && follows { stream.start() }
     }
 
     /// Returns when everything asked of the app so far has run and its
@@ -255,23 +276,26 @@ public final class AppHost: ObservableObject {
         }
     }
 
-    // Where the stream client should ask, from the app's present cursor.
-    private func streamAddress() async -> String? {
+    // Where the stream client should ask, from the app's present cursor, and
+    // the database that address belongs to.
+    private func streamAddress() async -> (address: String, store: Store)? {
         await withCheckedContinuation { answer in
             thread.run {
                 let position = self.position()
                 guard let store = self.open, let cursor = position["cursor"], position["bootstrap"] == "ready" else { return answer.resume(returning: nil) }
                 let who = (position["identity"] ?? "").isEmpty ? "" : "&identity=" + position["identity"]!
-                answer.resume(returning: "\(store.endpoint)/events?after=\(cursor)\(who)")
+                answer.resume(returning: ("\(store.endpoint)/events?after=\(cursor)\(who)", store))
             }
         }
     }
 
     // One event from the server, handed to the app. The screens are drawn
-    // again when it says records changed.
-    func feed(_ event: String) async {
+    // again when it says records changed. An event read for a database that
+    // has since been left is not this one's and is dropped.
+    func feed(_ event: String, from store: Store) async {
         await withCheckedContinuation { done in
             thread.run {
+                guard self.open == store else { return done.resume() }
                 if self.engine.call("stream", event) == nil { self.report() }
                 if self.engine.notice().hasPrefix("records_changed") { self.draw() }
                 done.resume()
@@ -344,7 +368,7 @@ public final class AppHost: ObservableObject {
             self.fetchingFirst = false
             self.status.pending = pending
             self.status.offline = offline
-            if let error { self.status.error = error } else if ok { self.status.error = "" }
+            if let error { self.status.syncError = error } else if ok { self.status.syncError = "" }
             self.schedule.finished(ok: ok, pending: pending)
             let waiting = self.refreshing
             self.refreshing = []
@@ -356,6 +380,7 @@ public final class AppHost: ObservableObject {
         DispatchQueue.main.async {
             self.root = route
             self.path = []
+            self.follow()
             self.schedule.now()
         }
     }
@@ -403,13 +428,22 @@ public final class AppHost: ObservableObject {
             for (route, node) in drawn where showing.contains(route) && self.screens[route] != node {
                 self.screens[route] = node
             }
-            if let problem { self.status.error = problem }
+            if let problem {
+                self.status.error = problem
+                self.undrawn = true
+            } else if self.undrawn {
+                self.status.error = ""
+                self.undrawn = false
+            }
         }
     }
 
     private func report() {
         let message = engine.error()
-        DispatchQueue.main.async { self.status.error = message }
+        DispatchQueue.main.async {
+            self.status.error = message
+            self.undrawn = false
+        }
     }
 
     private static func object(_ json: String) -> [String: Any]? {
