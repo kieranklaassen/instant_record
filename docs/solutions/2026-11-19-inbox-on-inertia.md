@@ -74,10 +74,9 @@ What that run found and fixed:
 ## Not verified
 
 - `compiled/test/mail-volume.mjs` with `--all` (the whole inbox) and `--mobile`, and the other compiled tests (`full-demo`, `sync-inspector`, `release-upgrade` and the rest), none of which this change touches;
-- the shell snapshot (`?shell=1`) together with the new page;
 - a compiled build served by its deploy (nginx, the service worker's cache): `/assets/inbox.js` has no digest in its name there, so a cache that keeps it must be told when it changes;
 - any browser but Chromium.
 
 ## Left out on purpose
 
-Shift+J / Shift+K range selection and bulk actions, as the requirements say. `/` does nothing because the demo has no search.
+Shift+J / Shift+K range selection and bulk actions, as the requirements say. Search came after this was written: `/` focuses it, and `compiled/test/offline-inbox.mjs` runs it, the background fill and the shell snapshot (`?shell=1`) with this page in a compiled build.
