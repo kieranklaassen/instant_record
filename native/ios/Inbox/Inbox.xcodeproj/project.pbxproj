@@ -1,0 +1,332 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 60;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10000000000000000000001 /* InboxApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* InboxApp.swift */; };
+		A10000000000000000000002 /* LibraryEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* LibraryEngine.swift */; };
+		A10000000000000000000003 /* InstantRecordNative in Frameworks */ = {isa = PBXBuildFile; productRef = A90000000000000000000002 /* InstantRecordNative */; };
+		A10000000000000000000004 /* InboxUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* InboxUITests.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A20000000000000000000001 /* InboxApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxApp.swift; sourceTree = "<group>"; };
+		A20000000000000000000002 /* LibraryEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryEngine.swift; sourceTree = "<group>"; };
+		A20000000000000000000003 /* Inbox-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Inbox-Bridging-Header.h"; sourceTree = "<group>"; };
+		A20000000000000000000004 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A20000000000000000000005 /* Inbox.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Inbox.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A20000000000000000000006 /* InboxUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxUITests.swift; sourceTree = "<group>"; };
+		A20000000000000000000007 /* InboxUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = InboxUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXContainerItemProxy section */
+		AA0000000000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A70000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A50000000000000000000001;
+			remoteInfo = Inbox;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A30000000000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000003 /* InstantRecordNative in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A40000000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				A40000000000000000000002 /* Inbox */,
+				A40000000000000000000004 /* InboxUITests */,
+				A40000000000000000000003 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A40000000000000000000002 /* Inbox */ = {
+			isa = PBXGroup;
+			children = (
+				A20000000000000000000001 /* InboxApp.swift */,
+				A20000000000000000000002 /* LibraryEngine.swift */,
+				A20000000000000000000003 /* Inbox-Bridging-Header.h */,
+				A20000000000000000000004 /* Info.plist */,
+			);
+			path = Inbox;
+			sourceTree = "<group>";
+		};
+		A40000000000000000000004 /* InboxUITests */ = {
+			isa = PBXGroup;
+			children = (
+				A20000000000000000000006 /* InboxUITests.swift */,
+			);
+			path = InboxUITests;
+			sourceTree = "<group>";
+		};
+		A40000000000000000000003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A20000000000000000000005 /* Inbox.app */,
+				A20000000000000000000007 /* InboxUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A50000000000000000000001 /* Inbox */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A80000000000000000000002 /* Build configuration list for PBXNativeTarget "Inbox" */;
+			buildPhases = (
+				A60000000000000000000001 /* Sources */,
+				A30000000000000000000001 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Inbox;
+			packageProductDependencies = (
+				A90000000000000000000002 /* InstantRecordNative */,
+			);
+			productName = Inbox;
+			productReference = A20000000000000000000005 /* Inbox.app */;
+			productType = "com.apple.product-type.application";
+		};
+		A50000000000000000000002 /* InboxUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A80000000000000000000003 /* Build configuration list for PBXNativeTarget "InboxUITests" */;
+			buildPhases = (
+				A60000000000000000000002 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				AA0000000000000000000002 /* PBXTargetDependency */,
+			);
+			name = InboxUITests;
+			productName = InboxUITests;
+			productReference = A20000000000000000000007 /* InboxUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A70000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastUpgradeCheck = 2720;
+			};
+			buildConfigurationList = A80000000000000000000001 /* Build configuration list for PBXProject "Inbox" */;
+			compatibilityVersion = "Xcode 15.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A40000000000000000000001;
+			packageReferences = (
+				A90000000000000000000001 /* XCLocalSwiftPackageReference "../InstantRecordNative" */,
+			);
+			productRefGroup = A40000000000000000000003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A50000000000000000000001 /* Inbox */,
+				A50000000000000000000002 /* InboxUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A60000000000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000001 /* InboxApp.swift in Sources */,
+				A10000000000000000000002 /* LibraryEngine.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A60000000000000000000002 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000004 /* InboxUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		AA0000000000000000000002 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A50000000000000000000001 /* Inbox */;
+			targetProxy = AA0000000000000000000001 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		A80000000000000000000011 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		A80000000000000000000012 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		A80000000000000000000021 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/../../../compiled/pipeline/native";
+				INFOPLIST_FILE = Inbox/Info.plist;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/../../../compiled/.build-native/$(PLATFORM_NAME)";
+				MARKETING_VERSION = 0.1;
+				OTHER_LDFLAGS = (
+					"-linstant_record_app",
+					"-lspinel_rt",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "dev.instantrecord.Inbox";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_OBJC_BRIDGING_HEADER = "Inbox/Inbox-Bridging-Header.h";
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		A80000000000000000000022 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/../../../compiled/pipeline/native";
+				INFOPLIST_FILE = Inbox/Info.plist;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/../../../compiled/.build-native/$(PLATFORM_NAME)";
+				MARKETING_VERSION = 0.1;
+				OTHER_LDFLAGS = (
+					"-linstant_record_app",
+					"-lspinel_rt",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "dev.instantrecord.Inbox";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_OBJC_BRIDGING_HEADER = "Inbox/Inbox-Bridging-Header.h";
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		A80000000000000000000031 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = "dev.instantrecord.InboxUITests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_TARGET_NAME = Inbox;
+			};
+			name = Debug;
+		};
+		A80000000000000000000032 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = "dev.instantrecord.InboxUITests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_TARGET_NAME = Inbox;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A80000000000000000000001 /* Build configuration list for PBXProject "Inbox" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A80000000000000000000011 /* Debug */,
+				A80000000000000000000012 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		A80000000000000000000002 /* Build configuration list for PBXNativeTarget "Inbox" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A80000000000000000000021 /* Debug */,
+				A80000000000000000000022 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		A80000000000000000000003 /* Build configuration list for PBXNativeTarget "InboxUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A80000000000000000000031 /* Debug */,
+				A80000000000000000000032 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		A90000000000000000000001 /* XCLocalSwiftPackageReference "../InstantRecordNative" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../InstantRecordNative;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A90000000000000000000002 /* InstantRecordNative */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = InstantRecordNative;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = A70000000000000000000001 /* Project object */;
+}
