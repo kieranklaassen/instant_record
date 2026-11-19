@@ -94,7 +94,7 @@ export default function Inbox({ member, inbox, inboxes, people, mail, thread, co
     const answered = held ? thread.replies.map(replyRow) : []
     return withPending(answered, actions.sending.filter((entry) => entry.parent === focusedId))
   }, [held, thread.replies, actions.sending, focusedId])
-  now.current = { rows, ids, focusedId, open, help, composing, url, message, replies, selected: selection.selected }
+  now.current = { rows, ids, focusedId, open, composing, url, message, replies, selected: selection.selected }
 
   // A conversation in the reader is read. Moving through the list with the
   // reader open reads each one the keys settle on.
@@ -159,16 +159,19 @@ export default function Inbox({ member, inbox, inboxes, people, mail, thread, co
 
   const mark = (unread) => {
     const { rows, selected } = now.current
-    const list = targets().filter((id) => rows.find((row) => row.id === id)?.unread !== unread)
+    const state = new Map(rows.map((row) => [row.id, row.unread]))
+    const list = targets().filter((id) => state.get(id) !== unread)
     if (unread && !selected.size) setOpen(false)
     actions.mark(list, unread)
   }
 
-  const select = (id, { range } = {}) => {
-    if (range) selection.extendTo(id, now.current.focusedId)
-    else selection.toggle(id)
+  // Stable, so a row that did not change is not drawn again (MailRow is memoized).
+  const { toggle, extendTo } = selection
+  const select = useCallback((id, { range } = {}) => {
+    if (range) extendTo(id, now.current.focusedId)
+    else toggle(id)
     focus(id)
-  }
+  }, [toggle, extendTo, focus])
 
   const reply = () => {
     if (!now.current.message) return

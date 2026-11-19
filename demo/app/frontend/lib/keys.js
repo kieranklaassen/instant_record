@@ -1,6 +1,6 @@
-// Every key the Inbox answers, once. This table runs the handlers
+// Every key the Inbox page answers, once. This table runs the handlers
 // (useShortcuts), fills the key list (KeyHelp) and puts the key caps on the
-// controls, so a key cannot be listed and not work, or work and go unlisted.
+// controls. Escape inside the reply box and the key list is theirs.
 //
 // `does` is the page's handlers and `is` what is true just now.
 export const GROUPS = ["Navigation", "Actions", "Reply and compose", "Selection"]
