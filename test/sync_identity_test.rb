@@ -79,12 +79,13 @@ class SyncIdentityTest < Minitest::Test
     end
   end
 
-  def test_a_key_from_another_identity_or_none_at_all_is_stale
+  def test_a_key_from_another_identity_is_stale_and_no_key_is_not
     with_sync_identity do
       refute Scope.stale?(Scope.key(@ada), @ada)
       assert Scope.stale?(Scope.key(@ada), @ben)
       assert Scope.stale?(Scope.key(@ada), nil)
-      assert Scope.stale?(nil, @ada)
+      refute Scope.stale?(nil, @ada)
+      refute Scope.stale?("", @ada)
     end
   end
 

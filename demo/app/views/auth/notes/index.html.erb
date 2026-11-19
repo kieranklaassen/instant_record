@@ -1,0 +1,131 @@
+<% content_for(:title, "Auth — InstantRecord") %>
+
+<%# One Stimulus controller, the same in both runtimes. It asks the server for
+    the session, because the session is on the server and nowhere else, and it
+    changes the session there. What it never does is decide who may see a note:
+    the list below is whatever this runtime's database holds. %>
+<div class="page auth-page"
+     data-controller="auth"
+     data-auth-session-url-value="<%= auth_session_endpoint %>"
+     data-auth-sign-out-url-value="<%= auth_sign_out_endpoint %>"
+     data-auth-bootstrap-url-value="<%= auth_bootstrap_endpoint %>"
+     data-auth-mutations-url-value="<%= auth_mutations_endpoint %>"
+     data-auth-runtime-value="<%= InstantRecord.browser? ? "browser" : "server" %>">
+  <header class="page-header">
+    <h1>Auth</h1>
+    <p class="intro">
+      Sign in as someone, and this browser is sent their notes. Sign out, and
+      they are taken out of it again. The session is an ordinary Rails cookie.
+      What decides who gets which note is two blocks on the model, and they run
+      on the server.
+    </p>
+  </header>
+
+  <section class="card auth-session" aria-labelledby="auth-session-title">
+    <div class="auth-session-head">
+      <h2 class="micro-label" id="auth-session-title">The session, as the server sees it</h2>
+      <p class="auth-who" data-auth-target="who" aria-live="polite">Asking the server…</p>
+      <dl class="auth-facts">
+        <div><dt>Role</dt><dd data-auth-target="role">–</dd></div>
+        <div><dt>Signed in</dt><dd data-auth-target="since">–</dd></div>
+        <div><dt>Notes on the server</dt><dd data-auth-target="total">–</dd></div>
+        <div><dt>Notes this session may be sent</dt><dd data-auth-target="allowed">–</dd></div>
+      </dl>
+    </div>
+
+    <%# Spelled out rather than looped: the compiled runtime builds this
+        template ahead of time, and plain markup is the safest input. %>
+    <div class="auth-people" role="group" aria-label="Sign in as">
+      <button type="button" class="auth-person" data-person="ada" data-auth-target="person" data-action="auth#signIn">
+        <span class="auth-avatar" aria-hidden="true">A</span>
+        <span class="auth-person-name">Ada</span><span class="auth-person-role">Admin</span>
+      </button>
+      <button type="button" class="auth-person" data-person="ben" data-auth-target="person" data-action="auth#signIn">
+        <span class="auth-avatar" aria-hidden="true">B</span>
+        <span class="auth-person-name">Ben</span><span class="auth-person-role">Member</span>
+      </button>
+      <button type="button" class="auth-person" data-person="cleo" data-auth-target="person" data-action="auth#signIn">
+        <span class="auth-avatar" aria-hidden="true">C</span>
+        <span class="auth-person-name">Cleo</span><span class="auth-person-role">Member</span>
+      </button>
+      <button type="button" class="auth-sign-out" data-auth-target="signOut" data-action="auth#signOut" hidden>Sign out</button>
+    </div>
+    <p class="auth-small">
+      No passwords here, so you can be anyone. A real app puts its own sign-in
+      in this spot. The cookie, and everything after it, is real.
+    </p>
+  </section>
+
+  <section class="auth-notes" aria-labelledby="auth-notes-title">
+    <h2 class="micro-label" id="auth-notes-title">
+      Notes in this <%= InstantRecord.browser? ? "browser’s database" : "response" %>
+      <span class="auth-count" data-auth-target="held" data-count="<%= @notes.size %>"><%= @notes.size %></span>
+    </h2>
+
+    <ul class="auth-list">
+      <% @notes.each do |note| %>
+        <% note_href = auth_note_path(note) %>
+        <li class="card auth-note audience-<%= note.audience %>" data-id="<%= note.id %>">
+          <div class="auth-note-head">
+            <h3><%= note.title %></h3>
+            <span class="badge auth-audience"><%= auth_audience_label(note.audience) %></span>
+            <% if note.sync_state == "pending" %>
+              <span class="badge badge-pending">Waiting to sync</span>
+            <% end %>
+          </div>
+          <p class="auth-note-body"><%= note.body %></p>
+          <div class="auth-note-foot">
+            <span class="auth-owner">Written by <%= AuthPerson.name_for(note.owner_id) %></span>
+            <%= button_to "Delete", note_href, method: :delete, class: "auth-delete", form: { data: { turbo: false } } %>
+          </div>
+        </li>
+      <% end %>
+    </ul>
+    <% if @notes.empty? %>
+      <p class="auth-empty">Nothing here for you yet.</p>
+    <% end %>
+    <% if InstantRecord.browser? %>
+      <p class="auth-small">
+        Delete is offered on every note on purpose. Delete one that is not
+        yours: it goes, the server refuses the write, and it comes back.
+        <span id="pending-count"><%= @pending_count %> waiting to sync.</span>
+      </p>
+    <% end %>
+
+    <%= form_with url: auth_notes_path, method: :post, class: "card auth-form", data: { turbo: false, auth_target: "form" } do |f| %>
+      <h3>Write a note</h3>
+      <%= f.text_field "note[title]", placeholder: "Title", required: true, maxlength: 120, aria: { label: "Title" } %>
+      <%= f.text_area "note[body]", placeholder: "What it says", rows: 2, aria: { label: "Body" } %>
+      <%# The browser cannot know who is signed in, so the page fills this in
+          from the session. It is a convenience and not a rule: the server
+          takes the owner from its own session, and refuses a note written in
+          someone else's name. %>
+      <input type="hidden" name="note[owner_id]" value="" data-auth-target="owner">
+      <div class="auth-form-row">
+        <label for="auth-audience">Who may see it</label>
+        <select id="auth-audience" name="note[audience]">
+          <option value="owner">Only me</option>
+          <option value="members">Signed-in people</option>
+          <option value="admins">Admins and me</option>
+          <option value="everyone">Everyone</option>
+        </select>
+        <%= f.submit "Add note", data: { auth_target: "submit" } %>
+      </div>
+      <p class="auth-small" data-auth-target="formHint">Sign in to write a note.</p>
+    <% end %>
+  </section>
+
+  <section class="card auth-proof" aria-labelledby="auth-proof-title">
+    <h2 class="micro-label" id="auth-proof-title">Don’t take the page’s word for it</h2>
+    <p>
+      Both buttons talk to the sync server directly, as this browser, with
+      whatever cookie it has. Nothing on this page can make the server send or
+      take more than the session allows.
+    </p>
+    <div class="auth-proof-actions">
+      <button type="button" class="ui-button" data-action="auth#ask">Ask the sync server for everything</button>
+      <button type="button" class="ui-button" data-action="auth#forge">Write a note as someone else</button>
+    </div>
+    <div class="auth-proof-out" data-auth-target="proof" aria-live="polite"></div>
+  </section>
+</div>

@@ -67,9 +67,10 @@ module InstantRecord
       end
 
       # Whether the key a client bootstrapped under is no longer this request's
-      # identity. A client with no key at all synced before identities existed.
+      # identity. A request that names no key is judged by who it is now: it is
+      # a client that synced before identities existed, or no sync client at all.
       def stale?(sent_key, identity)
-        enabled? && sent_key.to_s != key(identity)
+        enabled? && sent_key.present? && sent_key != key(identity)
       end
 
       def scoped?(model)

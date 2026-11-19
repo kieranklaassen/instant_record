@@ -20,10 +20,8 @@ module InstantRecord
 
       # Writes queued as someone else are refused whole. They are not written to
       # the ledger: the client drops them when its next poll tells it to reset.
-      # A client that names no identity queued nothing as anyone, and is judged
-      # by who it is now.
       results =
-        if params[:identity].present? && SyncScope.stale?(params[:identity], identity)
+        if SyncScope.stale?(params[:identity], identity)
           mutations.map { |mutation| { mutation_id: mutation[:id], status: "rejected", reason: "identity changed" } }
         else
           mutations.map { |mutation| MutationApplier.apply(mutation, identity) }
