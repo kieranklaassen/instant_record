@@ -1,0 +1,35 @@
+import InstantRecordNative
+import SwiftUI
+
+/// <%= app_name %> on iPhone. Its screens are Ruby, in app/screens. This file
+/// names the first one and says where the app keeps its data and syncs.
+///
+/// Launch arguments:
+///   -server <%= options[:server] %>   the Rails app
+///   -dev YES                          ask Rails for each screen: no rebuild after an edit
+@main
+struct <%= app_name %>App: App {
+    @StateObject private var host: AppHost
+
+    init() {
+        // Views written in SwiftUI that a screen asks for by name
+        // (`swift "Name" do ... end`) are registered here:
+        //   views.register("Name") { props, actions in NameView(props: props, actions: actions) }
+        let views = Screens()
+
+        let defaults = UserDefaults.standard
+        let server = defaults.string(forKey: "server") ?? "<%= options[:server] %>"
+        let folder = URL.applicationSupportDirectory
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let engine: Engine = defaults.bool(forKey: "dev") ? HTTPEngine(server: server + "<%= mount_path %>") : LibraryEngine()
+        let host = AppHost(engine: engine, root: Route("<%= options[:screen] %>"), views: views, store: { _ in
+            AppHost.Store(database: folder.appending(path: "app.sqlite3").path, endpoint: server + "<%= mount_path %>")
+        })
+        host.start()
+        _host = StateObject(wrappedValue: host)
+    }
+
+    var body: some Scene {
+        WindowGroup { AppView(host: host) }
+    }
+}

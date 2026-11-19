@@ -3,6 +3,7 @@
 
 usage: build_native.py                    (everything lands in <repo>/compiled/.build-native)
        build_native.py iphonesimulator    (libraries for the iOS simulator, in .build-native/iphonesimulator)
+       build_native.py iphoneos           (libraries for an iPhone, arm64, in .build-native/iphoneos)
 
 The first three steps are the browser build's (build.py). From there the app is compiled for
 this machine and linked with native_shim.c into libinstant_record_app.a, which a native host
@@ -10,10 +11,11 @@ calls through native/instant_record_native.h. `host` beside it is the screenless
 tests drive (native/host.c). The toolchain file needs SPINEL_HOME, ROUNDHOUSE_BIN, SQLITE_SRC
 and CACHE.
 
-For the iOS simulator there is no host program. Spinel ships its runtime built for this machine
-only, so its sources and the three packages the app uses are compiled here for the simulator
-into libspinel_rt.a, beside libinstant_record_app.a. The app in native/ios links both. This has
-run on Linux x86_64 and macOS arm64, and for the simulator on arm64. Nothing here builds for a device.
+For the iOS simulator and for a device there is no host program. Spinel ships its runtime built for this machine
+only, so its sources and the three packages the app uses are compiled here for that target
+into libspinel_rt.a, beside libinstant_record_app.a. The app in native/ios links both, from the
+folder named after the SDK Xcode is building for. This has run on Linux x86_64 and macOS arm64,
+and for the simulator on arm64. The device build has not run.
 """
 import os
 import re
@@ -34,10 +36,14 @@ IOS_MINIMUM = "17.0"
 RUNTIME_CFLAGS = ["-O2", "-Wno-all", "-ffunction-sections", "-fdata-sections", "-ffp-contract=off"]
 
 
-def simulator_cc():
-    """clang for the iOS simulator on this Mac's architecture."""
-    sdk = subprocess.run(["xcrun", "--sdk", "iphonesimulator", "--show-sdk-path"], check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
-    return ["xcrun", "--sdk", "iphonesimulator", "clang", "-target", f"{os.uname().machine}-apple-ios{IOS_MINIMUM}-simulator", "-isysroot", sdk]
+TARGETS = ("iphonesimulator", "iphoneos")
+
+
+def ios_cc(target):
+    """clang for the iOS simulator on this Mac's architecture, or for an iPhone."""
+    sdk = subprocess.run(["xcrun", "--sdk", target, "--show-sdk-path"], check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+    triple = f"arm64-apple-ios{IOS_MINIMUM}" if target == "iphoneos" else f"{os.uname().machine}-apple-ios{IOS_MINIMUM}-simulator"
+    return ["xcrun", "--sdk", target, "clang", "-target", triple, "-isysroot", sdk]
 
 
 def makefile_list(spinel_home, name):
@@ -107,8 +113,8 @@ def loose_node_fields(app_c):
 
 def main():
     target = sys.argv[1] if len(sys.argv) > 1 else ""
-    if target not in ("", "iphonesimulator"):
-        sys.exit("usage: build_native.py [iphonesimulator]")
+    if target and target not in TARGETS:
+        sys.exit("usage: build_native.py [" + "|".join(TARGETS) + "]")
     build.B = os.path.join(build.ROOT, ".build-native", target) if target else os.path.join(build.ROOT, ".build-native")
     T, B, run = build.T, build.B, build.run
     os.makedirs(B, exist_ok=True)
@@ -117,7 +123,7 @@ def main():
     pipeline = os.path.join(build.ROOT, "pipeline")
     spinel_home = T["SPINEL_HOME"]
     path_env = {"PATH": os.path.join(spinel_home, "bin") + os.pathsep + os.environ["PATH"]}
-    cc = simulator_cc() if target else [os.environ.get("CC", "cc")]
+    cc = ios_cc(target) if target else [os.environ.get("CC", "cc")]
 
     app, _emit, tree, _plan = build.emit_tree(python)
     print(run([python, os.path.join(pipeline, "make_native_entry.py"), tree, app]).strip())
