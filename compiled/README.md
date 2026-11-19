@@ -147,6 +147,13 @@ apply their release migrations at boot. The sync server remains authoritative ac
 - The module contains the absolute path of the folder it was built in; `scrub_path.py` replaces
   it with a neutral one of the same length.
 - Every path that is not a file serves the shell page, so deep links and reloads work.
+- The build copies the app's `app/views/pwa/service-worker.js` to `/service-worker.js`, and the
+  demo's `application.js` registers it. It caches the shell (the page, `/harness`, `/assets`, the
+  module, the fonts), so a reopened app starts with no connection; it leaves every sync request
+  and the change stream alone. It keeps the two newest modules. Pending changes are still sent
+  only while the app is open: a service worker cannot drain the outbox, which lives in the
+  app's database. This has not yet been run against a compiled build, only against the
+  Rails-served demo.
 
 ### Replacing the ruby.wasm build on its host
 

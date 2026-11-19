@@ -120,6 +120,9 @@ function kickSync(delay = QUIET_MS) {
   kickTimer = setTimeout(syncPass, delay);
 }
 
+// The connection came back: send what is waiting now, not at the next retry.
+self.addEventListener("online", () => kickSync(0));
+
 function syncPass() {
   clearTimeout(kickTimer);
   kickTimer = null;
