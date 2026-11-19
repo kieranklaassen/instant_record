@@ -12,7 +12,7 @@ require "sqlite3"
 class MailShell
   FORMAT = 1
 
-  # The models the compiled demo syncs (compiled/pipeline/make_wasm_entry.py).
+  # The models the compiled demo syncs (compiled/pipeline/entry_template.py).
   # The browser rebuilds its schema and forgets its cursor when its own list
   # differs from the one saved in its database, so the list is part of the
   # fingerprint and a build with another list never asks for this file.
