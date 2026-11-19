@@ -1,6 +1,8 @@
-# One conversation: the message, its replies, and a way to archive it.
-# Opened with "member/inbox/id". Archiving is the mailbox's action, so the
-# button hands the same argument to MailboxScreen through `perform`.
+# One conversation. This screen is not drawn from stock elements: it hands
+# its props to ConversationView, which the iPhone app wrote in SwiftUI
+# (native/ios/Inbox), the way Email::MailboxesController hands the React page
+# its props. Opened with "member/inbox/id". Archiving is the mailbox's action,
+# so the view sends "archive" with the `thread` prop back through `perform`.
 class ThreadScreen < MailboxScreen
   def thread = arg.split("/")[2].to_s
 
@@ -11,19 +13,17 @@ class ThreadScreen < MailboxScreen
       return
     end
 
-    navigation title: message.subject.to_s do
-      list do
-        section do
-          letter message.author, message.address.to_s, message.created_at.utc.iso8601(6), message.body.to_s
+    replies = MailEntry.where(mailbox_id: inbox, kind: "reply", parent_id: message.id).order(:created_at).to_a
+    swift "ConversationView" do
+      prop "thread", arg
+      prop "subject", message.subject.to_s
+      prop "participants", participants(message, replies)
+      prop "archived", archived?(message) ? "true" : ""
+      props "messages" do
+        letter message.author, message.address.to_s, message.created_at.utc.iso8601(6), message.body.to_s
+        replies.each do |reply|
+          letter reply.author, "", reply.created_at.utc.iso8601(6), reply.body.to_s
         end
-        MailEntry.where(mailbox_id: inbox, kind: "reply", parent_id: message.id).order(:created_at).each do |reply|
-          section do
-            letter reply.author, "", reply.created_at.utc.iso8601(6), reply.body.to_s
-          end
-        end
-      end
-      toolbar do
-        button "Archive", action: "archive", arg: arg, role: "destructive", image: "archivebox" unless archived?(message)
       end
     end
   end
@@ -31,14 +31,19 @@ class ThreadScreen < MailboxScreen
   private
 
   def letter(author, address, written, words)
-    row do
-      stack "horizontal" do
-        text author, style: "headline"
-        date written, style: "caption", tone: "secondary"
-      end
-      text address, style: "caption", tone: "secondary" unless address.empty?
-      text words
+    record do
+      prop "author", author
+      prop "address", address
+      prop "date", written
+      prop "body", words
+      prop "mine", author == member ? "true" : ""
     end
+  end
+
+  def participants(message, replies)
+    names = [message.author]
+    replies.each { |reply| names << reply.author unless names.include?(reply.author) }
+    names.join(", ")
   end
 
   def archived?(message)

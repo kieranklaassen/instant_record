@@ -12,23 +12,25 @@ class ThreadScreenTest < ActiveSupport::TestCase
     travel_to(2.minutes.from_now) { reply("maya", "I sent the invites.") }
   end
 
-  test "shows the message and then its replies in the order they were written" do
-    navigation = ThreadScreen.new("maya/support/#{@message.id}").render.children.first
+  test "hands the Swift view the conversation: subject, who is in it, and each message in the order written" do
+    arg = "maya/support/#{@message.id}"
+    view = ThreadScreen.new(arg).render.children.sole
 
-    assert_equal "Night shift", navigation.props["title"]
-    sections = navigation.children.first.children
-    assert_equal ["Can we invite them?", "Yes, from Settings.", "I sent the invites."], sections.map { |section| section.children.first.children.last.text }
+    assert_equal ["swift", "ConversationView"], [view.kind, view.text]
+    assert_equal({ "thread" => arg, "subject" => "Night shift", "participants" => "rae, theo, maya", "archived" => "" }, strings(view))
+    messages = view.children.find { |node| node.kind == "props" }
+    assert_equal "messages", messages.id
+    assert_equal ["Can we invite them?", "Yes, from Settings.", "I sent the invites."], messages.children.map { |record| strings(record)["body"] }
+    assert_equal [["rae", "rae@example.test", ""], ["theo", "", ""], ["maya", "", "true"]], messages.children.map { |record| strings(record).values_at("author", "address", "mine") }
+    assert_equal @message.created_at.utc.iso8601(6), strings(messages.children.first)["date"]
   end
 
-  test "offers archive until the conversation is archived" do
+  test "the view's archive comes back through perform, and the props then say it is archived" do
     arg = "maya/support/#{@message.id}"
-    button = toolbar(arg).children.sole
 
-    assert_equal ["button", "archive", arg], [button.kind, button.action, button.arg]
+    ThreadScreen.new(arg).perform("archive", strings(ThreadScreen.new(arg).render.children.sole)["thread"])
 
-    ThreadScreen.new(arg).perform(button.action, button.arg)
-
-    assert_empty toolbar(arg).children
+    assert_equal "true", strings(ThreadScreen.new(arg).render.children.sole)["archived"]
     assert MailEntry.exists?(kind: "archive", parent_id: @message.id, author: "maya")
   end
 
@@ -46,7 +48,5 @@ class ThreadScreenTest < ActiveSupport::TestCase
     @support.append!(id: SecureRandom.uuid, author: author, attributes: { kind: "reply", parent_id: @message.id, body: body })
   end
 
-  def toolbar(arg)
-    ThreadScreen.new(arg).render.children.first.children.find { |node| node.kind == "toolbar" }
-  end
+  def strings(node) = node.children.select { |child| child.kind == "prop" }.to_h { |prop| [prop.id, prop.text] }
 end

@@ -116,6 +116,20 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
     assert_equal JSON.parse(MailboxScreen.new("maya/support").json), @phone.render("mailbox", "maya/support")
   end
 
+  test "the menus, the unread list and mark all read are the server's, on the phone" do
+    @phone.sync
+
+    assert_equal JSON.parse(MailboxScreen.new("maya/support/unread").json), @phone.render("mailbox", "maya/support/unread")
+    assert_equal ["InboxSummary", @newer.id], @phone.render("mailbox", "maya/support/unread").dig("children", 0, "children", 0, "children").map { |node| node["id"].presence || node["text"] }
+
+    @phone.tap("mailbox", "maya/support", "read_all", "maya/support")
+    assert_equal %w[swift], @phone.render("mailbox", "maya/support/unread").dig("children", 0, "children", 0, "children").map { |node| node["kind"] }
+    @phone.sync
+
+    assert MailEntry.exists?(kind: "read", parent_id: @newer.id, author: "maya")
+    assert_equal JSON.parse(MailboxScreen.new("maya/support").json), @phone.render("mailbox", "maya/support")
+  end
+
   test "an archive made offline shows at once and reaches the server on reconnect" do
     @phone.sync
     @phone.online = false
@@ -195,6 +209,6 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
   end
 
   def rows
-    @phone.render("mailbox", "maya/support").dig("children", 0, "children", 0, "children")
+    @phone.render("mailbox", "maya/support").dig("children", 0, "children", 0, "children").select { |node| node["kind"] == "row" }
   end
 end

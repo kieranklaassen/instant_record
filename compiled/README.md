@@ -152,9 +152,41 @@ that the mailbox renders the same bytes as under CRuby, that an archive made
 with no connection waits in the outbox and reaches the server later, that the
 database survives a restart, and that a rejected write is undone.
 
-This has run on Linux x86_64 only. It has not been linked for iOS, and there is
-no renderer yet: drawing the JSON with SwiftUI is the next piece of work. It
-builds this repository's demo and has no rake task for another app.
+A screen can also hand props to a view written in SwiftUI (`swift "Name" do
+prop ... end`), as a Rails action hands a React page its props.
+
+### On iPhone
+
+```sh
+python3 compiled/pipeline/build_native.py iphonesimulator
+```
+
+builds the same library for the iOS simulator, with Spinel's runtime and the
+packages the app uses compiled from Spinel's sources beside it
+(`.build-native/iphonesimulator/libinstant_record_app.a` and
+`libspinel_rt.a`). `native/ios` holds a SwiftUI renderer and the Inbox as an
+app that links them. [native/ios/README.md](../native/ios/README.md) has the
+build steps and the two ways to draw a screen.
+
+What ran, on macOS arm64 with Xcode 27.2 and the iPhone 17 simulator on iOS
+26.5:
+
+- The library and host build on macOS with no change, and the test above
+  passes there (9 runs).
+- Spinel's generated C, its runtime and SQLite compile and link for the
+  simulator with one change: the iOS SDK has no `<sys/random.h>`, so the shim
+  uses `arc4random_buf` on Apple platforms.
+- In the simulator the Inbox lists mail from its local database, opens a
+  conversation and marks it read, archives with a swipe, switches inbox and
+  filter from its bar menus, and archives with the server stopped. The
+  archive reached the server on the next launch after it came back.
+
+What did not: nothing was built for a device, signed, or run on a phone. The
+app syncs when asked (launch, foreground, a tap, a pull) and does not hold
+the event stream, so a change from elsewhere waits for the next of those.
+Opening a second database calls `ir_boot` again and leaves the first file
+open. The build is for this repository's demo and has no rake task for
+another app.
 
 ## Deploying it
 
