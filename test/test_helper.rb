@@ -1,6 +1,7 @@
 require "minitest/autorun"
 require "active_record"
 require "instant_record"
+require "instant_record/sync_scope"
 
 ActiveRecord::Base.establish_connection(adapter: "sqlite3", database: ":memory:")
 
@@ -68,6 +69,22 @@ module InstantRecordTestHelpers
     InstantRecord::SyncMetadata.delete_all
     InstantRecord::Change.delete_all
     InstantRecord::AppliedMutation.delete_all
+  end
+
+  # Who is asking, as an app's `scope_from` would hand it to the gem. An id of
+  # nil is a browser nobody is signed in on. It names its own key, so a client
+  # can tell when the person behind it changes.
+  Person = Struct.new(:id) do
+    def sync_identity_key = id || "anonymous"
+  end
+
+  # Rows whose `state` is "public" are for everyone; any other state names the
+  # one person who may see the row. Only that person may write it.
+  def scoped_model(name = "Item")
+    syncable_model(name) do
+      syncable_to { |who| who&.id ? where(state: ["public", who.id]) : where(state: "public") }
+      writable_by { |who| who&.id ? where(state: who.id) : none }
+    end
   end
 end
 

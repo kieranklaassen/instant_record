@@ -53,7 +53,7 @@ module WasmBridge
   # Capture the exact outgoing batch before the worker yields to browser requests.
   def self.sync_plan
     mutations = InstantRecord::Client.pending_mutations
-    push = mutations.empty? ? "" : JSON.generate({ mutations: mutations })
+    push = mutations.empty? ? "" : JSON.generate(InstantRecord::Client.mutations_payload(mutations))
     File.write("/host/out", JSON.generate({ push: push, bootstrap: !InstantRecord::Client.bootstrapped? }))
     0
   end
@@ -68,7 +68,8 @@ module WasmBridge
 
   def self.handle_stream
     applied = InstantRecord::Client.consume_stream(File.read("/host/in"))
-    File.write("/host/out", "applied=" + applied.to_s + " cursor=" + InstantRecord::Client.cursor.to_s)
+    # A batch can be the server's reset, after which there is no cursor to report.
+    File.write("/host/out", "applied=" + applied.to_s + " cursor=" + InstantRecord::Client.cursor.to_s + " bootstrap=" + (InstantRecord::Client.bootstrapped? ? "ready" : "needed"))
     0
   end
 
@@ -96,7 +97,8 @@ module WasmBridge
   end
 
   def self.cursor
-    File.write("/host/out", "cursor=" + InstantRecord::Client.cursor.to_s + " pending=" + InstantRecord::Client.pending_count.to_s + " bootstrap=" + (InstantRecord::Client.bootstrapped? ? "ready" : "needed"))
+    key = InstantRecord::Client.identity_key
+    File.write("/host/out", "cursor=" + InstantRecord::Client.cursor.to_s + " pending=" + InstantRecord::Client.pending_count.to_s + " bootstrap=" + (InstantRecord::Client.bootstrapped? ? "ready" : "needed") + " identity=" + (key.nil? ? "" : key))
     0
   end
 end
@@ -120,11 +122,11 @@ if InstantRecord::SyncMetadata.get("compiled_models") != model_set
 end
 Tep::APP.name = Rails.application.global_id_app
 Message.sync_window(limit: 50, partition_by: :channel_id)
-InstantRecord.sync(Issue, ChatUser, Channel, Message, Note, MailEntry, AssistantChat, AssistantTurn)
+InstantRecord.sync(Issue, ChatUser, Channel, Message, Note, MailEntry, AssistantChat, AssistantTurn, AuthNote)
 # JS worker owns non-blocking inbound polling; Client#sync_pass handles bootstrap + outbox drain.
 InstantRecord::Client.streaming = true
 '''
-models = ["Issue", "ChatUser", "Channel", "Message", "Note", "MailEntry", "AssistantChat", "AssistantTurn"]
+models = ["Issue", "ChatUser", "Channel", "Message", "Note", "MailEntry", "AssistantChat", "AssistantTurn", "AuthNote"]
 if os.environ.get("INSTANT_RECORD_APP"):
     with open(os.environ["INSTANT_RECORD_MIGRATION_PLAN"]) as file:
         plan = json.load(file)
@@ -146,7 +148,7 @@ if os.environ.get("INSTANT_RECORD_APP"):
     if not models or not all(re.fullmatch(r"[A-Z]\w*(?:::[A-Z]\w*)*", name) for name in models):
         sys.exit("Declare at least one named model that includes InstantRecord::Syncable.")
     entry = entry.replace("Message.sync_window(limit: 50, partition_by: :channel_id)\n", "")
-    entry = entry.replace("InstantRecord.sync(Issue, ChatUser, Channel, Message, Note, MailEntry, AssistantChat, AssistantTurn)", "InstantRecord.sync(" + ", ".join(models) + ")")
+    entry = entry.replace("InstantRecord.sync(Issue, ChatUser, Channel, Message, Note, MailEntry, AssistantChat, AssistantTurn, AuthNote)", "InstantRecord.sync(" + ", ".join(models) + ")")
 entry = entry.replace("COMPILED_MODEL_SET", ",".join(sorted(models)))
 open(os.path.join(root, "main_wasm.rb"), "w").write(head + entry)
 print("wrote main_wasm.rb:", len(head.splitlines()), "lines of main.rb +", len(entry.splitlines()), "entry lines")

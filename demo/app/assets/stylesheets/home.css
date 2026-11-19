@@ -170,6 +170,7 @@
 .demo-home .demo-card-chat { --card-ink: #C25A2C; --card-wash: linear-gradient(160deg, #FFD9C4, #F7EBDD); }
 .demo-home .demo-card-inbox { --card-ink: #2F6CA3; --card-wash: linear-gradient(160deg, #D8E6F3, #F4EEE4); }
 .demo-home .demo-card-assistant { --card-ink: #9A4A2A; --card-wash: linear-gradient(160deg, #F3DCCB, #F6F0E6); }
+.demo-home .demo-card-auth { --card-ink: #2E6E73; --card-wash: linear-gradient(160deg, #D3E9E8, #F3F1E8); }
 .demo-home .demo-card-migrate { --card-ink: #6A4FA0; --card-wash: linear-gradient(160deg, #E5DEF7, #F4F0E8); }
 
 /* A drawn sheet of a few lines: enough to say "an app", nothing to go stale. */

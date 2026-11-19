@@ -86,6 +86,9 @@ let changes;
 
 let host = null;
 let currentCursor = null;
+// Read with the cursor, and sent with each poll so the server can say when the
+// person behind this browser has changed.
+let currentIdentity = "";
 let kickTimer = null;
 let pollInFlight = false;
 let draining = null;
@@ -179,7 +182,8 @@ async function drain(initial = false, early = null) {
     });
     const needsBootstrap = plan.bootstrap && !host.syncState().bootstrapped;
     if (push || snapshot) report({ kind: "sync-pass", path: `${result.pending} pending` });
-    currentCursor = needsBootstrap ? null : result.cursor;
+    // After a bootstrap the next poll reads the cursor and the identity afresh.
+    currentCursor = plan.bootstrap ? null : result.cursor;
     if (result.changed || result.notified) {
       save();
     }
@@ -211,8 +215,10 @@ async function pollChanges() {
         return;
       }
       currentCursor = state.cursor;
+      currentIdentity = state.identity;
     }
-    const { status, text } = await fetchReply("GET", `/events?after=${currentCursor}&window=0`);
+    const who = currentIdentity ? `&identity=${encodeURIComponent(currentIdentity)}` : "";
+    const { status, text } = await fetchReply("GET", `/events?after=${currentCursor}&window=0${who}`);
     if (status !== 200) return;
     if (!text.trim() || draining || kickTimer || revision !== snapshotRevision) return;
 
@@ -220,6 +226,12 @@ async function pollChanges() {
       if (draining || kickTimer || revision !== snapshotRevision) return;
       const consumed = host.consumeStream(text);
       currentCursor = consumed.cursor;
+      // The server said this browser synced as someone else, and the client dropped what it
+      // held. Bootstrap as whoever is here now, at once, and never poll from zero.
+      if (!consumed.bootstrapped) {
+        currentCursor = null;
+        kickSync(0);
+      }
       if (consumed.applied > 0 || consumed.notified) {
         save();
         return { changes: consumed.changes };
@@ -541,13 +553,19 @@ self.onmessage = async (event) => {
     }
     if (type === "serverRequest") {
       const url = new URL(payload.path, self.location.origin);
-      const allowed = (payload.method === "GET" && url.pathname === "/receipts/probe") ||
+      // The Auth page asks Rails who is signed in, and tries the sync server by hand.
+      const auth = payload.method === "GET"
+        ? ["/auth/session", "/instant_record/bootstrap"]
+        : ["/auth/session", "/auth/session/sign_out", "/instant_record/mutations"];
+      const allowed = auth.includes(url.pathname) || (payload.method === "GET" && url.pathname === "/receipts/probe") ||
         (payload.method === "POST" && (url.pathname === "/slack/reset" ||
           (import.meta.env.VITE_SHARED_INBOX_DEMO && url.pathname === new URL(syncEndpoint, self.location.origin).pathname + "/incoming" &&
             url.pathname.startsWith("/email/sync/"))));
       if (!allowed) throw new Error("Unknown demo server action");
       const root = publicEndpoint.replace(/\/instant_record\/?$/, "");
-      const reply = await fetchReply(payload.method, url.pathname + url.search, "", root);
+      url.searchParams.delete("instant_record_network");
+      const body = typeof payload.body === "string" ? payload.body : "";
+      const reply = await fetchReply(payload.method, url.pathname + url.search, body, root);
       return self.postMessage({ id, result: reply });
     }
     if (type === "boot") return self.postMessage({ id, result: await boot(payload) });
