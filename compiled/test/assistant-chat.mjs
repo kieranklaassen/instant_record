@@ -54,6 +54,8 @@ try {
   }
   if (compiled) await context.setOffline(false);
   await page.getByRole("link", { name: "Keep my place in chat" }).click();
+  // Latest is already showing in the conversation being left: wait for the one being opened.
+  await page.locator(".relay-bar strong").filter({ hasText: "Keep my place in chat" }).waitFor();
   await latest.waitFor();
   assert.equal(await scroll.evaluate(el => el.scrollTop), position);
   await latest.click();
