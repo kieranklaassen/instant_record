@@ -7,8 +7,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/random.h>
 #include <unistd.h>
+#ifndef __APPLE__
+#include <sys/random.h>
+#endif
 
 enum { IN, OUT, NOTIFY, REQUEST, RESPONSE, SLOTS };
 static const char *const names[SLOTS] = { "in", "out", "notify", "request", "response" };
@@ -74,13 +76,23 @@ void ir_set_exchange(ir_exchange_fn fn, void *context) {
   exchange_context = context;
 }
 
+/* The iOS SDK has no <sys/random.h>, and arc4random_buf cannot fail. */
+static int random_bytes(unsigned char *bytes, size_t size) {
+#ifdef __APPLE__
+  arc4random_buf(bytes, size);
+  return 0;
+#else
+  return getentropy(bytes, size);
+#endif
+}
+
 /* The runtime signs cookies with SECRET_KEY_BASE and, when there is none, keeps
    one in a file under the working directory. A native host serves no cookies
    and may not be able to write there, so each boot gets a key of its own. */
 static void fresh_secret(void) {
   unsigned char bytes[32];
   char hex[sizeof bytes * 2 + 1];
-  if (getenv("SECRET_KEY_BASE") || getentropy(bytes, sizeof bytes) != 0) return;
+  if (getenv("SECRET_KEY_BASE") || random_bytes(bytes, sizeof bytes) != 0) return;
   for (size_t i = 0; i < sizeof bytes; i++) snprintf(hex + i * 2, 3, "%02x", bytes[i]);
   setenv("SECRET_KEY_BASE", hex, 1);
 }

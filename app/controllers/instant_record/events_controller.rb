@@ -19,8 +19,11 @@ module InstantRecord
     }.freeze
 
     class EventStream
-      def initialize(cursor:, deadline:, heartbeat: 15.0)
+      # `identity` is who the stream was opened by, for as long as it stays
+      # open: the request is read once, when it arrives.
+      def initialize(cursor:, deadline:, heartbeat: 15.0, identity: nil)
         @cursor = cursor
+        @identity = identity
         @deadline = deadline
         @heartbeat = heartbeat
         @last_write = Time.current
@@ -28,10 +31,11 @@ module InstantRecord
 
       def each
         loop do
-          Change.poll(@cursor).each do |change|
-            @cursor = change.id
+          changes = Change.poll(@cursor, scope: SyncScope.token(@identity))
+          SyncScope.events_for(changes, @identity).each do |id, event|
+            @cursor = id
             @last_write = Time.current
-            yield "id: #{change.id}\nevent: change\ndata: #{change.as_event.to_json}\n\n"
+            yield "id: #{id}\nevent: change\ndata: #{event.to_json}\n\n"
           end
 
           # An SSE comment, written only when the stream has been quiet for a
@@ -58,9 +62,20 @@ module InstantRecord
     def index
       cursor = (request.headers["Last-Event-ID"] || params[:after] || 0).to_i
 
+      identity = SyncScope.identity(request)
+
       headers.merge!(EVENT_STREAM_HEADERS).merge!(InstantRecord::CORS_HEADERS)
+
+      # A client that synced as someone else is told to start over, and nothing
+      # more: no id line, so the cursor it is about to drop does not move.
+      if SyncScope.stale?(params[:identity], identity)
+        self.response_body = ["event: reset\ndata: #{SyncScope.reset_event(identity).to_json}\n\n"]
+        return
+      end
+
       self.response_body = EventStream.new(
         cursor: cursor,
+        identity: identity,
         deadline: Time.current + window_seconds,
         heartbeat: Rails.application.config.instant_record.sse_heartbeat_seconds.to_f
       )

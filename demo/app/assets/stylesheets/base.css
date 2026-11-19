@@ -42,6 +42,7 @@ body.demo-slack { --accent: #E8794A; --accent-soft: #FCEADF; }
 body.demo-email { --accent: #2F6CA3; --accent-soft: #E6EFF7; }
 body.demo-assistant { --accent: #9A4A2A; --accent-soft: #F6E6DD; }
 body.demo-migrate { --accent: #6A4FA0; --accent-soft: #EEE8F7; }
+body.demo-auth { --accent: #2E6E73; --accent-soft: #E2F0F0; }
 
 * { box-sizing: border-box; }
 

@@ -190,7 +190,55 @@ end
 **Where authorization actually lives:** browser-side checks are UX, never enforcement — the user owns the client and everything in it. Real enforcement has exactly two places, both on the server:
 
 1. **The mutations endpoint** — server-side validations and `server_only` model rules reject writes the client wasn't allowed to make; the client rolls back.
-2. **What you sync down** — a client can only render what the change stream delivered to it. (Per-user scoping of the stream itself — `syncable_to` — is on the roadmap; today the PoC syncs every registered model to every client.)
+2. **What you sync down** — a client can only render what the change stream delivered to it. A model that declares `sync_scope`, or `syncable_to`, is sent only to the clients that may hold its rows (both below); every other model syncs to every client.
+
+#### Rows that belong to one client: `sync_scope`
+
+```ruby
+class Note < ApplicationRecord
+  include InstantRecord::Syncable
+  sync_scope :user_id   # the column that says whose row this is
+end
+
+# config/initializers/instant_record.rb
+InstantRecord.config.scope_from = ->(request) { request.session[:user_id] }
+```
+
+`scope_from` reads a sync request's scope. With it and `sync_scope`, the sync endpoints keep a model's rows to their owner: the bootstrap, the change stream and history pages carry the rows whose column equals the request's scope, plus the rows where it is `NULL`, which belong to everyone. A create is stamped with the sender's scope whatever it claims, and a row of another scope cannot be changed or removed (the mutation is rejected, and the client rolls back). A request with no scope gets only the `NULL` rows and can write nothing to the model.
+
+The default `scope_from` trusts a `scope` parameter, and the compiled site sends one: a random token it keeps in `localStorage`. That makes a browser its own scope with no sign-in, which is what the demo's Assistant uses. It is a capability, not authentication: anyone holding the token reads those rows. An app with accounts should read the scope from its session, as above.
+
+Limits, as built: a row's scope is fixed at create, a scoped model with a `sync_window` ranks its window before the scope is applied, and the Ruby client (`InstantRecord::Client`, which the native build uses) sends no scope yet.
+
+#### Rules a column cannot say: `syncable_to` and `writable_by`
+
+```ruby
+class Note < ApplicationRecord
+  include InstantRecord::Syncable
+
+  server_only do
+    # Which notes the asker may be sent.
+    syncable_to { |user| user ? where(team_id: user.team_ids).or(where(public: true)) : where(public: true) }
+    # Which they may create, change and delete. Without it, what is seen may be written.
+    writable_by { |user| user ? where(author_id: user.id) : none }
+  end
+end
+
+# config/initializers/instant_record.rb
+InstantRecord.config.scope_from = ->(request) { User.find_by(id: request.session[:user_id]) }
+```
+
+Each block runs on the model, on the server, with whatever `scope_from` returned, and returns a relation. They are the same engine as `sync_scope`, and a model may declare both: `scope_from` is the one place an app says who is asking, and its answer's `to_s` is what a `sync_scope` column is compared with.
+
+- **Bootstrap and history** carry the rows in the relation.
+- **The change stream** asks the rule again when a change is sent, since it can depend on anything. A row the asker may see is sent as it stands now. A row they may not see is sent as an empty destroy: nothing to a client that never held it, and a removal from one that did, which is how a row that stops being shared leaves a browser.
+- **A write** must leave the row inside `writable_by`, checked after it is applied and rolled back if not (`not permitted`). A row the asker cannot see answers as a missing one does: an update is `record not found`, a destroy is accepted and does nothing, and no rejection carries its attributes.
+
+**When the person behind a browser changes.** The bootstrap carries a key for whoever asked: a digest of the identity's `sync_identity_key` if it answers one, else of its class and id, else of the identity as a string, and nobody at all has a key too. The client sends it back with every poll and write. A request under another key is a browser that synced as someone else: its poll is answered with one `reset` event, the client drops every row of the scoped models along with the writes it had queued to them, and it bootstraps again as whoever is there now. Writes that arrive under the old key are refused (`identity changed`). Models every client may see are left alone, and the poll after the new bootstrap starts from the old cursor so they miss nothing. An identity may answer `sync_reset_types` to name the models its key decides, when the rest follow something that did not change. The key is a name, not a credential: the server scopes every request by its own session whatever key it carries.
+
+A session is a cookie, so the page and the sync endpoints must be one origin for it to arrive: serve the compiled site from the Rails app (`config.instant_record.compiled_host`) or put both behind one proxy. The mutations endpoint takes JSON only, so a cross-site form cannot write through someone's cookie. The demo's Auth page (`/auth`) is this section running: three people, a real session, and a panel that asks the sync server for everything.
+
+Limits, as built: record ids are not secret (a change to a hidden row reaches every client as an empty destroy naming its id, and a create that reuses a hidden row's id is refused); a validation that looks at other rows, such as uniqueness, answers a refused write with a message about rows the sender cannot see; a stream that is open when the session changes keeps its identity until it closes (a poll lasts at most the SSE window); a rule is one query per model per batch of changes; and a `syncable_to` model with a `sync_window` ranks its window before the rule is applied.
 
 A `server_only` controller filter protects the server-rendered surface; it cannot and need not protect the browser's local rendering.
 
@@ -299,6 +347,7 @@ Things to try:
 - **Shared inbox** — Open `/email` as Maya, who shares Support with Theo and Billing with Jo. Reply offline in Support and reconnect to see it arrive for Theo. Each persona and inbox has a separate SQLite snapshot, outbox and sync cursor. The public persona picker is for fictional mail.
 - **Infinite scroll** — `/slack` seeds thousands of messages in `#general`, but a fresh client only syncs the newest 50 per conversation. Scroll to the top and older pages stream in; messages arriving mid-read update the page without a reload or a scroll jump.
 - **Offline** — stop the Rails server, create issues (they stay `pending`), reload the tab (still there), restart the server and watch them drain.
+- **Sessions and permissions** — open `/auth`, sign in as Ada, Ben or Cleo, and watch which notes this browser holds. Sign out and they leave it. "Ask the sync server for everything" shows what a browser with that cookie can get by asking directly.
 - **Rejection** — create an issue titled `reject me`. It appears optimistically, the server refuses it, and it disappears on reconcile.
 
 ## Scaling the SSE stream
@@ -356,7 +405,7 @@ class Issue < ApplicationRecord
 end
 ```
 
-Also out of scope for the PoC, on purpose: CRDTs, Postgres logical replication, multi-tab leader election, attachments, authentication/authorization on the sync endpoints, and migration generators. The Inbox demo runs as an Inertia page in React, with its props kept live from the local database: `docs/solutions/2026-11-19-inbox-on-inertia.md` says what held and what the gem would need to offer it properly.
+Also out of scope for the PoC, on purpose: CRDTs, Postgres logical replication, multi-tab leader election, attachments, a sign-in of the gem's own (it scopes the sync endpoints by whatever your app's session says: `sync_scope`, `syncable_to`), and migration generators. The Inbox demo runs as an Inertia page in React, with its props kept live from the local database: `docs/solutions/2026-11-19-inbox-on-inertia.md` says what held and what the gem would need to offer it properly.
 
 ## History
 

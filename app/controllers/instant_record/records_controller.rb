@@ -23,6 +23,7 @@ module InstantRecord
       limit = (params[:limit].presence || window.limit).to_i.clamp(1, HARD_LIMIT)
       rows = window
         .keyset_below(at: before_at, id: params[:before_id], partition: params[:partition])
+        .merge(SyncScope.visible(model, SyncScope.identity(request)))
         .limit(limit + 1)
         .to_a
 

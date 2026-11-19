@@ -48,6 +48,26 @@ module InstantRecord
         @instant_record_sync_window
       end
 
+      # Keep a model's rows to the client they belong to. `column` holds the
+      # owner's scope, the value InstantRecord.config.scope_from reads off each
+      # sync request: a client is sent the rows whose column equals its scope
+      # and the rows where it is NULL, which belong to everyone. A create is
+      # stamped with the sender's scope, and a row of another scope cannot be
+      # changed or removed. Models without a declaration sync to every client.
+      def sync_scope(column)
+        @instant_record_sync_scope = column.to_s
+      end
+
+      def instant_record_sync_scope
+        @instant_record_sync_scope
+      end
+
+      # The rows of this model a client with `scope` may be sent.
+      def instant_record_visible_to(scope)
+        column = instant_record_sync_scope
+        column ? where(column => [nil, scope.presence].uniq) : all
+      end
+
       # Observe a value from the server that last-write-wins threw away. The
       # block runs with the losing attribute hash at the moment it is dropped,
       # which is the only moment it exists in this runtime — the gem assigns
@@ -99,7 +119,8 @@ module InstantRecord
         record_id: id,
         operation: operation,
         version: operation == "destroy" ? 0 : self[:server_version],
-        attributes_payload: operation == "destroy" ? {} : InstantRecord.wire_attributes(attributes)
+        attributes_payload: operation == "destroy" ? {} : InstantRecord.wire_attributes(attributes),
+        scope: InstantRecord.scope_of(self)
       )
     end
   end

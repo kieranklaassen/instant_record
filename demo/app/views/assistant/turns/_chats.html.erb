@@ -1,0 +1,5 @@
+<nav id="relay-chats" data-live aria-label="Conversations">
+  <% @chats.each do |chat| %>
+    <a id="chat-<%= chat.id %>" class="relay-history-link" href="<%= assistant_root_path %>?chat=<%= chat.id %>" data-turbo="false" data-relay-link="chat" aria-current="<%= chat.id == @chat_id ? "page" : "false" %>"><%= chat.title %></a>
+  <% end %>
+</nav>

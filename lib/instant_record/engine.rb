@@ -1,3 +1,5 @@
+require "instant_record/sync_scope"
+
 module InstantRecord
   class Engine < ::Rails::Engine
     isolate_namespace InstantRecord

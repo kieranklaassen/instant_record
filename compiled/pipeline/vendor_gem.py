@@ -178,6 +178,11 @@ if not os.environ.get("INSTANT_RECORD_APP"):
 
     # The reset goes to the authoritative Rails server through the host's network marker.
     edit("app/helpers/slack_helper.rb", "InstantRecord.server_url(slack_reset_path)", '"/slack/reset?instant_record_network=1"')
+    # So do the Auth page's questions: the session, and the sync server asked directly.
+    edit("app/helpers/auth_helper.rb", "InstantRecord.server_url(auth_session_path)", '"/auth/session?instant_record_network=1"')
+    edit("app/helpers/auth_helper.rb", "InstantRecord.server_url(auth_session_sign_out_path)", '"/auth/session/sign_out?instant_record_network=1"')
+    edit("app/helpers/auth_helper.rb", 'InstantRecord.server_url("/instant_record/bootstrap")', '"/instant_record/bootstrap?instant_record_network=1"')
+    edit("app/helpers/auth_helper.rb", 'InstantRecord.server_url("/instant_record/mutations")', '"/instant_record/mutations?instant_record_network=1"')
 
     # 16. One instance variable holds a relation in one branch and [] in the other; the compiled
     #     code needs a single type, so the relation is loaded (same rows, same order).

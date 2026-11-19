@@ -29,6 +29,30 @@ module InstantRecord
     # app. A tap comes back as `perform` with the action and argument the
     # element named, and the screen is rendered again afterwards.
     #
+    # A screen, or one part of it, can instead be a view the app wrote in
+    # SwiftUI. `swift` names the view and hands it props, as a Rails action
+    # hands a React page its props with `render inertia: "Email/Index",
+    # props: { ... }`:
+    #
+    #   def body
+    #     swift "ConversationView" do
+    #       prop "subject", message.subject
+    #       props "messages" do
+    #         replies.each do |reply|
+    #           record do
+    #             prop "author", reply.author
+    #             prop "body", reply.body
+    #           end
+    #         end
+    #       end
+    #     end
+    #   end
+    #
+    # The app registers the view under that name and reads `props["subject"]`
+    # and `props.list("messages")`. What the view does comes back through
+    # `perform`, like any tap. Used inside a list or a stack, `swift` puts one
+    # hand-written view among the stock ones, as a partial would.
+    #
     # Keep to plain Ruby here: blocks, `yield` and `case`. The phone runs this
     # file through an ahead-of-time compiler with no `method_missing`, no
     # `instance_eval` and no `send` to a computed name.
@@ -64,8 +88,10 @@ module InstantRecord
         inside(node) { yield }
       end
 
-      def list
+      # `refreshable: true` lets a pull on the list sync and draw it again.
+      def list(refreshable: false)
         node = add("list")
+        node.set("refresh", "true") if refreshable
         inside(node) { yield } if block_given?
         node
       end
@@ -124,10 +150,26 @@ module InstantRecord
         node
       end
 
-      def button(label, action:, arg: "", role: "", image: "")
+      # In a toolbar, `position` is "leading" or "trailing". A button given a
+      # block is a menu, and the block holds its items.
+      def button(label, action: "", arg: "", role: "", image: "", position: "")
         node = add("button")
         act(node, label, action, arg, role)
         node.set("image", image)
+        node.set("position", position)
+        inside(node) { yield } if block_given?
+        node
+      end
+
+      # One line of a menu. With an `action` it is performed like a button's.
+      # With a `link` it opens that screen with `arg` in place of the first
+      # screen, as choosing another account does. `selected` gives it a tick.
+      def item(title, action: "", arg: "", link: "", image: "", role: "", selected: false)
+        node = add("item")
+        act(node, title, action, arg, role)
+        node.set("link", link)
+        node.set("image", image)
+        node.set("selected", "true") if selected
         node
       end
 
@@ -140,7 +182,37 @@ module InstantRecord
         node
       end
 
-      # Controls in the navigation bar.
+      # A view written in SwiftUI, by the name the app registered it under.
+      # The block hands it props.
+      def swift(name)
+        node = add("swift")
+        node.text = name
+        inside(node) { yield } if block_given?
+        node
+      end
+
+      # One string for the Swift view, by name. Props are strings: write a
+      # number with `to_s` and a flag as "true" or "".
+      def prop(name, value)
+        node = add("prop")
+        node.id = name
+        node.text = value
+        node
+      end
+
+      # A list for the Swift view, by name. The block holds its records.
+      def props(name)
+        node = add("props")
+        node.id = name
+        inside(node) { yield }
+      end
+
+      # One entry of a list: the block holds its props.
+      def record
+        inside(add("record")) { yield }
+      end
+
+      # Controls in the navigation bar: buttons, and buttons that open a menu.
       def toolbar
         inside(add("toolbar")) { yield }
       end
