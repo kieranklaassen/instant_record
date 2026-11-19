@@ -44,13 +44,18 @@ class MailboxScreenTest < ActiveSupport::TestCase
     assert_equal %w[1 2], [subject, preview].map { |text| text.props["lines"] }
   end
 
-  test "a render asks for the unread mail once" do
-    asked = 0
-    counter = ->(*, payload) { asked += 1 if payload[:sql].include?("mark.kind IN") }
+  test "a render asks the database the same number of questions however much mail is listed" do
+    queries = lambda do
+      asked = 0
+      counter = ->(*, payload) { asked += 1 unless payload[:name] == "SCHEMA" }
+      ActiveSupport::Notifications.subscribed(counter, "sql.active_record") { MailboxScreen.new(at("maya/support")).render }
+      asked
+    end
+    queries.call
+    few = queries.call
+    12.times { |n| write("support", "rae", "More #{n}") }
 
-    ActiveSupport::Notifications.subscribed(counter, "sql.active_record") { MailboxScreen.new(at("maya/support")).render }
-
-    assert_equal 1, asked
+    assert_equal few, queries.call
   end
 
   test "an inbox with nothing in it says so, in the words of the view it is" do

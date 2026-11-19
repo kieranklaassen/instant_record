@@ -77,7 +77,7 @@ def cross_runtime(cc, spinel_home, out, runtime, run):
     return packages
 
 
-def certain_type_errors(app_c):
+def certain_type_errors(generated):
     """Lines of the app's screens where the compiler already knows a hash is of the wrong type.
 
     Spinel types a whole program. A hash whose value comes from a record's column is a hash
@@ -85,26 +85,24 @@ def certain_type_errors(app_c):
     TypeError that would only show on the phone. It is found here instead.
     """
     found, place = [], ""
-    with open(app_c, errors="replace") as file:
-        for line in file:
-            if line.startswith("#line "):
-                place = line
-            elif "(expected Hash)" in line and "sp_raise_cls(\"TypeError\"" in line:
-                at = re.match(r'#line (\d+) "(?:app-src/)?(app/screens/[^"]+)"', place)
-                if at and f"{at.group(2)}:{at.group(1)}" not in found:
-                    found.append(f"{at.group(2)}:{at.group(1)}")
+    for line in generated.splitlines():
+        if line.startswith("#line "):
+            place = line
+        elif "(expected Hash)" in line and "sp_raise_cls(\"TypeError\"" in line:
+            at = re.match(r'#line (\d+) "(?:app-src/)?(app/screens/[^"]+)"', place)
+            if at and f"{at.group(2)}:{at.group(1)}" not in found:
+                found.append(f"{at.group(2)}:{at.group(1)}")
     return found
 
 
-def loose_node_fields(app_c):
+def loose_node_fields(generated):
     """The fields of a screen's node that the compiler did not type as a hash of strings.
 
     One hash of another kind handed to `params:` or `args:` anywhere in the app makes the
     compiler type the node's field loosely, and it then reads every screen's hashes wrongly:
     the app crashes on its first render. The struct is the place that shows it.
     """
-    text = open(app_c, errors="replace").read()
-    found = re.search(r"^struct sp_InstantRecord__Native__Node_s \{(.*?)^\}", text, re.S | re.M)
+    found = re.search(r"^struct sp_InstantRecord__Native__Node_s \{(.*?)^\}", generated, re.S | re.M)
     if not found:
         return []
     fields = re.findall(r"(\w+) \* ?iv_(link_params|args|props);", found.group(1))
@@ -137,11 +135,13 @@ def main():
          "--ext-entry", ",".join("NativeBridge." + entry for entry in ENTRIES),
          *flags, "main_native.rb", "-o", app_c],
         cwd=tree, env={**path_env, "CPATH": T["SQLITE_SRC"]}, log="spinel.log")
-    loose = loose_node_fields(app_c)
+    with open(app_c, errors="replace") as file:
+        generated = file.read()
+    loose = loose_node_fields(generated)
     if loose:
         sys.exit("Some screen gives params: or args: a hash that does not hold only strings (the compiler typed a node's "
                  + ", ".join(loose) + " loosely). Call to_s on a value that comes from a record, and write Node.strings for an empty hash.")
-    wrong = certain_type_errors(app_c)
+    wrong = certain_type_errors(generated)
     if wrong:
         sys.exit("A hash given to params: or args: must hold strings. Call to_s on a value that comes from a record:\n  " + "\n  ".join(wrong))
 

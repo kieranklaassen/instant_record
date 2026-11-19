@@ -24,4 +24,5 @@ class MailDirectory
   end
 
   def self.verifier = Rails.application.message_verifier(:inbox_sync)
+  private_class_method :verifier
 end

@@ -254,8 +254,7 @@ module InstantRecord
       end
 
       # A native host opened another database file: drop what was held in
-      # memory about the one before. Everything else the client knows is read
-      # from the database each time.
+      # memory about the one before.
       def forget_database
         reset_stream
         history_marks.clear

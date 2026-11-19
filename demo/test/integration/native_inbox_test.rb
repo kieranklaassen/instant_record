@@ -44,7 +44,6 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
     def cursor = call("cursor").first[/cursor=(\d+)/, 1].to_i
     def identity = call("cursor").first[/identity=(\S*)/, 1].to_s
 
-    # ir_boot and ir_open, by the host's own two words.
     def boot(database) = send_path("boot", database)
     def open(database) = send_path("open", database)
 
