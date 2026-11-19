@@ -48,5 +48,11 @@ Gemini Nano on desktop Chrome. Nothing is sent to the server. Choosing
 On-device downloads the model the first time. In a browser without the API the
 option is off, and an offline visitor keeps their draft until they reconnect.
 
+Only Rails ever calls a provider. The compiled site holds no key and no
+RubyLLM code: `compiled/pipeline/carve.py` leaves the initializer and
+`app/models/assistant` out of the build (`test/compiled_carve_test.rb` fails if
+a file that uses RubyLLM is carried in), and its Server engine posts the
+question to Rails like any other browser.
+
 **Auto** asks Rails when online and the browser's model when offline or when
 Rails cannot be reached.
