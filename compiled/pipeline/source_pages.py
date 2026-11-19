@@ -23,11 +23,12 @@ def write_source_pages(app, dist, version, demo):
         files = [(f"app/models/{model}.rb", root / f"app/models/{model}.rb") for model in models]
         files.extend((rel, root / rel) for rel in [
             f"app/controllers/{controller}_controller.rb", f"app/views/{controller}/{action}.html.erb"])
-        if key in ("assistant", "email"):
-            script_name = "assistant_chat" if key == "assistant" else "mailbox"
-            script = f"app/javascript/controllers/{script_name}_controller.js"
-            files.append((script, root / script))
+        if key == "email":
+            files.extend((rel, root / rel) for rel in [
+                "app/frontend/pages/Email/Inbox.jsx", "app/frontend/components/MailList.jsx", "app/frontend/components/MailReader.jsx"])
         if key == "assistant":
+            script = "app/javascript/controllers/assistant_chat_controller.js"
+            files.append((script, root / script))
             samples = "app/javascript/controllers/assistant_examples.js"
             files.append((samples, root / samples))
             history = "app/controllers/assistant/history_controller.rb"

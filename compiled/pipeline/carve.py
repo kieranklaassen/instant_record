@@ -28,6 +28,8 @@ REMOVE = [
     "config/initializers/inertia_rails.rb",
     "app/controllers/source_controller.rb", "app/controllers/assistant/replies_controller.rb",
     "app/controllers/slack/resets_controller.rb", "app/controllers/email/sync_controller.rb", "app/models/mailbox.rb",
+    # The shell snapshot is built on the server; the worker only downloads the file.
+    "app/models/mail_shell.rb", "app/jobs/email/shell_build_job.rb",
     "app/views/source", "app/views/pwa",
     "app/helpers/source_helper.rb",
     "test", "db/v2_migrate", "db/seeds.rb", "config/routes", "script", "lib/tasks",
