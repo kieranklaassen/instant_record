@@ -48,11 +48,18 @@ function fakeModel(state) {
   };
 }
 
+const providerCalls = [];
 const browser = await chromium.launch({ channel: "chrome" });
 try {
   const open = async state => {
     const context = await browser.newContext({ viewport: { width: 1440, height: 840 } });
     await context.addInitScript(fakeModel, state);
+    // A model provider is only ever asked by Rails: the browser must never call one.
+    context.on("request", request => {
+      const url = new URL(request.url());
+      if (/anthropic|openai|googleapis\.com\/v1|generativelanguage/.test(url.host + url.pathname)) providerCalls.push(request.url());
+      if (url.pathname.startsWith("/assistant/replies") && url.origin !== new URL(origin).origin) providerCalls.push(request.url());
+    });
     const page = await context.newPage();
     const errors = [];
     page.on("pageerror", error => errors.push(error.message));
@@ -212,5 +219,6 @@ try {
     assert.deepEqual(errors, []);
     await context.close();
   }
+  assert.deepEqual(providerCalls, []);
   console.log("Server replies with history, offline replies from the browser's model, the engine switch, stop, fallback, no model and download passed.");
 } finally { await browser.close(); }
