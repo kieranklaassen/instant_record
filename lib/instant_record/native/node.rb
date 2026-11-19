@@ -36,12 +36,33 @@ module InstantRecord
         out << ",\"id\":" << Node.quote(@id)
         out << ",\"text\":" << Node.quote(@text)
         out << ",\"action\":" << Node.quote(@action)
-        out << ",\"params\":"
-        Node.write_pairs(out, @params)
-        out << ",\"args\":"
-        Node.write_pairs(out, @args)
-        out << ",\"props\":"
-        Node.write_pairs(out, @props)
+        # Three loops and not one method called three times: the phone's
+        # compiler gives each hash the type of what it was handed, and a
+        # shared method would have to convert between them.
+        out << ",\"params\":{"
+        first = true
+        @params.each do |name, value|
+          out << "," unless first
+          first = false
+          out << Node.quote(name.to_s) << ":" << Node.quote(value.to_s)
+        end
+        out << "}"
+        out << ",\"args\":{"
+        first = true
+        @args.each do |name, value|
+          out << "," unless first
+          first = false
+          out << Node.quote(name.to_s) << ":" << Node.quote(value.to_s)
+        end
+        out << "}"
+        out << ",\"props\":{"
+        first = true
+        @props.each do |name, value|
+          out << "," unless first
+          first = false
+          out << Node.quote(name.to_s) << ":" << Node.quote(value.to_s)
+        end
+        out << "}"
         out << ",\"children\":["
         first = true
         @children.each do |child|
@@ -50,18 +71,6 @@ module InstantRecord
           child.write(out)
         end
         out << "]}"
-      end
-
-      # An object of strings by name, in the order they were given.
-      def self.write_pairs(out, pairs)
-        out << "{"
-        first = true
-        pairs.each do |name, value|
-          out << "," unless first
-          first = false
-          out << Node.quote(name) << ":" << Node.quote(value)
-        end
-        out << "}"
       end
 
       HEX = "0123456789abcdef".freeze

@@ -37,7 +37,7 @@ class MailboxScreen < InstantRecord::Native::Screen
       toolbar do
         button "Inboxes", image: "person.crop.circle", position: "leading" do
           MailDirectory.inboxes(member).each do |name|
-            item name.capitalize, link: "mailbox", params: { "member" => member, "inbox" => name }, image: "tray", selected: name == inbox
+            item name.capitalize, link: "mailbox", params: { "member" => member, "inbox" => name.to_s }, image: "tray", selected: name == inbox
           end
         end
         button "View", image: "slider.horizontal.3", position: "trailing" do
