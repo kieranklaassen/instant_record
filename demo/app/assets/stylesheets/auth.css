@@ -1,0 +1,145 @@
+/* The Auth demo: who you are on top, what this browser holds under it, and a
+   panel to try the sync server yourself. A note's audience is its colour. */
+
+.demo-auth .auth-page { max-width: 760px; }
+.demo-auth .intro { max-width: 38em; margin: 12px 0 0; color: var(--ink-2); font-size: 1.05rem; }
+.demo-auth .auth-small { margin: 12px 0 0; color: var(--muted); font-size: 0.875rem; max-width: 44em; }
+.demo-auth section + section { margin-top: 32px; }
+
+/* --- The session ---------------------------------------------------------- */
+
+.demo-auth .auth-session { padding: 24px; }
+.demo-auth .auth-who {
+  margin: 6px 0 0;
+  font-family: var(--serif);
+  font-size: 1.6rem;
+  letter-spacing: -0.015em;
+  line-height: 1.2;
+}
+.demo-auth .auth-facts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin: 18px 0 0;
+  padding: 14px 0;
+  border-top: 1px solid var(--hairline-soft);
+  border-bottom: 1px solid var(--hairline-soft);
+}
+.demo-auth .auth-facts div { min-width: 0; }
+.demo-auth .auth-facts dt { color: var(--muted); font-size: 0.8rem; }
+.demo-auth .auth-facts dd { margin: 2px 0 0; font-weight: 600; font-variant-numeric: tabular-nums; text-transform: capitalize; }
+
+.demo-auth .auth-people { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 18px; }
+.demo-auth .auth-person {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  height: 48px;
+  padding: 0 16px 0 6px;
+  background: var(--card);
+  color: var(--ink);
+  box-shadow: 0 0 0 1px var(--hairline);
+}
+.demo-auth .auth-person:hover { filter: none; background: var(--paper); }
+.demo-auth .auth-person[aria-pressed="true"] { background: var(--accent-soft); box-shadow: 0 0 0 1.5px var(--accent); }
+.demo-auth .auth-avatar {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+.demo-auth .auth-person-name { font-weight: 600; }
+.demo-auth .auth-person-role { color: var(--muted); font-weight: 500; font-size: 0.8rem; }
+.demo-auth .auth-sign-out {
+  margin-left: auto;
+  background: transparent;
+  color: var(--ink-2);
+  box-shadow: 0 0 0 1px var(--hairline);
+}
+.demo-auth .auth-sign-out:hover { filter: none; background: var(--paper-2); }
+
+/* --- The notes ------------------------------------------------------------ */
+
+.demo-auth .auth-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 22px;
+  height: 22px;
+  margin-left: 6px;
+  padding: 0 7px;
+  border-radius: 9999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+.demo-auth .auth-list { display: grid; gap: 10px; margin: 12px 0 0; padding: 0; list-style: none; }
+.demo-auth .auth-note { padding: 16px 18px; border-left: 3px solid var(--note-ink, var(--hairline)); }
+.demo-auth .auth-note-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.demo-auth .auth-note-head h3 { margin-right: auto; font-size: 1rem; }
+.demo-auth .auth-audience { background: var(--note-wash, var(--paper-2)); color: var(--note-ink, var(--muted)); }
+.demo-auth .auth-note-body { margin: 6px 0 0; color: var(--ink-2); overflow-wrap: anywhere; }
+.demo-auth .auth-note-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; }
+.demo-auth .auth-owner { color: var(--muted); font-size: 0.85rem; }
+.demo-auth .auth-delete {
+  height: 28px;
+  padding: 0 12px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  box-shadow: 0 0 0 1px var(--hairline);
+}
+.demo-auth .auth-delete:hover { filter: none; background: var(--danger-bg); color: var(--danger); }
+.demo-auth .auth-empty { margin: 12px 0 0; color: var(--muted); }
+
+.demo-auth .audience-everyone { --note-ink: #3E6B4F; --note-wash: #E7F0E9; }
+.demo-auth .audience-members { --note-ink: #2F6CA3; --note-wash: #E6EFF7; }
+.demo-auth .audience-admins { --note-ink: #9A4A2A; --note-wash: #F6E6DD; }
+.demo-auth .audience-owner { --note-ink: #6A4FA0; --note-wash: #EEE8F7; }
+
+/* --- Writing a note ------------------------------------------------------- */
+
+.demo-auth .auth-form { display: grid; gap: 10px; margin-top: 16px; padding: 18px; }
+.demo-auth .auth-form h3 { font-size: 1rem; }
+.demo-auth .auth-form textarea { resize: vertical; }
+.demo-auth .auth-form-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.demo-auth .auth-form-row label { color: var(--muted); font-size: 0.9rem; }
+.demo-auth .auth-form-row select {
+  height: 36px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--ink);
+  font: inherit;
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+.demo-auth .auth-form-row input[type="submit"] { margin-left: auto; }
+.demo-auth .auth-form .auth-small { margin: 0; }
+
+/* --- Try it yourself ------------------------------------------------------ */
+
+.demo-auth .auth-proof { padding: 24px; }
+.demo-auth .auth-proof > p { margin: 8px 0 0; color: var(--ink-2); max-width: 42em; }
+.demo-auth .auth-proof-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+.demo-auth .auth-proof-out:empty { display: none; }
+.demo-auth .auth-proof-out {
+  margin-top: 16px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--paper);
+  box-shadow: inset 0 0 0 1px var(--hairline-soft);
+  font-family: var(--mono);
+  font-size: 0.82rem;
+}
+.demo-auth .auth-proof-out p { margin: 0; }
+.demo-auth .auth-proof-out p + p { margin-top: 4px; }
+
+@media (max-width: 640px) {
+  .demo-auth .auth-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .demo-auth .auth-sign-out { margin-left: 0; }
+  .demo-auth .auth-who { font-size: 1.35rem; }
+}
