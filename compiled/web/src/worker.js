@@ -82,6 +82,9 @@ let changes;
 
 let host = null;
 let currentCursor = null;
+// Read with the cursor, and sent with each poll so the server can say when the
+// person behind this browser has changed.
+let currentIdentity = "";
 let kickTimer = null;
 let pollInFlight = false;
 let draining = null;
@@ -175,7 +178,8 @@ async function drain(initial = false, early = null) {
     });
     const needsBootstrap = plan.bootstrap && !host.syncState().bootstrapped;
     if (push || snapshot) report({ kind: "sync-pass", path: `${result.pending} pending` });
-    currentCursor = needsBootstrap ? null : result.cursor;
+    // After a bootstrap the next poll reads the cursor and the identity afresh.
+    currentCursor = plan.bootstrap ? null : result.cursor;
     if (result.changed || result.notified) {
       save();
     }
@@ -207,8 +211,10 @@ async function pollChanges() {
         return;
       }
       currentCursor = state.cursor;
+      currentIdentity = state.identity;
     }
-    const { status, text } = await fetchReply("GET", `/events?after=${currentCursor}&window=0`);
+    const who = currentIdentity ? `&identity=${encodeURIComponent(currentIdentity)}` : "";
+    const { status, text } = await fetchReply("GET", `/events?after=${currentCursor}&window=0${who}`);
     if (status !== 200) return;
     if (!text.trim() || draining || kickTimer || revision !== snapshotRevision) return;
 
@@ -216,6 +222,12 @@ async function pollChanges() {
       if (draining || kickTimer || revision !== snapshotRevision) return;
       const consumed = host.consumeStream(text);
       currentCursor = consumed.cursor;
+      // The server said this browser synced as someone else, and the client dropped what it
+      // held. Bootstrap as whoever is here now, at once, and never poll from zero.
+      if (!consumed.bootstrapped) {
+        currentCursor = null;
+        kickSync(0);
+      }
       if (consumed.applied > 0 || consumed.notified) {
         save();
         return { changes: consumed.changes };

@@ -53,7 +53,7 @@ module WasmBridge
   # Capture the exact outgoing batch before the worker yields to browser requests.
   def self.sync_plan
     mutations = InstantRecord::Client.pending_mutations
-    push = mutations.empty? ? "" : JSON.generate({ mutations: mutations })
+    push = mutations.empty? ? "" : JSON.generate(InstantRecord::Client.mutations_payload(mutations))
     File.write("/host/out", JSON.generate({ push: push, bootstrap: !InstantRecord::Client.bootstrapped? }))
     0
   end
@@ -68,7 +68,8 @@ module WasmBridge
 
   def self.handle_stream
     applied = InstantRecord::Client.consume_stream(File.read("/host/in"))
-    File.write("/host/out", "applied=" + applied.to_s + " cursor=" + InstantRecord::Client.cursor.to_s)
+    # A batch can be the server's reset, after which there is no cursor to report.
+    File.write("/host/out", "applied=" + applied.to_s + " cursor=" + InstantRecord::Client.cursor.to_s + " bootstrap=" + (InstantRecord::Client.bootstrapped? ? "ready" : "needed"))
     0
   end
 
@@ -96,7 +97,8 @@ module WasmBridge
   end
 
   def self.cursor
-    File.write("/host/out", "cursor=" + InstantRecord::Client.cursor.to_s + " pending=" + InstantRecord::Client.pending_count.to_s + " bootstrap=" + (InstantRecord::Client.bootstrapped? ? "ready" : "needed"))
+    key = InstantRecord::Client.identity_key
+    File.write("/host/out", "cursor=" + InstantRecord::Client.cursor.to_s + " pending=" + InstantRecord::Client.pending_count.to_s + " bootstrap=" + (InstantRecord::Client.bootstrapped? ? "ready" : "needed") + " identity=" + (key.nil? ? "" : key))
     0
   end
 end

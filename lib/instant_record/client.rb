@@ -131,6 +131,40 @@ module InstantRecord
         !SyncMetadata.get("cursor").nil?
       end
 
+      # The name the server gave the person this browser synced as, when the
+      # server tells people apart. It is sent back with every request so the
+      # server can say when that person has changed.
+      def identity_key
+        SyncMetadata.get("identity")
+      end
+
+      # The body of an outbox drain. The compiled worker prepares the same
+      # request ahead of the pass, so both build it here.
+      def mutations_payload(mutations)
+        key = identity_key
+        key.nil? ? { mutations: mutations } : { mutations: mutations, identity: key }
+      end
+
+      # The server says this browser synced as someone else. Everything it was
+      # sent for that person goes, with the writes they had queued, and the
+      # next pass starts again from a bootstrap as whoever is here now.
+      def reset(event)
+        applying_remote do
+          Array(event["types"]).each do |type|
+            model = InstantRecord.synced_model(type)
+            model.delete_all if model
+          end
+        end
+        OutboxMutation.delete_all
+        SyncMetadata.all.each do |entry|
+          entry.destroy if entry.key == "cursor" || entry.key == "identity" || entry.key.start_with?("history:")
+        end
+        history_marks.clear
+        unlisted_changes
+        instrument("reset")
+        true
+      end
+
       # First-sync hydration: windowed current state + cursor in one response.
       # The server captures the cursor BEFORE reading rows, so any overlap
       # with subsequent events re-applies idempotently. Returns true when the
@@ -145,6 +179,7 @@ module InstantRecord
           # Cursor written last: a crash mid-apply leaves it nil, so the next
           # tick re-bootstraps; upserts make the retry idempotent. A failure
           # never falls through to a cursor-0 poll of the full change log.
+          SyncMetadata.set("identity", body["identity"]) if body["identity"]
           self.cursor = body["cursor"]
           true
         end
@@ -159,7 +194,7 @@ module InstantRecord
         return false if mutations.empty?
 
         instrument("drain") do |event|
-          body = transport.post_json("/mutations", { mutations: mutations })
+          body = transport.post_json("/mutations", mutations_payload(mutations))
           apply_results(body["results"])
 
           results = Array(body["results"]).map { |r| r.deep_stringify_keys }
@@ -211,8 +246,19 @@ module InstantRecord
         applied = 0
         newest_cursor = nil
 
+        was_reset = false
+
         Array(events).each do |event|
+          # Nothing after a reset belongs to this client any more, and the
+          # cursor it would have advanced is gone.
+          next if was_reset
+
           event = event.deep_stringify_keys
+          if event["operation"] == "reset"
+            was_reset = reset(event)
+            applied += 1
+            next
+          end
           applied += 1 if apply_change(event)
           # The cursor advances for every event, changed or not: an echo we chose
           # to ignore must not be handed to us again.
@@ -221,7 +267,7 @@ module InstantRecord
 
         # One cursor write per batch, as poll_changes does: a crash before this
         # re-applies the batch, which the upserts make safe.
-        self.cursor = newest_cursor if newest_cursor
+        self.cursor = newest_cursor if newest_cursor && !was_reset
         notify_changed if applied.positive?
         instrument("stream", applied: applied) if applied.positive?
         applied
@@ -241,10 +287,20 @@ module InstantRecord
         changed = false
         applied = 0
         last_cursor = nil
+        was_reset = false
+        key = identity_key
+        path = "/events?after=#{cursor}&window=0"
+        path += "&identity=#{key}" unless key.nil?
 
         instrument("poll") do |note|
-          transport.each_event("/events?after=#{cursor}&window=0") do |event|
+          transport.each_event(path) do |event|
             event = event.deep_stringify_keys
+            next if was_reset
+            if event["operation"] == "reset"
+              was_reset = reset(event)
+              changed = true
+              next
+            end
             if apply_change(event)
               changed = true
               applied += 1
@@ -255,7 +311,7 @@ module InstantRecord
 
           # One cursor write per poll, not per event. A crash before this line
           # re-applies the batch next poll; upserts + LWW make that idempotent.
-          self.cursor = last_cursor if last_cursor
+          self.cursor = last_cursor if last_cursor && !was_reset
         end
         changed
       rescue Transport::Error => e

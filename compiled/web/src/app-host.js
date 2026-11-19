@@ -212,6 +212,7 @@ export class AppHost {
     return {
       applied: Number(/applied=(\d+)/.exec(text)?.[1] ?? 0),
       cursor: Number(/cursor=(\d+)/.exec(text)?.[1] ?? 0),
+      bootstrapped: !text.includes("bootstrap=needed"),
       ...readNotice(decoder.decode(notifyEntry.data)),
       exit: result.exit,
       errors: result.errors,
@@ -231,6 +232,8 @@ export class AppHost {
       bootstrapped: text.includes("bootstrap=ready"),
       cursor: Number(/cursor=(\d+)/.exec(text)?.[1] ?? 0),
       pending: Number(/pending=(\d+)/.exec(text)?.[1] ?? 0),
+      // The name the server gave whoever this browser synced as, when it tells people apart.
+      identity: /identity=(\S+)/.exec(text)?.[1] ?? "",
     };
   }
 }
