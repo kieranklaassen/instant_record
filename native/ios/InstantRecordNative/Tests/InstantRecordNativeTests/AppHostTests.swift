@@ -14,11 +14,11 @@ final class AppHostTests: XCTestCase {
     private let renderMailbox = "render mailbox inbox=support,member=maya"
 
     /// A host whose network is `answer`. Every request it makes is kept, as "METHOD path".
-    private func host(answer: @escaping (String) -> String = { _ in "200\n" }) -> AppHost {
+    private func host(leaveWithin: TimeInterval = 1, answer: @escaping (String) -> String = { _ in "200\n" }) -> AppHost {
         let host = AppHost(engine: engine, root: mailbox, store: { route in
             let place = (route.params["member"] ?? "") + "-" + (route.params["inbox"] ?? "")
             return AppHost.Store(database: "/tmp/\(place).sqlite3", endpoint: "http://example.test/" + place)
-        }, exchange: { request in
+        }, leaveWithin: leaveWithin, exchange: { request in
             self.lock.withLock { self.fetched.append(String(request.prefix { $0 != "\n" }).replacingOccurrences(of: "http://example.test", with: "")) }
             return answer(request)
         }, clock: clock, reachability: network)
@@ -223,9 +223,78 @@ final class AppHostTests: XCTestCase {
         XCTAssertNil(host.typed[thread])
     }
 
-    func testLeavingAnInboxSyncsItOnceMoreThenClosesItAndOpensTheOther() {
-        let host = host()
+    /// Let the main queue run until `holds`, for at most a few seconds.
+    private func until(_ holds: () -> Bool) {
+        let limit = Date().addingTimeInterval(3)
+        while !holds(), Date() < limit { RunLoop.main.run(until: Date().addingTimeInterval(0.005)) }
+    }
+
+    func testWithNothingWaitingAnotherInboxIsOpenedAndDrawnBeforeAnythingIsFetched() {
+        let hold = Flag(), release = DispatchSemaphore(value: 0)
+        let host = host(answer: { _ in
+            if hold.on { release.wait() }
+            return "200\n"
+        })
         host.path = [thread]
+        host.settle()
+        engine.push = ""
+        engine.calls = []
+        fetched = []
+        hold.on = true
+
+        // Every fetch from here on hangs. The rows must not wait for one.
+        host.replace(with: billing)
+        until { host.screens[self.billing] != nil }
+
+        XCTAssertEqual(billing, host.root)
+        XCTAssertEqual([], host.path)
+        XCTAssertEqual(["b1"], host.screens[billing]?.children.map(\.id))
+        XCTAssertEqual(["open /tmp/maya-billing.sqlite3", "render mailbox inbox=billing,member=maya"], Array(engine.calls.prefix(2)))
+        XCTAssertFalse(lock.withLock { fetched }.contains { $0.contains("maya-support") }, "the inbox being left was synced first")
+        XCTAssertFalse(engine.calls.contains { $0.hasPrefix("sync ") }, "a sync ended before the rows were drawn")
+
+        hold.on = false
+        (0..<4).forEach { _ in release.signal() }
+        pass(host)
+
+        XCTAssertEqual("sync http://example.test/maya-billing", engine.calls.filter { $0.hasPrefix("sync ") }.last)
+        XCTAssertEqual([billing], Array(host.screens.keys))
+    }
+
+    func testWritesWaitingGetOneShortPassAndTheSwitchHappensWhateverComesOfIt() {
+        let hold = Flag(), release = DispatchSemaphore(value: 0)
+        let host = host(leaveWithin: 0.2, answer: { _ in
+            if hold.on { release.wait() }
+            return "200\n"
+        })
+        hold.on = true
+        host.perform("archive", args: ["id": "m2"], on: mailbox)
+        until { self.engine.push != "" }
+        engine.calls = []
+        fetched = []
+
+        // The server never answers. The switch must not wait for it.
+        let asked = Date()
+        host.replace(with: billing)
+        until { host.root == self.billing && host.screens[self.billing] != nil }
+        let took = Date().timeIntervalSince(asked)
+
+        XCTAssertEqual(billing, host.root)
+        XCTAssertEqual(["b1"], host.screens[billing]?.children.map(\.id))
+        XCTAssertLessThan(took, 1, "leaving waited for the network")
+        XCTAssertGreaterThan(took, 0.15, "the waiting writes were given no time at all")
+        XCTAssertTrue(lock.withLock { fetched }.contains("POST /maya-support/mutations"), "the waiting write was not tried")
+        XCTAssertTrue(engine.calls.contains("open /tmp/maya-billing.sqlite3"))
+        XCTAssertFalse(engine.calls.contains("sync http://example.test/maya-support"), "answers for the inbox that was left were handed to the app")
+
+        hold.on = false
+        (0..<6).forEach { _ in release.signal() }
+        host.settle()
+    }
+
+    func testWritesWaitingGoOutBeforeTheSwitchWhenTheServerAnswersInTime() {
+        let host = host()
+        host.perform("archive", args: ["id": "m2"], on: mailbox)
         host.settle()
         engine.calls = []
         fetched = []
@@ -234,12 +303,24 @@ final class AppHostTests: XCTestCase {
         pass(host)
 
         XCTAssertEqual(["sync_plan", "sync " + support, "open /tmp/maya-billing.sqlite3"], Array(engine.calls.prefix(3)))
-        XCTAssertEqual("sync http://example.test/maya-billing", engine.calls.filter { $0.hasPrefix("sync ") }.last)
-        XCTAssertEqual(["GET /maya-support/events?after=7&window=0", "GET /maya-billing/events?after=7&window=0"], fetched.filter { $0.hasPrefix("GET") })
+        XCTAssertEqual("POST /maya-support/mutations", lock.withLock { fetched }.first)
         XCTAssertEqual(billing, host.root)
-        XCTAssertEqual([], host.path)
-        XCTAssertEqual([billing], Array(host.screens.keys))
-        XCTAssertEqual(["b1"], host.screens[billing]?.children.map(\.id))
+    }
+
+    func testADatabaseThatHasNeverSyncedSaysSoOnArrivalAndOneThatHasDoesNot() {
+        let host = host()
+        engine.bootstrapped = false
+
+        host.replace(with: billing)
+        host.settle()
+        XCTAssertTrue(host.fetchingFirst)
+
+        pass(host)
+        XCTAssertFalse(host.fetchingFirst)
+
+        host.replace(with: mailbox)
+        host.settle()
+        XCTAssertFalse(host.fetchingFirst, "a file that has synced before has its mail to show")
     }
 
     func testAnotherViewOfTheSameDataDoesNotOpenItAgain() {

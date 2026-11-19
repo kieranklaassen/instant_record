@@ -79,6 +79,7 @@ public final class AppHost: ObservableObject {
     private let transport: Transport
     private let exchange: (String) -> String
     private let follows: Bool
+    private let leaveWithin: TimeInterval
     private let thread = EngineThread()
     private let network = DispatchQueue(label: "instant-record-network", attributes: .concurrent)
     private let lock = NSLock()
@@ -97,9 +98,10 @@ public final class AppHost: ObservableObject {
     /// `store` says where the first screen's data lives. It is asked again
     /// when a menu item puts another screen in the first one's place.
     /// `follows` is whether it follows the server's events while in front.
-    /// `exchange` stands in for the network in tests.
+    /// `leaveWithin` is how long writes waiting in a database may hold up
+    /// leaving it. `exchange` stands in for the network in tests.
     public init(engine: Engine, root: Route, views: Screens = Screens(), store: @escaping (Route) -> Store,
-                transport: Transport = Transport(), follows: Bool = true, exchange: ((String) -> String)? = nil,
+                transport: Transport = Transport(), follows: Bool = true, leaveWithin: TimeInterval = 1, exchange: ((String) -> String)? = nil,
                 pace: SyncSchedule.Pace = SyncSchedule.Pace(), clock: Timekeeper = MainClock(), reachability: Reachability = NetworkPath()) {
         self.engine = engine
         self.root = root
@@ -107,6 +109,7 @@ public final class AppHost: ObservableObject {
         self.store = store
         self.transport = transport
         self.follows = follows
+        self.leaveWithin = leaveWithin
         self.exchange = exchange ?? transport.exchange
         visible = [root]
         schedule = SyncSchedule(pace: pace, clock: clock) { [weak self] in self?.pass() }
@@ -176,8 +179,14 @@ public final class AppHost: ObservableObject {
     }
 
     /// Put another screen in the first one's place, as choosing another
-    /// account does. Its data may live in another database: the one being
-    /// left is synced once more while it is still open, then closed.
+    /// account does. Its data may live in another database, which is opened
+    /// and drawn at once from what is on the phone: no network stands
+    /// between the tap and the rows. It syncs afterwards, as any pass does.
+    ///
+    /// Writes still waiting in the database being left get one pass first,
+    /// for at most `leaveWithin` seconds. Whatever comes of it the switch
+    /// happens, and what did not go out stays in that file until it is
+    /// opened again.
     public func replace(with route: Route) {
         let next = store(route)
         thread.run {
@@ -186,7 +195,10 @@ public final class AppHost: ObservableObject {
                 self.open = next
                 return self.arrive(at: route)
             }
+            var changed = false
             let change = {
+                guard !changed else { return }
+                changed = true
                 if self.engine.open(database: next.database) {
                     self.open = next
                     self.arrive(at: route)
@@ -196,7 +208,9 @@ public final class AppHost: ObservableObject {
                     self.report()
                 }
             }
-            if let leaving { self.run(leaving) { _ in change() } } else { change() }
+            guard let leaving, self.pending() > 0 else { return change() }
+            self.run(leaving) { _ in change() }
+            self.network.asyncAfter(deadline: .now() + self.leaveWithin) { self.thread.run(change) }
         }
     }
 
@@ -376,9 +390,17 @@ public final class AppHost: ObservableObject {
         }
     }
 
+    // The first screen changes. It is drawn here, on the engine's thread,
+    // from the database now open, and shown together with the change, so
+    // its rows are on screen before anything is fetched. Only a database
+    // that has never synced has nothing to show yet.
     private func arrive(at route: Route) {
+        let drawn = engine.call("render", route.input()).flatMap { try? Node(json: $0) }
+        let first = engine.syncs && position()["bootstrap"] == "needed"
         DispatchQueue.main.async {
             self.root = route
+            if let drawn { self.screens[route] = drawn }
+            self.fetchingFirst = first
             self.path = []
             self.follow()
             self.schedule.now()

@@ -198,10 +198,15 @@ dismissed or a pass succeeds. A screen that cannot be drawn keeps the last
 one that could.
 
 Each account has its own SQLite file, because one file syncs with one
-address. The app says which (`AppHost.Store`). When the first screen
-changes, the host syncs the database being left once more, closes it and
-opens the other (`ir_open`). Writes that could not go out wait in that file
-until it is opened again.
+address. The app says which (`AppHost.Store`). The files are kept: nothing
+deletes one but a launch with `-reset YES`.
+
+Switching account does not wait for the network. The host closes the
+database being left, opens the other (`ir_open`) and draws it from what is
+on the phone, and only then syncs it. "Getting your mail" shows only for a
+file that has never synced. Writes still waiting in the database being left
+get one pass first, for at most a second (`leaveWithin`). What did not go
+out by then waits in that file until it is opened again.
 
 ## Developing: no rebuild after an edit
 
