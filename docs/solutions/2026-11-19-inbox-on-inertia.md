@@ -4,7 +4,7 @@ Date: 2026-11-19. Answers `docs/brainstorms/2026-11-19-inbox-inertia-react-requi
 
 ## The answer
 
-InstantRecord works under Inertia, and the page stays an ordinary Inertia page. Its state is its props and its address. Reading is a partial reload, writing is a form post, and nothing holds a second copy of the data.
+InstantRecord works under Inertia, and the page stays an ordinary Inertia page. Its state is its props and its address. Reading is a partial reload, writing is a form post, and nothing holds a second copy of the data. What the page does hold is small and short-lived: the marks, held archives and replies that are on their way, laid over the props until the next reload answers.
 
 Inertia 3 already has the two seams this needed, and the gem's `frontend/` package fills each with one small file:
 
@@ -20,11 +20,11 @@ Inertia 3 already has the two seams this needed, and the gem's `frontend/` packa
 3. The controller answers from the local database. Inertia merges the props and re-renders.
 4. Rows are memoized on their own data, so a change to one conversation redraws one row. The list is virtual, so only the rows on screen exist.
 
-A write is `router.post` or `useForm`, with Inertia's `optimistic` option for archive and read. Rails redirects back and the answer carries fresh props.
+A new conversation is `useForm`: Rails redirects back and the answer carries fresh props. A reply, a mark and an archive are `write`, a form post that does not visit, followed by one partial reload, with the change drawn at once from the page's own overlay.
 
 ## What it cost
 
-About 400 lines, none of which knows about mail. They ship in the gem, in `frontend/`, as a package an app installs with `npm install "$(bundle show instant_record)/frontend"`:
+About 400 lines at first, about 900 after the polish, none of which knows about mail. They ship in the gem, in `frontend/`, as a package an app installs with `npm install "$(bundle show instant_record)/frontend"`:
 
 | File | Job |
 | --- | --- |

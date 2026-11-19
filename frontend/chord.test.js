@@ -77,3 +77,7 @@ test("key caps follow the platform", () => {
   assert.deepEqual(keycaps("Shift+J", pc), ["Shift", "J"])
   assert.deepEqual(keycaps("Escape", pc), ["Esc"])
 })
+
+test("a keydown with no key, as autofill sends, names nothing", () => {
+  assert.equal(chord({}, pc), null)
+})

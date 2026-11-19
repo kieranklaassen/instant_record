@@ -49,9 +49,10 @@ export function useMailActions(scope, { notify, hold }) {
       async commit({ keepalive = false } = {}) {
         // The page is going: send them all now and wait for nothing.
         if (keepalive) return void ids.forEach((id) => post({ kind: "archive", parent_id: id }, { keepalive }).catch(() => {}))
-        try {
-          for (const id of ids) await post({ kind: "archive", parent_id: id })
-        } catch {
+        // All at once, and each able to outlive the page: leaving in the
+        // middle must not drop the rest.
+        const answers = await Promise.allSettled(ids.map((id) => post({ kind: "archive", parent_id: id }, { keepalive: true })))
+        if (answers.some((answer) => answer.status === "rejected")) {
           notify(ids.length === 1 ? "Couldn’t archive that. It’s back in the list." : "Couldn’t archive everything. The rest are back in the list.")
         }
         await refresh(MAIL)

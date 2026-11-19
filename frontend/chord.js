@@ -23,7 +23,8 @@ const isLetter = (key) => key.length === 1 && key.toLowerCase() !== key.toUpperC
 // The chord an event is, or null for one no binding can name (Alt, or the
 // other platform's modifier).
 export function chord(event, { apple = isApple() } = {}) {
-  if (event.altKey) return null
+  // Autofill sends a keydown with no key.
+  if (event.altKey || !event.key) return null
   const mod = apple ? event.metaKey : event.ctrlKey
   if (apple ? event.ctrlKey : event.metaKey) return null
 

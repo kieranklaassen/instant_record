@@ -157,11 +157,12 @@ export default function Inbox({ member, inbox, inboxes, people, mail, thread, co
     setRestore(null)
   }, [restore, ids, focus])
 
-  const mark = (unread) => {
+  // `only` is the reader's own button: that conversation, whatever is selected.
+  const mark = (unread, only) => {
     const { rows, selected } = now.current
     const state = new Map(rows.map((row) => [row.id, row.unread]))
-    const list = targets().filter((id) => state.get(id) !== unread)
-    if (unread && !selected.size) setOpen(false)
+    const list = (only || targets()).filter((id) => state.get(id) !== unread)
+    if (unread && (only || !selected.size)) setOpen(false)
     actions.mark(list, unread)
   }
 
@@ -184,7 +185,9 @@ export default function Inbox({ member, inbox, inboxes, people, mail, thread, co
     setReplying(false)
     actions.reply(id, body, now.current.replies.filter((reply) => !reply.pending)).then((taken) => {
       if (taken) return thenArchive && archive([id])
-      drafts.save(id, body)
+      // Something may have been typed there since: keep both.
+      const since = drafts.read(id)
+      drafts.save(id, since ? `${body}\n\n${since}` : body)
       notify("Couldn’t send your reply. It’s back in the box.")
       if (now.current.focusedId !== id) return
       setReplyVersion((version) => version + 1)
@@ -277,11 +280,11 @@ export default function Inbox({ member, inbox, inboxes, people, mail, thread, co
             {composing ? (
               <Composer scope={scope} drafts={drafts} sender={sender} keys={keys} onClose={back} onSent={() => compose(false)}
                 onSend={() => { sent.current = { top: rows[0]?.id } }}
-                onFail={() => notify("Couldn’t send that. It’s still here.")} />
+                onFail={() => { sent.current = null; notify("Couldn’t send that. It’s still here.") }} />
             ) : message ? (
               <>
-                <Thread message={message} replies={replies} keys={keys} scroller={reader}
-                  onReply={reply} onUnread={() => mark(true)} onArchive={() => archive([message.id])} />
+                <Thread key={message.id} message={message} replies={replies} keys={keys} scroller={reader}
+                  onReply={reply} onUnread={() => mark(true, [message.id])} onArchive={() => archive([message.id])} />
                 <ReplyBox key={`${message.id}:${replyVersion}`} id={message.id} address={message.address} open={replying}
                   keys={keys} drafts={drafts} sender={sender}
                   onOpen={reply} onClose={() => setReplying(false)} onSend={sendReply} />

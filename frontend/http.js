@@ -33,8 +33,9 @@ const xsrf = () => decodeURIComponent(document.cookie.match(/(?:^|; )XSRF-TOKEN=
 // each this way and reloads its props once at the end, where `router.post`
 // would answer every one with the whole page.
 //
-// It reaches Rails, with the token Inertia's own requests carry, or the
-// worker beside a local database. `keepalive` lets the browser finish the
+// It reaches Rails with the token Inertia's own requests carry. Beside a
+// local database it is the page's own `fetch`, which the worker is meant to
+// answer; that half has not run. `keepalive` lets the browser finish the
 // request after the page is gone.
 export async function write(url, data, { keepalive = false } = {}) {
   const headers = { "X-Requested-With": "XMLHttpRequest" }
