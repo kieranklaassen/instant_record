@@ -187,6 +187,25 @@
 .maildesk time { font-size: 12px; white-space: nowrap; }
 .mail-row strong, .mail-snippet, .mail-row-meta b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mail-row strong { margin-top: 2px; font-weight: 500; }
+
+/* Unread: a dot on the avatar, the subject and sender in full weight. */
+.mail-row { position: relative; }
+.mail-row[data-unread=true]::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  margin-top: -3px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.mail-row[data-unread=true] strong { font-weight: 650; color: var(--ink); }
+.mail-row[data-unread=true] .mail-row-meta b { font-weight: 700; }
+.mail-row[data-unread=false] .mail-row-meta b { font-weight: 500; color: var(--ink-2); }
+.mail-unread-count { margin-left: auto; font-size: 13px; font-weight: 500; color: var(--accent); }
+.mail-thread-actions { display: flex; gap: 8px; }
 .mail-snippet { margin-top: 1px; font-size: 13px; }
 .mail-empty-list { padding: 0 10px; font-size: 14px; }
 

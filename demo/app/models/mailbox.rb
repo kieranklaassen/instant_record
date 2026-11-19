@@ -52,7 +52,7 @@ class Mailbox < ApplicationRecord
       when "message"
         raise ArgumentError, "Invalid email address" unless entry.address.to_s.match?(URI::MailTo::EMAIL_REGEXP) && entry.address.size <= 254
         raise ArgumentError, "Enter a subject and message" if entry.subject.blank? || entry.body.blank? || entry.parent_id.present?
-      when "archive", "reply"
+      when "archive", "reply", "read", "unread"
         raise ArgumentError, "Conversation unavailable" unless mail_entries.exists?(id: entry.parent_id, kind: "message")
         raise ArgumentError, "Enter a reply" if entry.kind == "reply" && entry.body.blank?
       end

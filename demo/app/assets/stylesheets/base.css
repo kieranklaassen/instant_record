@@ -162,8 +162,11 @@ button:disabled, input[type="submit"]:disabled { opacity: 0.55; cursor: default;
    One frame for every demo: the mark, the demo tabs, the network switch and
    the source drawer. On wide screens it spans the inspector rail too. */
 
+/* Sticky, so it stays above the fixed inspector rail (which starts at
+   --bar-h) instead of scrolling away and leaving a gap over it. */
 .site-bar {
-  position: relative;
+  position: sticky;
+  top: 0;
   z-index: 210;
   display: flex;
   align-items: center;

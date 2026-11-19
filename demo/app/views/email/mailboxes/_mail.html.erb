@@ -1,10 +1,10 @@
 <section class="mail-list" aria-label="Conversations" data-action="scroll->mailbox#scroll" data-before="<%= @before_id %>" data-at="<%= @before_at %>">
-  <header><h2><%= @inbox.capitalize %> inbox</h2><% unless @before_id.empty? %><a href="/email?member=<%= @member %>&amp;inbox=<%= @inbox %>">Newest</a><% end %></header>
+  <header><h2><%= @inbox.capitalize %> inbox</h2><% if @unread_count > 0 %><span class="mail-unread-count"><%= @unread_count %> unread</span><% end %><% unless @before_id.empty? %><a href="/email?member=<%= @member %>&amp;inbox=<%= @inbox %>">Newest</a><% end %></header>
   <% if @mail_entries.empty? %><p class="mail-empty-list">No open conversations.</p><% end %>
   <% @mail_entries.each do |entry| %>
-    <a class="mail-row" data-id="<%= entry.id %>" data-at="<%= entry.created_at.utc.iso8601(6) %>" href="/email?member=<%= @member %>&amp;inbox=<%= @inbox %>&amp;before=<%= @before_id %>&amp;at=<%= @before_at %>&amp;thread=<%= entry.id %>" aria-current="<%= @selected&.id == entry.id %>">
+    <a class="mail-row" data-id="<%= entry.id %>" data-at="<%= entry.created_at.utc.iso8601(6) %>" href="/email?member=<%= @member %>&amp;inbox=<%= @inbox %>&amp;before=<%= @before_id %>&amp;at=<%= @before_at %>&amp;thread=<%= entry.id %>" aria-current="<%= @selected&.id == entry.id %>" data-unread="<%= @unread.include?(entry.id) %>">
       <span class="mail-avatar avatar-<%= entry.author %>" aria-hidden="true"><%= entry.author[0].upcase %></span>
-      <span class="mail-row-text"><span class="mail-row-meta"><b><% if MailDirectory.inboxes(entry.author).empty? %><%= entry.author %><% else %>To <%= entry.address %><% end %></b><time datetime="<%= entry.created_at.utc.iso8601 %>"><%= entry.created_at.strftime("%b %d") %></time></span>
+      <span class="mail-row-text"><% if @unread.include?(entry.id) %><span class="visually-hidden">Unread. </span><% end %><span class="mail-row-meta"><b><% if MailDirectory.inboxes(entry.author).empty? %><%= entry.author %><% else %>To <%= entry.address %><% end %></b><time datetime="<%= entry.created_at.utc.iso8601 %>"><%= entry.created_at.strftime("%b %d") %></time></span>
       <strong><%= entry.subject %></strong><span class="mail-snippet"><%= entry.body %></span></span>
     </a>
   <% end %>
@@ -27,9 +27,15 @@
   <% elsif @selected %>
     <article class="mail-thread">
       <header class="mail-thread-tools"><span><%= "#{@replies.size + 1} #{"message".pluralize(@replies.size + 1)}" %></span>
-        <%= form_with url: "/email", method: :post do |f| %>
-          <input type="hidden" name="member" value="<%= @member %>"><input type="hidden" name="inbox" value="<%= @inbox %>"><input type="hidden" name="kind" value="archive"><input type="hidden" name="parent_id" value="<%= @selected.id %>"><button aria-label="Archive conversation">Archive</button>
-        <% end %>
+        <div class="mail-thread-actions">
+          <%= form_with url: "/email", method: :post do |f| %>
+            <input type="hidden" name="member" value="<%= @member %>"><input type="hidden" name="inbox" value="<%= @inbox %>"><input type="hidden" name="parent_id" value="<%= @selected.id %>">
+            <% if @unread.include?(@selected.id) %><input type="hidden" name="kind" value="read"><button>Mark read</button><% else %><input type="hidden" name="kind" value="unread"><button>Mark unread</button><% end %>
+          <% end %>
+          <%= form_with url: "/email", method: :post do |f| %>
+            <input type="hidden" name="member" value="<%= @member %>"><input type="hidden" name="inbox" value="<%= @inbox %>"><input type="hidden" name="kind" value="archive"><input type="hidden" name="parent_id" value="<%= @selected.id %>"><button aria-label="Archive conversation">Archive</button>
+          <% end %>
+        </div>
       </header>
       <h2><%= @selected.subject %></h2>
       <div class="mail-message">
