@@ -28,6 +28,18 @@ class Mailbox < ApplicationRecord
     })
   end
 
+  # What a first sync hands a client: the newest page of open conversations
+  # with their replies and marks, and the revision to follow the feed from.
+  # The revision is read before the rows. A write that lands between the two
+  # is then sent again by the feed and upserts, where the other order would
+  # skip it.
+  def first_sync
+    cursor = self.class.where(id: id).pick(:revision)
+    messages = mail_entries.open_messages.order(created_at: :desc, id: :desc).limit(MailEntry::PAGE_SIZE).to_a
+    actions = mail_entries.where(parent_id: messages.map(&:id), kind: MailEntry::ACTIONS).order(:server_version)
+    { cursor: cursor, records: (messages + actions).map { |entry| InstantRecord.record_payload(entry) } }
+  end
+
   def self.open_demo(name)
     find_by(id: name) || transaction do
       author, address, subject, body = WELCOME.fetch(name)

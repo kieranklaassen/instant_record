@@ -9,6 +9,7 @@ The knobs an optimization is most likely to turn are the constants right below.
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -32,6 +33,7 @@ SQLITE_CFLAGS = [
 ]
 STRIP = True  # llvm-strip the module (names and debug sections)
 SYNC_ENDPOINT = os.environ.get("SYNC_ENDPOINT", "http://127.0.0.1:3210/instant_record").rstrip("/")
+SHELL_FORMAT = 1
 REACTOR_EXPORTS = "WasmBridge.handle_request,WasmBridge.handle_sync,WasmBridge.sync_plan,WasmBridge.handle_stream,WasmBridge.cursor,WasmBridge.history"
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -120,6 +122,7 @@ def input_digest():
         if os.path.isfile(os.path.join(app_source, name)):
             paths.append(os.path.join(app_source, name))
     digest.update(os.environ.get("INSTANT_RECORD_MODELS", "").encode())
+    digest.update(os.environ.get("INSTANT_RECORD_SHELL_SNAPSHOT", "").encode())
     for base_root, folders in inputs:
         for folder in folders:
             full = os.path.join(base_root, folder)
@@ -293,7 +296,15 @@ def main():
     digest = hashlib.sha256(open(final, "rb").read()).hexdigest()[:10]
     output = os.path.join(web, "dist")
     dist = os.path.join(B, "site")
+    # What a server-built shell database has to match before the worker opens one as its own:
+    # the app's schema and the model list this build saves in its sync metadata. The demo's
+    # MailShell.fingerprint computes the same digest, and SHELL_FORMAT is its FORMAT.
+    model_set = re.search(r'model_set = "([^"]*)"', open(os.path.join(emit, "main_wasm.rb")).read()).group(1)
+    schema_source = open(os.path.join(app, "db/schema.rb")).read()
+    shell_fingerprint = hashlib.sha256("\n".join([str(SHELL_FORMAT), model_set, schema_source]).encode()).hexdigest()
     run(["npx", "vite", "build", "--outDir", dist, "--emptyOutDir"], cwd=web, env={"VITE_WASM_URL": f"/app-{digest}.wasm",
+        "VITE_SHELL_FINGERPRINT": shell_fingerprint,
+        "VITE_SHELL_SNAPSHOT": os.environ.get("INSTANT_RECORD_SHELL_SNAPSHOT", ""),
         "VITE_SHARED_INBOX_DEMO": "" if APP_SOURCE else "1",
         "VITE_SYNC_ENDPOINT": SYNC_ENDPOINT, "VITE_SOURCE_VERSION": wanted[:12],
         "VITE_SCHEMA_VERSION": str(plan["version"]),
