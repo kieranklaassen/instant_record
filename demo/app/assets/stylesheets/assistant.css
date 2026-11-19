@@ -1,72 +1,341 @@
+/* Assistant demo. The relay-* class names predate the rename and stay, since
+   the controller and the browser tests address them. Clay accent, warm bubbles
+   for the person, serif for the assistant's replies. */
+
 .relay {
-  --relay-ink: #312c29; --relay-paper: #fbf9f5; --relay-rule: #e3ded8; --relay-muted: #736c65; --relay-accent: #a44129;
-  display: flex; position: relative; min-height: 420px; height: calc(100svh - 47px);
-  overflow: hidden; background: var(--relay-paper); color: var(--relay-ink); font: 14px/1.5 "Helvetica Neue", Arial, sans-serif;
+  --relay-muted: var(--muted);
+  --relay-accent: var(--accent);
+  display: flex;
+  position: relative;
+  min-height: 420px;
+  height: calc(100svh - var(--bar-h));
+  overflow: hidden;
+  color: var(--ink);
 }
-.relay [hidden] { display: none!important; }
+
+.relay [hidden] { display: none !important; }
 .relay h1, .relay h2, .relay p { margin: 0; }
-.relay button, .relay textarea, .relay select { font: inherit; color: inherit; letter-spacing: normal; text-transform: none; }
-.relay button, .relay select { cursor: pointer; }
-.relay button { background: transparent; border: 0; }
-.relay :focus-visible { outline: 2px solid var(--relay-accent); outline-offset: 2px; }
-.relay-sidebar { display: none; flex: 0 0 clamp(150px,13vw,205px); flex-direction: column; min-width: 0; overflow: auto; padding: 18px 12px; background: #f0ede7; border-right: 1px solid var(--relay-rule); }
+.relay button, .relay textarea, .relay select { font: inherit; color: inherit; }
+.relay button {
+  height: auto;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  font-weight: inherit;
+}
+.relay button:hover { filter: none; }
+
+/* --- History rail ----------------------------------------------------------- */
+
+.relay-sidebar {
+  display: none;
+  flex: 0 0 260px;
+  flex-direction: column;
+  min-width: 0;
+  overflow: auto;
+  padding: 20px 12px;
+  border-right: 1px solid var(--hairline);
+  background: var(--paper);
+}
+
 .relay.history-open .relay-sidebar { display: flex; }
-.relay-wordmark { display: flex; align-items: center; gap: 8px; margin: 0 4px 20px; font: 600 24px/1 Georgia,serif; letter-spacing: -1.3px; }
-.relay-sign { color: var(--relay-accent); font: 32px/1 Georgia,serif; }
-.relay button.relay-new { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border: 1px solid #ccc5bb; background: #faf8f5; border-radius: 7px; font-weight: 600; text-align: left; }
-.relay-new:hover, .relay-starters button:hover { box-shadow: 0 2px 6px #382a1912; }
-.relay .relay-caption { margin: 24px 7px 8px; color: var(--relay-muted); font-size: 11px; font-weight: 600; }
-.relay-history-link, .relay-no-history { display: block; padding: 7px 8px; border-radius: 5px; font-size: 12px; text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.relay-no-history { color: var(--relay-muted); }
-.relay-history-link[aria-current=page], .relay-history-link:hover { background: #e3dfd8; }
+
+.relay-wordmark {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 6px 18px;
+  font-weight: 600;
+  font-size: 16px;
+}
+
+.relay-sign {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0) 55%), var(--accent);
+  color: #fff;
+}
+
+.relay button.relay-new {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 40px;
+  border-radius: 9999px;
+  background: var(--card);
+  box-shadow: 0 0 0 1px var(--hairline), 0 1px 2px rgba(48, 43, 38, 0.06);
+  font-weight: 600;
+}
+
+.relay button.relay-new:hover { box-shadow: 0 0 0 1px #C4B8A6, 0 2px 6px rgba(48, 43, 38, 0.08); }
+
+.relay .relay-caption {
+  margin: 24px 10px 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.relay-history-link, .relay-no-history {
+  display: block;
+  padding: 9px 10px;
+  border-radius: 10px;
+  color: var(--ink-2);
+  font-size: 14px;
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.relay-no-history { color: var(--muted); }
+.relay-history-link:hover { background: rgba(126, 114, 96, 0.08); }
+
+.relay-history-link[aria-current=page] {
+  background: var(--card);
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: 0 0 0 1px rgba(10, 10, 10, 0.06);
+}
+
 .relay-history-scroll { overflow-y: auto; min-height: 0; }
-.relay-new, .relay-wordmark, .relay-back { flex-shrink: 0; }
-.relay-back { margin-top: auto; padding: 22px 8px 0; font-size: 12px; color: var(--relay-muted); text-decoration: none; }
-.relay-main { min-width: 0; flex: 1; display: grid; grid-template-rows: auto minmax(0,1fr) auto; }
-.relay-bar { display: flex; align-items: center; gap: 12px; padding: 13px 18px; border-bottom: 1px solid var(--relay-rule); }
-.relay-bar strong { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.relay-menu { font-size: 17px!important; padding: 2px 5px; }
-.relay-source { flex: none; color: var(--relay-muted); font-size: 12px; text-underline-offset: 3px; }
-.relay-device { flex: none; margin-left: auto; color: var(--relay-muted); font-size: 11px; }
-.relay-scroll { overflow-y: auto; min-height: 0; padding: 0 clamp(16px,3vw,52px); }
-.relay-welcome { min-height: 100%; display: flex; align-items: center; justify-content: center; flex-direction: column; text-align: center; gap: 19px; }
-.relay-hero { font-size: 49px; line-height: .9; }
-.relay-welcome h1 { font: 400 clamp(30px,3.5vw,55px)/1.08 Georgia,serif; letter-spacing: -.055em; }
-.relay-starters { display: flex; gap: 7px; flex-wrap: wrap; justify-content: center; margin: 4px 0 15px; }
-.relay-starters button { display: flex; gap: 7px; align-items: center; background: #fff; border: 1px solid var(--relay-rule); border-radius: 7px; font-size: 12px; padding: 7px 10px; }
-.relay-starters button span { font: 15px/1 monospace; color: var(--relay-accent); }
+.relay-new, .relay-wordmark { flex-shrink: 0; }
+
+/* --- Conversation ----------------------------------------------------------- */
+
+.relay-main {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  background: var(--card);
+}
+
+.relay-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--hairline-soft);
+}
+
+.relay-bar strong { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.relay button.relay-menu {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  color: var(--ink-2);
+}
+
+.relay button.relay-menu:hover { background: rgba(126, 114, 96, 0.1); }
+
+.relay-device { flex: none; margin-left: auto; color: var(--muted); font-size: 12px; }
+
+.relay-scroll { overflow-y: auto; overflow-anchor: none; min-height: 0; padding: 0 24px; }
+
+.relay-welcome {
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 18px;
+  text-align: center;
+}
+
+.relay-hero { width: 52px; height: 52px; border-radius: 15px; }
+
+.relay-welcome h1 { font-size: clamp(34px, 3.5vw, 48px); }
+
+.relay-starters {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin: 4px 0 15px;
+}
+
+.relay .relay-starters button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 14px;
+  border-radius: 9999px;
+  background: var(--card);
+  box-shadow: 0 0 0 1px var(--hairline);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.relay .relay-starters button:hover { box-shadow: 0 0 0 1px #C4B8A6, 0 2px 6px rgba(48, 43, 38, 0.08); }
+.relay-starters button span { font-family: var(--mono); font-size: 13px; color: var(--accent); }
+
 .relay-transcript, .relay-foot { width: 100%; max-width: 760px; margin: 0 auto; }
-.relay-transcript { padding: 21px 0; }
+.relay-transcript { padding: 28px 0 8px; }
 .relay-welcome:not([hidden]) + .relay-transcript { display: none; }
-.relay .relay-user { white-space: pre-wrap; overflow-wrap: anywhere; width: fit-content; max-width: 87%; margin: 0 0 20px auto; padding: 11px 15px; background: #eee8df; border-radius: 14px 14px 3px 14px; }
-.relay-answer { margin-bottom: 25px; }
-.relay .relay-author { display: flex; align-items: center; gap: 6px; font: 650 13px/1.5 "Helvetica Neue",Arial,sans-serif; }
-.relay-author::before { content: "✳"; color: var(--relay-accent); font-size: 20px; }
-.relay-response p { margin-top: .6rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.relay .relay-user {
+  width: fit-content;
+  max-width: 80%;
+  margin: 0 0 22px auto;
+  padding: 10px 16px;
+  border-radius: 18px 18px 6px 18px;
+  background: var(--hairline-soft);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.relay-answer { margin-bottom: 26px; padding-left: 44px; position: relative; }
+
+.relay .relay-author {
+  display: flex;
+  align-items: center;
+  min-height: 30px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.relay-author::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2.2' stroke-linecap='round'%3E%3Cpath d='M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M5.6 18.4l2.8-2.8M15.6 8.4l2.8-2.8'/%3E%3C/svg%3E") center / 16px no-repeat,
+    var(--accent);
+}
+
+.relay-response { font-family: var(--serif); font-size: 18px; line-height: 1.6; }
+.relay-response p { margin-top: 0.5rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+
 .relay-code { position: relative; }
-.relay button.relay-copy { position: absolute; right: 8px; top: 6px; font-size: 11px; color: #ded5cb; background: #433e39; border-radius: 4px; padding: 3px 6px; }
-.relay-response pre { margin: .8rem 0; background: #302d2b; color: #f4ece3; border-radius: 9px; padding: 28px 15px 15px; overflow-x: auto; font: 13px/1.65 ui-monospace, monospace; }
-.relay-foot { position: relative; padding: 14px clamp(15px,2.2vw,36px) 10px; }
-.relay-composer { background: white; border: 1px solid #cfc6bb; border-radius: 15px; padding: 12px; box-shadow: 0 3px 12px #4f382009; }
-.relay-composer:focus-within { border-color: #a6907f; }
-.relay-composer textarea { background: transparent; border: 0; width: 100%; min-height: 48px; max-height: 125px; resize: vertical; outline: none; }
-.relay-controls { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; }
-.relay-engine { font-size: 12px; display: flex; align-items: center; gap: 4px; color: var(--relay-muted); }
-.relay-dot { width: 6px; height: 6px; border-radius: 50%; background: #a55c46; }
-.relay button.relay-send:disabled { opacity: .45; cursor: default; }
-.relay button.relay-send, .relay button.relay-stop { background: var(--relay-accent); color: white; border-radius: 8px; min-width: 34px; height: 34px; font-size: 20px; }
-.relay button.relay-stop { font-size: 12px; padding: 0 9px; }
-.relay .relay-status { color: var(--relay-muted); font-size: 11px; text-align: center; margin-top: 6px; min-height: 1.5em; }
-@media(max-width: 700px) {
-  .relay-sidebar { position: absolute; inset: 0 auto 0 0; width: 185px; z-index: 4; box-shadow: 9px 0 24px #362e231a; }
-  .relay.history-open .relay-menu { margin-left: 178px; }
+
+.relay button.relay-copy {
+  position: absolute;
+  right: 10px;
+  top: 8px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #EDE6DA;
+  font-family: var(--sans);
+  font-size: 12px;
+}
+
+.relay-response pre {
+  margin: 0.8rem 0;
+  padding: 40px 16px 14px;
+  border-radius: 12px;
+  background: #2A2521;
+  color: #EDE6DA;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 13.5px;
+  line-height: 1.7;
+}
+
+.relay-response pre code { font-size: inherit; }
+
+/* --- Composer --------------------------------------------------------------- */
+
+.relay-foot { position: relative; padding: 16px 24px 12px; }
+
+.relay-composer {
+  padding: 14px 14px 10px 18px;
+  border-radius: 18px;
+  background: var(--card);
+  box-shadow: 0 0 0 1px #DFD7CA, 0 0 0 4px rgba(10, 10, 10, 0.02), 0 10px 28px -18px rgba(48, 43, 38, 0.3);
+}
+
+.relay-composer:focus-within { box-shadow: 0 0 0 1.5px var(--accent), 0 0 0 4px rgba(154, 74, 42, 0.1); }
+
+.relay-composer textarea {
+  display: block;
+  width: 100%;
+  min-height: 48px;
+  max-height: 125px;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  resize: none;
+  font-size: 16px;
+}
+
+.relay-composer textarea:focus { box-shadow: none; }
+
+.relay-controls { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; }
+
+.relay-engine {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 9999px;
+  background: #F6F1E9;
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.relay-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+
+.relay button.relay-send,
+.relay button.relay-stop {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 38px;
+  height: 38px;
+  border-radius: 9999px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0) 55%), var(--accent);
+  color: #fff;
+}
+
+.relay button.relay-send:disabled { opacity: 0.45; cursor: default; }
+.relay button.relay-stop { padding: 0 14px; font-size: 13px; font-weight: 600; }
+
+.relay .relay-status { min-height: 1.5em; margin-top: 6px; color: var(--muted); font-size: 12px; text-align: center; }
+
+.relay button.relay-latest {
+  position: absolute;
+  left: 50%;
+  bottom: 100%;
+  transform: translateX(-50%);
+  height: 30px;
+  padding: 0 14px;
+  border-radius: 9999px;
+  background: var(--card);
+  box-shadow: 0 0 0 1px var(--hairline), 0 2px 8px rgba(48, 43, 38, 0.08);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.relay button.relay-older { display: block; margin: 12px auto; color: var(--accent); font-size: 13px; font-weight: 500; }
+
+@media (max-width: 700px) {
+  .relay-sidebar { position: absolute; inset: 0 auto 0 0; width: 240px; z-index: 4; box-shadow: 9px 0 24px rgba(54, 46, 35, 0.1); }
+  .relay.history-open .relay-menu { margin-left: 228px; }
   .relay-device { display: none; }
-  .relay-source { margin-left: auto; }
+  .relay-scroll, .relay-foot { padding-left: 16px; padding-right: 16px; }
+  .relay-answer { padding-left: 0; padding-top: 38px; }
   .relay-welcome { gap: 14px; }
   .relay-starters { flex-direction: column; }
 }
-
-.relay button.relay-latest { position: absolute; left: 50%; bottom: 100%; transform: translateX(-50%); padding: 5px 12px; border-radius: 20px; border: 1px solid var(--relay-rule); background: white; box-shadow: 0 2px 8px #382a1912; font-size: 12px; }
-
-.relay button.relay-older { display: block; margin: 12px auto; color: var(--relay-accent); }
-.relay-scroll { overflow-anchor: none; }

@@ -6,7 +6,7 @@
 
   <div class="thread-scroll">
     <article class="thread-parent <%= "own" if @thread_parent.from_visitor? %>">
-      <div class="tile"><%= slack_initials(@thread_parent.chat_user) %></div>
+      <div class="tile <%= slack_tile_class(@thread_parent.chat_user) %>" aria-hidden="true"><%= slack_initials(@thread_parent.chat_user) %></div>
       <div class="message-main">
         <div class="message-head">
           <span class="author"><%= @thread_parent.chat_user&.name || "Unknown" %></span>

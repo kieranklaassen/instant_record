@@ -4,17 +4,17 @@
 <div class="page" data-controller="release" data-instant-refresh
      data-action="instant-record:records-changed@window->release#refresh">
   <header class="page-header">
-    <p class="micro-label">Demo 03</p>
     <h1>Ship v2</h1>
-    <p class="meta">
-      Local schema:
+    <p class="schema-pill <%= @release_pending ? "pending" : "applied" %>">
+      <span class="schema-dot" aria-hidden="true"></span>
+      Local schema
       <strong class="data">
         <%= @release_pending ? "v1 · v2 (#{Release.version}) pending" : "v2 (#{Release.version}) applied" %>
       </strong>
     </p>
   </header>
 
-  <p>
+  <p class="intro">
     A migration is the one deploy step local-first cannot do for you server-side.
     The database that has to change is sitting in a visitor's browser, holding
     their rows and — if they were offline — a queue of writes that never reached
@@ -24,7 +24,7 @@
 
   <ol class="run">
     <li>Write a couple of notes. Each one commits locally and syncs.</li>
-    <li>Switch <strong>Offline</strong> on in the <a href="#inspector">Sync inspector</a>, then write two more notes. Those stay in the outbox.</li>
+    <li>Flip the switch at the top right to <strong>Offline</strong>, then write two more notes. Those stay in the outbox.</li>
     <li>Read the three numbers below.</li>
     <li>Press <strong>Ship v2</strong>.</li>
     <li>Read them again, and look at the list: the same rows, with the timestamps they already had, now carrying a word count derived from the body text that was already there.</li>

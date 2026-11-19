@@ -11,4 +11,10 @@ module SlackHelper
   def slack_initials(user)
     (user&.name || "??").split.map { |w| w[0] }.join[0, 2].upcase
   end
+
+  # One of six tile colours, stable per person. Name length is crude but
+  # deterministic in both runtimes, and that is all a colour needs.
+  def slack_tile_class(user)
+    "tile-#{(user&.name || "").length % 6}"
+  end
 end

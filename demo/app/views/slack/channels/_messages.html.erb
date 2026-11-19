@@ -25,13 +25,13 @@
     <li class="<%= "own" if message.from_visitor? %>"
         data-id="<%= message.id %>"
         data-created-at="<%= message.created_at.utc.iso8601(6) %>">
-      <div class="tile"><%= slack_initials(message.chat_user) %></div>
+      <div class="tile <%= slack_tile_class(message.chat_user) %>" aria-hidden="true"><%= slack_initials(message.chat_user) %></div>
       <div class="message-main">
         <div class="message-head">
           <span class="author"><%= message.chat_user&.name || "Unknown" %></span>
           <span class="timestamp"><%= message.created_at.strftime("%H:%M") %></span>
           <% if message.sync_state != "synced" %>
-            <span class="flag">· pending</span>
+            <span class="flag">Waiting to sync</span>
           <% end %>
         </div>
         <p class="body"><%= message.body %></p>

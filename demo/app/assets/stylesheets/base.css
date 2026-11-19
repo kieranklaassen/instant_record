@@ -1,0 +1,571 @@
+/* The shared frame every demo sits in: warm paper, white cards, beige
+   hairlines, one accent per demo. Depth comes from ring halos, not shadows.
+   Each demo sets --accent on its body class; everything else reads tokens. */
+
+:root {
+  --paper: #FBF8F2;
+  --paper-2: #F3EDE3;
+  --card: #FFFFFF;
+  --ink: #302B26;
+  --ink-2: #52483D;
+  --muted: #6E6456;
+  --faint: #8E8474;
+  --hairline: #E2D9CC;
+  --hairline-soft: #F0E9DE;
+  --ring: 0 0 0 1px rgba(10, 10, 10, 0.06), 0 0 0 4px rgba(10, 10, 10, 0.02);
+  --ring-1: 0 0 0 1px rgba(10, 10, 10, 0.06);
+
+  --accent: #302B26;
+  --accent-soft: #F3EDE3;
+  --online: #3E8A5B;
+  --offline: #B07A2A;
+  --pending-bg: #FBEFD8;
+  --pending-ink: #7A5212;
+  --danger: #980012;
+  --danger-bg: #FFE9E4;
+
+  --sans: Figtree, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --serif: Newsreader, Georgia, "Times New Roman", serif;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --bar-h: 56px;
+  --inspector-w: 22rem;
+
+  /* Kept for older rules that still name them. */
+  --rule: var(--hairline);
+  --red: var(--accent);
+  --font: var(--sans);
+}
+
+body.demo-todo { --accent: #3E6B4F; --accent-soft: #E7F0E9; }
+body.demo-slack { --accent: #E8794A; --accent-soft: #FCEADF; }
+body.demo-email { --accent: #2F6CA3; --accent-soft: #E6EFF7; }
+body.demo-assistant { --accent: #9A4A2A; --accent-soft: #F6E6DD; }
+body.demo-migrate { --accent: #6A4FA0; --accent-soft: #EEE8F7; }
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--ink);
+  /* A faint warm wash at the very top; the rest is plain paper. */
+  background:
+    linear-gradient(180deg, rgba(243, 226, 200, 0.28), rgba(251, 248, 242, 0) 320px) no-repeat,
+    var(--paper);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3 { margin: 0; font-weight: 600; line-height: 1.15; }
+
+h1 {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: clamp(2.25rem, 4.5vw, 2.75rem);
+  letter-spacing: -0.025em;
+  line-height: 1.05;
+}
+
+h2 { font-size: 1.25rem; letter-spacing: -0.01em; }
+
+a { color: var(--accent); text-underline-offset: 3px; }
+
+code, pre, kbd { font-family: var(--mono); font-size: 0.9em; }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.micro-label {
+  margin: 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.meta { color: var(--muted); margin: 0.5rem 0 0; font-size: 0.9rem; }
+
+.page {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 48px 24px 64px;
+}
+
+.page-header { margin-bottom: 28px; }
+.page-header h1 { margin-top: 4px; }
+.page-header .meta { max-width: 40em; color: var(--ink-2); font-size: 1rem; }
+
+.card {
+  border-radius: 16px;
+  background: var(--card);
+  box-shadow: var(--ring);
+}
+
+/* Sync-state chips shared by all demos */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 9px;
+  border-radius: 9999px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.badge-pending  { background: var(--pending-bg); color: var(--pending-ink); }
+.badge-synced   { background: var(--paper-2); color: var(--muted); }
+.badge-rejected { background: var(--danger-bg); color: var(--danger); }
+
+/* Form controls: soft, rounded, quiet until focused */
+input[type="text"], input[type="email"], input:not([type]), textarea {
+  font-family: var(--sans);
+  font-size: 1rem;
+  padding: 0.6rem 0.8rem;
+  border: 0;
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+
+input[type="text"]:focus, input[type="email"]:focus, input:not([type]):focus, textarea:focus {
+  outline: none;
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+}
+
+input[type="submit"], button {
+  font-family: var(--sans);
+  font-size: 14px;
+  font-weight: 600;
+  height: 36px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 9999px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0) 50%), var(--accent);
+  color: #fff;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  cursor: pointer;
+}
+
+input[type="submit"]:hover, button:hover { filter: brightness(0.94); }
+button:disabled, input[type="submit"]:disabled { opacity: 0.55; cursor: default; filter: none; }
+
+/* A quiet secondary button: white pill on a hairline ring. */
+.button-quiet {
+  background: var(--card);
+  color: var(--ink);
+  box-shadow: 0 0 0 1px var(--hairline);
+}
+
+/* --- Shared top bar ---------------------------------------------------------
+   One frame for every demo: the mark, the demo tabs, the network switch and
+   the source drawer. On wide screens it spans the inspector rail too. */
+
+.site-bar {
+  position: relative;
+  z-index: 210;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: var(--bar-h);
+  padding: 0 20px;
+  border-bottom: 1px solid var(--hairline);
+  background: rgba(251, 248, 242, 0.92);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+}
+
+.site-bar .wordmark {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--ink);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.site-bar .wordmark-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.site-tabs {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  gap: 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.site-tabs::-webkit-scrollbar { display: none; }
+
+.site-tabs a {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 9999px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ink-2);
+  text-decoration: none;
+}
+
+.site-tabs a:hover { background: rgba(126, 114, 96, 0.1); }
+.site-tabs a[aria-current="page"] { background: var(--ink); color: var(--paper); }
+
+/* The network switch: a real checkbox, drawn as a pill with a dot and track. */
+.net-switch {
+  flex: none;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  height: 34px;
+  padding: 0 5px 0 12px;
+  border-radius: 9999px;
+  background: var(--card);
+  box-shadow: 0 0 0 1px var(--hairline);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+}
+
+.net-switch input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.net-switch:has(input:focus-visible) { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+.net-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--online); }
+
+.net-label::before { content: "Online"; }
+
+.net-track {
+  position: relative;
+  width: 36px;
+  height: 22px;
+  border-radius: 9999px;
+  background: rgba(126, 114, 96, 0.22);
+  transition: background 160ms ease-out;
+}
+
+.net-track::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+  transition: left 160ms ease-out;
+}
+
+.net-switch:has(input:checked) .net-dot { background: var(--offline); }
+.net-switch:has(input:checked) .net-label::before { content: "Offline"; }
+.net-switch:has(input:checked) .net-track { background: var(--ink); }
+.net-switch:has(input:checked) .net-track::after { left: 17px; }
+
+.site-source {
+  flex: none;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink-2);
+  text-decoration: none;
+}
+
+.site-source:hover { color: var(--ink); text-decoration: underline; }
+
+@media (max-width: 720px) {
+  .site-bar { gap: 10px; padding: 0 12px; }
+  .site-bar .wordmark-text, .site-source, .net-label { display: none; }
+  .net-switch { gap: 8px; padding-left: 10px; }
+}
+
+/* Shown when a new build takes over the service worker. Asking beats an
+   unannounced reload, which would discard anything half-typed — so it sits at
+   the top, clear of the composer it is protecting. */
+#new-version {
+  position: fixed;
+  top: calc(var(--bar-h) + 12px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 10px 10px 10px 18px;
+  border-radius: 9999px;
+  background: var(--card);
+  box-shadow: var(--ring), 0 12px 30px -18px rgba(48, 43, 38, 0.45);
+}
+
+#new-version[hidden] { display: none; }
+
+/* --- Sync inspector --------------------------------------------------------
+   Fixed and out of flow, so opening it never reflows what it is describing —
+   the page is only shifted over by the body padding below.
+
+   On the LEFT: the chat demo's thread panel owns the right edge, so the
+   debugging chrome yields that side to the product it is describing. */
+#inspector {
+  position: fixed;
+  top: var(--bar-h);
+  left: 0;
+  bottom: 0;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  width: var(--inspector-w);
+  max-width: 100vw;
+  background: var(--paper-2);
+  color: var(--ink);
+  border-right: 1px solid var(--hairline);
+  font-size: 12px;
+}
+
+/* Make room instead of covering the page. Fixed positioning is viewport-based,
+   so the panel itself is unaffected by this padding; the top bar reaches back
+   over the rail so it spans the whole window. */
+body { padding-left: var(--inspector-w); }
+.site-bar { margin-left: calc(-1 * var(--inspector-w)); }
+
+@media (max-width: 60rem) {
+  body { padding-left: 0; }
+  .site-bar { margin-left: 0; }
+  #inspector {
+    position: static;
+    width: 100%;
+    height: min(70vh, 36rem);
+    border-right: 0;
+    border-top: 1px solid var(--hairline);
+  }
+}
+
+#inspector header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 14px 18px 4px;
+}
+
+#inspector header .micro-label { color: var(--ink); font-size: 13px; }
+
+.inspector-controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 18px 12px;
+  color: var(--ink-2);
+  font-size: 13px;
+}
+
+.inspector-controls label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.inspector-controls input[type="checkbox"] { accent-color: var(--ink); }
+
+.inspector-controls button {
+  margin-left: auto;
+  height: 28px;
+  padding: 0 12px;
+  font-size: 12px;
+  background: var(--card);
+  color: var(--ink);
+  box-shadow: 0 0 0 1px var(--hairline);
+}
+
+/* Newest first, so the freshest event is always in view without scrolling. */
+.inspector-log {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 0 10px 10px;
+  padding: 4px 0;
+  list-style: none;
+  border-radius: 12px;
+  background: var(--card);
+  box-shadow: var(--ring-1);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.inspector-log:empty { display: none; }
+
+.inspector-log li {
+  display: grid;
+  grid-template-columns: 3.8rem 1fr auto;
+  gap: 0.5rem;
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--hairline-soft);
+}
+
+.inspector-log li:last-child { border-bottom: 0; }
+
+.inspector-kind { color: var(--accent); font-weight: 500; }
+.inspector-log li[data-kind="local"] .inspector-kind,
+.inspector-log li[data-kind="assets"] .inspector-kind { color: #2F6CA3; }
+.inspector-log li[data-kind="sync-pass"] .inspector-kind { color: var(--faint); }
+.inspector-log li[data-kind="change"] .inspector-kind { color: #3E6B4F; }
+.inspector-log li[data-kind="stream"] .inspector-kind { color: #6A4FA0; }
+
+.inspector-path { overflow-wrap: anywhere; }
+.inspector-meta { color: var(--faint); white-space: nowrap; }
+.inspector-log li[data-status="bad"] .inspector-meta { color: var(--danger); }
+.inspector-log li[data-status="warn"] .inspector-meta { color: var(--pending-ink); }
+
+/* --- Inspector flow map ----------------------------------------------------
+   Boxes and wires light up as the log records traffic on them. Everything is
+   driven by data-active, set by inspector_controller.js. */
+
+#inspector-flow {
+  flex: 0 0 auto;
+  width: calc(100% - 20px);
+  margin: 0 10px 10px;
+  padding: 8px 4px;
+  border-radius: 12px;
+  background: var(--card);
+  box-shadow: var(--ring-1);
+  font-family: var(--sans);
+}
+
+.flow-zone rect {
+  fill: none;
+  stroke: var(--hairline);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  rx: 6px;
+}
+
+.flow-zone-label {
+  fill: var(--faint);
+  font-size: 7.5px;
+  font-weight: 600;
+}
+
+.flow-node rect {
+  fill: var(--paper);
+  stroke: var(--hairline);
+  stroke-width: 1;
+  rx: 6px;
+  transition: fill 240ms ease-out, stroke 240ms ease-out;
+}
+
+.flow-node text {
+  fill: var(--ink);
+  font-size: 9px;
+  font-weight: 500;
+  text-anchor: middle;
+  transition: fill 240ms ease-out;
+}
+
+/* A box doing work fills with the accent; it fades back on its own. */
+.flow-node[data-active] rect { fill: var(--accent); stroke: var(--accent); }
+.flow-node[data-active] text { fill: #fff; }
+
+.flow-edge {
+  fill: none;
+  stroke: #C4B8A6;
+  stroke-width: 1.5;
+  stroke-dasharray: 4 4;
+}
+
+.flow-edge-label {
+  fill: var(--faint);
+  font-size: 7px;
+  font-weight: 500;
+}
+
+/* Active wire: the dashes march in the direction of travel, so up and down are
+   distinguishable at a glance rather than by reading the label. */
+.flow-edge[data-active] {
+  stroke: var(--accent);
+  stroke-width: 2.5;
+  animation: flow-march 600ms linear;
+}
+
+.flow-edge[data-active="down"] { animation-direction: reverse; }
+
+/* A wire the simulated network has broken. */
+.flow-edge[data-broken] {
+  stroke: rgba(176, 122, 42, 0.55);
+  stroke-dasharray: 2 6;
+  animation: none;
+}
+
+@keyframes flow-march {
+  from { stroke-dashoffset: 24; }
+  to { stroke-dashoffset: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flow-edge[data-active] { animation: none; }
+}
+
+/* Markers don't inherit the referencing path's stroke, so the arrowhead is
+   coloured on its own and simply stays neutral while a wire pulses. */
+#inspector-flow marker path { fill: #C4B8A6; }
+
+/* A stream that is held open, even while nothing crosses it — the difference
+   between SSE and polling, made visible. */
+.flow-edge[data-connected] {
+  stroke: var(--online);
+  stroke-dasharray: none;
+}
+
+/* An active pulse still wins over the connected state. */
+.flow-edge[data-active] {
+  stroke: var(--accent);
+  stroke-dasharray: 4 4;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* A small fact on a white pill: "Adapter SQLite3Adapter". */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 9999px;
+  background: var(--card);
+  box-shadow: 0 0 0 1px var(--hairline);
+  font-size: 13px;
+}
+
+.chip > span { color: var(--muted); }
+.chip > strong { font-weight: 600; }

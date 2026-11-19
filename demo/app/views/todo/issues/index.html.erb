@@ -8,38 +8,43 @@
     composer's focus survive every change. Same records-changed signal and
     morph discipline as the chat page; removal is allowed here because this
     list is complete, not a window. %>
-<div class="todo-poster"
+<div class="todo-page"
      data-instant-refresh
      data-controller="issues"
      data-action="instant-record:records-changed@window->issues#sync">
-  <div class="todo-main">
-    <p class="micro-label kicker">Demo 01 · Todo</p>
-    <h1 class="poster-headline">The list<br>the browser<br>owns.</h1>
+  <section class="todo-main">
+    <h1>Todo</h1>
+    <p class="todo-lede">The list this browser owns. Every change commits here first, then syncs.</p>
 
-    <%= form_with url: todo_issues_path, method: :post, class: "todo-form", data: { turbo: false, action: "submit->issues#submit" } do |f| %>
-      <%= f.text_field "issue[title]", placeholder: "New issue title", required: true, autofocus: true %>
-      <%= f.submit "Create" %>
-    <% end %>
+    <div class="card todo-card">
+      <%= form_with url: todo_issues_path, method: :post, class: "todo-form", data: { turbo: false, action: "submit->issues#submit" } do |f| %>
+        <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        <%= f.text_field "issue[title]", placeholder: "Add an issue and press Enter", "aria-label": "New issue title", required: true, autofocus: true %>
+        <%= f.submit "Add" %>
+      <% end %>
 
-    <%= render "list" %>
-  </div>
+      <%= render "list" %>
+    </div>
+  </section>
 
   <aside class="todo-facts">
-    <div class="stat-hero">
-      <p class="micro-label">Open</p>
-      <p class="stat-huge" data-issues-target="open"><%= format("%02d", open_issues) %></p>
+    <div class="todo-stats">
+      <div class="todo-stat card">
+        <p>Open</p>
+        <p class="todo-stat-num" data-issues-target="open"><%= open_issues %></p>
+      </div>
+      <div class="todo-stat card">
+        <p>Done</p>
+        <p class="todo-stat-num" data-issues-target="done"><%= done_issues %></p>
+      </div>
     </div>
-    <div class="stat">
-      <p class="micro-label">Done</p>
-      <p class="stat-big" data-issues-target="done"><%= format("%02d", done_issues) %></p>
-    </div>
-    <div class="facts">
-      <p>Runtime<br><strong><%= InstantRecord.browser? ? "Spinel (WebAssembly)" : "CRuby" %></strong></p>
-      <p>Store<br><strong><%= InstantRecord.browser? ? "SQLite" : "Postgres" %></strong></p>
+    <dl class="todo-runtime">
+      <div><dt>Runtime</dt><dd><%= InstantRecord.browser? ? "Spinel (WebAssembly)" : "CRuby" %></dd></div>
+      <div><dt>Store</dt><dd><%= InstantRecord.browser? ? "SQLite" : "Postgres" %></dd></div>
       <% if InstantRecord.browser? %>
-        <p>Pending<br><strong id="pending-count" data-issues-target="pending"><%= @pending_count %> <%= "mutation".pluralize(@pending_count) %></strong></p>
+        <div><dt>Waiting to sync</dt><dd id="pending-count" data-issues-target="pending"><%= @pending_count %> <%= "mutation".pluralize(@pending_count) %></dd></div>
       <% end %>
-    </div>
-    <p class="micro-label foot">No network on this path</p>
+    </dl>
+    <p class="todo-hint">Try the title “reject me”. The browser saves it, then the server’s rule rejects it and the row rolls back.</p>
   </aside>
 </div>

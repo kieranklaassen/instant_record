@@ -3,17 +3,17 @@
     <div class="room">
       <h2>
         <% if @channel.dm? %>
-          <span class="micro-label">DM</span> <%= @channel.dm_user&.name || @channel.name %>
+          <%= @channel.dm_user&.name || @channel.name %>
         <% else %>
           <span class="hash">#</span><%= @channel.name %>
         <% end %>
       </h2>
       <span class="room-meta">
-        Runtime <strong><%= InstantRecord.browser? ? "browser" : "server" %></strong>
+        Rendered in the <strong><%= InstantRecord.browser? ? "browser" : "server" %></strong>
       </span>
     </div>
     <% if InstantRecord.browser? %>
-      <span class="pending-badge">Pending <%= @pending_count %></span>
+      <span class="pending-badge"><%= @pending_count %> waiting to sync</span>
     <% end %>
   </header>
 

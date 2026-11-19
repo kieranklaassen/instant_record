@@ -1,63 +1,99 @@
-<% content_for(:title, "InstantRecord Demos") %>
-<main class="demo-home">
-  <div class="home-board">
-    <header class="board-hero">
-      <div class="hero-copy">
-        <h1>Rails models<br>that run in<br>the browser.</h1>
-        <p class="lede">Write to SQLite in this tab, even offline. Open the Sync inspector to see local requests, queued changes, and acknowledgments from Rails.</p>
-      </div>
-      <aside class="hero-facts">
-        <p class="micro-label">Runtime</p>
-        <p class="stat-huge">Wasm</p>
-        <div class="facts">
-          <p>Compiler<br><strong>Roundhouse + Spinel</strong></p>
-          <p>Local store<br><strong>SQLite</strong></p>
-          <p>Sync server<br><strong>Rails + Postgres</strong></p>
-        </div>
-      </aside>
-    </header>
-    <ul class="demo-grid">
-      <li><a href="/todo" class="demo-card">
-        <img src="/assets/previews/todo.png" alt="" width="840" height="285" style="width:100%;height:auto" loading="lazy" decoding="async">
-        <h2>Todo</h2>
-        <p class="card-copy">Create and check off issues offline. Reconnect to see which writes the server accepts.</p>
-        <span class="go">Open Todo →</span>
-      </a></li>
-      <li><a href="/slack" class="demo-card">
-        <img src="/assets/previews/chat.png" alt="" width="666" height="226" style="width:100%;height:auto" loading="lazy" decoding="async">
-        <h2>Chat</h2>
-        <p class="card-copy">Switch channels, send a message, and reply in a thread.</p>
-        <span class="go">Open Chat →</span>
-      </a></li>
-      <li><a href="/migrate" class="demo-card">
-        <img src="/assets/previews/migration.png" alt="" width="672" height="228" style="width:100%;height:auto" loading="lazy" decoding="async">
-        <h2>Ship v2</h2>
-        <p class="card-copy">Run a migration over a local database with unsynced writes.</p>
-        <span class="go">Open example →</span>
-      </a></li>
-      <li><a href="/console" class="demo-card">
-        <img src="/assets/previews/console.png" alt="" width="840" height="285" style="width:100%;height:auto" loading="lazy" decoding="async">
-        <h2>Console</h2>
-        <p class="card-copy">Inspect local records and the sync outbox with compiled ActiveRecord queries.</p>
-        <span class="go">Open example →</span>
-      </a></li>
-      <li><a href="/email" class="demo-card" data-turbo="false">
-        <img src="/assets/previews/email.png" alt="" width="840" height="285" style="width:100%;height:auto" loading="lazy" decoding="async">
-        <h2>Shared inbox</h2>
-        <p class="card-copy">Reply offline, then switch teammates to see who receives the conversation in Support or Billing.</p>
-        <span class="go">Open inbox →</span>
-      </a></li>
-      <li><a href="/assistant" class="demo-card">
-        <img src="/assets/previews/assistant.png" alt="" width="800" height="450" loading="lazy" decoding="async" style="width:100%;height:auto">
-        <h2>Assistant chat</h2>
-        <p class="card-copy">Ask about your workspace, stream a reply, and pick up a saved conversation.</p>
-        <span class="go">Open Relay →</span>
-      </a></li>
-    </ul>
-    <div class="board-band"><span>Measured on this device</span><a href="/receipts">View performance receipts →</a></div>
-    <footer class="project-strip">
-      <p>InstantRecord is an MIT-licensed Ruby gem. The source drawer shows the code behind each demo.</p>
-      <p class="project-links"><a href="https://github.com/kieranklaassen/instant_record">InstantRecord on GitHub →</a></p>
-    </footer>
+<% content_for(:title, "InstantRecord — What if your Rails app were instant?") %>
+<main class="home">
+  <section class="home-hero">
+    <p class="home-pill">
+      <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6M10 3v6L4.5 18.5A2 2 0 0 0 6.2 21h11.6a2 2 0 0 0 1.7-2.5L14 9V3"/></svg>
+      An experiment, not a product
+    </p>
+    <h1>What if your Rails app were instant?</h1>
+    <p class="home-lede">No spinners, no loading states, and it keeps working on a train. InstantRecord is an open-source Ruby gem that runs your Rails models in the browser, so every click hits a database that’s already here.</p>
+    <div class="home-actions">
+      <a class="home-button" href="#demos">Try the demos</a>
+      <a class="home-button quiet" href="https://github.com/kieranklaassen/instant_record">Read the code on GitHub</a>
+    </div>
+  </section>
+
+  <section class="home-how" aria-labelledby="how">
+    <h2 id="how">How it works</h2>
+    <p class="home-sub">The same model file runs in two places. Your server stays the source of truth.</p>
+    <div class="home-how-grid">
+      <figure class="home-code">
+        <figcaption>app/models/issue.rb</figcaption>
+<pre><span class="k">class</span> Issue &lt; ApplicationRecord
+  <span class="k">include</span> InstantRecord::Syncable
+
+  validates :title, presence: <span class="v">true</span>
+
+  server_only <span class="k">do</span>
+    validate :title_allowed_by_server
+  <span class="k">end</span>
+<span class="k">end</span></pre>
+        <p>That one include is the whole opt-in.</p>
+      </figure>
+      <ol class="home-steps">
+        <li><span class="step-mark step-1" aria-hidden="true">1</span><b>Write locally</b><span><code>Issue.create!</code> commits to SQLite in your tab. The page re-renders before the network is involved.</span></li>
+        <li><span class="step-mark step-2" aria-hidden="true">2</span><b>Queue durably</b><span>The same transaction records a mutation, so a crash, a reload or a dead connection loses nothing.</span></li>
+        <li><span class="step-mark step-3" aria-hidden="true">3</span><b>Sync in the background</b><span>A loop drains the outbox to your Rails server, which validates and versions every write.</span></li>
+        <li><span class="step-mark step-4" aria-hidden="true">4</span><b>Stream everyone else</b><span>Accepted changes come back to every client over server-sent events, and their pages update from local data.</span></li>
+      </ol>
+    </div>
+  </section>
+
+  <div class="home-demos-head" id="demos">
+    <h2>The demos</h2>
+    <span>Six small apps. Open two tabs, or flip Offline at the top right.</span>
   </div>
+
+  <ul class="demo-grid">
+    <li><a class="demo-card demo-card-todo" href="/todo">
+      <span class="card-art" aria-hidden="true"><span class="card-sheet"><i></i><i></i><i></i></span></span>
+      <div class="card-body"><div class="card-head"><h3>Todo</h3><span class="card-tag">Optimistic writes</span></div>
+      <p class="card-copy">Writes land instantly, and a server-only rule can still reject a title after the browser accepted it.</p>
+      <span class="go">Open Todo →</span></div>
+    </a></li>
+    <li><a class="demo-card demo-card-chat" href="/slack">
+      <span class="card-art" aria-hidden="true"><span class="card-sheet"><i></i><i></i><i></i></span></span>
+      <div class="card-body"><div class="card-head"><h3>Chat</h3><span class="card-tag">Channels and threads</span></div>
+      <p class="card-copy">Channels, DMs and threads, with replies from server-side users arriving over SSE. No WebSocket.</p>
+      <span class="go">Open Chat →</span></div>
+    </a></li>
+    <li><a class="demo-card demo-card-inbox" href="/email" data-turbo="false">
+      <span class="card-art" aria-hidden="true"><span class="card-sheet"><i></i><i></i><i></i></span></span>
+      <div class="card-body"><div class="card-head"><h3>Inbox</h3><span class="card-tag">Shared mailboxes</span></div>
+      <p class="card-copy">Reply offline, then switch teammates to see who gets the conversation in Support or Billing.</p>
+      <span class="go">Open Inbox →</span></div>
+    </a></li>
+    <li><a class="demo-card demo-card-assistant" href="/assistant">
+      <span class="card-art" aria-hidden="true"><span class="card-sheet"><i></i><i></i><i></i></span></span>
+      <div class="card-body"><div class="card-head"><h3>Assistant</h3><span class="card-tag">Streaming replies</span></div>
+      <p class="card-copy">Ask about your workspace, watch a reply stream in, and pick up any saved conversation later.</p>
+      <span class="go">Open Assistant →</span></div>
+    </a></li>
+    <li><a class="demo-card demo-card-migrate" href="/migrate">
+      <span class="card-art" aria-hidden="true"><span class="card-sheet"><i></i><i></i><i></i></span></span>
+      <div class="card-body"><div class="card-head"><h3>Ship v2</h3><span class="card-tag">Migrations</span></div>
+      <p class="card-copy">Fill a local database, leave writes unsynced, then run a migration over the top. Both have to survive.</p>
+      <span class="go">Open Ship v2 →</span></div>
+    </a></li>
+    <li><a class="demo-card demo-card-console" href="/console">
+      <span class="card-art" aria-hidden="true"><span class="card-sheet"><i></i><i></i><i></i></span></span>
+      <div class="card-body"><div class="card-head"><h3>Console</h3><span class="card-tag">Live ActiveRecord</span></div>
+      <p class="card-copy">An ActiveRecord prompt against the database in this tab. Type a query the demo didn’t plan for.</p>
+      <span class="go">Open Console →</span></div>
+    </a></li>
+  </ul>
+
+  <div class="board-band">
+    <span>This page was rendered by Rails inside your browser: <b>Spinel + SQLite</b>.</span>
+    <a href="/receipts">What this cost on your device: performance receipts →</a>
+  </div>
+
+  <footer class="project-strip">
+    <p>InstantRecord is an MIT-licensed Ruby gem. Every page here is in the repo, and View source reads it out of the app that just rendered it.</p>
+    <p class="project-links">
+      <a href="https://github.com/kieranklaassen/instant_record">GitHub</a>
+      <a href="https://rubygems.org/gems/instant_record">RubyGems</a>
+      <code>gem "instant_record"</code>
+    </p>
+  </footer>
 </main>
