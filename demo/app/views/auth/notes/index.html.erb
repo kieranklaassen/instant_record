@@ -59,11 +59,11 @@
   <section class="auth-notes" aria-labelledby="auth-notes-title">
     <h2 class="micro-label" id="auth-notes-title">
       Notes in this <%= InstantRecord.browser? ? "browser’s database" : "response" %>
-      <span class="auth-count" data-auth-target="held" data-count="<%= @notes.size %>"><%= @notes.size %></span>
+      <span class="auth-count" data-auth-target="held" data-count="<%= @auth_notes.size %>"><%= @auth_notes.size %></span>
     </h2>
 
     <ul class="auth-list">
-      <% @notes.each do |note| %>
+      <% @auth_notes.each do |note| %>
         <% note_href = auth_note_path(note) %>
         <li class="card auth-note audience-<%= note.audience %>" data-id="<%= note.id %>">
           <div class="auth-note-head">
@@ -81,7 +81,7 @@
         </li>
       <% end %>
     </ul>
-    <% if @notes.empty? %>
+    <% if @auth_notes.empty? %>
       <p class="auth-empty">Nothing here for you yet.</p>
     <% end %>
     <% if InstantRecord.browser? %>

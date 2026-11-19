@@ -14,9 +14,9 @@ const ready = name => page.waitForFunction(name => window.Stimulus?.controllers.
 const go = async path => { await page.goto(new URL(path, origin).href); await ready("inspector"); };
 try {
   await go("/");
-  assert.deepEqual(await page.locator(".demo-card").evaluateAll(cards => cards.map(c => c.getAttribute("href"))), ["/todo","/slack","/email","/assistant","/migrate","/console"]);
+  assert.deepEqual(await page.locator(".demo-card").evaluateAll(cards => cards.map(c => c.getAttribute("href"))), ["/todo","/slack","/email","/assistant","/auth","/migrate","/console"]);
   await page.getByRole("link",{name:/performance receipts/i}).waitFor();
-  assert.equal(await page.locator(".demo-card .card-art").count(), 6);
+  assert.equal(await page.locator(".demo-card .card-art").count(), 7);
   assert.equal(await page.locator(".demo-grid").evaluate(grid => getComputedStyle(grid).display), "grid");
   await page.locator('link[rel="icon"]').evaluateAll(icons => Promise.all(icons.map(icon => {
     const image = new Image();
@@ -114,7 +114,7 @@ try {
   await ready("measure");
   page.once("dialog", dialog => dialog.accept());
   await page.getByRole("button", {name: "Wipe local data and boot cold"}).click();
-  await page.locator(".home-board").waitFor();
+  await page.locator(".demo-grid").waitFor();
   await go("/todo");
   await page.getByText(title, {exact:true}).waitFor();
   assert.deepEqual(errors, []);

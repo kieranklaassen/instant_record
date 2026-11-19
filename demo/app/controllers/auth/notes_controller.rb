@@ -7,7 +7,7 @@ module Auth
     end
 
     def index
-      @notes = notes_scope.order(created_at: :desc).to_a
+      @auth_notes = notes_scope.order(created_at: :desc).to_a
       @pending_count = InstantRecord.browser? ? InstantRecord.pending_count : 0
     end
 
