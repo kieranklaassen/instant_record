@@ -31,6 +31,11 @@
   color: #fff;
 }
 
+/* A control does not show a key where there is no keyboard to press it on. */
+@media (pointer: coarse) {
+  button .ui-keys { display: none; }
+}
+
 /* --- A button that shows its key ------------------------------------------- */
 
 button.ui-button {

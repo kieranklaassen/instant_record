@@ -12,7 +12,7 @@ export default function Rail({ member, inbox, inboxes, people, composeKey, helpK
         Inbox
       </div>
       <button type="button" className="mail-primary mail-compose-link" onClick={onCompose}>
-        <Icon name="compose" /> Compose <Kbd chord={composeKey} tone="on-accent" />
+        <Icon name="compose" /> Compose <Kbd chord={composeKey} tone="on-accent" silent />
       </button>
       <div className="mail-rail-section">Mailboxes</div>
       <nav aria-label="Mailboxes" className="mail-folders">
@@ -34,7 +34,7 @@ export default function Rail({ member, inbox, inboxes, people, composeKey, helpK
           ))}
         </nav>
       </div>
-      <button type="button" className="mail-keys-hint" onClick={onHelp}><Kbd chord={helpKey} /> Keyboard shortcuts</button>
+      <button type="button" className="mail-keys-hint" onClick={onHelp}><Kbd chord={helpKey} silent /> Keyboard shortcuts</button>
     </aside>
   )
 }

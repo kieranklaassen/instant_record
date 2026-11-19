@@ -17,7 +17,10 @@ export default function KeyHelp({ bindings, groups, onClose }) {
     return () => before?.focus?.()
   }, [])
 
+  // Nothing in the list takes focus, so Tab stays on the card and does not
+  // wander into the page behind it.
   const key = (event) => {
+    if (event.key === "Tab") event.preventDefault()
     if (event.key !== "Escape") return
     event.preventDefault()
     onClose()

@@ -42,7 +42,7 @@ export default function Toasts({ notices, pending, undoKey, onUndo, onDismiss })
         <div className="ui-toast" data-kind="undo" key={action.key}>
           <span>{action.label}{pending.length > 1 && <small> · {pending.length - 1} more</small>}</span>
           <button type="button" className="ui-toast-undo" onClick={onUndo}>
-            <Icon name="undo" size={14} /> Undo {undoKey && <Kbd chord={undoKey} tone="on-ink" />}
+            <Icon name="undo" size={14} /> Undo {undoKey && <Kbd chord={undoKey} tone="on-ink" silent />}
           </button>
         </div>
       )}

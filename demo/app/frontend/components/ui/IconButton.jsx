@@ -10,7 +10,7 @@ export default function IconButton({ icon, chord, tone, quiet = true, className 
     <button type="button" className={`ui-button ${className}`} data-quiet={String(quiet)} {...button}>
       {icon && <Icon name={icon} size={15} />}
       <span>{children}</span>
-      {chord && <Kbd chord={chord} tone={tone} />}
+      {chord && <Kbd chord={chord} tone={tone} silent />}
     </button>
   )
 }

@@ -21,6 +21,8 @@ export default function ReplyBox({ id, address, open, keys, drafts, sender, onOp
     const input = field.current
     input.focus()
     input.setSelectionRange(input.value.length, input.value.length)
+    // In one column the box is part of the page, so bring its buttons up.
+    input.form.scrollIntoView({ block: "nearest" })
   }, [open])
 
   // As tall as its text, up to the limit the stylesheet sets.
@@ -66,7 +68,7 @@ export default function ReplyBox({ id, address, open, keys, drafts, sender, onOp
       <button type="button" className="mail-reply-prompt" data-draft={String(!!body)} onClick={onOpen}>
         <Icon name="reply" />
         <span>{body ? <><b>Draft</b> {body}</> : `Reply to ${address}`}</span>
-        <Kbd chord={keys.reply} />
+        <Kbd chord={keys.reply} silent />
       </button>
     )
   }
