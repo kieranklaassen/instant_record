@@ -199,14 +199,38 @@ def optimize_wasm(tree, wasm):
     return final
 
 
-def inject_preloads(dist):
+def outside_stylesheets(app):
+    """The stylesheets a layout takes from another site (its web fonts), asked for while wasm
+    compiles.
+
+    The page the app writes names them only once the app is up, and a stylesheet holds the
+    paint until it has arrived: a round trip to another site, after everything else is ready.
+    Preloaded from the shell, the answer is in the HTTP cache when the page asks.
+    """
+    layouts = os.path.join(app, "app/views/layouts")
+    links = []
+    if not os.path.isdir(layouts):
+        return links
+    for name in sorted(os.listdir(layouts)):
+        for tag in re.findall(r"<link\b[^>]*>", open(os.path.join(layouts, name)).read()):
+            href = re.search(r'href="(https://[^"<]+)"', tag)
+            if not href:
+                continue
+            if 'rel="preconnect"' in tag and "    " + tag not in links:
+                links.append("    " + tag)  # where its fonts come from: the layout knows
+            if 'rel="stylesheet"' in tag and "crossorigin" not in tag:
+                links.append(f'    <link rel="preload" as="style" href="{href.group(1)}">')
+    return links
+
+
+def inject_preloads(dist, app=None):
     """Preload the worker bundle and app stylesheets while wasm compiles.
 
     JS libraries are intentionally not preloaded here so main-thread script parsing does not
     compete with WebAssembly.compileStreaming or resolve bare importmap specifiers prematurely.
     They are fetched instead (warm_scripts): the bytes are in the HTTP cache when the page asks.
     """
-    links = []
+    links = outside_stylesheets(app) if app else []
     harness_dir = os.path.join(dist, "harness")
     if os.path.isdir(harness_dir):
         for name in sorted(os.listdir(harness_dir)):
@@ -374,7 +398,7 @@ def main():
     shell_worker = os.path.join(APP_SOURCE or os.path.join(GEM_SRC, "demo"), "app/views/pwa/service-worker.js")
     if os.path.isfile(shell_worker):
         shutil.copy(shell_worker, os.path.join(dist, "service-worker.js"))
-    inject_preloads(dist)
+    inject_preloads(dist, APP_SOURCE or os.path.join(GEM_SRC, "demo"))
     previous = os.path.join(B, "previous-site")
     clean(previous)
     if os.path.isdir(output):
