@@ -317,6 +317,11 @@ def main():
             shutil.copy(found, assets)
     if not APP_SOURCE:
         write_source_pages(app, dist, wanted[:12], os.path.join(GEM_SRC, "demo"))
+    # The service worker that keeps the shell: the same file Rails serves at /service-worker.js.
+    # Read from the app's own checkout: the demo's staged copy leaves app/views/pwa out.
+    shell_worker = os.path.join(APP_SOURCE or os.path.join(GEM_SRC, "demo"), "app/views/pwa/service-worker.js")
+    if os.path.isfile(shell_worker):
+        shutil.copy(shell_worker, os.path.join(dist, "service-worker.js"))
     inject_preloads(dist)
     previous = os.path.join(B, "previous-site")
     clean(previous)

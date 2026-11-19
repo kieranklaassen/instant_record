@@ -7,9 +7,11 @@ Rails.application.routes.draw do
   # Can be used by load balancers and uptime monitors to verify that the app is live.
   get "up" => "rails/health#show", as: :rails_health_check
 
-  # Render dynamic PWA files from app/views/pwa/* (remember to link manifest in application.html.erb)
+  # The service worker that keeps the app shell (app/views/pwa/service-worker.js).
+  # The page registers /service-worker.js; the compiled build copies the same
+  # file to that path on its static site.
   # get "manifest" => "rails/pwa#manifest", as: :pwa_manifest
-  # get "service-worker" => "rails/pwa#service_worker", as: :pwa_service_worker
+  get "service-worker" => "rails/pwa#service_worker", as: :pwa_service_worker
 
   # Each demo app lives under its own namespace: controllers in
   # app/controllers/<demo>/, views in app/views/<demo>/, routes scoped here.
