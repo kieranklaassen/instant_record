@@ -3,12 +3,17 @@ module InstantRecord
   # change-log row, and idempotency-ledger row, in one transaction. This is
   # the server half of the sync protocol; the HTTP layer above it is thin.
   class MutationApplier
-    def self.apply(mutation)
-      new(mutation).apply
+    # A write the identity may not make. Raised inside the transaction, so
+    # whatever the write did is rolled back with it.
+    NotPermitted = Class.new(StandardError)
+
+    def self.apply(mutation, identity = nil)
+      new(mutation, identity).apply
     end
 
-    def initialize(mutation)
+    def initialize(mutation, identity = nil)
       @mutation = mutation
+      @identity = identity
       @changes = (mutation[:changes] || {}).to_h
     end
 
@@ -25,6 +30,8 @@ module InstantRecord
         InstantRecord.applying_client_mutation { perform(model) }
       end
       record_result(**result)
+    rescue NotPermitted
+      record_result(status: "rejected", reason: "not permitted", server_attributes: server_attributes_for(model))
     rescue ActiveRecord::RecordInvalid => e
       record_result(status: "rejected", reason: e.record.errors.full_messages.to_sentence,
         server_attributes: server_attributes_for(model))
@@ -55,15 +62,23 @@ module InstantRecord
     def perform(model)
       case @mutation[:operation]
       when "create"
+        # An id that belongs to a record this identity cannot see is answered
+        # as any other create it may not make, before the database can say
+        # "id already exists" about a row the client was never shown.
+        raise NotPermitted if hidden?(model)
+
         record = model.new(@changes.merge("id" => @mutation[:record_id]))
         record.server_version = 1
         record.sync_state = "synced"
         record.save!
+        permit!(model)
         log_change(record, "create")
         { status: "applied", version: record.server_version }
       when "update"
         record = model.find_by(id: @mutation[:record_id])
-        return { status: "rejected", reason: "record not found" } unless record
+        return { status: "rejected", reason: "record not found" } if record.nil? || hidden?(model)
+
+        permit!(model)
 
         if stale?(record)
           # Last-write-wins: an older concurrent write is acknowledged (there is
@@ -77,11 +92,20 @@ module InstantRecord
           record.server_version += 1
           record.sync_state = "synced"
           record.save!
+          # Again after the write: a change of owner or audience must leave the
+          # record somewhere this identity may still write.
+          permit!(model)
           log_change(record, "update")
           { status: "applied", version: record.server_version }
         end
       when "destroy"
         record = model.find_by(id: @mutation[:record_id])
+        # A hidden record answers as a missing one does, and is left alone. No
+        # change is logged: a logged destroy would remove the record from the
+        # browsers of the people who may see it.
+        return { status: "applied" } if record && hidden?(model)
+
+        permit!(model) if record
         record&.destroy!
         log_destroy(model)
         { status: "applied" }
@@ -115,9 +139,24 @@ module InstantRecord
       )
     end
 
+    # The server's row as this identity may see it, for a client to roll back
+    # to. Every rejection reads through here, so none carries a hidden record.
     def server_attributes_for(model)
-      record = model&.find_by(id: @mutation[:record_id])
+      record = model && SyncScope.visible(model, @identity).find_by(id: @mutation[:record_id])
       InstantRecord.wire_attributes(record.attributes) if record
+    end
+
+    # The record exists and this identity may not see it.
+    def hidden?(model)
+      SyncScope.scoped?(model) && model.exists?(id: @mutation[:record_id]) &&
+        !SyncScope.visible(model, @identity).exists?(id: @mutation[:record_id])
+    end
+
+    # The record, as it stands inside this transaction, is one this identity may write.
+    def permit!(model)
+      return unless SyncScope.scoped?(model)
+
+      raise NotPermitted unless SyncScope.writable(model, @identity).exists?(id: @mutation[:record_id])
     end
 
     # create_or_find_by leans on the unique index: a concurrent duplicate

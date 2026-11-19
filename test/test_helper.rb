@@ -1,6 +1,7 @@
 require "minitest/autorun"
 require "active_record"
 require "instant_record"
+require "instant_record/sync_scope"
 
 ActiveRecord::Base.establish_connection(adapter: "sqlite3", database: ":memory:")
 
@@ -67,6 +68,27 @@ module InstantRecordTestHelpers
     InstantRecord::SyncMetadata.delete_all
     InstantRecord::Change.delete_all
     InstantRecord::AppliedMutation.delete_all
+  end
+
+  # A person as an app would hand one to the gem: anything with an id.
+  Person = Struct.new(:id)
+
+  # Runs the block with identities configured, the way an app's initializer
+  # would leave things. The identity is whatever the "request" is.
+  def with_sync_identity(&block)
+    InstantRecord.config.sync_identity = ->(request) { request }
+    block.call
+  ensure
+    InstantRecord.config.sync_identity = nil
+  end
+
+  # Rows whose `state` is "public" are for everyone; any other state names the
+  # one person who may see the row. Only that person may write it.
+  def scoped_model(name = "Item")
+    syncable_model(name) do
+      syncable_to { |who| who ? where(state: ["public", who.id]) : where(state: "public") }
+      writable_by { |who| who ? where(state: who.id) : none }
+    end
   end
 end
 

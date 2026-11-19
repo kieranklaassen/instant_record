@@ -21,10 +21,9 @@ module InstantRecord
       return head :bad_request if before_at.nil? || params[:before_id].blank?
 
       limit = (params[:limit].presence || window.limit).to_i.clamp(1, HARD_LIMIT)
-      rows = window
-        .keyset_below(at: before_at, id: params[:before_id], partition: params[:partition])
-        .limit(limit + 1)
-        .to_a
+      rows = window.keyset_below(at: before_at, id: params[:before_id], partition: params[:partition])
+      rows = rows.merge(SyncScope.visible(model, SyncScope.identity(request))) if SyncScope.scoped?(model)
+      rows = rows.limit(limit + 1).to_a
 
       render json: {
         records: rows.first(limit).map { |record| InstantRecord.record_payload(record) },

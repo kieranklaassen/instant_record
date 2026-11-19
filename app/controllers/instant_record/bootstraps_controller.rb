@@ -8,10 +8,15 @@ module InstantRecord
     before_action { headers.merge!(InstantRecord::CORS_HEADERS) }
 
     def show
+      identity = SyncScope.identity(request)
       payload = ActiveRecord::Base.transaction do
         cursor = Change.maximum(:id) || 0
-        { cursor: cursor, records: bootstrap_models.flat_map { |model| serialize_rows(model) } }
+        { cursor: cursor, records: bootstrap_models.flat_map { |model| serialize_rows(model, identity) } }
       end
+      # The key a client keeps and sends back, so either side notices when the
+      # person behind the browser changes. Absent unless identities are configured.
+      payload[:identity] = SyncScope.key(identity) if SyncScope.enabled?
+      headers["cache-control"] = "no-store" if SyncScope.enabled?
       render json: payload
     end
 
@@ -25,9 +30,10 @@ module InstantRecord
       InstantRecord.syncable_models
     end
 
-    def serialize_rows(model)
+    def serialize_rows(model, identity)
       window = model.instant_record_sync_window
       scope = window ? window.in_window : model.all
+      scope = scope.merge(SyncScope.visible(model, identity)) if SyncScope.scoped?(model)
       scope.map { |record| InstantRecord.record_payload(record) }
     end
   end
