@@ -27,7 +27,7 @@ export default memo(function MailRow({ row, scope, focused, open, selected, onOp
       <a className="mail-row-link" href={inboxPath(scope, { thread: row.id })} onClick={click} aria-current={String(open)}>
         {row.unread && <span className="visually-hidden">Unread. </span>}
         <span className="mail-row-meta">
-          <b>{sender}</b>
+          <b data-address={String(!row.outside)}>{sender}</b>
           <time dateTime={row.at} title={new Date(row.at).toLocaleString()}>{shortTime(row.at)}</time>
         </span>
         <strong>{row.subject}</strong>
