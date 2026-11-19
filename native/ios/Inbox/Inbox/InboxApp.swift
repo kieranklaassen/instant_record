@@ -58,30 +58,16 @@ struct InboxApp: App {
     }
 }
 
-/// The Feedback library's form for the screen `feedback`. The form is made
-/// for a sheet: it holds a navigation stack of its own, with Cancel and
-/// Send, which SwiftUI refuses inside a screen pushed onto another. So the
-/// screen opens it as a sheet at once and goes back to the mailbox when the
-/// sheet closes. Who is writing, and from which inbox, go with the note and
-/// are shown under it like the rest.
-///
-/// (`presentationBackground` and the rest reach only the sheet around the
-/// form. What the form draws inside is the library's own.)
+/// The Feedback library's form for the screen `feedback`, which the mailbox
+/// brings up as a sheet. The form has its own bar, with Cancel and Send, and
+/// closes the sheet itself. Who is writing, and from which inbox, go with
+/// the note and are shown under it like the rest. The face is the app's.
+/// What the form draws inside is the library's own.
 private struct FeedbackScreen: View {
     let props: Props
-    @State private var writing = true
-    @Environment(\.dismiss) private var dismiss
     @Environment(\.theme) private var theme
 
     var body: some View {
-        (theme.page ?? .clear).ignoresSafeArea()
-            .sheet(isPresented: $writing, onDismiss: { dismiss() }) {
-                // The form is the library's. Around it, the app's look: its
-                // paper behind the sheet, its blue on Cancel and Send, its face.
-                FeedbackForm(details: ["From": props["from"], "Inbox": props["inbox"]])
-                    .tint(theme.tint)
-                    .fontDesign(theme.ui)
-                    .presentationBackground(theme.page.map(AnyShapeStyle.init) ?? AnyShapeStyle(.background))
-            }
+        FeedbackForm(details: ["From": props["from"], "Inbox": props["inbox"]]).fontDesign(theme.ui)
     }
 }

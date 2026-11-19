@@ -20,13 +20,21 @@ public struct AppView: View {
     }
 
     public var body: some View {
-        NavigationStack(path: $host.path) {
-            // A first screen put in another's place starts afresh.
-            ScreenView(route: host.root, host: host, first: true, waiting: waiting)
-                .id(host.root)
-                .navigationDestination(for: Route.self) { ScreenView(route: $0, host: host, first: false, waiting: waiting) }
+        // The status line sits over the navigation bar, not on it: as an
+        // inset of the stack it was drawn across the bar's buttons.
+        VStack(spacing: 0) {
+            banner
+            NavigationStack(path: $host.path) {
+                // A first screen put in another's place starts afresh.
+                ScreenView(route: host.root, host: host, first: true, waiting: waiting)
+                    .id(host.root)
+                    .navigationDestination(for: Route.self) { ScreenView(route: $0, host: host, first: false, waiting: waiting) }
+            }
         }
-        .safeAreaInset(edge: .top, spacing: 0) { banner }
+        .background { theme.page?.ignoresSafeArea() }
+        .sheet(isPresented: Binding(get: { host.sheet != nil }, set: { if !$0 { host.sheet = nil } })) {
+            if let route = host.sheet { SheetView(route: route, host: host, theme: theme) }
+        }
         .tint(theme.tint)
         .environment(\.theme, theme)
         .onChange(of: phase, initial: true) { _, now in host.front(now == .active) }
@@ -50,9 +58,42 @@ public struct AppView: View {
             }
             .padding(.horizontal)
             .padding(.vertical, 8)
-            .background(failed ? AnyShapeStyle(.yellow.opacity(0.25)) : theme.fill.map(AnyShapeStyle.init) ?? AnyShapeStyle(.bar))
-            .background { theme.page }
+            .background((failed ? AnyShapeStyle(.yellow.opacity(0.25)) : theme.fill.map(AnyShapeStyle.init) ?? AnyShapeStyle(.bar)), ignoresSafeAreaEdges: .top)
+            .background { theme.page?.ignoresSafeArea(edges: .top) }
         }
+    }
+}
+
+/// A screen brought up as a sheet. One that Ruby draws gets a navigation
+/// stack, for its title and bar buttons. One that is a single Swift view is
+/// shown as it is: such a view brings its own bar, and a stack inside a
+/// stack is not allowed.
+private struct SheetView: View {
+    let route: Route
+    @ObservedObject var host: AppHost
+    let theme: Theme
+
+    var body: some View {
+        Group {
+            // Nothing until the screen is drawn: which of the two it is
+            // must not change under a view that holds what was typed.
+            if host.screens[route] == nil {
+                Color.clear
+            } else if bare {
+                ScreenView(route: route, host: host, first: false)
+            } else {
+                NavigationStack { ScreenView(route: route, host: host, first: false) }
+            }
+        }
+        .tint(theme.tint)
+        .environment(\.theme, theme)
+        .presentationBackground(theme.page.map(AnyShapeStyle.init) ?? AnyShapeStyle(.background))
+    }
+
+    private var bare: Bool {
+        guard let screen = host.screens[route] else { return false }
+        let holder = screen.children.first { $0.kind == "navigation" } ?? screen
+        return !holder.children.isEmpty && holder.children.allSatisfy { $0.kind == "swift" }
     }
 }
 
@@ -260,12 +301,15 @@ struct NodeView: View {
     }
 
     // One line of a menu, ticked when it is the selected one. With `replace`
-    // it puts that screen in the first one's place, with `link` it opens it
-    // over this one, and otherwise it is an action.
+    // it puts that screen in the first one's place, with `sheet` it brings
+    // it up as a sheet, with `link` it opens it over this one, and
+    // otherwise it is an action.
     private var item: some View {
         Button(role: role) {
             if !node.prop("replace").isEmpty {
                 host.replace(with: Route(node.prop("replace"), node.params))
+            } else if !node.prop("sheet").isEmpty {
+                host.sheet = Route(node.prop("sheet"), node.params)
             } else if !node.prop("link").isEmpty {
                 host.path.append(Route(node.prop("link"), node.params))
             } else {

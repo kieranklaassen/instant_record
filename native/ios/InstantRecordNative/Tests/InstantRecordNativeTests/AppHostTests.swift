@@ -223,6 +223,41 @@ final class AppHostTests: XCTestCase {
         XCTAssertNil(host.typed[thread])
     }
 
+    func testAScreenBroughtUpAsASheetIsToldItOpenedDrawnWithItsParamsAndForgottenWhenPutAway() {
+        let host = host()
+        let feedback = Route("feedback", ["member": "maya", "inbox": "support"])
+        engine.calls = []
+
+        host.sheet = feedback
+        host.settle()
+
+        XCTAssertEqual(["action feedback inbox=support,member=maya open", renderMailbox, "render feedback inbox=support,member=maya"], engine.calls)
+        XCTAssertEqual("feedback", host.screens[feedback]?.text)
+        XCTAssertEqual([], host.path, "a sheet is not pushed")
+        XCTAssertNotNil(host.screens[mailbox], "the screen under the sheet is kept")
+
+        host.typed[feedback] = ["note": "Draft"]
+        engine.calls = []
+        host.sheet = nil
+        host.settle()
+
+        XCTAssertEqual([renderMailbox], engine.calls)
+        XCTAssertNil(host.screens[feedback])
+        XCTAssertNil(host.typed[feedback])
+    }
+
+    func testAnotherInboxPutsTheSheetAway() {
+        let host = host()
+        host.sheet = Route("feedback", ["member": "maya", "inbox": "support"])
+        host.settle()
+
+        host.replace(with: billing)
+        pass(host)
+
+        XCTAssertNil(host.sheet)
+        XCTAssertEqual([billing], Array(host.screens.keys))
+    }
+
     /// Let the main queue run until `holds`, for at most a few seconds.
     private func until(_ holds: () -> Bool) {
         let limit = Date().addingTimeInterval(3)

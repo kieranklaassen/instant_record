@@ -90,7 +90,11 @@ end
   conversation marks its message read there.
 - **A menu item with `replace:`** puts that screen in the first screen's
   place, as choosing another account does. With `link:` it opens the screen
-  over this one, as a row does.
+  over this one, as a row does. With `sheet:` it brings the screen up as a
+  sheet. The screen is told it opened, like a pushed one, and is forgotten
+  when the sheet is put away. A sheet that Ruby draws gets a bar for its
+  title and buttons. One that is a single `swift` view is shown as it is,
+  since such a view brings its own bar.
 - **Layout is in the Ruby.** `spacer` pushes what follows to the far edge,
   and `lines:` caps a text. The renderer adds no rules of its own.
 - **Icons are named by meaning** (`archive`, `filter`, `person`, `inbox`,
@@ -178,12 +182,13 @@ files a note as a GitHub issue through a relay.
   Inbox does not build: `git clone https://github.com/EveryInc/swift-libraries`
   beside this repo first.
 - **`InboxApp.swift`** calls `Feedback.setUp(product: "instant-record-inbox",
-  relay:)` once and registers the form as `FeedbackForm`. The form holds a
-  navigation stack of its own, which SwiftUI refuses inside a pushed screen
-  (it stops the app), so the screen opens it as a sheet, the way the library
-  means it to be used, and goes back when the sheet closes. The member and
-  inbox are listed under the note as "From" and "Inbox" with the rest of what
-  is sent.
+  relay:)` once and registers the form as `FeedbackForm`. The member and
+  inbox are listed under the note as "From" and "Inbox" with the rest of
+  what is sent.
+- **It comes up as a sheet.** The menu item says `sheet: "feedback"`, and
+  the renderer presents that screen over the mailbox, the way the library
+  means its form to be used. The form has its own bar, with Cancel and Send,
+  and closes the sheet itself.
 - **Nothing is filed yet.** The relay files only for the products in its own
   list, and `instant-record-inbox` is not in it. Send is answered with "This
   form is not set up to send feedback yet.", shown in red under the form, and
@@ -235,7 +240,8 @@ message's subject and body. Sizes are system text styles, so Dynamic Type
 works as before, and a test holds every text and ground pair to AA contrast
 in both appearances.
 
-The feedback form is drawn by its library. The theme reaches the sheet
+A sheet takes the theme too: its paper, its tint and its faces. The
+feedback form is drawn by its library, so the theme reaches the sheet
 around it (the paper, the blue of Cancel and Send, the face), not the
 form's own fields.
 
@@ -255,7 +261,7 @@ in front it follows the server's events (`StreamClient.swift`): it asks
 `events?after=<cursor>`, hands what arrives to the library, and asks again a
 second after a clean end, so a change made elsewhere shows without a touch.
 
-One line over the screen says, in this order: what went wrong ("Could not
+One line over the navigation bar says, in this order: what went wrong ("Could not
 sync: POST /mutations answered 401", or what Ruby raised), that the app is
 offline, or how many changes are waiting to send. An error stays until it is
 dismissed or a pass succeeds. A screen that cannot be drawn keeps the last

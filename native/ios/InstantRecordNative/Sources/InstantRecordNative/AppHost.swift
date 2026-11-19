@@ -71,6 +71,19 @@ public final class AppHost: ObservableObject {
             show()
         }
     }
+    /// The screen brought up as a sheet over the others, if one is. It is
+    /// told it opened, like a pushed one, and forgotten once it is put away.
+    @Published public var sheet: Route? {
+        didSet {
+            guard sheet != oldValue else { return }
+            if let sheet {
+                thread.run { self.act("open", [:], [:], on: sheet) }
+                schedule.request()
+            }
+            show()
+        }
+    }
+    private var showing: [Route] { [root] + path + (sheet.map { [$0] } ?? []) }
 
     /// The SwiftUI views a screen can ask for by name.
     public let views: Screens
@@ -266,7 +279,7 @@ public final class AppHost: ObservableObject {
     }
 
     private func show() {
-        let showing = [root] + path
+        let showing = showing
         lock.withLock { visible = showing }
         screens = screens.filter { showing.contains($0.key) }
         typed = typed.filter { showing.contains($0.key) }
@@ -401,6 +414,7 @@ public final class AppHost: ObservableObject {
             self.root = route
             if let drawn { self.screens[route] = drawn }
             self.fetchingFirst = first
+            self.sheet = nil
             self.path = []
             self.follow()
             self.schedule.now()
@@ -446,7 +460,7 @@ public final class AppHost: ObservableObject {
             if let node = try? Node(json: json) { drawn[route] = node } else { problem = "The screen \(route.screen) could not be read." }
         }
         DispatchQueue.main.async {
-            let showing = [self.root] + self.path
+            let showing = self.showing
             for (route, node) in drawn where showing.contains(route) && self.screens[route] != node {
                 self.screens[route] = node
             }
