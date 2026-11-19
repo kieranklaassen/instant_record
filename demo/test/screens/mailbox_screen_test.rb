@@ -113,10 +113,10 @@ class MailboxScreenTest < ActiveSupport::TestCase
     assert_equal [nil, "true"], toolbar("maya/support/unread").last.children.first(2).map { |item| item.props["selected"] }
   end
 
-  test "the trailing menu ends with a way to send feedback, opened over the mailbox" do
+  test "the trailing menu ends with a way to send feedback, in a sheet over the mailbox" do
     feedback = toolbar("maya/support/unread").last.children.last
 
-    assert_equal ["Send feedback", "feedback", nil], [feedback.text, feedback.props["link"], feedback.props["replace"]]
+    assert_equal ["Send feedback", "feedback", nil, nil], [feedback.text, feedback.props["sheet"], feedback.props["link"], feedback.props["replace"]]
     assert_equal at("maya/support"), feedback.link_params
   end
 

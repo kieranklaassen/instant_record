@@ -89,6 +89,12 @@ class NativeScreenTest < ActiveSupport::TestCase
     end
   end
 
+  class SheetScreen < InstantRecord::Native::Screen
+    def body
+      toolbar { button("More") { item "About", sheet: "about", params: { "from" => "menu" } } }
+    end
+  end
+
   class ReplyScreen < InstantRecord::Native::Screen
     def body
       bottom do
@@ -253,7 +259,14 @@ class NativeScreenTest < ActiveSupport::TestCase
     assert_equal ["menu", nil], inbox.props.values_at("link", "replace")
     assert_equal [nil, "menu"], sent.props.values_at("link", "replace")
     error = assert_raises(ArgumentError) { BothScreen.new.render }
-    assert_match "link: or replace:", error.message
+    assert_match "one of link:, replace: or sheet:", error.message
+  end
+
+  test "a menu item may bring a screen up as a sheet" do
+    about = SheetScreen.new.render.children.first.children.first.children.first
+
+    assert_equal ["about", nil, nil], about.props.values_at("sheet", "link", "replace")
+    assert_equal({ "from" => "menu" }, about.link_params)
   end
 
   test "a bar under the screen holds a field by name and the button that sends it" do
