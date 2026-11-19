@@ -11,7 +11,7 @@ export default defineConfig({
     emptyOutDir: false,
     rollupOptions: {
       input: "app/frontend/inbox.jsx",
-      output: { entryFileNames: "inbox.js", inlineDynamicImports: true },
+      output: { entryFileNames: "inbox.js", codeSplitting: false },
     },
   },
 })
