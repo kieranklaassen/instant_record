@@ -1,11 +1,13 @@
 import Foundation
 
-/// The compiled app, as instant_record_native.h declares it. The app target
-/// supplies the one implementation that calls the C library, so this package
-/// builds and tests without it.
+/// The app behind the screens. The app target supplies the one that calls
+/// the compiled C library (instant_record_native.h), and `HTTPEngine` asks a
+/// Rails server instead, so this package builds and tests without either.
 public protocol Engine: AnyObject {
-    /// Open the SQLite file. False when the app did not come up.
+    /// Start the app on a SQLite file. False when it did not come up.
     func boot(database: String) -> Bool
+    /// Close the open database and open another. False when it could not.
+    func open(database: String) -> Bool
     /// Run one entry point. Nil when Ruby raised, and `error` says what.
     func call(_ entry: String, _ input: String) -> String?
     /// What changed during the last call.

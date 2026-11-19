@@ -1,77 +1,80 @@
 import XCTest
 @testable import InstantRecordNative
 
-/// Stands where the compiled app would be and keeps what it was asked.
-final class FakeEngine: Engine {
-    var calls: [String] = []
-    var rows = ["m2", "m1"]
-    var noticeAfterSync = ""
-    var raises = false
-    private var last = ""
-    private var answer: (String) -> String = { _ in Transport.offline }
-    var answered: [String] = []
-
-    func boot(database: String) -> Bool {
-        calls.append("boot " + database)
-        rows = database.contains("billing") ? ["b1"] : ["m2", "m1"]
-        return true
-    }
-
-    func call(_ entry: String, _ input: String) -> String? {
-        calls.append(entry + " " + input.replacingOccurrences(of: "\n", with: "|"))
-        last = entry
-        if raises { return nil }
-        switch entry {
-        case "render": return screen(input)
-        case "action": rows.removeAll { input.hasSuffix($0) }
-        case "sync": answered.append(answer("GET " + input + "/events"))
-        default: break
-        }
-        return ""
-    }
-
-    func notice() -> String { last == "sync" ? noticeAfterSync : "" }
-    func error() -> String { "ArgumentError: No screen named nowhere" }
-    func onExchange(_ answer: @escaping (String) -> String) { self.answer = answer }
-
-    private func screen(_ input: String) -> String {
-        let items = rows.map { "{\"kind\":\"row\",\"id\":\"\($0)\",\"text\":\"\",\"action\":\"\",\"arg\":\"\",\"props\":{},\"children\":[]}" }
-        return "{\"kind\":\"screen\",\"id\":\"\",\"text\":\"\(input.split(separator: "\n")[0])\",\"action\":\"\",\"arg\":\"\",\"props\":{},\"children\":[\(items.joined(separator: ","))]}"
-    }
-}
-
 final class AppHostTests: XCTestCase {
-    private let mailbox = Route("mailbox", "maya/support")
-    private let thread = Route("thread", "maya/support/m2")
+    private let mailbox = Route("mailbox", ["member": "maya", "inbox": "support"])
+    private let thread = Route("thread", ["member": "maya", "inbox": "support", "id": "m2"])
+    private let billing = Route("mailbox", ["member": "maya", "inbox": "billing"])
     private var engine = FakeEngine()
+    private let clock = ManualClock()
+    private let network = ManualReachability()
+    private let renderMailbox = "render mailbox inbox=support,member=maya"
+    private let syncSupport = "sync http://example.test/maya-support"
 
     private func host(answer: @escaping (String) -> String = { _ in "200\n" }) -> AppHost {
-        // "member/inbox", and anything after it is how to show the inbox.
         let host = AppHost(engine: engine, root: mailbox, store: { route in
-            let place = route.arg.split(separator: "/").prefix(2).joined(separator: "-")
+            let place = (route.params["member"] ?? "") + "-" + (route.params["inbox"] ?? "")
             return AppHost.Store(database: "/tmp/\(place).sqlite3", endpoint: "http://example.test/" + place)
-        }, exchange: answer)
+        }, exchange: answer, clock: clock, reachability: network)
         host.start()
-        host.settle()
+        pass(host)
         return host
+    }
+
+    /// Let the planned sync pass run, and its results land.
+    private func pass(_ host: AppHost) {
+        host.settle()
+        clock.fire()
+        host.settle()
     }
 
     func testItDrawsFromTheDatabaseBeforeItSyncs() {
         let host = host()
 
-        XCTAssertEqual(["boot /tmp/maya-support.sqlite3", "render mailbox|maya/support", "sync http://example.test/maya-support"], engine.calls)
+        XCTAssertEqual(["boot /tmp/maya-support.sqlite3", renderMailbox, syncSupport], engine.calls)
         XCTAssertEqual(["m2", "m1"], host.screens[mailbox]?.children.map(\.id))
+        XCTAssertTrue(host.online)
+        XCTAssertEqual(0, host.pending)
     }
 
-    func testATapIsPerformedThenDrawnThenSynced() {
+    func testATapIsPerformedWithItsValuesThenDrawnThenSynced() {
         let host = host()
         engine.calls = []
 
-        host.perform("archive", arg: "maya/support/m2", on: mailbox)
-        host.settle()
+        host.perform("archive", with: ["id": "m2"], on: mailbox)
+        pass(host)
 
-        XCTAssertEqual(["action mailbox|maya/support|archive|maya/support/m2", "render mailbox|maya/support", "sync http://example.test/maya-support"], engine.calls)
+        XCTAssertEqual(["action mailbox inbox=support,member=maya archive id=m2", renderMailbox, syncSupport], engine.calls)
         XCTAssertEqual(["m1"], host.screens[mailbox]?.children.map(\.id))
+    }
+
+    func testAValueWithANewlineASlashAndAQuoteReachesTheAppAsItIs() {
+        let odd = "a/b\n\"c\""
+        let input = Route("thread", ["id": odd]).input(action: "reply", with: ["body": odd])
+        let object = try? JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: Any]
+
+        XCTAssertEqual(odd, (object?["params"] as? [String: String])?["id"])
+        XCTAssertEqual(odd, (object?["with"] as? [String: String])?["body"])
+        XCTAssertEqual(["reply", "thread"], [object?["action"] as? String, object?["screen"] as? String])
+    }
+
+    func testTwoRoutesWithTheSameParamsAreTheSameRoute() {
+        XCTAssertEqual(Route("mailbox", ["inbox": "support", "member": "maya"]), mailbox)
+        XCTAssertNotEqual(Route("mailbox", ["inbox": "support", "member": "maya", "show": "unread"]), mailbox)
+        XCTAssertEqual(mailbox.input(), Route("mailbox", ["inbox": "support", "member": "maya"]).input())
+    }
+
+    func testSeveralTapsCloseTogetherSyncOnce() {
+        let host = host()
+        engine.calls = []
+
+        host.perform("archive", with: ["id": "m2"], on: mailbox)
+        host.perform("archive", with: ["id": "m1"], on: mailbox)
+        host.sync()
+        pass(host)
+
+        XCTAssertEqual(1, engine.calls.filter { $0 == syncSupport }.count)
+        XCTAssertEqual(2, engine.calls.filter { $0.hasPrefix("action") }.count)
     }
 
     func testAChangeNoticeDrawsTheScreensOnShowOnceMore() {
@@ -83,9 +86,9 @@ final class AppHostTests: XCTestCase {
         engine.rows = ["m3", "m2", "m1"]
 
         host.sync()
-        host.settle()
+        pass(host)
 
-        XCTAssertEqual(["sync http://example.test/maya-support", "render mailbox|maya/support", "render thread|maya/support/m2"], engine.calls)
+        XCTAssertEqual([syncSupport, renderMailbox, "render thread id=m2,inbox=support,member=maya"], engine.calls)
         XCTAssertEqual(["m3", "m2", "m1"], host.screens[mailbox]?.children.map(\.id))
     }
 
@@ -94,23 +97,33 @@ final class AppHostTests: XCTestCase {
         engine.calls = []
 
         host.sync()
-        host.settle()
+        pass(host)
 
-        XCTAssertEqual(["sync http://example.test/maya-support"], engine.calls)
+        XCTAssertEqual([syncSupport], engine.calls)
     }
 
-    func testARowsActionIsPerformedBeforeTheScreenItOpensIsDrawn() {
+    func testAPushedScreenIsToldItOpenedBeforeItIsDrawn() {
         let host = host()
         engine.calls = []
 
-        host.open("thread", arg: "maya/support/m2", action: "read", from: mailbox)
+        host.path.append(thread)
         host.settle()
 
-        XCTAssertEqual([thread], host.path)
-        XCTAssertEqual("action mailbox|maya/support|read|maya/support/m2", engine.calls.first)
-        XCTAssertLessThan(engine.calls.firstIndex(of: "action mailbox|maya/support|read|maya/support/m2")!,
-                          engine.calls.firstIndex(of: "render thread|maya/support/m2")!)
+        XCTAssertEqual(["action thread id=m2,inbox=support,member=maya open", renderMailbox, "render thread id=m2,inbox=support,member=maya"], engine.calls)
         XCTAssertEqual("thread", host.screens[thread]?.text)
+    }
+
+    func testGoingBackTellsNobodyAndDropsTheScreen() {
+        let host = host()
+        host.path = [thread]
+        host.settle()
+        engine.calls = []
+
+        host.path = []
+        host.settle()
+
+        XCTAssertEqual([renderMailbox], engine.calls)
+        XCTAssertNil(host.screens[thread])
     }
 
     func testAnotherFirstScreenOpensItsOwnDatabaseAndSyncsWithItsOwnAddress() {
@@ -119,24 +132,35 @@ final class AppHostTests: XCTestCase {
         host.settle()
         engine.calls = []
 
-        host.replace(with: Route("mailbox", "maya/billing"))
-        host.settle()
+        host.replace(with: billing)
+        pass(host)
 
-        XCTAssertEqual(["boot /tmp/maya-billing.sqlite3", "render mailbox|maya/billing", "sync http://example.test/maya-billing"], engine.calls)
-        XCTAssertEqual(Route("mailbox", "maya/billing"), host.root)
+        XCTAssertEqual(["open /tmp/maya-billing.sqlite3", "render mailbox inbox=billing,member=maya", "sync http://example.test/maya-billing"], engine.calls)
+        XCTAssertEqual(billing, host.root)
         XCTAssertEqual([], host.path)
-        XCTAssertEqual([Route("mailbox", "maya/billing")], Array(host.screens.keys))
-        XCTAssertEqual(["b1"], host.screens[host.root]?.children.map(\.id))
+        XCTAssertEqual([billing], Array(host.screens.keys))
+        XCTAssertEqual(["b1"], host.screens[billing]?.children.map(\.id))
     }
 
     func testAnotherViewOfTheSameDataDoesNotOpenItAgain() {
         let host = host()
         engine.calls = []
 
-        host.replace(with: Route("mailbox", "maya/support/unread"))
-        host.settle()
+        host.replace(with: Route("mailbox", ["member": "maya", "inbox": "support", "show": "unread"]))
+        pass(host)
 
-        XCTAssertEqual(["render mailbox|maya/support/unread", "sync http://example.test/maya-support"], engine.calls)
+        XCTAssertEqual(["render mailbox inbox=support,member=maya,show=unread", syncSupport], engine.calls)
+    }
+
+    func testADatabaseThatWillNotOpenIsReportedAndTheOldOneKeepsSyncing() {
+        let host = host()
+        engine.calls = []
+
+        host.replace(with: Route("mailbox", ["member": "maya", "inbox": "locked"]))
+        pass(host)
+
+        XCTAssertEqual("ArgumentError: No screen named nowhere", host.failure)
+        XCTAssertEqual(syncSupport, engine.calls.last)
     }
 
     func testAPullSyncsAndDrawsEvenWhenNothingChanged() async {
@@ -145,42 +169,78 @@ final class AppHostTests: XCTestCase {
 
         await host.refresh()
 
-        XCTAssertEqual(["sync http://example.test/maya-support", "render mailbox|maya/support"], engine.calls)
+        XCTAssertEqual([syncSupport, renderMailbox], engine.calls)
     }
 
-    func testAScreenThatWasClosedIsNoLongerKeptOrDrawn() {
+    func testOfflineWithAWriteWaitingIsSaidAndTriedAgainUntilItGoes() {
+        var reachable = false
+        let host = host(answer: { _ in reachable ? "200\n" : Transport.offline })
+        engine.pending = 1
+
+        host.perform("archive", with: ["id": "m2"], on: mailbox)
+        pass(host)
+
+        XCTAssertFalse(host.online)
+        XCTAssertEqual(1, host.pending)
+        XCTAssertTrue(clock.waiting, "nothing is planned to try again")
+        XCTAssertEqual([0.3, 2, 0.3, 4], clock.planned, "the launch pass failed too, so the second wait is longer")
+
+        reachable = true
+        engine.pending = 0
+        pass(host)
+
+        XCTAssertTrue(host.online)
+        XCTAssertEqual(0, host.pending)
+    }
+
+    func testTheNetworkComingBackSyncsWithoutATouch() {
+        var reachable = false
+        let host = host(answer: { _ in reachable ? "200\n" : Transport.offline })
+        engine.calls = []
+        reachable = true
+
+        network.comeBack()
+        pass(host)
+
+        XCTAssertEqual([syncSupport], engine.calls)
+        XCTAssertTrue(host.online)
+        XCTAssertEqual(0, clock.planned.last)
+    }
+
+    func testInFrontTheAppKeepsSyncingOnATimer() {
         let host = host()
-        host.path = [thread]
-        host.settle()
-        host.path = []
-        host.settle()
         engine.calls = []
 
-        host.perform("archive", arg: "maya/support/m1", on: mailbox)
-        host.settle()
+        host.front(true)
+        pass(host)
+        pass(host)
+        host.front(false)
 
-        XCTAssertNil(host.screens[thread])
-        XCTAssertFalse(engine.calls.contains("render thread|maya/support/m2"))
+        XCTAssertEqual([syncSupport, syncSupport], engine.calls)
+        XCTAssertFalse(clock.waiting)
     }
 
-    func testWhatTheAppRaisesIsKeptAndTheScreenStays() {
+    func testWhatTheAppRaisesIsKeptUntilDismissedAndTheScreenStays() {
         let host = host()
         engine.raises = true
 
-        host.perform("archive", arg: "maya/support/m2", on: mailbox)
+        host.perform("archive", with: ["id": "m2"], on: mailbox)
+        host.settle()
+        engine.raises = false
+        host.perform("archive", with: ["id": "missing"], on: mailbox)
         host.settle()
 
         XCTAssertEqual("ArgumentError: No screen named nowhere", host.failure)
         XCTAssertEqual(["m2", "m1"], host.screens[mailbox]?.children.map(\.id))
+
+        host.dismissFailure()
+
+        XCTAssertEqual("", host.failure)
     }
 
-    func testWithNoNetworkTheAppIsToldSoAndNotKeptWaiting() {
-        // Nothing listens on port 9, so the connection is refused at once.
-        let transport = Transport(timeout: 2)
-        _ = host(answer: transport.exchange)
-
-        XCTAssertEqual([Transport.offline], engine.answered)
-        XCTAssertEqual(Transport.offline, transport.exchange("GET http://127.0.0.1:9/events"))
-        XCTAssertEqual(Transport.offline, transport.exchange("nonsense"))
+    func testTheStatusLineSaysWhatIsWaitingAndWhy() {
+        XCTAssertEqual("Offline", Wording.status(online: false, pending: 0))
+        XCTAssertEqual("Offline · 1 change waiting", Wording.status(online: false, pending: 1))
+        XCTAssertEqual("3 changes waiting to sync", Wording.status(online: true, pending: 3))
     }
 }

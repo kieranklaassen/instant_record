@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// The whole app: the first screen in a navigation stack, with every screen a
-/// row links to pushed over it. Syncs when the app comes to the front.
+/// row links to pushed over it. Under it, a line says when the app is offline
+/// or has changes waiting, and over it, what last went wrong.
 public struct AppView: View {
     @ObservedObject private var host: AppHost
     @Environment(\.scenePhase) private var phase
@@ -12,27 +13,69 @@ public struct AppView: View {
 
     public var body: some View {
         NavigationStack(path: $host.path) {
-            ScreenView(route: host.root, first: true)
-                .navigationDestination(for: Route.self) { ScreenView(route: $0, first: false) }
+            ScreenView(route: host.root, host: host, first: true)
+                .navigationDestination(for: Route.self) { ScreenView(route: $0, host: host, first: false) }
         }
-        .environmentObject(host)
-        .onChange(of: phase) { _, now in
-            if now == .active { host.sync() }
+        .safeAreaInset(edge: .bottom, spacing: 0) { status }
+        .safeAreaInset(edge: .top, spacing: 0) { failure }
+        .onChange(of: phase, initial: true) { _, now in host.front(now == .active) }
+    }
+
+    @ViewBuilder private var status: some View {
+        if !host.online || host.pending > 0 {
+            Label(Wording.status(online: host.online, pending: host.pending), systemImage: host.online ? "arrow.triangle.2.circlepath" : "wifi.slash")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 6)
+                .background(.bar)
+                .accessibilityIdentifier("sync-status")
+        }
+    }
+
+    @ViewBuilder private var failure: some View {
+        if !host.failure.isEmpty {
+            HStack(alignment: .firstTextBaseline) {
+                Label(host.failure, systemImage: "exclamationmark.triangle").font(.footnote)
+                Spacer()
+                Button("Dismiss") { host.dismissFailure() }.font(.footnote)
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+            .background(.yellow.opacity(0.25))
+            .accessibilityIdentifier("failure")
         }
     }
 }
 
-/// One screen, drawn from the description the app last gave for it.
+/// What the status line says.
+enum Wording {
+    static func status(online: Bool, pending: Int) -> String {
+        let waiting = pending == 1 ? "1 change waiting" : "\(pending) changes waiting"
+        if online { return waiting + " to sync" }
+        return pending > 0 ? "Offline · " + waiting : "Offline"
+    }
+}
+
+/// One screen, drawn from the description the app last gave for it. It keeps
+/// what is typed into its fields until an action from the same form sends it.
 struct ScreenView: View {
     let route: Route
+    let host: AppHost
     let first: Bool
-    @EnvironmentObject private var host: AppHost
+    @ObservedObject private var watched: AppHost
+    @State private var typed: [String: String] = [:]
+
+    init(route: Route, host: AppHost, first: Bool) {
+        self.route = route
+        self.host = host
+        self.first = first
+        watched = host
+    }
 
     var body: some View {
         if let screen = host.screens[route] {
-            ForEach(screen.keyed) { NodeView(node: $0.node, route: route, host: host, first: first) }
-        } else if !host.failure.isEmpty {
-            Text(host.failure).foregroundStyle(.secondary).padding()
+            NodeView(node: screen, route: route, host: host, typed: $typed, first: first)
         } else {
             Color.clear
         }
@@ -46,31 +89,77 @@ struct NodeView: View {
     let node: Node
     let route: Route
     let host: AppHost
+    @Binding var typed: [String: String]
     var first = false
+    /// The fields beside this node in the same container: a button sends
+    /// what was typed into them with its action, then empties them.
+    var form: [String] = []
 
     var body: some View {
         switch node.kind {
-        case "navigation": navigation
+        case "screen", "navigation": page
         case "list": list
         case "section": section
         case "row": row
         case "stack": stack
-        case "text": Text(node.text).font(font).foregroundStyle(tone)
+        case "spacer": Spacer(minLength: 8)
+        case "text": text
         case "date": Text(Moment.written(node.text)).font(font).foregroundStyle(tone)
-        case "image": Image(systemName: node.text).imageScale(.small).foregroundStyle(tone)
+        case "image": Image(systemName: Icons.symbol(node.text)).imageScale(.small).foregroundStyle(tone)
         case "button": button
         case "item": item
+        case "field": field
         case "swift": swift
         default: EmptyView()
         }
     }
 
     private func each(_ items: [Node.Keyed]) -> some View {
-        ForEach(items) { NodeView(node: $0.node, route: route, host: host) }
+        let fields = items.filter { $0.node.kind == "field" }.map(\.node.id)
+        return ForEach(items) { NodeView(node: $0.node, route: route, host: host, typed: $typed, first: first, form: fields) }
     }
 
     private func keyed(except kinds: String...) -> [Node.Keyed] {
         node.keyed.filter { !kinds.contains($0.node.kind) }
+    }
+
+    private func send(_ action: String) {
+        var with = node.params
+        for name in form { with[name] = typed[name] ?? "" }
+        host.perform(action, with: with, on: route)
+        for name in form { typed[name] = nil }
+    }
+
+    // The screen itself, or its navigation: content, with a title and bar
+    // buttons when it names them, and a bar pinned under it when it has one.
+    private var page: some View {
+        let content = keyed(except: "toolbar", "bottom")
+        let controls = node.children(of: "toolbar").flatMap(\.children)
+        let leading = Node.keyed(controls.filter { $0.prop("position") == "leading" })
+        let trailing = Node.keyed(controls.filter { $0.prop("position") != "leading" })
+        let under = node.children(of: "bottom").flatMap(\.keyed)
+        return Group {
+            if content.allSatisfy({ ["list", "navigation", "swift"].contains($0.node.kind) }) {
+                each(content)
+            } else {
+                VStack(alignment: .leading, spacing: 8) { each(content) }
+                    .padding()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            }
+        }
+        .modifier(Titled(title: node.kind == "navigation" ? node.prop("title") : nil, large: first))
+        .toolbar {
+            ToolbarItemGroup(placement: NodeView.leadingEdge) { each(leading) }
+            ToolbarItemGroup(placement: .primaryAction) { each(trailing) }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if !under.isEmpty {
+                HStack(alignment: .bottom, spacing: 10) { each(under) }
+                    .padding(.horizontal)
+                    .padding(.vertical, 8)
+                    .background(.bar)
+            }
+        }
     }
 
     // Pulling a list that asks for it syncs and draws the screens again.
@@ -82,32 +171,6 @@ struct NodeView: View {
         }
     }
 
-    // A title over the content, with the toolbar's controls in the bar, each
-    // on the side its `position` names.
-    private var navigation: some View {
-        let content = keyed(except: "toolbar")
-        let controls = node.children(of: "toolbar").flatMap(\.children)
-        let leading = Node.keyed(controls.filter { $0.prop("position") == "leading" })
-        let trailing = Node.keyed(controls.filter { $0.prop("position") != "leading" })
-        return Group {
-            if content.allSatisfy({ $0.node.kind == "list" }) {
-                each(content)
-            } else {
-                VStack(alignment: .leading, spacing: 8) { each(content) }
-                    .padding()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            }
-        }
-        .navigationTitle(node.prop("title"))
-        #if os(iOS)
-        .navigationBarTitleDisplayMode(first ? .large : .inline)
-        #endif
-        .toolbar {
-            ToolbarItemGroup(placement: NodeView.leadingEdge) { each(leading) }
-            ToolbarItemGroup(placement: .primaryAction) { each(trailing) }
-        }
-    }
-
     @ViewBuilder private var section: some View {
         if node.text.isEmpty {
             Section { each(node.keyed) }
@@ -116,48 +179,37 @@ struct NodeView: View {
         }
     }
 
-    // A row's children one under another. With a `link` the row is a button
-    // that opens that screen, and its text is a preview of two lines at most.
+    // A row's children one under another. With a `link` the row is a
+    // navigation link to that screen, opened with the params the row carries.
     @ViewBuilder private var row: some View {
         let content = VStack(alignment: .leading, spacing: 3) { each(keyed(except: "swipe")) }
-        let link = node.prop("link")
         Group {
-            if link.isEmpty {
+            if node.prop("link").isEmpty {
                 content
             } else {
-                Button {
-                    host.open(link, arg: node.arg, action: node.action, from: route)
-                } label: {
-                    HStack {
-                        content.lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
-                        Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
+                NavigationLink(value: Route(node.prop("link"), node.params)) { content }
             }
         }
+        .accessibilityIdentifier(node.id)
         .swipeActions(edge: .trailing) { swipes(leading: false) }
         .swipeActions(edge: .leading) { swipes(leading: true) }
     }
 
     private func swipes(leading: Bool) -> some View {
         let items = node.keyed.filter { $0.node.kind == "swipe" && ($0.node.prop("edge") == "leading") == leading }
-        return ForEach(items) { NodeView(node: $0.node, route: route, host: host).button }
+        return ForEach(items) { NodeView(node: $0.node, route: route, host: host, typed: $typed).button }
     }
 
-    // Side by side, the last element sits at the far edge.
     @ViewBuilder private var stack: some View {
         if node.prop("axis") == "horizontal" {
-            let items = node.keyed
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                each(Array(items.dropLast()))
-                if items.count > 1 { Spacer(minLength: 8) }
-                each(Array(items.suffix(1)))
-            }
+            HStack(alignment: .firstTextBaseline, spacing: 6) { each(node.keyed) }
         } else {
             VStack(alignment: .leading, spacing: 3) { each(node.keyed) }
         }
+    }
+
+    private var text: some View {
+        Text(node.text).font(font).foregroundStyle(tone).lineLimit(Int(node.prop("lines")))
     }
 
     #if os(iOS)
@@ -168,10 +220,10 @@ struct NodeView: View {
 
     // A button or a swipe: both are a label and an action for this screen.
     // A button that holds items opens them as a menu.
-    @ViewBuilder private var button: some View {
+    @ViewBuilder var button: some View {
         let items = node.keyed.filter { $0.node.kind == "item" }
         if items.isEmpty {
-            Button(role: role) { host.perform(node.action, arg: node.arg, on: route) } label: { label(image: node.prop("image")) }
+            Button(role: role) { send(node.action) } label: { label(image: node.prop("image")) }
         } else {
             Menu { each(items) } label: { label(image: node.prop("image")) }
         }
@@ -182,9 +234,9 @@ struct NodeView: View {
     private var item: some View {
         Button(role: role) {
             if node.prop("link").isEmpty {
-                host.perform(node.action, arg: node.arg, on: route)
+                send(node.action)
             } else {
-                host.replace(with: Route(node.prop("link"), node.arg))
+                host.replace(with: Route(node.prop("link"), node.params))
             }
         } label: {
             label(image: node.prop("selected") == "true" ? "checkmark" : node.prop("image"))
@@ -197,14 +249,22 @@ struct NodeView: View {
         if image.isEmpty {
             Text(node.text)
         } else {
-            Label(node.text, systemImage: image)
+            Label(node.text, systemImage: Icons.symbol(image))
         }
+    }
+
+    // A box to type in. It starts with what the screen gave it.
+    private var field: some View {
+        TextField(node.prop("placeholder"), text: Binding(get: { typed[node.id] ?? node.text }, set: { typed[node.id] = $0 }), axis: .vertical)
+            .textFieldStyle(.roundedBorder)
+            .lineLimit(1...5)
+            .accessibilityIdentifier(node.id)
     }
 
     // A view the app wrote in SwiftUI, by the name it registered. A name
     // nobody registered says so on screen.
     @ViewBuilder private var swift: some View {
-        if let view = Screens.view(node.text, Props(node), Actions(host: host, route: route)) {
+        if let view = host.views.view(node.text, Props(node), Actions(host: host, route: route)) {
             view
         } else {
             Label("No Swift view is registered as \(node.text)", systemImage: "exclamationmark.triangle")
@@ -227,6 +287,25 @@ struct NodeView: View {
         case "secondary": AnyShapeStyle(.secondary)
         case "accent": AnyShapeStyle(.tint)
         default: AnyShapeStyle(.primary)
+        }
+    }
+}
+
+/// A navigation title: large on the first screen, inline on pushed ones. A
+/// screen with no navigation of its own keeps whatever its Swift view sets.
+private struct Titled: ViewModifier {
+    let title: String?
+    let large: Bool
+
+    func body(content: Content) -> some View {
+        if let title {
+            content
+                .navigationTitle(title)
+                #if os(iOS)
+                .navigationBarTitleDisplayMode(large ? .large : .inline)
+                #endif
+        } else {
+            content
         }
     }
 }
