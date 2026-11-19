@@ -26,6 +26,28 @@ const formBody = (data, verb) => {
 const failure = (status, url) =>
   new HttpResponseError(`Request failed with status ${status}`, { status, data: "", headers: {} }, url)
 
+const xsrf = () => decodeURIComponent(document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/)?.[1] || "")
+
+// A write that visits nothing: a form post that neither follows the app's
+// redirect nor reloads a prop. A page sending several writes in a row sends
+// each this way and reloads its props once at the end, where `router.post`
+// would answer every one with the whole page.
+//
+// It reaches Rails with the token Inertia's own requests carry. Beside a
+// local database it is the page's own `fetch`, which the worker is meant to
+// answer; that half has not run. `keepalive` lets the browser finish the
+// request after the page is gone.
+export async function write(url, data, { keepalive = false } = {}) {
+  const headers = { "X-Requested-With": "XMLHttpRequest" }
+  const token = xsrf()
+  if (token) headers["X-XSRF-TOKEN"] = token
+  const sent = await fetch(new URL(url, window.location.href), {
+    method: "POST", body: formBody(data, "POST"), headers, redirect: "manual", keepalive, credentials: "same-origin",
+  })
+  // A redirect not followed is the app saying the write was taken.
+  if (!sent.ok && sent.type !== "opaqueredirect") throw failure(sent.status, url)
+}
+
 export const localHttpClient = {
   async request({ method, url, data, params, headers, signal }) {
     const target = new URL(url, window.location.href)
