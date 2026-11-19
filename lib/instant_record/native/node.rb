@@ -9,6 +9,12 @@ module InstantRecord
     # by its name across the whole app, and a Rails app already has a `params`
     # that holds anything.
     class Node
+      # The phone's compiler reads these (inline RBS): each is a hash of
+      # strings, and a screen that hands it any other kind fails the build.
+      # @rbs @link_params: Hash[String, String]
+      # @rbs @args: Hash[String, String]
+      # @rbs @props: Hash[String, String]
+
       attr_reader :kind, :props, :children
       attr_accessor :id, :text, :action, :link_params, :args
 
@@ -27,6 +33,7 @@ module InstantRecord
       # a hash by what it holds, an empty literal holds nothing it can go by,
       # and it would then treat a hash of strings given in its place as
       # another kind of hash.
+      #: () -> Hash[String, String]
       def self.strings
         none = { "" => "" }
         none.clear
