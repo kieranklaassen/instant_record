@@ -37,7 +37,12 @@ xcrun simctl launch booted dev.instantrecord.Inbox -server http://localhost:3000
 ```
 
 `InboxApp.swift` lists the launch arguments: the member and inbox, a token,
-the dev mode, the sync timer and a reset. `ruby native/ios/Inbox/project.rb`
+the dev mode, the sync timer and a reset. The server, member, inbox and
+token are kept in the app's settings, so the app opened again from the home
+screen, with no arguments, goes on where it was. Launch it with other
+values to change them. `-reset YES` still only empties the local databases.
+The token is kept as a plain setting, which is enough for a demo token. An
+app with real accounts keeps it in the Keychain. `ruby native/ios/Inbox/project.rb`
 writes `Inbox.xcodeproj` again.
 
 ## A screen
@@ -319,7 +324,8 @@ from it, not from the address. There is no sign-in screen yet.
   recreates a database of its own (`postgres:///instant_record_native_ui`),
   seeds a fixed inbox, starts the demo with a token required, and stops it
   afterwards, so it can be run again and again. It covers open and read,
-  reply, archive, switching inbox, unread only, the feedback form, older mail, a message
+  reply, archive, switching inbox, unread only, the feedback form, opening
+  again with no arguments, older mail, a message
   arriving with no touch, pull to refresh, an archive the server refuses,
   an archive made offline that goes out when the server returns, and the
   main controls in dark mode at the largest text size. The script refuses

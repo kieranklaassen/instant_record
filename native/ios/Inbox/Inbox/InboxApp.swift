@@ -14,6 +14,10 @@ import SwiftUI
 ///   -follow NO                      do not follow the server's events while in front
 ///   -reset YES                      start from an empty local database
 ///   -relay http://localhost:8787    where the feedback form sends its notes
+///
+/// The server, member, inbox and token it was launched with are kept, and
+/// used the next time it is opened with none given, as it is from the home
+/// screen.
 @main
 struct InboxApp: App {
     @StateObject private var host: AppHost
@@ -25,6 +29,12 @@ struct InboxApp: App {
         views.register("FeedbackForm") { props, _ in FeedbackScreen(props: props) }
 
         let defaults = UserDefaults.standard
+        // A launch argument is read like a setting but is gone at the next
+        // launch. Keep these four as settings of the app's own.
+        let given = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
+        for name in ["server", "member", "inbox", "token"] {
+            if let value = given[name] as? String { defaults.set(value, forKey: name) }
+        }
         // The form is the Feedback library's (EveryInc/swift-libraries). Its
         // relay files a note only for the products it lists, and this one is
         // not listed yet, so Send is answered with the relay's refusal.

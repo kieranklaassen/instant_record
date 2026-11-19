@@ -177,6 +177,23 @@ final class InboxUITests: XCTestCase {
         XCTAssertTrue(row("ui-60").exists)
     }
 
+    func testOpenedAgainWithNothingGivenItStillKnowsItsServerAndItsToken() {
+        launch()
+        let before = unread
+
+        // As from the home screen: no arguments at all.
+        app.terminate()
+        app.launchArguments = []
+        app.launch()
+        eventually("the mailbox was not there when opened again") { self.summary.exists && self.unread == before }
+        deliver()
+
+        // Only the server it was first given, asked with the token it was
+        // first given, can bring the new message.
+        eventually("the new message did not arrive", within: 20) { self.unread == before + 1 }
+        XCTAssertFalse(status.exists, status.label)
+    }
+
     func testOlderMailLoadsAsTheListIsScrolled() {
         launch()
         XCTAssertTrue(summary.label.contains("more on the server"), summary.label)
