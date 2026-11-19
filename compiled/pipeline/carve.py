@@ -25,7 +25,7 @@ REMOVE = [
     "config/initializers/instant_record.rb",
     # The Inbox speaks Inertia's protocol itself in the browser (its controller's
     # browser_only half); the gem's setup stays on the server.
-    "config/initializers/inertia_rails.rb",
+    "config/initializers/inertia_rails.rb", "app/views/inertia.html.erb",
     "app/controllers/source_controller.rb", "app/controllers/assistant/replies_controller.rb",
     "app/controllers/slack/resets_controller.rb", "app/controllers/email/sync_controller.rb", "app/models/mailbox.rb",
     "app/views/source", "app/views/pwa",

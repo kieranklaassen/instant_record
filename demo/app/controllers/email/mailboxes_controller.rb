@@ -159,7 +159,7 @@ module Email
         if params[:_inertia] == "1"
           render plain: page, content_type: "application/json"
         else
-          @page = page.gsub("<", "\\u003c")
+          @page = page
         end
       end
 
