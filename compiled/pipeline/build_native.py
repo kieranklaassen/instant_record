@@ -90,6 +90,21 @@ def certain_type_errors(app_c):
     return found
 
 
+def loose_node_fields(app_c):
+    """The fields of a screen's node that the compiler did not type as a hash of strings.
+
+    One hash of another kind handed to `params:` or `args:` anywhere in the app makes the
+    compiler type the node's field loosely, and it then reads every screen's hashes wrongly:
+    the app crashes on its first render. The struct is the place that shows it.
+    """
+    text = open(app_c, errors="replace").read()
+    found = re.search(r"^struct sp_InstantRecord__Native__Node_s \{(.*?)^\}", text, re.S | re.M)
+    if not found:
+        return []
+    fields = re.findall(r"(\w+) \* ?iv_(link_params|args|props);", found.group(1))
+    return [name for kind, name in fields if kind != "sp_StrStrHash"]
+
+
 def main():
     target = sys.argv[1] if len(sys.argv) > 1 else ""
     if target not in ("", "iphonesimulator"):
@@ -115,6 +130,10 @@ def main():
          "--ext-entry", ",".join("NativeBridge." + entry for entry in ENTRIES),
          *flags, "main_native.rb", "-o", app_c],
         cwd=tree, env={**path_env, "CPATH": T["SQLITE_SRC"]}, log="spinel.log")
+    loose = loose_node_fields(app_c)
+    if loose:
+        sys.exit("Some screen gives params: or args: a hash that does not hold only strings (the compiler typed a node's "
+                 + ", ".join(loose) + " loosely). Call to_s on a value that comes from a record, and write Node.strings for an empty hash.")
     wrong = certain_type_errors(app_c)
     if wrong:
         sys.exit("A hash given to params: or args: must hold strings. Call to_s on a value that comes from a record:\n  " + "\n  ".join(wrong))

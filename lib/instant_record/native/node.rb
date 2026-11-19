@@ -17,10 +17,20 @@ module InstantRecord
         @id = ""
         @text = ""
         @action = ""
-        @link_params = {}
-        @args = {}
-        @props = {}
+        @link_params = Node.strings
+        @args = Node.strings
+        @props = Node.strings
         @children = []
+      end
+
+      # An empty hash of strings by name. Not `{}`: the phone's compiler types
+      # a hash by what it holds, an empty literal holds nothing it can go by,
+      # and it would then treat a hash of strings given in its place as
+      # another kind of hash.
+      def self.strings
+        none = { "" => "" }
+        none.clear
+        none
       end
 
       def set(name, value)

@@ -62,7 +62,7 @@ module InstantRecord
       # hash a screen gives to `params:` or `args:` holds strings too: write
       # `entry.id.to_s` for a value that comes from a record, since the
       # phone's compiler types a hash by what it holds and refuses another.
-      def initialize(params = {})
+      def initialize(params = Node.strings)
         @given = params
         @open = []
       end
@@ -70,7 +70,7 @@ module InstantRecord
       # What a host sent as a JSON object, as strings by name. Anything that
       # is not an object gives an empty hash.
       def self.strings(parsed)
-        out = {}
+        out = Node.strings
         parsed.each { |name, value| out[name.to_s] = value.to_s } if parsed.is_a?(Hash)
         out
       end
@@ -124,7 +124,7 @@ module InstantRecord
       # keeps its place when it is drawn again. `link` names the screen a tap
       # opens and `params` are handed to that screen. A row with an `action`
       # has it performed with `args` before the screen opens.
-      def row(id: "", link: "", params: {}, action: "", args: {})
+      def row(id: "", link: "", params: Node.strings, action: "", args: Node.strings)
         node = add("row")
         node.id = id
         node.action = action
@@ -171,7 +171,7 @@ module InstantRecord
 
       # In a toolbar, `position` is "leading" or "trailing". A button given a
       # block is a menu, and the block holds its items.
-      def button(label, action: "", args: {}, role: "", image: "", position: "")
+      def button(label, action: "", args: Node.strings, role: "", image: "", position: "")
         node = add("button")
         act(node, label, action, args, role)
         node.set("image", image)
@@ -183,7 +183,7 @@ module InstantRecord
       # One line of a menu. With an `action` it is performed like a button's.
       # With a `link` it opens that screen with `params` in place of the first
       # screen, as choosing another account does. `selected` gives it a tick.
-      def item(title, action: "", args: {}, link: "", params: {}, image: "", role: "", selected: false)
+      def item(title, action: "", args: Node.strings, link: "", params: Node.strings, image: "", role: "", selected: false)
         node = add("item")
         act(node, title, action, args, role)
         node.link_params = params
@@ -194,7 +194,7 @@ module InstantRecord
       end
 
       # A swipe on the row that holds it. `edge` is "trailing" or "leading".
-      def swipe(label, action:, args: {}, role: "", edge: "", image: "")
+      def swipe(label, action:, args: Node.strings, role: "", edge: "", image: "")
         node = add("swipe")
         act(node, label, action, args, role)
         node.set("edge", edge)
