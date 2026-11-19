@@ -4,8 +4,10 @@ import SwiftUI
 /// A conversation as bubbles, written by hand in SwiftUI. ThreadScreen
 /// (demo/app/screens/thread_screen.rb) hands it its props:
 ///
-///   thread, subject, participants, archived ("true" or "")
-///   messages: author, address, date (ISO 8601), body, mine ("true" or "")
+///   subject, participants, archived (a flag)
+///   messages: author, address, date (ISO 8601), body, mine (a flag)
+///
+/// The reply box under it is not part of this view: the screen draws it.
 struct ConversationView: View {
     let props: Props
     let actions: Actions
@@ -16,7 +18,7 @@ struct ConversationView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(props["subject"]).font(.title2.bold())
                     Label(props["participants"], systemImage: "person.2").font(.subheadline).foregroundStyle(.secondary)
-                    if props["archived"] == "true" {
+                    if props.bool("archived") {
                         Label("Archived", systemImage: "archivebox").font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -26,16 +28,16 @@ struct ConversationView: View {
         }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if props["archived"] != "true" {
+            if !props.bool("archived") {
                 Button("Archive", systemImage: "archivebox", role: .destructive) {
-                    actions.perform("archive", props["thread"])
+                    actions.perform("archive")
                 }
             }
         }
     }
 
     private func bubble(_ message: Props) -> some View {
-        let mine = message["mine"] == "true"
+        let mine = message.bool("mine")
         return VStack(alignment: mine ? .trailing : .leading, spacing: 4) {
             HStack(spacing: 6) {
                 Text(message["author"]).font(.footnote.weight(.semibold))

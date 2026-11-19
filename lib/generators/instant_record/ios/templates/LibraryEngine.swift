@@ -22,7 +22,7 @@ final class LibraryEngine: Engine {
     }
 
     func boot(database: String) -> Bool { ir_boot(database) == 0 }
-    func open(database: String) -> Bool { ir_call("open", database) != nil }
+    func open(database: String) -> Bool { ir_open(database) == 0 }
     func call(_ entry: String, _ input: String) -> String? { ir_call(entry, input).map { String(cString: $0) } }
     func notice() -> String { String(cString: ir_notice()) }
     func error() -> String { String(cString: ir_error()) }
