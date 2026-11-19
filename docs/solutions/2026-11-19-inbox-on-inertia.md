@@ -72,6 +72,11 @@ The compiled toolchain (Spinel, Roundhouse) was not available where this was bui
 
 What did run: the Rails suite, the gem suite, the hook's unit tests, and a walk of the Rails-served page in Chromium (keys, 10,000 messages, two personas, a narrow screen). Served by Rails alone there is no local database, so that walk exercises Inertia's stock XHR client and a four-second poll in place of the change signal.
 
+## Two things the polish got wrong first
+
+- **A refused form opened Inertia's error window.** `onHttpException` on a `useForm` post suppresses that window only when it returns `false`. A callback that shows its own notice and returns nothing gets both.
+- **A key that submits skips the browser's validation.** Mod+Enter called the form's post directly, so `required` and `type=email` never ran. A submit from a key asks first: `fields.reportValidity()`, then post.
+
 ## Left out on purpose
 
 `/` does nothing because the demo has no search. Range selection, bulk actions and undo were left out of the first round and built in the polish that followed. That polish leaves out, on purpose: undo for a sent reply (the write landing at once is what the demo shows), an unarchive on the server (undo holds the write instead, so the mail log stays append-only), and one request for a bulk action (it is one light write per conversation and then one reload).
