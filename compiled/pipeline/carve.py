@@ -23,7 +23,7 @@ REMOVE = [
     "Gemfile.lock", "config/initializers/rack_attack.rb",
     # The compiled worker gets its endpoint from SYNC_ENDPOINT.
     "config/initializers/instant_record.rb",
-    "app/controllers/source_controller.rb",
+    "app/controllers/source_controller.rb", "app/controllers/assistant/replies_controller.rb",
     "app/controllers/slack/resets_controller.rb", "app/controllers/email/sync_controller.rb", "app/models/mailbox.rb",
     "app/views/source", "app/views/pwa",
     "app/helpers/source_helper.rb",
@@ -54,6 +54,8 @@ open(os.path.join(app, "config/routes.rb"), "w").write('''Rails.application.rout
     post "ship", to: "releases#create"
     delete "ship", to: "releases#destroy"
   end
+  get "assistant", to: "assistant/chats#index"
+  get "assistant/history", to: "assistant/history#index"
   get "email", to: "email/mailboxes#index"
   post "email", to: "email/mailboxes#create"
   namespace :console do

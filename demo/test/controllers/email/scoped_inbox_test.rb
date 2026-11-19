@@ -49,6 +49,8 @@ class ScopedInboxTest < ActionDispatch::IntegrationTest
   test "all scoped endpoints require membership and cross-inbox references are rejected" do
     get "/email/sync/jo/support/bootstrap"
     assert_response :forbidden
+    get "/email/sync/jo/support/records", params: { thread: "hidden" }
+    assert_response :forbidden
     get "/email/sync/jo/support/events"
     assert_response :forbidden
     post "/email/sync/jo/support/mutations", params: { mutations: [mutation("support", "jo")] }, as: :json
@@ -75,6 +77,40 @@ class ScopedInboxTest < ActionDispatch::IntegrationTest
     post "/email", params: { member: "jo", inbox: "billing", kind: "message", address: "missing-address", subject: "Hello", body: "Hi" }
     assert_response :unprocessable_entity
     assert_equal 1, MailEntry.count
+  end
+
+  test "mail pages break timestamp ties by id and omit archived conversations" do
+    mailbox = Mailbox.find("support")
+    ids = Array.new(53) { |i| "tied-%02d" % i }
+    at = Time.utc(2024, 5, 1)
+    ids.each do |id|
+      mailbox.append!(id: id, author: "maya", attributes: { kind: "message", address: "rae@example.test", subject: id, body: id })
+    end
+    MailEntry.where(id: ids).update_all(created_at: at)
+    mailbox.append!(id: "archive", author: "theo", attributes: { kind: "archive", parent_id: ids.last })
+    get "/email/sync/maya/support/bootstrap"
+    page = response.parsed_body.fetch("records").pluck("id")
+    assert_equal ids.reverse.drop(1).first(50), page
+    get "/email/sync/maya/support/records", params: { type: "MailEntry", before_id: page.last, before_created_at: at.iso8601 }
+    assert_equal ids.first(2).reverse, response.parsed_body.fetch("records").pluck("id")
+    assert_equal false, response.parsed_body.fetch("has_more")
+  end
+
+  test "generated mail arrives from an external sender only in the selected inbox" do
+    post "/email/sync/jo/support/incoming"
+    assert_response :forbidden
+    assert_no_difference("Mailbox.find('billing').revision") do
+      assert_difference("MailEntry.count", 1) { post "/email/sync/theo/support/incoming" }
+    end
+    assert_response :created
+    id = response.parsed_body.fetch("id")
+    entry = MailEntry.find(id)
+    assert_equal ["message", "support"], [entry.kind, entry.mailbox_id]
+    assert_not_includes %w[maya theo jo], entry.author
+    get "/email/sync/maya/support/events?after=0"
+    assert_includes response.body, id
+    get "/email/sync/maya/billing/bootstrap"
+    assert_empty response.parsed_body.fetch("records")
   end
 
   test "Rails compose, reply and archive go through the same feed" do

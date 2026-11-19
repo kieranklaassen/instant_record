@@ -3,7 +3,7 @@
 <div class="home-board">
   <div class="board-hero">
     <div class="hero-copy">
-      <p class="micro-label kicker">Five demos</p>
+      <p class="micro-label kicker">Six demos</p>
       <h1>Rails models<br>that run in<br>the browser.</h1>
       <p class="lede">
         Compiled to WebAssembly, rendered in a dedicated worker, backed by
@@ -15,7 +15,7 @@
     <aside class="hero-facts">
       <div>
         <p class="micro-label">Demos</p>
-        <p class="stat-huge">05</p>
+        <p class="stat-huge">06</p>
       </div>
       <div class="facts">
         <p>Runtime<br><strong><%= InstantRecord.browser? ? "Spinel" : "CRuby" %></strong></p>
@@ -72,6 +72,12 @@
         <h2>Shared inbox</h2>
         <p class="card-copy">Reply offline, then switch teammates to see who receives the conversation in Support or Billing.</p>
         <span class="go">Open inbox →</span>
+      </a></li>
+      <li><a href="/assistant" class="demo-card">
+        <%= image_tag "previews/assistant.png", alt: "", width: 800, height: 450, loading: "lazy", decoding: "async", style: "width:100%;height:auto" %>
+        <h2>Assistant chat</h2>
+        <p class="card-copy">Ask about your workspace, stream a reply, and pick up a saved conversation.</p>
+        <span class="go">Open Relay →</span>
       </a></li>
     </ul>
 

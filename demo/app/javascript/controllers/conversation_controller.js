@@ -1,3 +1,4 @@
+import { fetchHistoryViaWorker } from "controllers/history_page"
 import { Controller } from "@hotwired/stimulus"
 
 // Conversation behavior for the Swiss Slack demo: scroll up for older pages,
@@ -419,26 +420,6 @@ const fetchElement = async (url, selector) => {
 // or null if the page couldn't be reached. A thrown fetch and a non-ok
 // response mean the same thing to them, so they're answered the same way.
 const fetchList = (url, selector) => fetchElement(url, selector)
-
-const fetchHistoryViaWorker = (request) =>
-  new Promise((resolve) => {
-    const channel = new MessageChannel()
-    // An unresponsive worker recovers on a later attempt; busy keeps the slot
-    // idle instead of latching the offline notice.
-    const timer = setTimeout(
-      () => resolve({ ok: false, busy: true, error: "history request timed out" }),
-      15000,
-    )
-    channel.port1.onmessage = (event) => {
-      clearTimeout(timer)
-      resolve(event.data || { ok: false, error: "empty reply" })
-    }
-    const worker = window.__spinel.worker
-    worker.postMessage(
-      { type: "instant_record.fetch_history", request },
-      [channel.port2],
-    )
-  })
 
 // Add and update by data-id; never remove. Both lists are ascending, so one
 // pass keeps order: matched rows advance the anchor, new rows land after it.

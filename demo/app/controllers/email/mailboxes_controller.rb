@@ -11,10 +11,34 @@ module Email
 
       prepare_inbox
       entries = MailEntry.where(mailbox_id: @inbox)
-      archived = entries.where(kind: "archive").pluck(:parent_id)
-      @mail_entries = entries.where(kind: "message").order(created_at: :desc).to_a.reject { |entry| archived.include?(entry.id) }
-      @selected = entries.find_by(id: params[:thread], kind: "message") if params[:thread].present?
-      @replies = entries.where(kind: "reply", parent_id: params[:thread]).order(:created_at).to_a
+      messages = MailEntry.open_messages.where(mailbox_id: @inbox)
+      @before_id = params[:before].to_s
+      @before_at = params[:at].to_s
+      @limit = [params[:limit].to_i, MailEntry::PAGE_SIZE].max
+      @limit = [@limit, MailEntry::PAGE_SIZE * 3].min
+      if params[:after].present?
+        boundary = entries.find_by(id: params[:after])
+        return head :not_found unless boundary
+        newer = messages.where("created_at > :at OR (created_at = :at AND id > :id)", at: boundary.created_at, id: boundary.id)
+        rows = newer.order(:created_at, :id).limit(MailEntry::PAGE_SIZE + 1).to_a
+        preceding = rows.pop if rows.size > MailEntry::PAGE_SIZE
+        @before_id = preceding&.id.to_s
+        @before_at = preceding ? preceding.created_at.utc.iso8601(6) : ""
+        @mail_entries = rows.reverse
+      else
+        page = messages.order(created_at: :desc, id: :desc)
+        boundary = entries.find_by(id: @before_id) unless @before_id.empty?
+        if boundary
+          page = page.where("created_at < :at OR (created_at = :at AND id < :id)", at: boundary.created_at, id: boundary.id)
+        end
+        @mail_entries = page.limit(@limit).to_a
+      end
+      @composing = params[:compose] == "1"
+      @detail = @composing || !params[:thread].to_s.empty?
+      unless @composing
+        @selected = messages.find_by(id: params[:thread]) || @mail_entries.first
+      end
+      @replies = entries.where(kind: "reply", parent_id: @selected&.id).order(:created_at).to_a
       render partial: "mail", layout: false if params[:fragment]
     end
 

@@ -69,7 +69,7 @@ window.fetch = async (input, init) => {
   const isUrlInput = typeof input === "string" || input instanceof URL;
   const url = isUrlInput ? new URL(input, location.href) : new URL(input.url);
   if (url.origin === location.origin && url.searchParams.has("instant_record_network")) {
-    const response = await call("serverRequest", { path: url.pathname + url.search, method: init?.method || "GET" });
+    const response = await call("serverRequest", { path: url.pathname + url.search, method: init?.method || "GET", body: init?.body });
     if (!response.status) throw new TypeError("Sync server unreachable");
     return new Response(response.text || null, { status: response.status });
   }

@@ -33,6 +33,14 @@ export default class extends Controller {
     this.loaded = false
   }
 
+  reveal(event) {
+    if (!event.target.closest?.("[data-open-source]")) return
+    event.preventDefault()
+    this.element.open = true
+    this.element.querySelector("summary").focus({ preventScroll: true })
+    this.element.scrollIntoView({ block: "start" })
+  }
+
   // toggle->source#load
   async load() {
     if (!this.element.open || this.loaded) return

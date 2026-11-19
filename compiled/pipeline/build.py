@@ -316,7 +316,7 @@ def main():
         if found:
             shutil.copy(found, assets)
     if not APP_SOURCE:
-        write_source_pages(app, dist, wanted[:12])
+        write_source_pages(app, dist, wanted[:12], os.path.join(GEM_SRC, "demo"))
     inject_preloads(dist)
     previous = os.path.join(B, "previous-site")
     clean(previous)

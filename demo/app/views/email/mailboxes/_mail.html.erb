@@ -1,17 +1,51 @@
-<section class="mail-list"><h2><%= @inbox.capitalize %> inbox</h2>
-  <% if @mail_entries.empty? %><p>No open conversations.</p><% end %>
-  <% @mail_entries.each do |mail_entry| %>
-    <a href="/email?member=<%= @member %>&amp;inbox=<%= @inbox %>&amp;thread=<%= mail_entry.id %>"><strong><%= mail_entry.subject %></strong><span><%= mail_entry.address %></span></a>
+<section class="mail-list" aria-label="Conversations" data-action="scroll->mailbox#scroll" data-before="<%= @before_id %>" data-at="<%= @before_at %>">
+  <header><h2><%= @inbox.capitalize %> inbox</h2><% unless @before_id.empty? %><a href="/email?member=<%= @member %>&amp;inbox=<%= @inbox %>">Newest</a><% end %></header>
+  <% if @mail_entries.empty? %><p class="mail-empty-list">No open conversations.</p><% end %>
+  <% @mail_entries.each do |entry| %>
+    <a class="mail-row" data-id="<%= entry.id %>" data-at="<%= entry.created_at.utc.iso8601(6) %>" href="/email?member=<%= @member %>&amp;inbox=<%= @inbox %>&amp;before=<%= @before_id %>&amp;at=<%= @before_at %>&amp;thread=<%= entry.id %>" aria-current="<%= @selected&.id == entry.id %>">
+      <span class="mail-row-meta"><b><% if MailDirectory.inboxes(entry.author).empty? %><%= entry.author %><% else %>To <%= entry.address %><% end %></b><time datetime="<%= entry.created_at.utc.iso8601 %>"><%= entry.created_at.strftime("%b %d") %></time></span>
+      <strong><%= entry.subject %></strong><span class="mail-snippet"><%= entry.body %></span>
+    </a>
+  <% end %>
+  <% if @mail_entries.last && (@mail_entries.size == @limit || InstantRecord.browser?) %>
+    <button type="button" class="mail-older" data-mailbox-target="older" data-action="mailbox#older" data-id="<%= @mail_entries.last.id %>" data-at="<%= @mail_entries.last.created_at.utc.iso8601(6) %>">Load older conversations</button>
   <% end %>
 </section>
-<% if @selected %>
-  <article class="mail-thread"><a href="/email?member=<%= @member %>&amp;inbox=<%= @inbox %>">← All conversations</a>
-    <h2><%= @selected.subject %></h2><p><%= @selected.address %> · <%= @inbox %>@example.test</p><strong><%= @selected.author %></strong><p><%= @selected.body %></p>
-    <% @replies.each do |reply| %><div><strong><%= reply.author %></strong><p><%= reply.body %></p></div><% end %>
-    <%= form_with url: "/email", method: :post do |f| %>
-      <input type="hidden" name="member" value="<%= @member %>"><input type="hidden" name="inbox" value="<%= @inbox %>">
-      <input type="hidden" name="kind" value="archive"><input type="hidden" name="parent_id" value="<%= @selected.id %>">
-      <button>Archive conversation</button>
+<section class="mail-reader" data-thread="<%= @selected&.id %>" data-compose="<%= @composing %>">
+  <a class="mail-return" href="/email?member=<%= @member %>&amp;inbox=<%= @inbox %>">← Inbox</a>
+  <% if @composing %>
+    <div class="mail-compose-head"><h2>New conversation</h2><a aria-label="Close composer" href="/email?member=<%= @member %>&amp;inbox=<%= @inbox %>">×</a></div>
+    <%= form_with url: "/email", method: :post, class: "mail-compose" do |f| %>
+      <input type="hidden" name="member" value="<%= @member %>"><input type="hidden" name="inbox" value="<%= @inbox %>"><input type="hidden" name="kind" value="message">
+      <label>To<input type="email" name="address" placeholder="person@example.test" maxlength="254" required></label>
+      <label>Subject<input name="subject" placeholder="Subject" maxlength="180" required></label>
+      <label class="mail-body-field">Message<textarea name="body" placeholder="Write your message…" maxlength="5000" required></textarea></label>
+      <button class="mail-primary">Send message</button>
     <% end %>
-  </article>
-<% end %>
+  <% elsif @selected %>
+    <article class="mail-thread">
+      <header class="mail-thread-tools"><span>Conversation</span>
+        <%= form_with url: "/email", method: :post do |f| %>
+          <input type="hidden" name="member" value="<%= @member %>"><input type="hidden" name="inbox" value="<%= @inbox %>"><input type="hidden" name="kind" value="archive"><input type="hidden" name="parent_id" value="<%= @selected.id %>"><button aria-label="Archive conversation">Archive</button>
+        <% end %>
+      </header>
+      <h2><%= @selected.subject %></h2>
+      <div class="mail-message">
+        <div class="mail-byline"><span class="mail-avatar"><%= @selected.author[0].upcase %></span><div><strong><%= @selected.author %></strong><small><% if MailDirectory.inboxes(@selected.author).empty? %>From<% else %>To<% end %> <%= @selected.address %></small></div><time datetime="<%= @selected.created_at.utc.iso8601 %>"><%= @selected.created_at.strftime("%b %d") %></time></div>
+        <p><%= @selected.body %></p>
+      </div>
+      <div class="mail-replies">
+        <% @replies.each do |reply| %>
+          <div class="mail-message"><div class="mail-byline"><span class="mail-avatar avatar-<%= reply.author %>"><%= reply.author[0].upcase %></span><strong><%= reply.author %></strong><time datetime="<%= reply.created_at.utc.iso8601 %>"><%= reply.created_at.strftime("%b %d") %></time></div><p><%= reply.body %></p></div>
+        <% end %>
+      </div>
+    </article>
+    <%= form_with url: "/email", method: :post, class: "mail-reply" do |f| %>
+      <input type="hidden" name="member" value="<%= @member %>"><input type="hidden" name="inbox" value="<%= @inbox %>"><input type="hidden" name="kind" value="reply"><input type="hidden" name="parent_id" value="<%= @selected.id %>">
+      <h3>Reply to <%= @selected.address %></h3>
+      <textarea aria-label="Reply" name="body" placeholder="Write a reply…" maxlength="5000" required></textarea><button class="mail-primary">Send reply</button>
+    <% end %>
+  <% else %>
+    <div class="mail-empty"><span class="mail-mark" aria-hidden="true">✳</span><h2>Your inbox is clear</h2><p>Generate an incoming email to start a conversation.</p></div>
+  <% end %>
+</section>
