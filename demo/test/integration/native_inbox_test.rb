@@ -344,6 +344,18 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
     assert_equal [@older.id], MailEntry.open_messages.where(mailbox_id: "support").pluck(:id)
   end
 
+  test "a file that will not open leaves the app in the one it had" do
+    @phone.sync
+    held = rows.map { |row| row["id"] }
+    assert_not_empty held
+
+    assert_raises(RuntimeError) { @phone.open(File.join(@folder, "no-such-folder", "other.sqlite3")) }
+    assert_equal held, rows.map { |row| row["id"] }
+    @phone.tap("mailbox", SUPPORT, "archive", { "id" => @newer.id })
+    @phone.sync
+    assert_equal [@older.id], MailEntry.open_messages.where(mailbox_id: "support").pluck(:id)
+  end
+
   test "the app boots once, and nothing runs before it has" do
     again = assert_raises(RuntimeError) { @phone.boot(File.join(@folder, "second.sqlite3")) }
     assert_match "boots once", again.message

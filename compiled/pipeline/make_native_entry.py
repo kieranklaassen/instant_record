@@ -59,9 +59,27 @@ ENTRIES = '''
 # no host file to keep it in and every migration would otherwise run on each launch.
 DATABASE = '''
 module NativeDatabase
+  # A file that will not open leaves the app in the one it had: the host is told of
+  # the failure and its screens go on working.
   def self.open(db_path)
+    if @opened
+      previous = @path
+      begin
+        use(db_path)
+      rescue StandardError => error
+        use(previous)
+        raise error
+      end
+    else
+      use(db_path)
+    end
+    0
+  end
+
+  def self.use(db_path)
     Db.close if @opened
     @opened = true
+    @path = db_path
 <<database>>    InstantRecord::Client.forget_database
     0
   end
