@@ -29,11 +29,6 @@
         content_for :head) would fetch against the default resolver and fail
         to resolve its bare specifier. %>
     <%= yield :head %>
-    <%# The Inbox is an Inertia page in React: `npm run build` writes its
-        bundle to app/assets/builds. No other demo has a build step. %>
-    <% if controller_path == "email/mailboxes" %>
-      <script type="module" src="<%= asset_path("inbox.js") %>"></script>
-    <% end %>
   </head>
 
   <body class="demo-<%= controller_path.split("/").first %>"

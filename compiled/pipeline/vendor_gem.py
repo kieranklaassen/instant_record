@@ -160,8 +160,6 @@ if not os.environ.get("INSTANT_RECORD_APP"):
     source = target.read_text().replace('demo-<%= controller_path.split("/").first %>', 'demo-<%= content_for(:demo_scope) %>')
     # The top bar marks the current demo's tab from the same scope.
     source = source.replace('<% demo = controller_path.split("/").first %>', '<% demo = content_for(:demo_scope).to_s %>')
-    # And the Inbox's React bundle is asked for by the same scope.
-    source = source.replace('<% if controller_path == "email/mailboxes" %>', '<% if content_for(:demo_scope).to_s == "email" %>')
     target.write_text(source)
     for view in Path(app, "app/views").rglob("*.html.erb"):
         if view.name.startswith("_") or view.parent.name == "layouts":

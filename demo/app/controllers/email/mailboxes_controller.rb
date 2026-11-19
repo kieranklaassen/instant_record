@@ -72,6 +72,15 @@ module Email
       # from what is held, and the page asks the sync server for the rest.
       term = params[:q].to_s.strip
       messages = messages.where(MailEntry::MATCHING, q: MailEntry.pattern(term)) unless term.empty?
+      # The conversation the address names is in the list: the window widens
+      # to the page that holds it, so a link opens it however deep it lies.
+      thread = params[:thread].to_s
+      named = MailEntry.find_by(id: thread, mailbox_id: @inbox, kind: "message") unless thread.empty?
+      if named
+        ahead = messages.where("created_at > :at OR (created_at = :at AND id > :id)", at: named.created_at, id: named.id).count
+        held = (ahead / MailEntry::PAGE_SIZE + 1) * MailEntry::PAGE_SIZE
+        limit = held if held > limit && held <= MailEntry::LIVE_LIMIT
+      end
       entries = messages.order(created_at: :desc, id: :desc).limit(limit + 1).to_a
       more = entries.size > limit
       entries.pop if more
@@ -165,7 +174,7 @@ module Email
         if params[:_inertia] == "1"
           render plain: page, content_type: "application/json"
         else
-          @page = page.gsub("<", "\\u003c")
+          @page = page
         end
       end
 

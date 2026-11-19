@@ -174,6 +174,16 @@ class ScopedInboxTest < ActionDispatch::IntegrationTest
     assert_equal MailEntry::LIVE_LIMIT, live("maya", "mail", limit: 1_000_000)["limit"]
   end
 
+  test "the list widens to hold the conversation the address names" do
+    box = Mailbox.find("support")
+    120.times { |i| box.append!(id: "m#{i}", author: "Rae", attributes: { kind: "message", address: "rae@example.test", subject: "S#{i}", body: "B" }) }
+    mail = live("maya", "mail", thread: "m45")
+    assert_equal 100, mail["limit"]
+    assert_includes mail["rows"].map(&:first), "m45"
+    assert_equal 50, live("maya", "mail", thread: "m119")["limit"]
+    assert_equal 50, live("maya", "mail", thread: "nobody")["limit"]
+  end
+
   test "Rails compose, reply and archive go through the same feed" do
     post "/email", params: { member: "theo", inbox: "support", kind: "message", address: "rae@example.test", subject: "Hello", body: "Hi" }
     thread = MailEntry.sole.id
