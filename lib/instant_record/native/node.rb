@@ -22,7 +22,9 @@ module InstantRecord
       end
 
       # Written by hand so the compiled app and CRuby produce the same bytes.
-      def to_json
+      # Not `to_json`: JSON.generate calls that with an argument, and the
+      # compiled app's runtime gives every object one of its own.
+      def json
         out = +"{"
         out << "\"kind\":" << Node.quote(@kind)
         out << ",\"id\":" << Node.quote(@id)
@@ -41,7 +43,7 @@ module InstantRecord
         @children.each do |child|
           out << "," unless first
           first = false
-          out << child.to_json
+          out << child.json
         end
         out << "]}"
         out

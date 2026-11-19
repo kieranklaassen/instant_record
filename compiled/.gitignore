@@ -5,3 +5,4 @@ web/node_modules
 .worktrees/
 __pycache__/
 toolchain.env
+.build-native/

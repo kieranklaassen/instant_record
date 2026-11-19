@@ -70,8 +70,8 @@ class LettersScreen < InstantRecord::Native::Screen
 end
 
 box = LetterBox.new
-puts LettersScreen.new(box).to_json
+puts LettersScreen.new(box).json
 LettersScreen.new(box).perform("archive", "a1")
 LettersScreen.new(box).perform("shred", "b2")
-puts LettersScreen.new(box).to_json
+puts LettersScreen.new(box).json
 puts LettersScreen.new(LetterBox.new).arg

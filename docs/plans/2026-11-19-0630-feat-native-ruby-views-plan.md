@@ -255,7 +255,7 @@ Waits on: nothing.
 
 - **Goal:** The gem's view layer and a sample screen compile with Spinel to a native executable whose output equals CRuby's.
 - **Requirements:** R6.
-- **Files:** `compiled/pipeline/native/sample_screen.rb`, `compiled/pipeline/native/check_views.py`, `test/native_spinel_test.rb`, `compiled/README.md`.
+- **Files:** `test/native/sample_screen.rb`, `test/native_spinel_test.rb`. (As built: the test drives Spinel itself, so there is no `check_views.py`.)
 - **Approach:** The sample screen uses every node kind and builds rows from an array of plain objects, with no database. The check compiles it with `spinel`, runs it, and compares its JSON with the same file run under `ruby`. The test skips with a message when no toolchain is configured.
 - **Test Scenarios:** The compiled binary prints the same JSON as CRuby for the sample screen. An action that mutates the sample data changes the next render in both. Strings with quotes and non-ASCII characters match byte for byte.
 - **Verification:** `INSTANT_RECORD_TOOLCHAIN=<path> bundle exec rake test TEST=test/native_spinel_test.rb`.
@@ -264,10 +264,10 @@ Waits on: nothing.
 
 - **Goal:** The demo builds as a native library with boot, render, action and the existing sync entry points, and a host program drives the Inbox against a SQLite file.
 - **Requirements:** R10, R11, R12, R14, R16.
-- **Files:** `compiled/pipeline/make_native_entry.py`, `compiled/pipeline/native_shim.c`, `compiled/pipeline/native/host_check.c`, `compiled/pipeline/build_native.py`, `lib/instant_record/compiler.rb`, `lib/tasks/` for an `instant_record:compile_native` task, `compiled/README.md`.
+- **Files:** `compiled/pipeline/make_native_entry.py`, `compiled/pipeline/native_shim.c`, `compiled/pipeline/native/host.c`, `compiled/pipeline/native/instant_record_native.h`, `compiled/pipeline/build_native.py`, `demo/test/integration/native_inbox_test.rb`, `compiled/README.md`. (As built: the host is a program a test drives over its standard input, not a one-shot check, and it builds the repository's demo only. A rake task for a consumer app waits for the iOS half.)
 - **Approach:** Per KTD3 and KTD6. Start from `make_wasm_entry.py` and `reactor_shim.c` and share what is common instead of copying it. Overlay the gem's view layer and the demo's screens into the emitted project. Build for the host architecture first. The host check is a small C program that boots, seeds a mailbox through the sync entry point with a recorded bootstrap payload, renders the mailbox, archives a message and renders again.
 - **Test Scenarios:** Boot twice against the same file keeps its rows, covering AE5 without a network. Render of the mailbox returns one row per open message. Covers AE1: after `archive`, the row is gone and the pending mutation count is one. Covers AE4: feeding a rejection for that mutation restores the row. A change batch for a new message produces a change notice and the next render includes it.
-- **Verification:** `INSTANT_RECORD_TOOLCHAIN=<path> python3 compiled/pipeline/build_native.py --check`.
+- **Verification:** `INSTANT_RECORD_TOOLCHAIN=<path> python3 compiled/pipeline/build_native.py`, then `cd demo && INSTANT_RECORD_NATIVE_HOST=../compiled/.build-native/host bin/rails test test/integration/native_inbox_test.rb`.
 
 ### PR2: The iPhone app
 
@@ -308,7 +308,7 @@ Waits on: PR1 merged. Needs a Mac with Xcode and the compiler toolchain.
 | Gem tests | `bundle exec rake test` | U1, U3, U4 |
 | Demo tests | `cd demo && bin/rails test` | U2 |
 | Views under Spinel | `INSTANT_RECORD_TOOLCHAIN=<path> bundle exec rake test TEST=test/native_spinel_test.rb` | U3 |
-| Native reactor | `INSTANT_RECORD_TOOLCHAIN=<path> python3 compiled/pipeline/build_native.py --check` | U4 |
+| Native reactor | `python3 compiled/pipeline/build_native.py`, then `demo/test/integration/native_inbox_test.rb` with `INSTANT_RECORD_NATIVE_HOST` | U4 |
 | Swift package | `swift test` in `native/ios/InstantRecordNative` | U5 |
 | Simulator | `xcodebuild` build, then F1 through F4 by hand | U6 |
 
@@ -323,3 +323,13 @@ Per `AGENTS.md`, merge `origin/main` into the branch and run the gem and demo su
 - Anything that has not run on an iPhone simulator is described as unverified wherever the docs mention it.
 - No abandoned experiment, scratch harness or copied-and-unused pipeline code remains in the diff.
 - PR1 is done when U1 through U4 hold. The Objective is met only when U6 holds.
+
+## What changed while building PR1
+
+- A screen writes itself out with `json`, not `to_json`. The compiled runtime gives every object a `to_json` of its own, and that one won.
+- A row can carry an `action`, performed before the screen it links to opens (opening a message marks it read). There is a `date` element, so the phone writes a moment in its own language and time zone.
+- A screen's argument is one string: `member/inbox` for the mailbox and `member/inbox/id` for a thread.
+- The native app keeps SQLite's default locking and journal. The browser's `locking_mode = EXCLUSIVE` and `journal_mode = MEMORY` made the second connection fail with "database is locked".
+- The demo no longer went through Roundhouse on `main`: `MailShell` and `Email::ShellBuildJob` name the server-only `Mailbox`. `carve.py` now leaves both out, which also mends the browser build's emit step.
+- Ran on Linux x86_64 only. Nothing here has been linked for iOS or run on a phone or a simulator.
+

@@ -55,8 +55,8 @@ module InstantRecord
         root
       end
 
-      def to_json
-        render.to_json
+      def json
+        render.json
       end
 
       # A navigation bar with a title over whatever the block holds.

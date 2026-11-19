@@ -73,7 +73,7 @@ class NativeScreenTest < ActiveSupport::TestCase
   end
 
   test "the tree is JSON a host can parse" do
-    tree = JSON.parse(LettersScreen.new.to_json)
+    tree = JSON.parse(LettersScreen.new.json)
 
     row = tree.dig("children", 0, "children", 0, "children", 0, "children", 0)
     assert_equal "row", row["kind"]
@@ -84,7 +84,7 @@ class NativeScreenTest < ActiveSupport::TestCase
   end
 
   test "quotes, newlines, control characters and non-ASCII text survive" do
-    text = JSON.parse(QuotedScreen.new.to_json).dig("children", 0, "text")
+    text = JSON.parse(QuotedScreen.new.json).dig("children", 0, "text")
 
     assert_equal "She said \"hi\"\n\tthen left \\ café ☕ \u0001", text
   end
