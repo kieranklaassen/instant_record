@@ -165,7 +165,11 @@ try {
       const token = await page.evaluate(() => localStorage.getItem("instant_record.sync_scope"));
       const held = async scope => (await (await context.request.get(new URL("/instant_record/bootstrap" + scope, origin).href)).json()).records
         .filter(record => record.type === "AssistantTurn").map(record => record.attributes.reply);
-      assert.ok((await held("?scope=" + token)).includes("On-device answer to: Stay local"));
+      // The reply is in the outbox first: give the sync pass its moment.
+      for (let tries = 0; !(await held("?scope=" + token)).includes("On-device answer to: Stay local"); tries++) {
+        assert.ok(tries < 40, "the on-device reply never reached Rails");
+        await page.waitForTimeout(250);
+      }
       assert.ok(!(await held("")).some(reply => reply.includes("On-device answer")));
     }
 
