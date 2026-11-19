@@ -2,13 +2,15 @@
 # Opened with `member` and `inbox`, and with `filter: "unread"` to list only
 # what the member has not read.
 class MailboxScreen < InstantRecord::Native::Screen
-  include MailAccess
   extend InstantRecord::RuntimeScoped
 
+  def member = param("member")
+  def inbox = param("inbox")
+  def mail = MailAccess.new(member, inbox)
   def unread_only? = param("filter") == "unread"
 
   def body
-    unread = unread_ids
+    unread = mail.unread_ids
     shown = messages
     waiting = shown.count { |entry| unread.key?(entry.id) }
     older = older?
@@ -58,28 +60,37 @@ class MailboxScreen < InstantRecord::Native::Screen
   # "archive" names a message of this inbox by its `id`. "read_all" marks the
   # listed mail read.
   def perform(action, args, values)
-    return unless allowed?
+    mail = self.mail
+    return unless mail.allowed?
 
     case action
     when "read_all" then read_all
     when "archive"
-      entry = message(args.fetch("id", ""))
-      append("archive", entry.id) if entry
+      entry = mail.message(args.fetch("id", ""))
+      mail.append("archive", entry.id) if entry
     end
   end
 
   private
 
+  # Where this screen is, and the places a link from here leads: the params
+  # another screen is opened with, each a hash of strings.
+  def place = { "member" => member, "inbox" => inbox }
+  def place_in(name) = { "member" => member, "inbox" => name }
+  def unread_place = { "member" => member, "inbox" => inbox, "filter" => "unread" }
+  def thread_place(id) = { "member" => member, "inbox" => inbox, "thread" => id }
+
   def messages
-    return [] unless allowed?
+    return [] unless mail.allowed?
     open = MailEntry.open_messages.where(mailbox_id: inbox)
     open = open.where(MailEntry::UNREAD, member: member) if unread_only?
     held(open.order(created_at: :desc, id: :desc)).to_a
   end
 
   def read_all
-    unread = unread_ids
-    messages.each { |entry| append("read", entry.id) if unread.key?(entry.id) }
+    mail = self.mail
+    unread = mail.unread_ids
+    messages.each { |entry| mail.append("read", entry.id) if unread.key?(entry.id) }
   end
 
   # What the app asks the sync address's records door for: the page of mail
@@ -102,7 +113,7 @@ class MailboxScreen < InstantRecord::Native::Screen
     # What the last page of older mail said, or before any was asked for,
     # whether the first page came full.
     def older?
-      return false unless allowed?
+      return false unless mail.allowed?
       mark = InstantRecord::SyncMetadata.get("history:older:" + inbox)
       return mark == "more" unless mark.nil?
       MailEntry.open_messages.where(mailbox_id: inbox).count >= MailEntry::PAGE_SIZE

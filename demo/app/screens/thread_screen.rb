@@ -4,10 +4,12 @@
 # its props. Under it sits a reply box drawn from Ruby. Opened with `member`,
 # `inbox` and `thread`. Opening it marks the message read.
 class ThreadScreen < InstantRecord::Native::Screen
-  include MailAccess
+  def member = param("member")
+  def inbox = param("inbox")
+  def mail = MailAccess.new(member, inbox)
 
   def body
-    entry = message(param("thread"))
+    entry = mail.message(param("thread"))
     if entry.nil?
       navigation(title: "") { text "This conversation is not in #{inbox.capitalize}.", tone: "secondary" }
       return
@@ -35,15 +37,16 @@ class ThreadScreen < InstantRecord::Native::Screen
   # carries what was typed as `body`. "archive" comes from the Swift view's
   # own button.
   def perform(action, args, values)
-    entry = message(param("thread"))
+    mail = self.mail
+    entry = mail.message(param("thread"))
     return if entry.nil?
 
     case action
-    when "open" then append("read", entry.id) if unread_ids.key?(entry.id)
-    when "archive" then append("archive", entry.id)
+    when "open" then mail.append("read", entry.id) if mail.unread_ids.key?(entry.id)
+    when "archive" then mail.append("archive", entry.id)
     when "reply"
       words = values.fetch("body", "").strip
-      reply(entry.id, words) unless words.empty?
+      mail.reply(entry.id, words) unless words.empty?
     end
   end
 

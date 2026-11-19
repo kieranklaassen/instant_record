@@ -169,7 +169,7 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
     assert_equal ["InboxSummary", @newer.id], @phone.render("mailbox", UNREAD).dig("children", 0, "children", 0, "children").map { |node| node["id"].presence || node["text"] }
 
     @phone.tap("mailbox", SUPPORT, "read_all")
-    assert_equal %w[swift], @phone.render("mailbox", UNREAD).dig("children", 0, "children", 0, "children").map { |node| node["kind"] }
+    assert_equal ["InboxSummary", "You're all caught up"], @phone.render("mailbox", UNREAD).dig("children", 0, "children", 0, "children").map { |node| node["text"] }
     @phone.sync
 
     assert MailEntry.exists?(kind: "read", parent_id: @newer.id, author: "maya")
