@@ -230,14 +230,13 @@ export default class extends Controller {
 }
 
 // The fresh list folded into the one on screen, by note id. A note that stays
-// keeps its element, so nothing blinks; one that arrives eases in, and one
-// that leaves closes up before it is removed.
+// keeps its element and its place, so nothing blinks; one that arrives opens
+// up, and one that leaves closes up where it stood before it is removed.
 const foldRows = (current, fresh) => {
   const incoming = [...fresh.children].filter((row) => row.dataset.id)
   const staying = new Set(incoming.map((row) => row.dataset.id))
   const existing = new Map()
-  for (const row of [...current.children]) {
-    if (row.classList.contains("auth-leave")) continue
+  for (const row of live(current)) {
     if (staying.has(row.dataset.id)) existing.set(row.dataset.id, row)
     else leave(row)
   }
@@ -245,21 +244,42 @@ const foldRows = (current, fresh) => {
   let anchor = null
   for (const row of incoming) {
     let node = existing.get(row.dataset.id)
+    const arriving = !node
     if (node) {
       // The forms inside carry a token that differs on every render, so the
       // contents are swapped whenever they differ and the element is kept.
       if (node.innerHTML !== row.innerHTML) node.replaceChildren(...row.childNodes)
-      node.className = [...row.classList, ...(node.classList.contains("auth-enter") ? ["auth-enter"] : [])].join(" ")
+      node.className = row.className
     } else {
       node = document.importNode(row, true)
-      node.classList.add("auth-enter")
-      node.addEventListener("animationend", () => node.classList.remove("auth-enter"), { once: true })
     }
-    if (anchor ? anchor.nextElementSibling !== node : current.firstElementChild !== node) {
-      anchor ? anchor.after(node) : current.prepend(node)
+    // Order is kept among the notes that are staying: one on its way out is
+    // stepped over, not moved.
+    const rows = live(current)
+    const expected = anchor ? rows[rows.indexOf(anchor) + 1] : rows[0]
+    if (expected !== node) {
+      if (anchor) anchor.after(node)
+      else if (rows[0]) rows[0].before(node)
+      else current.prepend(node)
     }
+    if (arriving) enter(node)
     anchor = node
   }
+}
+
+const live = (list) => [...list.children].filter((row) => !row.classList.contains("auth-leave"))
+const still = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches
+
+// Opens from nothing to its own height, so the notes below slide down.
+const enter = (row) => {
+  if (still() || !row.animate) return
+  const style = getComputedStyle(row)
+  const open = { height: `${row.offsetHeight}px`, paddingTop: style.paddingTop, paddingBottom: style.paddingBottom, marginBottom: "0px", opacity: 1 }
+  // The negative margin takes back the list's gap while the row has no height.
+  const shut = { height: "0px", paddingTop: "0px", paddingBottom: "0px", marginBottom: "-10px", opacity: 0 }
+  row.style.overflow = "hidden"
+  const done = () => (row.style.overflow = "")
+  row.animate([shut, open], { duration: 280, easing: "cubic-bezier(0.2, 0.7, 0.2, 1)" }).finished.then(done, done)
 }
 
 const leave = (row) => {
