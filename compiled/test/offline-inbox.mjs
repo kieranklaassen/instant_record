@@ -27,8 +27,28 @@ const watch = context => {
   });
   return seen;
 };
+// What a reader could have seen of a load: each state the page was painted in, as
+// { list, rows }. A load is one paint when there is one state and it has rows.
+const frames = () => {
+  window.__frames = [];
+  const tick = () => {
+    const body = document.body;
+    if (body && body.childElementCount && getComputedStyle(body).visibility !== "hidden") {
+      const state = { list: !!document.querySelector(".mail-list"), rows: document.querySelectorAll(".mail-row").length > 0 };
+      const last = window.__frames.at(-1);
+      if (!last || last.list !== state.list || last.rows !== state.rows) window.__frames.push(state);
+    }
+    requestAnimationFrame(tick);
+  };
+  tick();
+};
+const onePaint = async (page, load) => {
+  await page.waitForTimeout(300);
+  assert.deepEqual(await page.evaluate(() => window.__frames), [{ list: true, rows: true }], load + " is painted once, with its mail");
+};
 const open = async (context, query = "") => {
   const page = await context.newPage();
+  await page.addInitScript(frames);
   page.on("pageerror", error => { throw error; });
   await page.goto(new URL("/email?member=maya&inbox=support" + query, origin).href);
   await page.getByRole("heading", { name: "Support inbox" }).waitFor();
@@ -42,6 +62,7 @@ try {
   const plainRequests = watch(plain);
   const bootstrapped = await open(plain);
   const expected = (await subjects(bootstrapped)).slice(0, 8);
+  await onePaint(bootstrapped, "a first load");
   assert.ok(plainRequests.some(path => path.startsWith("bootstrap")), "a plain first load bootstraps");
   assert.ok(!plainRequests.some(path => path.startsWith("shell")), "the shell is off unless asked for");
 
@@ -53,7 +74,8 @@ try {
   assert.ok(!shellRequests.some(path => path.startsWith("bootstrap")), "a shell load does not bootstrap");
   assert.deepEqual((await subjects(fromShell)).slice(0, 8), expected, "the shell's first screen is the bootstrap's, in the same order");
   assert.ok(shellRequests.some(path => path.startsWith("events?after=")), "the feed is asked from the shell's cursor");
-  say("1. A shell load shows the same first screen as a bootstrap and tails the feed.");
+  await onePaint(fromShell, "a first load from the shell");
+  say("1. A shell load shows the same first screen as a bootstrap and tails the feed, and each is painted once.");
 
   // 2. Mail that arrives after the shell reaches a shell-loaded page, above the shell's rows.
   await fromShell.getByRole("button", { name: "Generate incoming email" }).click();
@@ -94,11 +116,12 @@ try {
   shellRequests.length = 0;
   await fromShell.reload();
   await fromShell.locator(".mail-row").first().waitFor();
+  await onePaint(fromShell, "a reload");
   await filled(fromShell);
   // The address names the open conversation, and the worker asks for that one by id the
   // first time it boots at it (records?thread=). That is a lookup, not a page of history.
   assert.deepEqual(shellRequests.filter(path => /^(records\?type=|bootstrap|shell|file)/.test(path)), [], "a reload fetches no history");
-  say("6. A reload is whole at once, with no history request.");
+  say("6. A reload is whole at once, in one paint, with no history request.");
 
   // 7. Before the fill has run, a search widens from the server. The fill is held back here.
   const partial = await browser.newContext();

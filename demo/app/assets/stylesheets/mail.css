@@ -3,6 +3,14 @@
    The list is virtual: one scroll through the whole mailbox, with only the
    rows on screen in the page. */
 
+/* One paint. The page's markup arrives before its script has drawn the Inbox
+   into it, and painting it then shows the site bar over an empty page, then
+   an empty list, then the mail. So nothing is painted until the Inbox says
+   its rows are drawn (usePaintWhenDrawn in pages/Email/Inbox.jsx). If the
+   script never runs the page shows after four seconds, with what it has. */
+html:not([data-mail-ready]) body.demo-email { animation: mail-hold 4s steps(1, end) forwards; }
+@keyframes mail-hold { from { visibility: hidden; } to { visibility: visible; } }
+
 .maildesk {
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);
