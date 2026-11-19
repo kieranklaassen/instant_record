@@ -48,6 +48,31 @@ try {
   await maya.getByRole("link", { name: /October invoice/ }).waitFor();
   assert.equal(await maya.locator(".mail-folders a").count(), 1);
   console.log("Scoped compose, offline reply, reload, inbox switch, teammate delivery, and archive passed.");
+
+  // Two windows opened from /email share a browser profile and default to Maya.
+  const profile = await browser.newContext();
+  const sender = await profile.newPage();
+  const mirror = await profile.newPage();
+  await open(sender);
+  await open(mirror);
+  await open(theo, "?member=theo&inbox=support");
+  const onlineSubject = "Online " + randomUUID();
+  const response = "Confirmed " + randomUUID();
+  const thread = page => page.getByRole("link", { name: new RegExp(onlineSubject) });
+  await sender.getByLabel("To", { exact: true }).fill("support@example.test");
+  await sender.getByLabel("Subject", { exact: true }).fill(onlineSubject);
+  await sender.getByLabel("Message", { exact: true }).fill("Testing two open Support windows.");
+  await sender.getByRole("button", { name: "Send message" }).click();
+  await thread(mirror).waitFor();
+  // This teammate uses a separate profile and can only receive through Rails.
+  await thread(theo).click();
+  await theo.getByLabel("Reply", { exact: true }).fill(response);
+  await theo.getByRole("button", { name: "Send reply" }).click();
+  await sender.getByText(response, { exact: true }).waitFor();
+  await theo.getByRole("button", { name: "Archive conversation" }).click();
+  await thread(mirror).waitFor({ state: "detached" });
+  await thread(sender).waitFor({ state: "detached" });
+  console.log("Online send reached both a same-profile window and an independent teammate without reload.");
 } finally {
   await browser.close();
 }
