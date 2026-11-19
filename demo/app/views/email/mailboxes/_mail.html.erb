@@ -26,7 +26,7 @@
     <% end %>
   <% elsif @selected %>
     <article class="mail-thread">
-      <header class="mail-thread-tools"><span><%= pluralize(@replies.size + 1, "message") %></span>
+      <header class="mail-thread-tools"><span><%= "#{@replies.size + 1} #{"message".pluralize(@replies.size + 1)}" %></span>
         <%= form_with url: "/email", method: :post do |f| %>
           <input type="hidden" name="member" value="<%= @member %>"><input type="hidden" name="inbox" value="<%= @inbox %>"><input type="hidden" name="kind" value="archive"><input type="hidden" name="parent_id" value="<%= @selected.id %>"><button aria-label="Archive conversation">Archive</button>
         <% end %>

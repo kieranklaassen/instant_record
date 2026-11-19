@@ -22,7 +22,7 @@
       <% if issue.sync_state == "pending" %>
         <span class="badge badge-pending">Waiting to sync</span>
       <% end %>
-      <%= button_to "×", issue_href, method: :delete, "aria-label": "Delete issue", form: { data: { turbo: false, action: "submit->issues#submit" } } %>
+      <%= button_to "×", issue_href, method: :delete, aria: { label: "Delete issue" }, form: { data: { turbo: false, action: "submit->issues#submit" } } %>
     </li>
   <% end %>
 </ul>

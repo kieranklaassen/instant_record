@@ -19,7 +19,7 @@
     <div class="card todo-card">
       <%= form_with url: todo_issues_path, method: :post, class: "todo-form", data: { turbo: false, action: "submit->issues#submit" } do |f| %>
         <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-        <%= f.text_field "issue[title]", placeholder: "Add an issue and press Enter", "aria-label": "New issue title", required: true, autofocus: true %>
+        <%= f.text_field "issue[title]", placeholder: "Add an issue and press Enter", aria: { label: "New issue title" }, required: true, autofocus: true %>
         <%= f.submit "Add" %>
       <% end %>
 

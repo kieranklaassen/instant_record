@@ -35,20 +35,20 @@
         data-controller="inspector">
     <% demo = controller_path.split("/").first %>
     <header class="site-bar">
-      <a class="wordmark" href="<%= root_path %>">
+      <a class="wordmark" href="/">
         <span class="wordmark-mark" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7Z"/></svg></span>
         <span class="wordmark-text">InstantRecord</span>
       </a>
       <%# Spelled out rather than looped: the compiled runtime builds this
           template ahead of time, and plain markup is the safest input. %>
       <nav class="site-tabs" aria-label="Demos">
-        <a href="<%= root_path %>" aria-current="<%= demo == "home" ? "page" : "false" %>">Home</a>
-        <a href="<%= todo_root_path %>" aria-current="<%= demo == "todo" ? "page" : "false" %>">Todo</a>
-        <a href="<%= slack_root_path %>" aria-current="<%= demo == "slack" ? "page" : "false" %>">Chat</a>
+        <a href="/" aria-current="<%= demo == "home" ? "page" : "false" %>">Home</a>
+        <a href="/todo" aria-current="<%= demo == "todo" ? "page" : "false" %>">Todo</a>
+        <a href="/slack" aria-current="<%= demo == "slack" ? "page" : "false" %>">Chat</a>
         <a href="/email" data-turbo="false" aria-current="<%= demo == "email" ? "page" : "false" %>">Inbox</a>
         <a href="/assistant" aria-current="<%= demo == "assistant" ? "page" : "false" %>">Assistant</a>
-        <a href="<%= migrate_root_path %>" aria-current="<%= demo == "migrate" ? "page" : "false" %>">Ship v2</a>
-        <a href="<%= console_root_path %>" aria-current="<%= demo == "console" ? "page" : "false" %>">Console</a>
+        <a href="/migrate" aria-current="<%= demo == "migrate" ? "page" : "false" %>">Ship v2</a>
+        <a href="/console" aria-current="<%= demo == "console" ? "page" : "false" %>">Console</a>
       </nav>
       <%# Mirrors the inspector's own Offline checkbox; inspector#toggleOffline
           keeps the two in step, so either one drives the same simulation. %>

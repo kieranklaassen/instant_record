@@ -297,7 +297,7 @@ button:disabled, input[type="submit"]:disabled { opacity: 0.55; cursor: default;
 
 @media (max-width: 720px) {
   .site-bar { gap: 10px; padding: 0 12px; }
-  .site-bar .wordmark-text, .site-source, .net-label { display: none; }
+  .site-bar .wordmark-text, .net-label { display: none; }
   .net-switch { gap: 8px; padding-left: 10px; }
 }
 
