@@ -33,6 +33,50 @@ class NativeScreenTest < ActiveSupport::TestCase
     end
   end
 
+  class MenuScreen < InstantRecord::Native::Screen
+    def body
+      navigation title: "Letters" do
+        list refreshable: true
+        toolbar do
+          button "Boxes", image: "person.crop.circle", position: "leading" do
+            item "Inbox", link: "menu", arg: "inbox", image: "tray", selected: arg == "inbox"
+            item "Sent", link: "menu", arg: "sent", selected: arg == "sent"
+            item "Empty", action: "empty", arg: arg, role: "destructive"
+          end
+          button "New", action: "compose", position: "trailing"
+        end
+      end
+    end
+  end
+
+  class SwiftScreen < InstantRecord::Native::Screen
+    def body
+      swift "LetterView" do
+        prop "subject", "Night \"shift\""
+        prop "archived", ""
+        props "replies" do
+          LettersScreen::LETTERS.each do |letter|
+            record do
+              prop "from", letter.from
+              props("tags") { record { prop "name", letter.id } }
+            end
+          end
+        end
+        props("nobody") { }
+      end
+    end
+  end
+
+  class PartialScreen < InstantRecord::Native::Screen
+    def body
+      list do
+        swift("Banner") { prop "count", "2" }
+        row(id: "a1") { text "Rae" }
+        swift "Footer"
+      end
+    end
+  end
+
   class EmptyScreen < InstantRecord::Native::Screen
     def body
       list
@@ -96,6 +140,67 @@ class NativeScreenTest < ActiveSupport::TestCase
     assert_empty list.children
   end
 
+  test "a toolbar button says which side of the bar it sits on" do
+    menu, plain = toolbar(MenuScreen.new("inbox"))
+
+    assert_equal ["leading", "person.crop.circle"], [menu.props["position"], menu.props["image"]]
+    assert_equal ["trailing", "compose"], [plain.props["position"], plain.action]
+    assert_empty plain.children
+  end
+
+  test "a button with a block is a menu of items" do
+    inbox, sent, empty = toolbar(MenuScreen.new("sent")).first.children
+
+    assert_equal %w[item item item], [inbox, sent, empty].map(&:kind)
+    assert_equal ["Inbox", "menu", "inbox", "tray"], [inbox.text, inbox.props["link"], inbox.arg, inbox.props["image"]]
+    assert_equal ["empty", "sent", "destructive"], [empty.action, empty.arg, empty.props["role"]]
+    assert_nil empty.props["link"]
+  end
+
+  test "only the chosen item is selected" do
+    inbox, sent, empty = toolbar(MenuScreen.new("sent")).first.children
+
+    assert_equal [nil, "true", nil], [inbox, sent, empty].map { |item| item.props["selected"] }
+    assert_equal({ "link" => "menu", "selected" => "true" }, JSON.parse(MenuScreen.new("sent").json).dig("children", 0, "children", 1, "children", 0, "children", 1, "props"))
+  end
+
+  test "a list can ask to be refreshed by a pull, and does not by default" do
+    assert_equal "true", MenuScreen.new.render.children.first.children.first.props["refresh"]
+    assert_nil EmptyScreen.new.render.children.first.props["refresh"]
+  end
+
+  test "a screen can be one Swift view, named, with its props" do
+    view = SwiftScreen.new.render.children.sole
+
+    assert_equal ["swift", "LetterView"], [view.kind, view.text]
+    assert_equal [%w[prop subject], %w[prop archived], %w[props replies], %w[props nobody]], view.children.map { |node| [node.kind, node.id] }
+    assert_equal ["Night \"shift\"", ""], view.children.first(2).map(&:text)
+  end
+
+  test "a list of props holds records, and a record can hold a list" do
+    replies, nobody = SwiftScreen.new.render.children.sole.children.last(2)
+
+    assert_equal %w[record record], replies.children.map(&:kind)
+    assert_equal [%w[from Rae], %w[tags]], replies.children.first.children.map { |node| [node.id, node.text].reject(&:empty?) }
+    assert_equal "b2", replies.children.last.children.last.children.sole.children.sole.text
+    assert_empty nobody.children
+  end
+
+  test "the props reach the host as JSON it can read by name" do
+    view = JSON.parse(SwiftScreen.new.json).dig("children", 0)
+
+    assert_equal({ "kind" => "prop", "id" => "subject", "text" => "Night \"shift\"", "action" => "", "arg" => "", "props" => {}, "children" => [] }, view["children"].first)
+    assert_equal %w[Rae Sam], view["children"][2]["children"].map { |record| record["children"].first["text"] }
+  end
+
+  test "a Swift view sits among stock elements, with or without props" do
+    banner, row, footer = PartialScreen.new.render.children.sole.children
+
+    assert_equal %w[swift row swift], [banner, row, footer].map(&:kind)
+    assert_equal ["Banner", "count", "2"], [banner.text, banner.children.sole.id, banner.children.sole.text]
+    assert_equal ["Footer", []], [footer.text, footer.children]
+  end
+
   test "an action changes what the next render shows" do
     LettersScreen.new.perform("archive", "a1")
 
@@ -117,6 +222,10 @@ class NativeScreenTest < ActiveSupport::TestCase
   end
 
   private
+
+  def toolbar(screen)
+    screen.render.children.first.children.last.children
+  end
 
   def rows(root)
     root.children.first.children.first.children.first.children

@@ -38,7 +38,7 @@ class LettersScreen < InstantRecord::Native::Screen
 
   def body
     navigation title: "Letters" do
-      list do
+      list refreshable: true do
         section "Open" do
           @box.letters.each do |letter|
             row id: letter.id, link: "letter", arg: letter.id, action: "read" do
@@ -55,9 +55,26 @@ class LettersScreen < InstantRecord::Native::Screen
         section do
           text "#{@box.letters.size} letters", tone: "secondary"
         end
+        swift "LetterCount" do
+          prop "count", @box.letters.size.to_s
+          prop "empty", @box.letters.empty? ? "true" : ""
+          props "senders" do
+            @box.letters.each do |letter|
+              record do
+                prop "name", letter.from
+                prop "subject", letter.subject
+              end
+            end
+          end
+        end
       end
       toolbar do
         button "New", action: "compose", image: "square.and.pencil"
+        button "Boxes", image: "person.crop.circle", position: "leading" do
+          item "Inbox", link: "letters", arg: "inbox", image: "tray", selected: arg == "inbox"
+          item "Sent \"mail\"", link: "letters", arg: "sent", selected: arg == "sent"
+          item "Empty", action: "empty", arg: arg, role: "destructive"
+        end
       end
     end
   end
