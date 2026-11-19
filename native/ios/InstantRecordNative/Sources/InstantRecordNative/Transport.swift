@@ -3,29 +3,41 @@ import Foundation
 /// The network, for an app that never opens a connection itself. A request is
 /// "METHOD URL\n" and then the body. The answer is the status on the first
 /// line and then the response body, or "0\n" when the network failed.
+///
+/// `prepare` sees every request before it goes: an app adds what says who is
+/// asking there, such as an Authorization header.
 public struct Transport {
     public static let offline = "0\n"
-    private let session: URLSession
+    let session: URLSession
+    private let prepare: (inout URLRequest) -> Void
 
-    public init(timeout: TimeInterval = 10) {
+    public init(timeout: TimeInterval = 10, prepare: @escaping (inout URLRequest) -> Void = { _ in }) {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = timeout
-        configuration.timeoutIntervalForResource = timeout
         configuration.waitsForConnectivity = false
         session = URLSession(configuration: configuration)
+        self.prepare = prepare
     }
 
-    /// Blocks the calling thread, which is the engine's and never the main one.
-    public func exchange(_ request: String) -> String {
-        let parts = request.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+    /// The request as it goes out, or nil when it cannot be read.
+    func request(_ exchange: String) -> URLRequest? {
+        let parts = exchange.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
         let line = parts[0].split(separator: " ", maxSplits: 1)
-        guard line.count == 2, let url = URL(string: String(line[1])) else { return Transport.offline }
+        guard line.count == 2, let url = URL(string: String(line[1])), url.scheme != nil else { return nil }
         var call = URLRequest(url: url)
         call.httpMethod = String(line[0])
         if call.httpMethod != "GET" {
             call.httpBody = Data((parts.count > 1 ? parts[1] : "").utf8)
             call.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
+        prepare(&call)
+        return call
+    }
+
+    /// Blocks the calling thread until the answer is in. Never call it on the
+    /// main thread, or on the engine's: a tap would wait behind it.
+    public func exchange(_ exchange: String) -> String {
+        guard let call = request(exchange) else { return Transport.offline }
         var answer = Transport.offline
         let done = DispatchSemaphore(value: 0)
         session.dataTask(with: call) { data, response, _ in
@@ -37,4 +49,18 @@ public struct Transport {
         done.wait()
         return answer
     }
+}
+
+/// One answer from the network, read apart.
+struct Reply {
+    let status: Int
+    let body: String
+
+    init(_ answer: String) {
+        let parts = answer.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+        status = Int(parts[0]) ?? 0
+        body = parts.count > 1 ? String(parts[1]) : ""
+    }
+
+    var ok: Bool { (200..<300).contains(status) }
 }

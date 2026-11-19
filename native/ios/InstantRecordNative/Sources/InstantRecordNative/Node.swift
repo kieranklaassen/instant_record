@@ -2,13 +2,16 @@ import Foundation
 
 /// One element of a screen, as the Ruby view layer writes it
 /// (lib/instant_record/native/node.rb). Every element has the same fields and
-/// the renderer switches on `kind`.
+/// the renderer switches on `kind`. `params` are what the screen a link
+/// leads to is opened with, and `args` are what the element's action is
+/// performed with.
 public struct Node: Decodable, Equatable {
     public let kind: String
     public let id: String
     public let text: String
     public let action: String
-    public let arg: String
+    public let params: [String: String]
+    public let args: [String: String]
     public let props: [String: String]
     public let children: [Node]
 
@@ -18,7 +21,6 @@ public struct Node: Decodable, Equatable {
 
     public func prop(_ name: String) -> String { props[name] ?? "" }
     public func children(of kind: String) -> [Node] { children.filter { $0.kind == kind } }
-    public func children(except kinds: String...) -> [Node] { children.filter { !kinds.contains($0.kind) } }
 
     /// The children with the identity a list keeps them by: a node's `id`
     /// when it has one, which for a row is its record, or else its place.
@@ -35,13 +37,28 @@ public struct Node: Decodable, Equatable {
     }
 }
 
-/// A screen and the argument it was opened with.
+/// A screen and the named values it was opened with.
 public struct Route: Hashable {
     public let screen: String
-    public let arg: String
+    public let params: [String: String]
 
-    public init(_ screen: String, _ arg: String) {
+    public init(_ screen: String, _ params: [String: String] = [:]) {
         self.screen = screen
-        self.arg = arg
+        self.params = params
+    }
+
+    /// What a render or an action is asked with: one JSON object, so that no
+    /// value's meaning depends on what characters it holds.
+    /// An action carries the arguments of the element that was tapped and the
+    /// values of the screen's fields, each under its own name.
+    func input(action: String? = nil, args: [String: String] = [:], values: [String: String] = [:]) -> String {
+        var object: [String: Any] = ["screen": screen, "params": params]
+        if let action {
+            object["action"] = action
+            object["args"] = args
+            object["values"] = values
+        }
+        let data = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data("{}".utf8)
+        return String(decoding: data, as: UTF8.self)
     }
 }
