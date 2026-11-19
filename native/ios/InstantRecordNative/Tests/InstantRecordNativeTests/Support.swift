@@ -37,13 +37,14 @@ final class FakeEngine: Engine {
     var noticeAfterSync = ""
     var raises = false
     var pending = 0
+    var boots = true
     var answered: [String] = []
     private var last = ""
     private var answer: (String) -> String = { _ in Transport.offline }
 
     func boot(database: String) -> Bool {
         calls.append("boot " + database)
-        return true
+        return boots
     }
 
     func open(database: String) -> Bool {

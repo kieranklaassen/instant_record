@@ -33,6 +33,8 @@ public final class AppHost: ObservableObject {
             // A screen pushed over the others is told it opened, before it is drawn.
             if path.count == oldValue.count + 1, Array(path.dropLast()) == oldValue, let opened = path.last {
                 thread.run { self.act("open", [:], on: opened) }
+                // Opening may write, as marking a message read does.
+                schedule.request()
             }
             show()
         }
@@ -50,6 +52,7 @@ public final class AppHost: ObservableObject {
     // Read and written on the engine's thread only.
     private var open: Store?
     private var unreachable = false
+    private var refused = ""
 
     /// `store` says where the first screen's data lives. It is asked again
     /// when a menu item puts another screen in the first one's place.
@@ -73,7 +76,14 @@ public final class AppHost: ObservableObject {
         thread.run {
             self.engine.onExchange { request in
                 let answer = self.exchange(request)
-                if answer.hasPrefix(Transport.offline) { self.unreachable = true }
+                let status = String(answer.prefix { $0 != "\n" })
+                if status == "0" {
+                    self.unreachable = true
+                } else if !status.hasPrefix("2") {
+                    // The server answered and said no. The app's own client
+                    // keeps the write and says nothing, so the host says it.
+                    self.refused = "The server answered \(status) to \(request.prefix { $0 != "\n" })"
+                }
                 return answer
             }
             if self.engine.boot(database: store.database) { self.open = store } else { self.report() }
@@ -120,11 +130,14 @@ public final class AppHost: ObservableObject {
     public func replace(with route: Route) {
         let store = store(route)
         thread.run {
-            if store.database == self.open?.database || self.engine.open(database: store.database) {
+            if store.database == self.open?.database {
                 self.open = store
-            } else {
-                self.report()
+                return
             }
+            // What was written in the database being left goes out now, while
+            // it is open. What cannot go out waits in it until it is opened again.
+            if let leaving = self.open { _ = self.engine.call("sync", leaving.endpoint) }
+            if self.engine.open(database: store.database) { self.open = store } else { self.report() }
         }
         root = route
         path = []
@@ -166,17 +179,27 @@ public final class AppHost: ObservableObject {
     }
 
     private func exchangeOnce() {
-        guard let open else { return }
+        guard let open else {
+            // No database is open, so nothing can sync. Say so, or the
+            // schedule would wait for this pass to end and never start another.
+            return DispatchQueue.main.async { self.schedule.finished(ok: false, pending: 0) }
+        }
         unreachable = false
+        refused = ""
         let result = engine.call("sync", open.endpoint)
         if result == nil { report() }
+        if !refused.isEmpty {
+            let message = refused
+            DispatchQueue.main.async { self.failure = message }
+        }
         if engine.notice().hasPrefix("records_changed") { draw() }
         let waiting = Int(result?.components(separatedBy: "pending=").dropFirst().first?.prefix { $0.isNumber } ?? "") ?? 0
         let reached = result != nil && !unreachable
+        let accepted = reached && refused.isEmpty
         DispatchQueue.main.async {
             self.online = reached
             self.pending = waiting
-            self.schedule.finished(ok: reached, pending: waiting)
+            self.schedule.finished(ok: accepted, pending: waiting)
         }
     }
 

@@ -23,15 +23,22 @@ work=$(mktemp -d)
 signal="$work/signal"
 log="$work/server.log"
 server=""
+tests=""
 export DATABASE_URL="${UI_DATABASE:-postgres:///instant_record_native_ui}" INBOX_REQUIRE_TOKEN=1 RAILS_ENV=development DISABLE_DATABASE_ENVIRONMENT_CHECK=1
 
 start_server() {
+  # Whatever already answers here is not this script's server and has another database.
+  if curl -s -o /dev/null "http://localhost:$port/up"; then
+    echo "Port $port is in use. Stop what is listening there, or set PORT."
+    exit 1
+  fi
   (cd "$repo/demo" && exec bundle exec falcon serve --bind "http://localhost:$port") >"$log" 2>&1 &
   server=$!
   i=0
   until curl -s -o /dev/null "http://localhost:$port/up"; do
     i=$((i + 1))
-    [ "$i" -lt 60 ] || { echo "The server did not start. See $log"; exit 1; }
+    kill -0 "$server" 2>/dev/null || { echo "The server stopped while starting:"; tail -5 "$log"; exit 1; }
+    [ "$i" -lt 60 ] || { echo "The server did not start:"; tail -5 "$log"; exit 1; }
     sleep 0.5
   done
 }
@@ -45,6 +52,7 @@ stop_server() {
 }
 
 finish() {
+  [ -z "$tests" ] || kill "$tests" 2>/dev/null || true
   stop_server
   xcrun simctl ui "$device" appearance light >/dev/null 2>&1 || true
   xcrun simctl ui "$device" content_size large >/dev/null 2>&1 || true

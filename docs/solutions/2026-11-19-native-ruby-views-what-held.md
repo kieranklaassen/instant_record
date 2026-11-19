@@ -40,3 +40,13 @@ Answers `docs/plans/2026-11-19-0929-fix-native-ios-hardening-plan.md`. Ran on ma
 - **Run the largest text size.** The hand-written summary card squeezed its words into one narrow column there. Nothing else would have shown it.
 - **The Open items above are closed**: inputs are JSON, the screen-name rule is one Ruby method the build calls, and the header says the exchange needs a timeout.
 - **Another app did not build until three things in this repository were fixed**: screens were not staged, the schema version was asked of a host slot that does not exist, and the gem did not ship the Swift package.
+
+## What five reviewers found in the hardened version
+
+- **"No CORS headers" does not stop a web page.** A cross-site POST with a plain content type needs no preflight, so a page open in the developer's browser could drive the development endpoints blind. They now take only a JSON content type.
+- **A server that answers and refuses looked healthy.** The compiled client keeps a refused write and says nothing, and only a network failure counted as a failed pass. A 401 or 500 retried every two seconds for ever with no sign on screen. The host now shows the status and backs off, and the wait starts over only when nothing is left to send.
+- **A pass that could not start must still say it ended.** With no database open the pass returned without telling the schedule, which then waited for it for good.
+- **Leaving an inbox must sync it first.** Its queued writes live in its own file and nothing else sends them.
+- **Count what is held, not what is open.** Guessing "the server has more" from the open messages meant archiving one hid the older mail.
+- **A field sends what it shows.** A prefilled field that was not edited was sent as empty.
+- **Still open:** the sync endpoint reaches Ruby only on the next pass after a switch; a pull to refresh ends a pass the schedule did not start; a write made just before the app leaves the front waits for it to return; writes that could not go out before a switch wait until that inbox is opened again; the build finds screen classes with a pattern that misses a namespaced or indented class.

@@ -194,7 +194,8 @@ config.instant_record.native_dev = true
 
 The endpoints run a screen's actions as whoever the params name. They answer
 404 unless that setting is on, the environment is local, and the request
-comes from this machine, and they send no CORS headers.
+comes from this machine with a JSON content type, and they send no CORS
+headers, so a web page open in the developer's browser cannot reach them.
 
 ## The token
 

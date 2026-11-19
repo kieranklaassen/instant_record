@@ -97,10 +97,11 @@ class MailboxScreen < InstantRecord::Native::Screen
 
     # What the last page the server sent said, kept in the database so it
     # holds across redraws. Before any page: a full first page means more.
+    # Archived messages count, or archiving one would hide the older mail.
     def more_on_server?
       mark = InstantRecord::SyncMetadata.get("older:" + inbox)
       return mark == "more" unless mark.nil?
-      MailEntry.open_messages.where(mailbox_id: inbox).count >= MailEntry::PAGE_SIZE
+      MailEntry.where(mailbox_id: inbox, kind: "message").count >= MailEntry::PAGE_SIZE
     end
 
     # The page below the oldest message here, and whether more lies under

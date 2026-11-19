@@ -7,7 +7,9 @@ module InstantRecord
   # A screen's actions write as whoever its params name, with no session or
   # token consulted. So this answers only when the app turned it on
   # (config.instant_record.native_dev), in a local environment, to a request
-  # from this machine, and it sends no CORS headers: a web page cannot drive it.
+  # from this machine. It takes only a JSON content type and sends no CORS
+  # headers: a browser must ask before sending that, and is told nothing, so
+  # a web page the developer has open cannot drive it.
   class NativeScreensController < ActionController::API
     before_action :local_development_only
 
@@ -25,7 +27,8 @@ module InstantRecord
     private
 
     def local_development_only
-      head :not_found unless Rails.application.config.instant_record.native_dev && Rails.env.local? && request.local?
+      allowed = Rails.application.config.instant_record.native_dev && Rails.env.local? && request.local?
+      head :not_found unless allowed && request.media_type == "application/json"
     end
 
     def input

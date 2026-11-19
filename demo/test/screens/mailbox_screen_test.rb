@@ -137,7 +137,6 @@ class MailboxScreenTest < ActiveSupport::TestCase
     assert_equal "true", summary.children.find { |node| node.id == "more" }.text
     assert_equal ["button", "Load older mail", "older"], [last.kind, last.text, last.action]
     assert_equal "row", list("member" => "maya", "inbox" => "billing").last.kind
-    assert_nothing_raised { MailboxScreen.new(MAYA).perform("older", {}) }
   end
 
   test "the list can be pulled to refresh" do

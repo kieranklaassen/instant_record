@@ -269,6 +269,16 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
     assert_equal "Mark 121 read", @phone.render("mailbox", MAYA).dig("children", 0, "children", 1, "children", 1, "children", 2, "text")
   end
 
+  test "archiving a message does not hide that the server has older mail" do
+    60.times { |n| travel_to(1.day.ago + n.seconds) { write("rae", "Old #{n}") } }
+    @phone.sync
+
+    @phone.tap("mailbox", MAYA, "archive", { "id" => rows.last["id"] })
+
+    assert_equal MailEntry::PAGE_SIZE - 1, rows.size
+    assert_equal ["true", "Load older mail"], [summary("more"), list.last["text"]]
+  end
+
   test "a sync pass alone brings a change from elsewhere" do
     @phone.sync
     arrived = write("jo", "Receipt")

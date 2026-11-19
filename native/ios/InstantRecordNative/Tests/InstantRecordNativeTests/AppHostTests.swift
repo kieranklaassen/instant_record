@@ -135,7 +135,8 @@ final class AppHostTests: XCTestCase {
         host.replace(with: billing)
         pass(host)
 
-        XCTAssertEqual(["open /tmp/maya-billing.sqlite3", "render mailbox inbox=billing,member=maya", "sync http://example.test/maya-billing"], engine.calls)
+        XCTAssertEqual([syncSupport, "open /tmp/maya-billing.sqlite3", "render mailbox inbox=billing,member=maya", "sync http://example.test/maya-billing"], engine.calls,
+                       "the inbox being left is synced while its database is still open")
         XCTAssertEqual(billing, host.root)
         XCTAssertEqual([], host.path)
         XCTAssertEqual([billing], Array(host.screens.keys))
@@ -161,6 +162,18 @@ final class AppHostTests: XCTestCase {
 
         XCTAssertEqual("ArgumentError: No screen named nowhere", host.failure)
         XCTAssertEqual(syncSupport, engine.calls.last)
+    }
+
+    func testAnAppThatDidNotComeUpStillSyncsOnceADatabaseOpens() {
+        engine.boots = false
+        let host = host()
+        XCTAssertFalse(engine.calls.contains { $0.hasPrefix("sync") })
+        engine.calls = []
+
+        host.replace(with: billing)
+        pass(host)
+
+        XCTAssertEqual("sync http://example.test/maya-billing", engine.calls.last, "the schedule is still waiting for a pass that never ran")
     }
 
     func testAPullSyncsAndDrawsEvenWhenNothingChanged() async {
@@ -191,6 +204,27 @@ final class AppHostTests: XCTestCase {
 
         XCTAssertTrue(host.online)
         XCTAssertEqual(0, host.pending)
+    }
+
+    func testAServerThatAnswersAndRefusesIsShownAndAskedLessOften() {
+        var status = "401"
+        let host = host(answer: { _ in status + "\nno" })
+        engine.pending = 1
+
+        host.perform("archive", with: ["id": "m2"], on: mailbox)
+        pass(host)
+
+        XCTAssertTrue(host.online, "a server that answers is not offline")
+        XCTAssertEqual("The server answered 401 to GET http://example.test/maya-support/events", host.failure)
+        XCTAssertEqual([0.3, 2, 0.3, 4], clock.planned)
+
+        status = "200"
+        engine.pending = 0
+        host.dismissFailure()
+        pass(host)
+
+        XCTAssertEqual("", host.failure)
+        XCTAssertFalse(clock.waiting)
     }
 
     func testTheNetworkComingBackSyncsWithoutATouch() {

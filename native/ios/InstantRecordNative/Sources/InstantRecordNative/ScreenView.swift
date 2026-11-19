@@ -13,7 +13,10 @@ public struct AppView: View {
 
     public var body: some View {
         NavigationStack(path: $host.path) {
+            // A first screen put in another's place starts afresh: what was
+            // typed for one account must not be sent as another.
             ScreenView(route: host.root, host: host, first: true)
+                .id(host.root)
                 .navigationDestination(for: Route.self) { ScreenView(route: $0, host: host, first: false) }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) { status }
@@ -92,9 +95,10 @@ struct NodeView: View {
     let host: AppHost
     @Binding var typed: [String: String]
     var first = false
-    /// The fields beside this node in the same container: a button sends
-    /// what was typed into them with its action, then empties them.
-    var form: [String] = []
+    /// The fields beside this node in the same container, each with the text
+    /// it started with: a button sends what they show with its action, then
+    /// forgets what was typed into them.
+    var form: [String: String] = [:]
 
     var body: some View {
         switch node.kind {
@@ -116,7 +120,7 @@ struct NodeView: View {
     }
 
     private func each(_ items: [Node.Keyed]) -> some View {
-        let fields = items.filter { $0.node.kind == "field" }.map(\.node.id)
+        let fields = Dictionary(items.filter { $0.node.kind == "field" }.map { ($0.node.id, $0.node.text) }) { first, _ in first }
         return ForEach(items) { NodeView(node: $0.node, route: route, host: host, typed: $typed, first: first, form: fields) }
     }
 
@@ -126,9 +130,9 @@ struct NodeView: View {
 
     private func send(_ action: String) {
         var with = node.params
-        for name in form { with[name] = typed[name] ?? "" }
+        for (name, shown) in form { with[name] = typed[name] ?? shown }
         host.perform(action, with: with, on: route)
-        for name in form { typed[name] = nil }
+        for name in form.keys { typed[name] = nil }
     }
 
     // The screen itself, or its navigation: content, with a title and bar

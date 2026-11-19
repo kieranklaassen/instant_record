@@ -29,7 +29,7 @@ module InstantRecord
     # app. A screen is opened with named params, which it reads with `param`.
     # A tap comes back as `perform` with the action the element named and the
     # params it carried (`with:`), together with whatever was typed into the
-    # screen's fields, and the screen is rendered again afterwards. A screen
+    # fields beside that element, and the screen is rendered again afterwards. A screen
     # that was just opened over another is told so: `perform("open", {})`.
     #
     # A screen, or one part of it, can instead be a view the app wrote in
@@ -209,8 +209,9 @@ module InstantRecord
         inside(add("bottom")) { yield }
       end
 
-      # A box to type in. What is typed reaches `perform` under `name`, with
-      # the next action from this screen, and the box is emptied afterwards.
+      # A box to type in. A button in the same container (the same `bottom`,
+      # stack, section or row) sends what the box shows to `perform` under
+      # `name`, and the box is emptied afterwards.
       def field(name, placeholder: "", value: "")
         node = add("field")
         node.id = name

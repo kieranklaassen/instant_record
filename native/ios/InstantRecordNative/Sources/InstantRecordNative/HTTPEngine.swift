@@ -28,7 +28,8 @@ public final class HTTPEngine: Engine {
         let answer = transport.exchange("POST \(server)/native/\(entry)\n\(input)")
         let parts = answer.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
         let body = parts.count > 1 ? String(parts[1]) : ""
-        if parts[0] == "200" { return body }
+        // An action answers with no content, a render with the screen.
+        if parts[0].hasPrefix("2") { return body }
         problem = parts[0] == "0" ? "The server at \(server) did not answer." : body
         return nil
     }

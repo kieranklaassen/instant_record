@@ -105,7 +105,9 @@ public final class SyncSchedule {
     /// A pass ended. `ok` is false when the server could not be reached.
     public func finished(ok: Bool, pending: Int) {
         running = false
-        if ok { wait = pace.retry }
+        // The wait starts over only when nothing is left to send. A server
+        // that answers but keeps refusing the writes is asked less and less often.
+        if ok && pending == 0 { wait = pace.retry }
         if wanted {
             wanted = false
             plan(pace.delay)

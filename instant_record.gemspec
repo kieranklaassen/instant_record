@@ -27,7 +27,7 @@ Gem::Specification.new do |spec|
                         "compiled/web/{index.html,vite.config.js,package.json,package-lock.json}",
                         "compiled/README.md", "compiled/toolchain.env.example",
                         "native/ios/README.md", "native/ios/InstantRecordNative/Package.swift",
-                        "native/ios/InstantRecordNative/Sources/**/*.swift"]
+                        "native/ios/InstantRecordNative/{Sources,Tests}/**/*.swift"]
 
   spec.add_dependency "rails", ">= 8.0"
   spec.add_dependency "sqlite3", ">= 2.1"

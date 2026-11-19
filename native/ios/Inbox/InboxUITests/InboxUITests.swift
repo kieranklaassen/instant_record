@@ -48,6 +48,7 @@ final class InboxUITests: XCTestCase {
         FileManager.default.createFile(atPath: signal, contents: Data(request.utf8))
         let limit = Date().addingTimeInterval(60)
         while FileManager.default.fileExists(atPath: signal), Date() < limit { usleep(100_000) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: signal), "the script outside the simulator did not do: \(request)")
     }
 
     private func eventually(_ message: String, within seconds: TimeInterval = 15, _ holds: @escaping () -> Bool) {
@@ -91,9 +92,10 @@ final class InboxUITests: XCTestCase {
         launch()
         let before = unread
 
-        row("ui-60").tap()
-        XCTAssertTrue(app.staticTexts["Looking at it now."].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.textFields["body"].exists || app.textViews["body"].exists)
+        // A message no other test opens, so that it is unread whatever ran before.
+        row("ui-54").tap()
+        XCTAssertTrue(app.staticTexts["Could you look at number 54?"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "body").firstMatch.exists)
         app.navigationBars.buttons.firstMatch.tap()
 
         eventually("the count of unread mail did not go down by one") { self.unread == before - 1 }
@@ -144,6 +146,9 @@ final class InboxUITests: XCTestCase {
         XCTAssertTrue(app.buttons["All"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Mark ' AND label ENDSWITH ' read'")).firstMatch.exists)
         app.buttons["Unread"].tap()
+        // A sync that lands while the menu is open redraws the bar and can
+        // swallow the tap. Choose again if the menu is still up.
+        if app.buttons["Unread"].waitForExistence(timeout: 2), app.buttons["Unread"].isHittable { app.buttons["Unread"].tap() }
 
         eventually("a read message is listed as unread") { !self.row("ui-60").exists && self.row("ui-55").exists }
         XCTAssertTrue(summary.label.contains("Showing unread only"), summary.label)

@@ -70,6 +70,15 @@ class NativeDevTest < ActionDispatch::IntegrationTest
     assert_not MailEntry.exists?(kind: "archive")
   end
 
+  test "a request a web page can send without asking first is refused" do
+    ["text/plain", "application/x-www-form-urlencoded", "multipart/form-data"].each do |type|
+      ask "action", { screen: "mailbox", params: MAYA, action: "archive", with: { "id" => @message.id } }, { "CONTENT_TYPE" => type }
+      assert_response :not_found, type
+    end
+
+    assert_not MailEntry.exists?(kind: "archive")
+  end
+
   test "a web page cannot drive it: no CORS headers, and no preflight" do
     ask "render", { screen: "mailbox", params: MAYA }
     assert_nil response.headers["access-control-allow-origin"]

@@ -272,6 +272,12 @@ class NativeScreenTest < ActiveSupport::TestCase
     assert_equal 2, rows(LettersScreen.new.render).size
   end
 
+  test "one rule names a screen from its class, whatever the class is called" do
+    assert_equal %w[order_lines mailbox html_page x2_factor], %w[OrderLinesScreen MailboxScreen HtmlPageScreen X2FactorScreen].map { |name| InstantRecord::Native.name_of(name) }
+    assert_equal "order_lines", InstantRecord::Native.name_of("Shop::Admin::OrderLinesScreen")
+    assert_equal "letters", InstantRecord::Native.screen_name(LettersScreen)
+  end
+
   test "a screen is found by the name its class gives it" do
     screen = InstantRecord::Native.screen("letters", { "box" => "x" })
 

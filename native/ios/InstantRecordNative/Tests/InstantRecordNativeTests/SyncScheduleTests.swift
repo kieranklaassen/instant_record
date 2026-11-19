@@ -50,6 +50,24 @@ final class SyncScheduleTests: XCTestCase {
         XCTAssertTrue(clock.waiting)
     }
 
+    func testWritesAServerKeepsRefusingAreTriedLessAndLessOften() {
+        schedule.request()
+        for _ in 0..<5 {
+            clock.fire()
+            schedule.finished(ok: true, pending: 2)
+        }
+
+        XCTAssertEqual([0.3, 2, 4, 8, 10, 10], clock.planned)
+
+        clock.fire()
+        schedule.finished(ok: true, pending: 0)
+        schedule.request()
+        clock.fire()
+        schedule.finished(ok: true, pending: 1)
+
+        XCTAssertEqual(2, clock.planned.last, "the wait did not start over once everything had been sent")
+    }
+
     func testTheNetworkComingBackRunsAPassAtOnceAndStartsTheWaitOver() {
         schedule.request()
         clock.fire()
