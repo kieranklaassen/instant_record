@@ -30,6 +30,8 @@ REMOVE = [
     # RubyLLM answers on the server only: its setup, the reply and the job that asks for
     # one stay there. The browser asks its own model and saves the answer as a record.
     "config/initializers/ruby_llm.rb", "app/models/assistant", "app/jobs/assistant",
+    # The session is the server's: the page asks Rails for it over the network.
+    "app/controllers/auth/sessions_controller.rb",
     "app/controllers/slack/resets_controller.rb", "app/controllers/email/sync_controller.rb", "app/models/mailbox.rb",
     # The shell snapshot is built on the server, from the server's Mailbox.
     "app/models/mail_shell.rb", "app/jobs/email/shell_build_job.rb",
@@ -68,6 +70,10 @@ open(os.path.join(app, "config/routes.rb"), "w").write('''Rails.application.rout
   namespace :assistant do
     resources :turns, only: [:create, :update]
     root "turns#index" # /assistant
+  end
+  namespace :auth do
+    resources :notes, only: [:create, :destroy]
+    root "notes#index" # /auth
   end
   get "email", to: "email/mailboxes#index"
   post "email", to: "email/mailboxes#create"

@@ -5,6 +5,11 @@
 class AuthPerson
   IDS = ["ada", "ben", "cleo"].freeze
 
+  # The id a session names, or nil when it names nobody the demo knows.
+  def self.known(id)
+    IDS.include?(id) ? id : nil
+  end
+
   def self.name_for(id)
     case id
     when "ada" then "Ada"
@@ -17,19 +22,4 @@ class AuthPerson
   def self.role_for(id)
     id == "ada" ? "admin" : "member"
   end
-
-  # Who a session names, or nil when it names nobody.
-  def self.find(id)
-    IDS.include?(id) ? new(id) : nil
-  end
-
-  attr_reader :id
-
-  def initialize(id)
-    @id = id
-  end
-
-  def name = self.class.name_for(id)
-  def role = self.class.role_for(id)
-  def admin? = role == "admin"
 end

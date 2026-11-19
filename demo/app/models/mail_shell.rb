@@ -16,7 +16,7 @@ class MailShell
   # The browser rebuilds its schema and forgets its cursor when its own list
   # differs from the one saved in its database, so the list is part of the
   # fingerprint and a build with another list never asks for this file.
-  MODELS = %w[AssistantChat AssistantTurn Channel ChatUser Issue MailEntry Message Note].freeze
+  MODELS = %w[AssistantChat AssistantTurn AuthNote Channel ChatUser Issue MailEntry Message Note].freeze
 
   # Rebuild once a file is this far behind. Catch-up stays short.
   REBUILD_AFTER_CHANGES = 200

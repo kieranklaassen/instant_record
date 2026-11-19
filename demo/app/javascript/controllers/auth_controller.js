@@ -46,6 +46,15 @@ export default class extends Controller {
     }
     if (this.runtimeValue === "server") return window.location.reload()
 
+    // A cookie is kept for one origin. A build that syncs with a server on
+    // another origin has no session there, and it is better said than hidden.
+    const kept = await this.request("GET", this.sessionUrlValue).catch(() => null)
+    if (kept && (kept.person?.id || null) !== (this.session.person?.id || null)) {
+      this.show(kept)
+      this.whoTarget.textContent = "The session cookie did not reach the sync server: it is on another origin than this page."
+      return
+    }
+
     // The compiled page is redrawn when the sync pass says records changed.
     // This is only for a pass that changed nothing.
     this.whoTarget.textContent += " Syncing this browser…"

@@ -102,7 +102,8 @@
 
 /* --- Writing a note ------------------------------------------------------- */
 
-.demo-auth .auth-form { display: grid; gap: 10px; margin-top: 16px; padding: 18px; }
+.demo-auth .auth-form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; margin-top: 16px; padding: 18px; }
+.demo-auth .auth-form input[type="text"], .demo-auth .auth-form textarea { width: 100%; }
 .demo-auth .auth-form h3 { font-size: 1rem; }
 .demo-auth .auth-form textarea { resize: vertical; }
 .demo-auth .auth-form-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }

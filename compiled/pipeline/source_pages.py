@@ -5,6 +5,7 @@ from pathlib import Path
 
 PAGES = {
     "assistant": ("assistant/turns", "index", ("assistant_chat", "assistant_turn")),
+    "auth": ("auth/notes", "index", ("auth_note", "auth_person")),
     "home": ("home", "index", ()),
     "email": ("email/mailboxes", "index", ("mail_entry", "mail_directory")),
     "todo": ("todo/issues", "index", ("issue",)),
@@ -33,6 +34,11 @@ def write_source_pages(app, dist, version, demo):
                 files.append((part, root / part))
             # What answers on the server is left out of the build, so it is read from the demo.
             for server in ("app/jobs/assistant/reply_job.rb", "app/models/assistant/reply.rb"):
+                files.append((server, Path(demo) / server))
+        if key == "auth":
+            files.append(("app/javascript/controllers/auth_controller.js", root / "app/javascript/controllers/auth_controller.js"))
+            # The session and the rule for who is asking stay on the server, so they are read from the demo.
+            for server in ("app/controllers/auth/sessions_controller.rb", "config/initializers/instant_record.rb"):
                 files.append((server, Path(demo) / server))
         if key == "migrate":
             files[1] = ("compiled/pipeline/sqlite_release.rb", Path(__file__).with_name("sqlite_release.rb"))

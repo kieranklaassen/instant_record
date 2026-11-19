@@ -15,11 +15,11 @@ module Auth
     end
 
     def create
-      person = AuthPerson.find(params[:person].to_s)
+      person = AuthPerson.known(params[:person].to_s)
       return head :unprocessable_entity unless person
 
       reset_session
-      session[:auth_person_id] = person.id
+      session[:auth_person_id] = person
       session[:auth_signed_in_at] = Time.current.iso8601
       render json: session_payload
     end
@@ -36,10 +36,10 @@ module Auth
     end
 
     def session_payload
-      person = AuthPerson.find(session[:auth_person_id])
+      person = AuthPerson.known(session[:auth_person_id])
       {
         signed_in: !person.nil?,
-        person: person && { id: person.id, name: person.name, role: person.role },
+        person: person && { id: person, name: AuthPerson.name_for(person), role: AuthPerson.role_for(person) },
         signed_in_at: person && session[:auth_signed_in_at],
         # Counts, never contents: how many notes exist, and how many of them
         # this session may be sent.

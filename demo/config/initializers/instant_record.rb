@@ -12,13 +12,13 @@ end
 # person its session names (the Auth demo's `syncable_to` and `writable_by`).
 # The key changes when the person does, which is what tells a browser to drop
 # what it was sent as someone else.
-DemoAsker = Struct.new(:token, :person) do
+DemoAsker = Struct.new(:token, :person_id) do
   def to_s = token.to_s
-  def sync_identity_key = person ? person.id : "anonymous"
+  def sync_identity_key = person_id || "anonymous"
 end
 
 InstantRecord.configure do |config|
   config.scope_from = lambda do |request|
-    DemoAsker.new(request.params["scope"], AuthPerson.find(request.session[:auth_person_id]))
+    DemoAsker.new(request.params["scope"], AuthPerson.known(request.session[:auth_person_id]))
   end
 end

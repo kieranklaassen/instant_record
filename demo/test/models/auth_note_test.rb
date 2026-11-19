@@ -3,8 +3,8 @@ require "test_helper"
 class AuthNoteTest < ActiveSupport::TestCase
   setup { AuthNote.seed_demo }
 
-  def seen_by(id) = InstantRecord::SyncScope.visible(AuthNote, DemoAsker.new(nil, AuthPerson.find(id))).pluck(:id).sort
-  def written_by(id) = InstantRecord::SyncScope.writable(AuthNote, DemoAsker.new(nil, AuthPerson.find(id))).pluck(:id).sort
+  def seen_by(id) = InstantRecord::SyncScope.visible(AuthNote, DemoAsker.new(nil, id)).pluck(:id).sort
+  def written_by(id) = InstantRecord::SyncScope.writable(AuthNote, DemoAsker.new(nil, id)).pluck(:id).sort
 
   test "who is sent what" do
     assert_equal %w[auth-welcome], seen_by(nil)

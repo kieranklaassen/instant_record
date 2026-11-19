@@ -553,13 +553,19 @@ self.onmessage = async (event) => {
     }
     if (type === "serverRequest") {
       const url = new URL(payload.path, self.location.origin);
-      const allowed = (payload.method === "GET" && url.pathname === "/receipts/probe") ||
+      // The Auth page asks Rails who is signed in, and tries the sync server by hand.
+      const auth = payload.method === "GET"
+        ? ["/auth/session", "/instant_record/bootstrap"]
+        : ["/auth/session", "/auth/session/sign_out", "/instant_record/mutations"];
+      const allowed = auth.includes(url.pathname) || (payload.method === "GET" && url.pathname === "/receipts/probe") ||
         (payload.method === "POST" && (url.pathname === "/slack/reset" ||
           (import.meta.env.VITE_SHARED_INBOX_DEMO && url.pathname === new URL(syncEndpoint, self.location.origin).pathname + "/incoming" &&
             url.pathname.startsWith("/email/sync/"))));
       if (!allowed) throw new Error("Unknown demo server action");
       const root = publicEndpoint.replace(/\/instant_record\/?$/, "");
-      const reply = await fetchReply(payload.method, url.pathname + url.search, "", root);
+      url.searchParams.delete("instant_record_network");
+      const body = typeof payload.body === "string" ? payload.body : "";
+      const reply = await fetchReply(payload.method, url.pathname + url.search, body, root);
       return self.postMessage({ id, result: reply });
     }
     if (type === "boot") return self.postMessage({ id, result: await boot(payload) });
