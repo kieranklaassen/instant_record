@@ -16,7 +16,8 @@ import sys
 os.environ["INSTANT_RECORD_NATIVE"] = "1"
 import build
 
-ENTRIES = "handle_request,handle_sync,sync_plan,handle_stream,cursor,history,render,action"
+# native_shim.c holds one wrapper for each of these.
+ENTRIES = [name.split(".")[1] for name in build.REACTOR_EXPORTS.split(",")] + ["render", "action"]
 CFLAGS = ["-O2", "-Wno-all", "-ffp-contract=off", "-DSP_INT_OVERFLOW_MODE_RAISE"]
 SQLITE_CFLAGS = ["-O2", "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION"]
 
@@ -40,7 +41,7 @@ def main():
     app_c = os.path.join(out, "app.c")
     flags = run(["spin", "flags"], cwd=tree, env=path_env).split()
     run(["spinel", "-c", "--force", "--ext-init", "app_boot",
-         "--ext-entry", ",".join("NativeBridge." + entry for entry in ENTRIES.split(",")),
+         "--ext-entry", ",".join("NativeBridge." + entry for entry in ENTRIES),
          *flags, "main_native.rb", "-o", app_c],
         cwd=tree, env={**path_env, "CPATH": T["SQLITE_SRC"]}, log="spinel.log")
 

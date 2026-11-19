@@ -25,8 +25,13 @@ module InstantRecord
       # Not `to_json`: JSON.generate calls that with an argument, and the
       # compiled app's runtime gives every object one of its own.
       def json
-        out = +"{"
-        out << "\"kind\":" << Node.quote(@kind)
+        out = +""
+        write(out)
+        out
+      end
+
+      def write(out)
+        out << "{\"kind\":" << Node.quote(@kind)
         out << ",\"id\":" << Node.quote(@id)
         out << ",\"text\":" << Node.quote(@text)
         out << ",\"action\":" << Node.quote(@action)
@@ -43,10 +48,9 @@ module InstantRecord
         @children.each do |child|
           out << "," unless first
           first = false
-          out << child.json
+          child.write(out)
         end
         out << "]}"
-        out
       end
 
       HEX = "0123456789abcdef".freeze

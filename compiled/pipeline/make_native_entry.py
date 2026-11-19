@@ -96,7 +96,6 @@ for base, _dirs, files in os.walk(os.path.join(tree, "app/models/instant_record/
         path = os.path.join(base, name)
         text = open(path).read()
         changed = through_host(text)
-        # Roundhouse spells the two constants out in full.
         changed = re.sub(r'File\.write\((?:[\w:]+::)?REQUEST, ', 'NativeHost.ir_host_give("request", ', changed)
         changed = re.sub(r'File\.read\((?:[\w:]+::)?RESPONSE\)', 'NativeHost.ir_host_take("response")', changed)
         if changed != text:

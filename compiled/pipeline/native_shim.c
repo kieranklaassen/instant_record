@@ -30,7 +30,6 @@ static int slot_named(const char *name) {
   return -1;
 }
 
-/* Called from Ruby. */
 const char *ir_host_take(const char *name) {
   int slot = slot_named(name);
   return slot >= 0 && slots[slot] ? slots[slot] : "";
@@ -40,7 +39,6 @@ void ir_host_give(const char *name, const char *value) {
   int slot = slot_named(name);
   if (slot < 0) return;
   put(slot, value);
-  /* A request is answered before Ruby reads the response slot. */
   if (slot == REQUEST) put(RESPONSE, exchange ? exchange(slots[REQUEST], exchange_context) : "0\n");
 }
 

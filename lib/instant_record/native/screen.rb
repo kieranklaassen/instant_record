@@ -35,8 +35,6 @@ module InstantRecord
     class Screen
       attr_reader :arg
 
-      # `arg` is what the element that opened this screen passed along, most
-      # often a record's id.
       def initialize(arg = "")
         @arg = arg
         @open = []
