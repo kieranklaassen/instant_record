@@ -91,7 +91,6 @@ module NativeBridge
     begin
       NativeDatabase.open(path)
     rescue StandardError => error
-      # Go back to the file that was open, so the app is not left with none.
       NativeDatabase.open(previous)
       raise error
     end

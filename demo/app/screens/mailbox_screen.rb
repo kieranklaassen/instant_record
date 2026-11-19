@@ -11,15 +11,15 @@ class MailboxScreen < InstantRecord::Native::Screen
     unread = unread_ids
     shown = messages
     waiting = shown.count { |entry| unread.key?(entry.id) }
+    more = more_on_server?
     navigation title: inbox.capitalize do
       list refreshable: true do
-        # One view among the rows that the app wrote in SwiftUI.
         swift "InboxSummary" do
           prop "inbox", inbox.capitalize
           number "unread", unread.size
           number "showing", shown.size
           flag "filtered", unread_only?
-          flag "more", more_on_server?
+          flag "more", more
         end
         shown.each do |entry|
           row id: entry.id, link: "thread", with: at(entry.id) do
@@ -34,7 +34,7 @@ class MailboxScreen < InstantRecord::Native::Screen
             swipe "Archive", action: "archive", with: { "id" => entry.id.to_s }, role: "destructive", image: "archive"
           end
         end
-        button "Load older mail", action: "older" if more_on_server?
+        button "Load older mail", action: "older" if more
       end
       toolbar do
         button "Inboxes", image: "person", position: "leading" do

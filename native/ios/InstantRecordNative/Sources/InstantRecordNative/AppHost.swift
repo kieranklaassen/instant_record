@@ -47,7 +47,7 @@ public final class AppHost: ObservableObject {
     private let lock = NSLock()
     private var visible: [Route]
     private var schedule: SyncSchedule!
-    // The engine thread's.
+    // Read and written on the engine's thread only.
     private var open: Store?
     private var unreachable = false
 
