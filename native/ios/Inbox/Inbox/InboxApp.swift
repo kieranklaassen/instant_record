@@ -54,7 +54,7 @@ struct InboxApp: App {
     }
 
     var body: some Scene {
-        WindowGroup { AppView(host: host, waiting: "Getting your mail") }
+        WindowGroup { AppView(host: host, waiting: "Getting your mail", theme: .cora) }
     }
 }
 
@@ -64,15 +64,24 @@ struct InboxApp: App {
 /// screen opens it as a sheet at once and goes back to the mailbox when the
 /// sheet closes. Who is writing, and from which inbox, go with the note and
 /// are shown under it like the rest.
+///
+/// (`presentationBackground` and the rest reach only the sheet around the
+/// form. What the form draws inside is the library's own.)
 private struct FeedbackScreen: View {
     let props: Props
     @State private var writing = true
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.theme) private var theme
 
     var body: some View {
-        Color.clear
+        (theme.page ?? .clear).ignoresSafeArea()
             .sheet(isPresented: $writing, onDismiss: { dismiss() }) {
+                // The form is the library's. Around it, the app's look: its
+                // paper behind the sheet, its blue on Cancel and Send, its face.
                 FeedbackForm(details: ["From": props["from"], "Inbox": props["inbox"]])
+                    .tint(theme.tint)
+                    .fontDesign(theme.ui)
+                    .presentationBackground(theme.page.map(AnyShapeStyle.init) ?? AnyShapeStyle(.background))
             }
     }
 }

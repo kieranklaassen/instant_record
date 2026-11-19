@@ -210,6 +210,35 @@ files a note as a GitHub issue through a relay.
 | `more` | a spinner at the foot of the list while the next page loads, or a line to tap when it could not |
 | `swift` | the registered SwiftUI view |
 
+## How it looks
+
+`AppView(host: host, theme: .cora)` gives the app a look. A `Theme`
+(`Theme.swift`) is a few colours and two faces: the page, a row's surface, a
+quiet fill, a hairline, ink, muted ink, the tint of links and buttons, an
+accent fill with the ink that goes on it, the face of labels and controls,
+and the face of what is read. The stock elements use it: a list's ground,
+rows and separators, `tone: "secondary"` and `tone: "accent"`, the status
+line, the reply box and its bar, the foot of a list, and the bar's titles.
+A `text` with no `style:` is running text and is set in the reading face.
+A hand-written view reads the same value with `@Environment(\.theme)`.
+
+With no theme the app is iOS as it comes (`Theme.system`), which is what a
+generated app starts with.
+
+The Inbox uses `Theme.cora`: warm paper (#FBF8F2), white rows, stone ink
+(#302B26), one blue (#2F6CA3 for links, #86B2D9 as a fill under dark text),
+flat, with hairlines. In the dark it is the same ramp from the other end:
+a stone-950 page, stone-900 rows, stone-100 ink and the lighter blue.
+Cora's own typefaces are licensed and are not in this repo. The system's
+rounded face stands in for headlines and controls and its serif for a
+message's subject and body. Sizes are system text styles, so Dynamic Type
+works as before, and a test holds every text and ground pair to AA contrast
+in both appearances.
+
+The feedback form is drawn by its library. The theme reaches the sheet
+around it (the paper, the blue of Cancel and Send, the face), not the
+form's own fields.
+
 ## Sync, and what the app tells you
 
 Every call into the library runs on one thread, and none of them waits for
