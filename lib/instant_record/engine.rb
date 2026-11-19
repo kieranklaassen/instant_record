@@ -6,6 +6,14 @@ module InstantRecord
     config.instant_record.mount_path = DEFAULT_MOUNT_PATH
     config.instant_record.build_on_precompile = false
 
+    # `render inertia: ..., live: { prop: Model }` where the app has inertia_rails.
+    config.after_initialize do
+      if defined?(::InertiaRails::Renderer)
+        require "instant_record/inertia"
+        ::InertiaRails::Renderer.prepend(InstantRecord::Inertia::Renderer)
+      end
+    end
+
     initializer "instant_record.compiled_site" do |app|
       host = app.config.instant_record.compiled_host
       if host.present?

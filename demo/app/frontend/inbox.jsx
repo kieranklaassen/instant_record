@@ -1,6 +1,6 @@
 import { createInertiaApp } from "@inertiajs/react"
 import { createRoot } from "react-dom/client"
-import { instantRecord } from "./instant_record"
+import { instantRecord } from "instant_record"
 
 const pages = import.meta.glob("./pages/**/*.jsx", { eager: true })
 

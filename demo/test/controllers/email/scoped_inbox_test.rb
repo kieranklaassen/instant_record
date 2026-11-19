@@ -144,7 +144,9 @@ class ScopedInboxTest < ActionDispatch::IntegrationTest
     # Both props are live: Inertia reloads each when InstantRecord says the
     # local database changed.
     assert_equal %w[mail thread], page["liveProps"].keys
-    assert_equal [{ "channel" => { "name" => "instant_record", "type" => "local" }, "events" => ["changed"] }], page.dig("liveProps", "mail", "listeners")
+    assert_equal [{ "channel" => { "name" => "instant_record", "type" => "local" }, "events" => ["MailEntry"] }], page.dig("liveProps", "mail", "listeners")
+    # The compiled runtime spells the same hash out by hand.
+    assert_equal Email::MailboxesController::LIVE_PROPS.as_json, page["liveProps"]
     assert_equal page["liveProps"], response.parsed_body["liveProps"]
   end
 

@@ -1,5 +1,5 @@
 import { memo } from "react"
-import { LiveList } from "../instant_record"
+import { LiveList } from "instant_record"
 import { avatarClass, inboxPath, initial, shortTime } from "../lib/mail"
 
 // Memoized: an answer that changes one conversation redraws one row.

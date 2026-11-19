@@ -2,17 +2,7 @@
 // virtual list answers so a row it has not drawn can be scrolled into view,
 // and focus that survives whatever redraws the list.
 import { useCallback, useEffect, useRef, useState } from "react"
-
-// Where focus belongs in `ids`, given the row that had it and where that row
-// last stood. A row that left the list (archived here, or by a teammate)
-// hands focus to the row that took its place, never to the top.
-export function resolveFocus(ids, id, index) {
-  if (!ids.length) return { id: null, index: 0 }
-  const at = ids.indexOf(id)
-  if (at >= 0) return { id, index: at }
-  const next = Math.min(Math.max(index, 0), ids.length - 1)
-  return { id: ids[next], index: next }
-}
+import { resolveFocus } from "./focus.js"
 
 const typing = (target) =>
   target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))

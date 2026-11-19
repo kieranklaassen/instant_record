@@ -6,7 +6,8 @@ bin/rails server
 ```
 
 Every demo is Hotwire with no build step, except the Inbox, which is an
-Inertia page in React (`app/frontend`). Its bundle is built by Vite into
+Inertia page in React (`app/frontend`), built on the gem's own package in
+`../frontend`. Its bundle is built by Vite into
 `app/assets/builds/inbox.js`:
 
 ```sh

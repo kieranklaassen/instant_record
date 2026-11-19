@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { resolveFocus } from "./keyboard.js"
+import { resolveFocus } from "./focus.js"
 
 test("focus follows its row when the list is redrawn around it", () => {
   assert.deepEqual(resolveFocus(["new", "a", "b"], "b", 1), { id: "b", index: 2 })

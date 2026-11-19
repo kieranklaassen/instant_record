@@ -5,10 +5,11 @@ module Email
       skip_forgery_protection
     end
 
-    # How Inertia keeps the page current. Each prop listens for the one event
-    # InstantRecord has: something in the local database changed. Inertia then
-    # reloads that prop alone (app/frontend/instant_record/live.js).
-    CHANGED = { listeners: [{ channel: { name: "instant_record", type: "local" }, events: ["changed"] }], throttle: 150 }.freeze
+    # How Inertia keeps the page current: both props are made of mail
+    # entries, and Inertia reloads each when one changes in the local database.
+    # The server says so with `live:` (InstantRecord::Inertia). The compiled
+    # runtime has no gem to say it, so its half spells out the same hash.
+    CHANGED = { listeners: [{ channel: { name: "instant_record", type: "local" }, events: ["MailEntry"] }], throttle: 150 }.freeze
     LIVE_PROPS = { mail: CHANGED, thread: CHANGED }.freeze
 
     # An Inertia page. Its props are the first paint, and every later read is
@@ -119,15 +120,10 @@ module Email
 
       # Lazy props: a partial reload evaluates only the ones it asks for.
       def render_page
-        render inertia: "Email/Inbox", props: {
+        render inertia: "Email/Inbox", live: { mail: MailEntry, thread: MailEntry }, props: {
           member: @member, inbox: @inbox, inboxes: @inboxes, people: people, composing: params[:compose] == "1",
           mail: -> { mail_props }, thread: -> { thread_props }
         }
-      end
-
-      # Read by the renderer (config/initializers/inertia_rails.rb).
-      def inertia_live_props
-        LIVE_PROPS
       end
 
       # A write returns the reader to the page they were on, with fresh props.
@@ -148,7 +144,7 @@ module Email
       # The compiled runtime has no Inertia gem and its requests carry no
       # headers, so this speaks the protocol itself. A visit arrives with
       # _inertia=1 and the props it wants in _only
-      # (app/frontend/instant_record/http.js) and is answered with the page
+      # (the gem's frontend/http.js) and is answered with the page
       # object; a first load gets the same object placed by index.html.erb.
       def render_page
         only = params[:_only].to_s
