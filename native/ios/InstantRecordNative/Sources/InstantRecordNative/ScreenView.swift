@@ -29,6 +29,7 @@ public struct AppView: View {
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 6)
                 .background(.bar)
+                .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("sync-status")
         }
     }
@@ -222,7 +223,14 @@ struct NodeView: View {
     // A button that holds items opens them as a menu.
     @ViewBuilder var button: some View {
         let items = node.keyed.filter { $0.node.kind == "item" }
-        if items.isEmpty {
+        if node.kind == "swipe" {
+            // Not the destructive role: with it the list takes the row out
+            // itself, at once, and the app's own answer arrives a moment
+            // later from another thread. The two updates can collide. A red
+            // tint says the same, and the row leaves when Ruby says it has.
+            Button { send(node.action) } label: { label(image: node.prop("image")) }
+                .tint(role == .destructive ? .red : nil)
+        } else if items.isEmpty {
             Button(role: role) { send(node.action) } label: { label(image: node.prop("image")) }
         } else {
             Menu { each(items) } label: { label(image: node.prop("image")) }

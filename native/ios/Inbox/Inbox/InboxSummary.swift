@@ -7,9 +7,13 @@ import SwiftUI
 ///   inbox, unread and showing (numbers), filtered and more (flags)
 struct InboxSummary: View {
     let props: Props
+    @Environment(\.dynamicTypeSize) private var size
 
     var body: some View {
-        HStack(spacing: 14) {
+        // At the largest text sizes the count sits over the words, not beside
+        // them, so the words keep the row's whole width.
+        let layout = size.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4)) : AnyLayout(HStackLayout(spacing: 14))
+        layout {
             Text("\(props.int("unread"))")
                 .font(.system(.largeTitle, design: .rounded).bold())
                 .foregroundStyle(.tint)
@@ -17,8 +21,10 @@ struct InboxSummary: View {
                 Text("unread in \(props["inbox"])").font(.headline)
                 Text(caption).font(.subheadline).foregroundStyle(.secondary)
             }
-            Spacer()
-            Image(systemName: "tray.full").font(.title2).foregroundStyle(.tint)
+            if !size.isAccessibilitySize {
+                Spacer()
+                Image(systemName: "tray.full").font(.title2).foregroundStyle(.tint)
+            }
         }
         .padding(.vertical, 6)
         .accessibilityElement(children: .combine)
