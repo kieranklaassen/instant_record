@@ -22,7 +22,7 @@ class MailboxScreen < InstantRecord::Native::Screen
         end
         shown.each do |entry|
           message = { "id" => entry.id.to_s }
-          row id: entry.id, link: "thread", params: place.merge("thread" => entry.id.to_s), action: "read", args: message do
+          row id: entry.id, link: "thread", params: thread_place(entry.id.to_s), action: "read", args: message do
             stack "horizontal" do
               image "circle.fill", tone: "accent" if unread.key?(entry.id)
               text entry.author, style: "headline"
@@ -37,12 +37,12 @@ class MailboxScreen < InstantRecord::Native::Screen
       toolbar do
         button "Inboxes", image: "person.crop.circle", position: "leading" do
           MailDirectory.inboxes(member).each do |name|
-            item name.capitalize, link: "mailbox", params: { "member" => member, "inbox" => name.to_s }, image: "tray", selected: name == inbox
+            item name.capitalize, link: "mailbox", params: place_in("#{name}"), image: "tray", selected: name == inbox
           end
         end
         button "View", image: "slider.horizontal.3", position: "trailing" do
           item "All", link: "mailbox", params: place, selected: !unread_only?
-          item "Unread", link: "mailbox", params: place.merge("filter" => "unread"), selected: unread_only?
+          item "Unread", link: "mailbox", params: unread_place, selected: unread_only?
           item "Mark all read", action: "read_all", image: "envelope.open"
         end
       end
@@ -67,6 +67,11 @@ class MailboxScreen < InstantRecord::Native::Screen
 
   # Where this screen is: what a link to the same inbox starts from.
   def place = { "member" => member, "inbox" => inbox }
+
+  # The places a link from here leads, each a hash of strings.
+  def place_in(name) = { "member" => member, "inbox" => name }
+  def unread_place = { "member" => member, "inbox" => inbox, "filter" => "unread" }
+  def thread_place(id) = { "member" => member, "inbox" => inbox, "thread" => id }
 
   def allowed? = MailDirectory.inboxes(member).include?(inbox)
 

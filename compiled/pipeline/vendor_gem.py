@@ -64,6 +64,9 @@ edit("lib/instant_record.rb", 'require "instant_record/engine" if defined?(Rails
 # Screens are found by name through constant lookup, which has no ahead-of-time counterpart.
 # The native entry spells the lookup out as a `case` (make_native_entry.py).
 os.makedirs(os.path.join(app, "lib/instant_record/native"), exist_ok=True)
+# The types of a screen's parts, which the compilers would otherwise infer from the app's call sites.
+os.makedirs(os.path.join(app, "sig/instant_record"), exist_ok=True)
+shutil.copy(os.path.join(gem, "sig/instant_record/native.rbs"), os.path.join(app, "sig/instant_record/native.rbs"))
 open(os.path.join(app, "lib/instant_record/native.rb"), "w").write(
     'require "instant_record/native/node"\nrequire "instant_record/native/screen"\n')
 
