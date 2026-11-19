@@ -74,16 +74,16 @@ final class AppHostTests: XCTestCase {
 
     func testATapMadeWhileAPassIsFetchingIsPerformedAndDrawnBeforeThePassEnds() {
         let fetching = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
-        var hold = false
+        let hold = Flag()
         let host = host(answer: { _ in
-            if hold {
+            if hold.on {
                 fetching.signal()
                 release.wait()
             }
             return "200\n"
         })
         engine.calls = []
-        hold = true
+        hold.on = true
 
         host.sync()
         clock.fire()
@@ -96,7 +96,7 @@ final class AppHostTests: XCTestCase {
         }
         wait(for: [drawn], timeout: 5)
         XCTAssertFalse(engine.calls.contains("sync " + support), "the tap waited for the network")
-        hold = false
+        hold.on = false
         release.signal()
         pass(host)
 
@@ -106,9 +106,9 @@ final class AppHostTests: XCTestCase {
 
     func testDuringAPassTheAppIsAnsweredOnlyFromWhatWasFetched() {
         let fetching = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
-        var hold = false
+        let hold = Flag()
         let host = host(answer: { _ in
-            if hold {
+            if hold.on {
                 fetching.signal()
                 release.wait()
             }
@@ -116,14 +116,14 @@ final class AppHostTests: XCTestCase {
         })
         engine.answered = []
         fetched = []
-        hold = true
+        hold.on = true
 
         // The pass plans with nothing to send. A write is made while it fetches.
         host.sync()
         clock.fire()
         fetching.wait()
         host.perform("archive", args: ["id": "m2"], on: mailbox)
-        hold = false
+        hold.on = false
         release.signal()
         host.settle()
 
@@ -280,14 +280,22 @@ final class AppHostTests: XCTestCase {
     }
 
     func testAPullSyncsAndReturnsOnceThePassHasEndedAndTheScreensAreDrawn() async {
-        let host = host()
+        let host = await MainActor.run { self.host() }
         engine.calls = []
 
-        async let pulled: Void = host.refresh()
-        try? await Task.sleep(nanoseconds: 50_000_000)
-        await MainActor.run { clock.fire() }
-        await pulled
+        let pull = Task { await host.refresh() }
+        // The pull plans a pass. Wait until it has, then let the time pass.
+        for _ in 0..<400 where await !MainActor.run(body: { self.clock.waiting }) { try? await Task.sleep(nanoseconds: 5_000_000) }
+        await MainActor.run { self.clock.fire() }
+        let returned = await withTaskGroup(of: Bool.self) { group in
+            group.addTask { await pull.value; return true }
+            group.addTask { try? await Task.sleep(nanoseconds: 5_000_000_000); return false }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
 
+        XCTAssertTrue(returned, "the pull never came back")
         XCTAssertEqual(["sync_plan", "sync " + support, renderMailbox], engine.calls)
     }
 
@@ -336,7 +344,8 @@ final class AppHostTests: XCTestCase {
         host.perform("archive", args: ["id": "m2"], on: mailbox)
         pass(host)
 
-        XCTAssertEqual("Could not sync: POST /mutations answered 401", host.status.error)
+        XCTAssertEqual("Could not sync: POST /mutations answered 401", host.status.syncError)
+        XCTAssertEqual("", host.status.error)
         XCTAssertFalse(host.status.offline, "a server that answers is not offline")
         XCTAssertEqual(1, host.status.pending)
         XCTAssertEqual([0.3, 5, 0.3, 10], clock.planned)
@@ -348,7 +357,8 @@ final class AppHostTests: XCTestCase {
     }
 
     func testAnErrorCanBeDismissedAndComesFirstOnTheLine() {
-        XCTAssertEqual("Boom", AppHost.Status(pending: 2, offline: true, error: "Boom").message)
+        XCTAssertEqual("Boom", AppHost.Status(pending: 2, offline: true, error: "Boom", syncError: "Could not sync").message)
+        XCTAssertEqual("Could not sync", AppHost.Status(pending: 2, offline: true, error: "", syncError: "Could not sync").message)
         XCTAssertEqual("Offline. Changes will send when you are back.", AppHost.Status(pending: 2, offline: true, error: "").message)
         XCTAssertEqual("2 changes waiting to send", AppHost.Status(pending: 2, offline: false, error: "").message)
         XCTAssertEqual("1 change waiting to send", AppHost.Status(pending: 1, offline: false, error: "").message)
@@ -361,6 +371,42 @@ final class AppHostTests: XCTestCase {
         XCTAssertEqual("ArgumentError: No screen named nowhere", host.status.message)
 
         host.dismissError()
+
+        XCTAssertNil(host.status.message)
+    }
+
+    func testWhatATapReportedIsStillShownAfterTheNextPassSucceeds() {
+        let host = host()
+        engine.raises = ["action"]
+
+        host.perform("archive", args: ["id": "m2"], on: mailbox)
+        host.settle()
+        engine.raises = []
+        pass(host)
+        host.sync()
+        pass(host)
+
+        XCTAssertEqual("ArgumentError: No screen named nowhere", host.status.message, "a pass that went well took the tap's error away")
+        XCTAssertEqual("", host.status.syncError)
+
+        host.dismissError()
+
+        XCTAssertNil(host.status.message)
+    }
+
+    func testASyncErrorIsClearedByThePassThatSucceedsAndAScreenErrorByTheDrawThatDoes() {
+        var status = "500"
+        let host = host(answer: { _ in status + "\n" })
+        XCTAssertEqual("Could not sync: GET /events?after=7&window=0 answered 500", host.status.message)
+        engine.raises = ["render"]
+        host.sync()
+        pass(host)
+        XCTAssertEqual("ArgumentError: No screen named nowhere", host.status.message, "what is wrong with the screen comes first")
+
+        engine.raises = []
+        status = "200"
+        host.sync()
+        pass(host)
 
         XCTAssertNil(host.status.message)
     }
@@ -429,11 +475,26 @@ final class AppHostTests: XCTestCase {
         engine.rows = ["m3", "m2", "m1"]
         engine.noticeAfter = ["stream": "records_changed\nMailEntry:m3"]
 
-        await host.feed("id: 8\nevent: change\ndata: {}\n\n")
+        await host.feed("id: 8\nevent: change\ndata: {}\n\n", from: AppHost.Store(database: "/tmp/maya-support.sqlite3", endpoint: support))
         host.settle()
 
         XCTAssertEqual(["stream id: 8\nevent: change\ndata: {}\n\n", renderMailbox], engine.calls)
         XCTAssertEqual(["m3", "m2", "m1"], host.screens[mailbox]?.children.map(\.id))
+    }
+
+    func testAnEventReadForADatabaseThatWasLeftIsNotGivenToTheOneNowOpen() async {
+        let host = await MainActor.run { () -> AppHost in
+            let host = self.host()
+            host.replace(with: self.billing)
+            self.pass(host)
+            return host
+        }
+        engine.calls = []
+
+        await host.feed("id: 8\nevent: change\ndata: {}\n\n", from: AppHost.Store(database: "/tmp/maya-support.sqlite3", endpoint: support))
+        await host.feed("id: 9\nevent: change\ndata: {}\n\n", from: AppHost.Store(database: "/tmp/maya-billing.sqlite3", endpoint: "http://example.test/maya-billing"))
+
+        XCTAssertEqual(["stream id: 9\nevent: change\ndata: {}\n\n"], engine.calls.filter { $0.hasPrefix("stream") })
     }
 
     func testAnEngineThatKeepsNothingOnThePhoneIsNeverAskedToSync() {
