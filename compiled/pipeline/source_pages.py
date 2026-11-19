@@ -24,8 +24,9 @@ def write_source_pages(app, dist, version, demo):
         files.extend((rel, root / rel) for rel in [
             f"app/controllers/{controller}_controller.rb", f"app/views/{controller}/{action}.html.erb"])
         if key in ("assistant", "email"):
-            script_name = "assistant_chat" if key == "assistant" else "mailbox"
-            script = f"app/javascript/controllers/{script_name}_controller.js"
+            # The Inbox is a React page; the Assistant is a Stimulus controller.
+            script = ("app/javascript/controllers/assistant_chat_controller.js" if key == "assistant"
+                      else "app/frontend/pages/Email/Inbox.jsx")
             files.append((script, root / script))
         if key == "assistant":
             samples = "app/javascript/controllers/assistant_examples.js"
