@@ -98,22 +98,7 @@
 .mail-team a[aria-current=true] { color: var(--ink); font-weight: 600; }
 .mail-team a[aria-current=true]::after { content: "✓"; margin-left: auto; color: var(--accent); }
 
-.mail-avatar {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  background: var(--hairline-soft);
-  color: var(--ink-2);
-  font-size: 14px;
-  font-weight: 600;
-  text-transform: uppercase;
-}
-
-.mail-team .mail-avatar { width: 24px; height: 24px; font-size: 11px; }
+/* A teammate's own colour (ui.css draws the avatar itself). */
 .avatar-maya { background: #DCE7D6; color: #3D5537; }
 .avatar-theo { background: #E4DFF0; color: #54467A; }
 .avatar-jo { background: #F3DFD3; color: #74493A; }
@@ -136,6 +121,11 @@
 .mail-tools { gap: 12px; }
 .mail-tools [role=status] { color: var(--muted); font-size: 13px; }
 .mail-tools [role=status]:empty { display: none; }
+.maildesk .mail-search {
+  width: 220px; max-width: 100%; padding: 7px 12px; border: 1px solid var(--hairline-soft); border-radius: 999px;
+  background: var(--card); color: inherit; font: inherit; font-size: 13px;
+}
+.maildesk .mail-search:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 .maildesk .mail-incoming {
   display: inline-flex;
@@ -161,13 +151,41 @@
 
 /* --- Conversation list ---------------------------------------------------- */
 
-.mail-list { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 0 4px; }
+.mail-list { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 0 4px; container: list / inline-size; }
 .mail-scroll { flex: 1; min-height: 0; }
-.mail-list header { justify-content: space-between; gap: 10px; padding: 0 10px 14px; }
-.mail-list h2 { font-family: var(--serif); font-size: 30px; font-weight: 400; letter-spacing: -0.02em; }
-.mail-list header a { font-size: 13px; color: var(--accent); }
 
+/* The header and the bulk bar share one height, so no row moves when one
+   takes the other's place. A hairline shows once rows have scrolled under. */
+.mail-list > header {
+  justify-content: space-between;
+  gap: 10px;
+  height: 58px;
+  padding: 0 10px 12px;
+  border-bottom: 1px solid transparent;
+  transition: border-color 0.12s;
+}
+.mail-list[data-scrolled=true] > header { border-bottom-color: var(--hairline); }
+.mail-list h2 { font-family: var(--serif); font-size: 30px; font-weight: 400; letter-spacing: -0.02em; }
+.mail-unread-count { margin-left: auto; font-size: 13px; font-weight: 500; color: var(--accent); }
+
+.mail-list > .mail-bulk { gap: 8px; padding: 0 4px 12px 10px; }
+.mail-bulk-count { font-weight: 600; white-space: nowrap; }
+.mail-bulk-actions { display: flex; flex: 1; gap: 4px; min-width: 0; }
+.mail-bulk .ui-button { padding: 0 8px; }
+.mail-bulk-actions > :last-child { margin-left: auto; }
+
+@container list (max-width: 460px) {
+  .mail-bulk .ui-keys { display: none; }
+  .mail-bulk .ui-button { gap: 5px; padding: 0 7px; }
+}
+
+/* A row can be four things at once, and each shows on its own:
+   focused   the ring the keys move
+   open      a white card, the conversation in the reader
+   selected  a ticked box and a tint
+   unread    a dot, and the sender and subject in full weight */
 .mail-row {
+  position: relative;
   display: flex;
   gap: 12px;
   padding: 12px;
@@ -175,23 +193,25 @@
 }
 
 .mail-row:hover { background: rgba(126, 114, 96, 0.07); }
-
-/* The row in the reader is a card; the row the keys are on wears the ring. */
-.mail-row[aria-current=true] {
+.mail-row[data-open=true] {
   background: var(--card);
   box-shadow: 0 0 0 1px rgba(10, 10, 10, 0.06), 0 1px 3px rgba(48, 43, 38, 0.06);
 }
+.mail-row[data-selected=true] { background: var(--accent-soft); }
+.mail-row[data-focused=true] { box-shadow: 0 0 0 2px var(--accent); }
+.mail-row[data-focused=true]:not([data-selected=true]) { background: var(--card); }
 
-.mail-row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.mail-row-link { flex: 1; min-width: 0; display: flex; flex-direction: column; outline: none; }
 .mail-row-meta { justify-content: space-between; gap: 8px; }
 .mail-row-meta b { font-weight: 600; text-transform: capitalize; }
+.mail-row-meta b[data-address=true] { text-transform: none; }
 .maildesk time, .mail-snippet, .mail-empty-list { color: var(--muted); }
 .maildesk time { font-size: 12px; white-space: nowrap; }
 .mail-row strong, .mail-snippet, .mail-row-meta b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mail-row strong { margin-top: 2px; font-weight: 500; }
+.mail-snippet { margin-top: 1px; font-size: 13px; }
+.mail-empty-list { padding: 0 10px; font-size: 14px; }
 
-/* Unread: a dot on the avatar, the subject and sender in full weight. */
-.mail-row { position: relative; }
 .mail-row[data-unread=true]::before {
   content: "";
   position: absolute;
@@ -206,40 +226,67 @@
 .mail-row[data-unread=true] strong { font-weight: 650; color: var(--ink); }
 .mail-row[data-unread=true] .mail-row-meta b { font-weight: 700; }
 .mail-row[data-unread=false] .mail-row-meta b { font-weight: 500; color: var(--ink-2); }
-.mail-unread-count { margin-left: auto; font-size: 13px; font-weight: 500; color: var(--accent); }
-.mail-thread-actions { display: flex; gap: 8px; }
-.mail-snippet { margin-top: 1px; font-size: 13px; }
-.mail-empty-list { padding: 0 10px; font-size: 14px; }
 
-/* Older mail loads when this scrolls near the bottom of the list. */
-.mail-row[data-focused=true] { box-shadow: 0 0 0 2px var(--accent); background: var(--card); }
+/* The avatar is also the row's checkbox: the box shows in its place on
+   hover, and on every row once one is selected. A tap on the avatar ticks it
+   where there is no hover. */
+.mail-pick { position: relative; flex: none; width: 36px; height: 36px; cursor: pointer; }
+.mail-pick input {
+  position: absolute;
+  inset: 0;
+  width: 18px;
+  height: 18px;
+  margin: auto;
+  opacity: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.mail-row:hover .mail-pick input, .mail-pick input:focus-visible,
+.mail-list[data-selecting=true] .mail-pick input { opacity: 1; }
+.mail-row:hover .mail-pick .ui-avatar, .mail-pick input:focus-visible + .ui-avatar,
+.mail-list[data-selecting=true] .mail-pick .ui-avatar { visibility: hidden; }
+
 /* Room for the ring. Padding, not a margin: the list measures each item. */
 .mail-item { padding: 2px; }
 
 /* --- Reader --------------------------------------------------------------- */
 
+/* A white card in two parts: the conversation scrolls, and the reply box
+   stays docked under it. */
 .mail-reader {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
-  overflow: auto;
-  padding: 12px 56px 28px;
+  min-height: 0;
+  overflow: hidden;
   border-radius: 14px;
   background: var(--card);
   box-shadow: var(--ring), 0 12px 32px -18px rgba(48, 43, 38, 0.18);
+  container: reader / inline-size;
 }
 
-.mail-thread, .mail-reply, .mail-compose, .mail-compose-head { max-width: 760px; margin-inline: auto; }
+.mail-reader-scroll { flex: 1; min-height: 0; overflow: auto; padding: 0 56px 28px; outline: none; }
+.mail-thread, .mail-compose, .mail-compose-head { max-width: 760px; margin-inline: auto; }
 
 .mail-thread-tools, .mail-compose-head { justify-content: space-between; gap: 12px; }
-.mail-thread-tools { margin: 0 -40px 20px; font-size: 12px; color: var(--muted); }
 
-.maildesk .mail-thread-tools button {
-  height: 32px;
-  padding: 0 14px;
-  background: rgba(126, 114, 96, 0.08);
-  color: var(--ink);
-  box-shadow: none;
-  font-weight: 500;
+/* The toolbar stays at the top of the conversation, with a hairline once
+   the conversation has scrolled under it. */
+.mail-thread-tools {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: 0 -40px 12px;
+  padding: 12px 0 10px;
+  background: var(--card);
+  border-bottom: 1px solid transparent;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  transition: border-color 0.12s;
 }
+.mail-thread-tools[data-scrolled=true] { border-bottom-color: var(--hairline-soft); }
+.mail-thread-actions { display: flex; gap: 6px; }
 
 .mail-reader h2 {
   font-family: var(--serif);
@@ -248,6 +295,7 @@
   line-height: 1.15;
   letter-spacing: -0.02em;
   overflow-wrap: anywhere;
+  text-wrap: balance;
 }
 
 .mail-message { padding: 24px 0 0; }
@@ -273,25 +321,47 @@
   box-shadow: 0 0 0 1px rgba(10, 10, 10, 0.05);
 }
 
-.mail-replies .mail-avatar { width: 28px; height: 28px; font-size: 12px; }
+.mail-replies .ui-avatar { width: 28px; height: 28px; font-size: 12px; }
+
+/* A reply on its way is drawn at once, a little quieter until it has landed. */
+.mail-message[data-pending=true] { opacity: 0.62; }
+.mail-sending { margin-left: auto; font-size: 12px; color: var(--muted); }
 .mail-replies .mail-message p { margin-left: 40px; font-size: 17px; }
 
-.mail-reply {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 28px;
-  padding: 14px 16px 12px;
+/* The reply box. Closed, it is one line under the conversation; open, it
+   grows with what is written, to about twelve lines. */
+.maildesk .mail-reply-prompt, .mail-reply {
+  flex: none;
+  width: min(760px, calc(100% - 112px));
+  margin: 0 auto 20px;
   border-radius: 12px;
   background: var(--card);
   box-shadow: 0 0 0 1px rgba(10, 10, 10, 0.08), 0 0 0 4px rgba(10, 10, 10, 0.02);
 }
 
+.maildesk .mail-reply-prompt {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 46px;
+  padding: 0 14px;
+  color: var(--muted);
+  font-weight: 400;
+  text-align: left;
+  cursor: text;
+}
+.maildesk .mail-reply-prompt:hover { filter: none; box-shadow: 0 0 0 1px rgba(10, 10, 10, 0.14), 0 0 0 4px rgba(10, 10, 10, 0.03); }
+.mail-reply-prompt > span:not(.ui-keys) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mail-reply-prompt[data-draft=true] > span:not(.ui-keys) { color: var(--ink); font-family: var(--serif); font-size: 16px; }
+.mail-reply-prompt b { margin-right: 6px; font: 600 12px var(--sans); color: var(--accent); }
+
+.mail-reply { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px 12px; }
+.mail-reply:focus-within { box-shadow: 0 0 0 1px var(--accent), 0 0 0 4px var(--accent-soft); }
 .mail-reply h3 { font-size: 13px; font-weight: 500; color: var(--muted); }
 
 .maildesk textarea {
   width: 100%;
-  min-height: 78px;
+  min-height: 56px;
   padding: 0;
   border-radius: 0;
   background: transparent;
@@ -303,10 +373,12 @@
 }
 
 .maildesk textarea:focus { box-shadow: none; }
+.mail-reply textarea { max-height: calc(12 * 1.55 * 17px); overflow-y: auto; }
 
 .mail-reply-foot { justify-content: space-between; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.mail-reply-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 
-.mail-compose-head { padding: 12px 0 20px; border-bottom: 1px solid var(--hairline-soft); }
+.mail-compose-head { padding: 24px 0 20px; border-bottom: 1px solid var(--hairline-soft); }
 .mail-compose-head a { font-size: 24px; color: var(--muted); }
 
 .mail-compose label {
@@ -330,14 +402,14 @@
 .mail-compose input:focus { box-shadow: none; background: var(--paper); }
 .mail-compose .mail-body-field { flex-direction: column; align-items: stretch; gap: 6px; }
 .mail-compose textarea { min-height: 200px; color: var(--ink); }
-.mail-compose button { margin-top: 16px; }
+.mail-compose .ui-button { margin-top: 16px; }
 
 .mail-empty {
   display: grid;
   place-items: center;
   align-content: center;
   gap: 12px;
-  height: 80%;
+  flex: 1;
   text-align: center;
 }
 
@@ -373,64 +445,56 @@
   .mail-tools { flex-wrap: wrap; }
   .mail-panes { display: block; padding: 0 12px 16px; }
   .mail-list { height: calc(100svh - 190px); }
-  .maildesk .mail-keys-hint { display: none; }
-  .mail-reader { display: none; padding: 16px 20px 24px; }
+  .mail-reader { display: none; min-height: calc(100svh - 190px); }
+  .mail-reader-scroll { padding: 0 20px 24px; }
+  .maildesk .mail-reply-prompt, .mail-reply { width: calc(100% - 40px); }
+  .mail-reply-foot > span { display: none; }
   .maildesk[data-detail=true] .mail-list { display: none; }
-  .maildesk[data-detail=true] .mail-reader { display: block; }
-  .mail-thread-tools { margin: 0 0 16px; }
+  .maildesk[data-detail=true] .mail-reader { display: flex; }
+  .mail-thread-tools { margin: 0 0 12px; flex-wrap: wrap; }
+  .mail-thread-tools .ui-keys, .mail-bulk .ui-keys { display: none; }
   .mail-message p, .mail-replies .mail-message { margin-left: 0; }
   .mail-replies .mail-message p { margin-left: 0; }
-  .mail-return { display: inline-block; margin-bottom: 14px; font-size: 13px; color: var(--muted) !important; }
+  .mail-return { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; margin: 12px 20px 0; font-size: 13px; color: var(--muted) !important; }
 }
 
-/* --- Keys ----------------------------------------------------------------- */
-
-.maildesk kbd {
-  display: inline-block;
-  min-width: 20px;
-  padding: 1px 6px;
-  border-radius: 6px;
-  border: 1px solid rgba(10, 10, 10, 0.12);
-  background: var(--card);
-  font: 500 12px/18px var(--mono, ui-monospace, monospace);
-  text-align: center;
-  color: var(--ink-2);
+/* A narrow reader (a small window, or the sync inspector open beside it)
+   gives its width to the words: less margin, and the buttons drop their key
+   caps, which the key list still shows. */
+@container reader (max-width: 500px) {
+  .mail-reader-scroll { padding: 0 24px 24px; }
+  .mail-thread-tools { margin-inline: -8px; }
+  .maildesk .mail-reply-prompt, .mail-reply { width: calc(100% - 48px); }
+  .mail-reply-foot > span { display: none; }
 }
+
+@container reader (max-width: 430px) {
+  .mail-thread-tools .ui-keys, .mail-reply .ui-keys { display: none; }
+}
+
+/* --- Small controls ------------------------------------------------------- */
 
 .maildesk .mail-keys-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin-top: auto;
   padding: 8px 10px;
   border: 0;
   background: none;
+  box-shadow: none;
   font-size: 13px;
+  font-weight: 400;
   color: var(--muted);
   text-align: left;
   cursor: pointer;
 }
 
 .maildesk .mail-compose-link { border: 0; cursor: pointer; }
-.maildesk .mail-compose-close, .maildesk .mail-return { border: 0; background: none; cursor: pointer; }
-.maildesk .mail-compose-close { font-size: 22px; line-height: 1; color: var(--muted); }
+.maildesk .mail-compose-link .ui-keys { margin-left: 2px; }
+.maildesk .mail-compose-close, .maildesk .mail-return { height: auto; padding: 0; border: 0; background: none; box-shadow: none; cursor: pointer; }
+.maildesk .mail-compose-close { color: var(--muted); }
 
-.mail-keys {
-  position: fixed;
-  inset: 0;
-  z-index: 40;
-  display: grid;
-  place-items: center;
-  background: rgba(48, 43, 38, 0.28);
+@media (max-width: 780px), (min-width: 961px) and (max-width: 1100px) {
+  .maildesk .mail-keys-hint { display: none; }
 }
-
-.mail-keys-card {
-  width: min(360px, calc(100vw - 32px));
-  padding: 22px 26px;
-  border-radius: 16px;
-  background: var(--card);
-  box-shadow: var(--ring), 0 24px 48px -20px rgba(48, 43, 38, 0.35);
-}
-
-.mail-keys-card h2 { margin: 0 0 12px; font-family: var(--serif); font-size: 24px; font-weight: 400; }
-.mail-keys-card dl { margin: 0; }
-.mail-keys-card dl div { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 6px 0; }
-.mail-keys-card dt span { font-size: 12px; color: var(--muted); }
-.mail-keys-card dd { margin: 0; font-size: 14px; color: var(--ink-2); }

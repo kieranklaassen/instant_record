@@ -4,7 +4,7 @@ Date: 2026-11-19. Answers `docs/brainstorms/2026-11-19-inbox-inertia-react-requi
 
 ## The answer
 
-InstantRecord works under Inertia, and the page stays an ordinary Inertia page. Its state is its props and its address. Reading is a partial reload, writing is a form post, and nothing holds a second copy of the data.
+InstantRecord works under Inertia, and the page stays an ordinary Inertia page. Its state is its props and its address. Reading is a partial reload, writing is a form post, and nothing holds a second copy of the data. What the page does hold is small and short-lived: the marks, held archives and replies that are on their way, laid over the props until the next reload answers.
 
 Inertia 3 already has the two seams this needed, and the gem's `frontend/` package fills each with one small file:
 
@@ -20,11 +20,11 @@ Inertia 3 already has the two seams this needed, and the gem's `frontend/` packa
 3. The controller answers from the local database. Inertia merges the props and re-renders.
 4. Rows are memoized on their own data, so a change to one conversation redraws one row. The list is virtual, so only the rows on screen exist.
 
-A write is `router.post` or `useForm`, with Inertia's `optimistic` option for archive and read. Rails redirects back and the answer carries fresh props.
+A new conversation is `useForm`: Rails redirects back and the answer carries fresh props. A reply, a mark and an archive are `write`, a form post that does not visit, followed by one partial reload, with the change drawn at once from the page's own overlay.
 
 ## What it cost
 
-About 400 lines, none of which knows about mail. They ship in the gem, in `frontend/`, as a package an app installs with `npm install "$(bundle show instant_record)/frontend"`:
+About 400 lines at first, about 900 after the polish, none of which knows about mail. They ship in the gem, in `frontend/`, as a package an app installs with `npm install "$(bundle show instant_record)/frontend"`:
 
 | File | Job |
 | --- | --- |
@@ -32,7 +32,12 @@ About 400 lines, none of which knows about mail. They ship in the gem, in `front
 | `http.js` | The HTTP client for the compiled runtime |
 | `window.js` | `useLiveWindow` (a list prop that widens with the scroll), `useLiveParam` (a query parameter and the props that depend on it), `useStableRows` |
 | `LiveList.js` | A react-virtuoso list that holds the reader's place while rows arrive above |
-| `keyboard.js`, `focus.js` | `useKeyboardNavigation`: a focused row, a key map, a scroll registry, focus that survives a redraw |
+| `keyboard.js`, `focus.js` | `useKeyboardNavigation`: a focused row, a scroll registry, focus that survives a redraw |
+| `chord.js`, `shortcuts.js` | `useShortcuts`: one table of bindings (keys, label, group, when it applies) that the key handler, the key list and the key caps on buttons all read |
+| `range.js`, `selection.js` | `useSelection`: a set of selected ids with an anchor, a range to any row, select all |
+| `held.js`, `undo.js` | `useUndoable`: a write held for five seconds so it can be taken back, sent when the time passes or the page is left |
+
+The second half of that table came with the polish of 2026-11-19 (`docs/plans/2026-11-19-0536-feat-inbox-polish-plan.md`), which also added `write` to `http.js`: a form post that does not visit, so marking twenty rows does not redraw the page twenty times. The files that hold logic and no React (`chord.js`, `range.js`, `held.js`, `focus.js`) are the ones with node tests, since the package has no dependencies of its own to import React from.
 
 In Ruby, `lib/instant_record/inertia.rb` adds `live:` to `render inertia:`. It names the synced models each prop is made from, and the page object carries `liveProps` with one event per model.
 
@@ -55,18 +60,35 @@ The ids reach a page as the payload of Inertia's `live` event. Nothing patches a
 3. **Build tooling.** Vite writes one file, `app/assets/builds/inbox.js`, and Propshaft serves it. `bin/rails test` and `assets:precompile` build it first. No other demo has a build step.
 4. **Older mail.** One data path. The address carries `limit`; scrolling widens the local window (`instant_record.fetch_history`), then the limit. A reload returns to the same depth.
 
+## Verified in the compiled runtime
+
+Later the same day the toolchain was built in a cloud thread (Roundhouse `b937108ce`, Spinel `7c56323d2`, WASI SDK 34, SQLite 3.54.1 built to an amalgamation from its GitHub source) and the demo was compiled and run in Chromium beside a local Rails sync server. What ran there:
+
+- a walk of the Inbox in the real worker: j/k, Enter, reply, archive, older mail fetched from the sync server, compose, reload, with no page error;
+- two workers in separate profiles: a message sent in one reached the other in under a second, as a change event carrying `{ type: "MailEntry", id }`, in the same document;
+- `compiled/test/shared-inbox.mjs` (offline reply, reload, inbox switch, teammate delivery, a kept draft) and `compiled/test/mail-volume.mjs --incoming` (10,000 messages), both brought up to the new page. `mail-volume.mjs` also passes against the Rails-served page.
+
+What that run found and fixed:
+
+- the layout asked for `controller_path`, which a Roundhouse layout does not have: the bundle's script tag moved into the two roots;
+- the first page sat in a `raw` script element behind a `gsub`: it now sits in an escaped `data-page` attribute that `instantRecord()` hands to Inertia;
+- the compiled build of `main` did not build at all: the shell snapshot's `MailShell` and `Email::ShellBuildJob` name the server's `Mailbox`, and are now carved out of the browser's copy;
+- the source drawer still listed the removed Stimulus controller;
+- a link to a conversation deep in the list opened the newest one in a browser that had not scrolled that far, in both runtimes: the list now widens to hold the conversation the address names, and a row's link carries its depth.
+
 ## Not verified
 
-The compiled toolchain (Spinel, Roundhouse) was not available where this was built, so **nothing here has run in the compiled runtime**. That covers:
+- `compiled/test/mail-volume.mjs` with `--all` (the whole inbox) and `--mobile`, and the other compiled tests (`full-demo`, `sync-inspector`, `release-upgrade` and the rest), none of which this change touches;
+- a compiled build served by its deploy (nginx, the service worker's cache): `/assets/inbox.js` has no digest in its name there, so a cache that keeps it must be told when it changes;
+- any browser but Chromium.
 
-- whether Roundhouse compiles the controller's new Ruby (`JSON.generate` of a nested hash, `gsub`, a hash built by assignment);
-- `http.js` against the real worker, and so every local read and write, the offline walk (R13), and the Offline switch;
-- `compiled/pipeline` now copying `app/assets/builds` and dropping `config/initializers/inertia_rails.rb`;
-- the change list on its way through the worker (`compiled/web/src/changes.js`, `app-host.js`, `worker.js`, `main.js`), and whether Spinel compiles the Ruby that writes it. The Ruby is covered by the gem's tests and the parser by a node test;
-- `compiled/test/mail-volume.mjs` and `compiled/test/shared-inbox.mjs`, which drive the old markup (`fragment=1`, `.mail-older`) and need rewriting against the new page.
+## Two things the polish got wrong first
 
-What did run: the Rails suite, the gem suite, the hook's unit tests, and a walk of the Rails-served page in Chromium (keys, 10,000 messages, two personas, a narrow screen). Served by Rails alone there is no local database, so that walk exercises Inertia's stock XHR client and a four-second poll in place of the change signal.
+- **A refused form opened Inertia's error window.** `onHttpException` on a `useForm` post suppresses that window only when it returns `false`. A callback that shows its own notice and returns nothing gets both.
+- **A key that submits skips the browser's validation.** Mod+Enter called the form's post directly, so `required` and `type=email` never ran. A submit from a key asks first: `fields.reportValidity()`, then post.
 
 ## Left out on purpose
 
-Shift+J / Shift+K range selection and bulk actions, as the requirements say. `/` does nothing because the demo has no search.
+Search came after this was written: `/` focuses it, and `compiled/test/offline-inbox.mjs` runs it, the background fill and the shell snapshot (`?shell=1`) with this page in a compiled build. Range selection, bulk actions and undo were left out of the first round and built in the polish that followed. That polish leaves out, on purpose: undo for a sent reply (the write landing at once is what the demo shows), an unarchive on the server (undo holds the write instead, so the mail log stays append-only), and one request for a bulk action (it is one light write per conversation and then one reload).
+
+The polish ran in Chromium against the Rails-served page only: keys, selection, archive and undo, the reply flow, two members, a narrow window and a refused write. None of the polish has run in the compiled runtime, which was verified before it landed. `compiled/test/shared-inbox.mjs` and `compiled/test/mail-volume.mjs` were brought to the new markup (a row's link is `.mail-row-link`, the reply box opens from `.mail-reply-prompt`, the button is Send) without a toolchain to run them. There `write` goes to `window.fetch`, not through the Inertia client `http.js` hands to the local database, so whether the worker answers it is the first thing to check.

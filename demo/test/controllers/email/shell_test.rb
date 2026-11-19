@@ -46,6 +46,11 @@ class MailShellTest < ActionDispatch::IntegrationTest
     [database, database.get_first_value("SELECT value FROM instant_record_sync_metadata WHERE key = 'cursor'").to_i]
   end
 
+  # A wire row as the compiled runtime stores it: its datetimes in the runtime's form.
+  def stored(attributes)
+    attributes.merge(%w[created_at updated_at].to_h { |name| [name, Time.iso8601(attributes[name]).utc.strftime(MailShell::DB_TIME)] })
+  end
+
   # The feed from a cursor, applied as the client applies it: an upsert by id.
   def catch_up(database, cursor)
     loop do
@@ -54,7 +59,7 @@ class MailShellTest < ActionDispatch::IntegrationTest
       return cursor if events.empty?
 
       events.each do |event|
-        row = event["attributes"].merge("server_version" => event["version"], "sync_state" => "synced")
+        row = stored(event["attributes"]).merge("server_version" => event["version"], "sync_state" => "synced")
         database.execute(%(INSERT OR REPLACE INTO mail_entries (#{row.keys.join(", ")}) VALUES (#{(["?"] * row.size).join(", ")})), row.values)
         cursor = event["version"]
       end
@@ -67,7 +72,7 @@ class MailShellTest < ActionDispatch::IntegrationTest
 
   def bootstrap_rows
     get "/email/sync/maya/support/bootstrap"
-    response.parsed_body["records"].map { |record| record["attributes"] }.sort_by { |row| row["server_version"] }
+    response.parsed_body["records"].map { |record| stored(record["attributes"]) }.sort_by { |row| row["server_version"] }
   end
 
   test "a missing shell sends the browser to the bootstrap and is built for the next one" do

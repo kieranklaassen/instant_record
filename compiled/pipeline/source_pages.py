@@ -24,16 +24,19 @@ def write_source_pages(app, dist, version, demo):
         files.extend((rel, root / rel) for rel in [
             f"app/controllers/{controller}_controller.rb", f"app/views/{controller}/{action}.html.erb"])
         if key in ("assistant", "email"):
-            script_name = "assistant_chat" if key == "assistant" else "mailbox"
-            script = f"app/javascript/controllers/{script_name}_controller.js"
+            # The Inbox is a React page; the Assistant is a Stimulus controller.
+            script = ("app/javascript/controllers/assistant_chat_controller.js" if key == "assistant"
+                      else "app/frontend/pages/Email/Inbox.jsx")
             files.append((script, root / script))
         if key == "assistant":
             samples = "app/javascript/controllers/assistant_examples.js"
             files.append((samples, root / samples))
             history = "app/controllers/assistant/history_controller.rb"
             files.append((history, root / history))
-            server = "app/controllers/assistant/replies_controller.rb"
-            files.append((server, Path(demo) / server))
+            local = "app/javascript/controllers/assistant_local_model.js"
+            files.append((local, root / local))
+            for server in ("app/controllers/assistant/replies_controller.rb", "app/models/assistant/reply.rb"):
+                files.append((server, Path(demo) / server))
         if key == "migrate":
             files[1] = ("compiled/pipeline/sqlite_release.rb", Path(__file__).with_name("sqlite_release.rb"))
         parts = ['<p class="source-note">Source used by this compiled build. Marked lines use InstantRecord.</p>']

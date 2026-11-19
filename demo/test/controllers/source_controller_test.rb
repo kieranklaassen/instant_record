@@ -17,6 +17,12 @@ class SourceControllerTest < ActionDispatch::IntegrationTest
     assert_includes text, "class Issue < ApplicationRecord"
   end
 
+  test "every file a demo lists is on disk" do
+    SourceController::MODELS.each do |demo, paths|
+      paths.each { |path| assert Rails.root.join(path).file?, "#{demo} lists #{path}, which is not there" }
+    end
+  end
+
   test "highlights ruby and erb without losing or reordering a single line" do
     get source_url(page: "todo/issues", view: "index")
 

@@ -5,7 +5,7 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite build --watch",
-    "test": "node --test ../frontend/*.test.js"
+    "test": "node --test ../frontend/*.test.js app/frontend/lib/*.test.js"
   },
   "dependencies": {
     "@inertiajs/core": "^3.11.0",

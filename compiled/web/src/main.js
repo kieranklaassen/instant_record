@@ -4,11 +4,19 @@ let releaseRequired;
 const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
 const waiting = new Map();
 let nextId = 1;
+let historyFill = null;
 worker.onmessage = (event) => {
   const { id, result, error, type } = event.data;
   if (type === "release_required") return releaseRequired?.();
   if (type === "storage_upgrade_blocked") {
     document.body.textContent = "Close or reload other tabs running the previous version of this app. Your saved changes will be kept.";
+    return;
+  }
+  if (type === "instant_record.history") {
+    // How much of the model's history the local database holds: { done, full, rows }.
+    historyFill = event.data.state;
+    if (window.__spinel) window.__spinel.history = historyFill;
+    window.dispatchEvent(new CustomEvent("instant-record:history", { detail: historyFill }));
     return;
   }
   if (type === "records_changed") {
@@ -28,7 +36,7 @@ const call = (type, payload) => new Promise((resolve, reject) => {
 
 const initialScope = mailboxScope(location.href);
 const marks = { start: performance.now() };
-window.__spinel = { marks, call, worker, sourceVersion: import.meta.env.VITE_SOURCE_VERSION };
+window.__spinel = { marks, call, worker, history: historyFill, sourceVersion: import.meta.env.VITE_SOURCE_VERSION };
 
 // Restore the switches before even the first bootstrap can reach Rails.
 try {
