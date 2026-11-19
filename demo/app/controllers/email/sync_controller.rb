@@ -4,6 +4,7 @@ module Email
       headers.merge!(InstantRecord::CORS_HEADERS)
       headers["Cache-Control"] = "no-store"
     end
+    before_action :check_token, except: :preflight
     before_action :load_mailbox, except: :preflight
 
     def preflight
@@ -90,6 +91,14 @@ module Email
       messages = page.to_a
       actions = @mailbox.mail_entries.where(parent_id: messages.map(&:id), kind: MailEntry::ACTIONS).order(:server_version)
       (messages + actions).map { |entry| InstantRecord.record_payload(entry) }
+    end
+
+    # A client that says who it is must be who the address says. One that
+    # does not is served as before, unless this server requires a token.
+    def check_token
+      sent = request.authorization.to_s[/\ABearer (.+)\z/, 1]
+      return head :unauthorized if sent.nil? && (request.authorization.present? || ENV["INBOX_REQUIRE_TOKEN"].present?)
+      head :unauthorized if sent && MailDirectory.member_for(sent) != params[:member]
     end
 
     def load_mailbox

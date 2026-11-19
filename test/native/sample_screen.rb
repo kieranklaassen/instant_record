@@ -45,20 +45,22 @@ class LettersScreen < InstantRecord::Native::Screen
         section "Open" do
           @box.letters.each do |letter|
             message = { "id" => letter.id, "note" => letter.note.to_s }
-            row id: letter.id, link: "letter", params: place.merge("id" => letter.id), action: "read", args: message do
+            row id: letter.id, link: "letter", params: place_of(letter.id) do
               stack "horizontal" do
-                image "circle.fill", tone: "accent"
-                text letter.from, style: "headline"
+                image "unread", tone: "accent"
+                text letter.from, style: "headline", lines: 1
+                spacer
                 date "2026-11-19T06:00:00.000000Z", style: "caption", tone: "secondary"
               end
-              text letter.subject
-              swipe "Archive", action: "archive", args: message, role: "destructive", edge: "trailing", image: "archivebox"
+              text letter.subject, lines: 2
+              swipe "Archive", action: "archive", args: message, role: "destructive", edge: "trailing", image: "archive"
             end
           end
         end
         section do
           text "#{@box.letters.size} letters", tone: "secondary"
         end
+        more "older:letters", query: "type=Letter&before_id=" + @box.letters.last.id unless @box.letters.empty?
         swift "LetterCount" do
           number "count", @box.letters.size
           flag "empty", @box.letters.empty?
@@ -73,12 +75,17 @@ class LettersScreen < InstantRecord::Native::Screen
           end
         end
       end
+      bottom do
+        field "body", label: "Reply", value: param("box"), multiline: true
+        field "subject"
+        button "Send", action: "rename", image: "send"
+      end
       toolbar do
         button "New", action: "compose", image: "square.and.pencil"
         button "Boxes", image: "person.crop.circle", position: "leading" do
           item "Here", link: "letters", params: place
-          item "Inbox", link: "letters", params: { "box" => "inbox" }, image: "tray", selected: param("box") == "inbox"
-          item "Sent \"mail\"", link: "letters", params: { "box" => "sent" }, selected: param("box") == "sent"
+          item "Inbox", replace: "letters", params: { "box" => "inbox" }, image: "inbox", selected: param("box") == "inbox"
+          item "Sent \"mail\"", replace: "letters", params: { "box" => "sent" }, selected: param("box") == "sent"
           item "Empty", action: "empty", args: { "box" => param("box") }, role: "destructive"
         end
       end
@@ -87,6 +94,7 @@ class LettersScreen < InstantRecord::Native::Screen
 
   # Where this screen is, built from its own params as a real screen does.
   def place = { "box" => box, "odd" => param("odd") }
+  def place_of(id) = { "box" => box, "odd" => param("odd"), "id" => id }
 
   # A param behind a method of its own, as a real screen reads one.
   def box = param("box")

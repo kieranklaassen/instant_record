@@ -26,10 +26,12 @@ module InstantRecord
       def open_with: (Hash[String, String] params) -> Hash[String, String]
       def self.strings: (untyped parsed) -> Hash[String, String]
       def param: (String name) -> String
-      def row: (?id: String, ?link: String, ?params: Hash[String, String], ?action: String, ?args: Hash[String, String]) -> InstantRecord::Native::Node
+      def row: (?id: String, ?link: String, ?params: Hash[String, String]) -> InstantRecord::Native::Node
       def button: (String label, ?action: String, ?args: Hash[String, String], ?role: String, ?image: String, ?position: String) -> InstantRecord::Native::Node
-      def item: (String title, ?action: String, ?args: Hash[String, String], ?link: String, ?params: Hash[String, String], ?image: String, ?role: String, ?selected: bool) -> InstantRecord::Native::Node
+      def item: (String title, ?action: String, ?args: Hash[String, String], ?link: String, ?replace: String, ?params: Hash[String, String], ?image: String, ?role: String, ?selected: bool) -> InstantRecord::Native::Node
       def swipe: (String label, action: String, ?args: Hash[String, String], ?role: String, ?edge: String, ?image: String) -> InstantRecord::Native::Node
+      def field: (String name, ?label: String, ?value: String, ?multiline: bool) -> InstantRecord::Native::Node
+      def more: (String key, query: String) -> InstantRecord::Native::Node
       def act: (InstantRecord::Native::Node node, String label, String action, Hash[String, String] args, String role) -> nil
     end
   end

@@ -151,7 +151,8 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
     @phone.sync
     row = rows.first
 
-    @phone.tap("mailbox", SUPPORT, row["action"], row["args"])
+    @phone.tap(row["props"]["link"], row["params"], "open")
+    @phone.tap(row["props"]["link"], row["params"], "open")
     assert_equal 1, @phone.pending
     @phone.sync
 
@@ -264,11 +265,47 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
     assert_empty @phone.unanswered
   end
 
+  test "a reply typed on the phone keeps every character, shows at once and reaches the server" do
+    @phone.sync
+    thread = SUPPORT.merge("thread" => @newer.id)
+    words = "On it, \"today\".\n\tThanks ☕"
+
+    @phone.tap("thread", thread, "reply", {}, { "body" => words })
+    @phone.tap("thread", thread, "reply", {}, { "body" => " \n " })
+
+    said = @phone.render("thread", thread).dig("children", 0, "children").find { |node| node["kind"] == "props" }["children"].last
+    assert_includes said["children"].map { |prop| prop["text"] }, words
+    assert_equal 1, @phone.pending
+    @phone.sync
+    assert_equal [words], MailEntry.where(kind: "reply", parent_id: @newer.id, author: "maya").pluck(:body)
+    assert_equal JSON.parse(ThreadScreen.new(thread).json), @phone.render("thread", thread)
+  end
+
+  test "older mail arrives a page at a time, and the phone says whether more is left" do
+    (MailEntry::PAGE_SIZE + 8).times { |n| travel_to((n + 10).minutes.ago) { write("rae", "Bulk #{n}") } }
+    @phone.sync
+    list = -> { @phone.render("mailbox", SUPPORT).dig("children", 0, "children", 0, "children") }
+    summary = -> { list.call.first["children"].to_h { |prop| [prop["props"]["name"], prop["text"]] } }
+    more = list.call.last
+
+    assert_equal ["more", "older:support"], more.values_at("kind", "id")
+    assert_equal MailEntry::PAGE_SIZE, rows.size
+    assert_equal "true", summary.call["more"]
+
+    get "/email/sync/maya/support/records?#{more["props"]["query"]}"
+    assert_response :success
+    @phone.call("history", JSON.generate(key: more["id"], response: response.body))
+
+    assert_equal MailEntry::PAGE_SIZE + 10, rows.size
+    assert_equal ["row", "false"], [list.call.last["kind"], summary.call["more"]]
+    assert_equal MailEntry.open_messages.where(mailbox_id: "support").order(created_at: :desc, id: :desc).pluck(:id), rows.map { |row| row["id"] }
+  end
+
   test "a tap made while a pass was fetching is not lost, and goes out with the next pass" do
     @phone.sync
     @phone.tap("mailbox", SUPPORT, "archive", { "id" => @older.id })
 
-    @phone.prepared_sync { @phone.tap("mailbox", SUPPORT, "read", { "id" => @newer.id }) }
+    @phone.prepared_sync { @phone.tap("thread", SUPPORT.merge("thread" => @newer.id), "open") }
 
     assert_equal ["POST #{ENDPOINT}/mutations"], @phone.unanswered
     assert_equal 2, @phone.pending

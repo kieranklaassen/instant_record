@@ -9,7 +9,7 @@ module InstantRecord
     #           MailEntry.open_messages.each do |entry|
     #             row id: entry.id, link: "thread", params: { "id" => entry.id } do
     #               text entry.author, style: "headline"
-    #               text entry.subject
+    #               text entry.subject, lines: 1
     #               swipe "Archive", action: "archive", args: { "id" => entry.id }, role: "destructive"
     #             end
     #           end
@@ -27,7 +27,9 @@ module InstantRecord
     # `body` describes the screen with the words iOS draws. The app's renderer
     # turns the description into native views and knows nothing else about the
     # app. A tap comes back as `perform` with the action and `args` the
-    # element named, and the screen is rendered again afterwards.
+    # element named, together with what was typed into the screen's fields
+    # (`values`), and the screen is rendered again afterwards. A screen that
+    # was just opened over another is told so: `perform("open", {}, {})`.
     #
     # A screen, or one part of it, can instead be a view the app wrote in
     # SwiftUI. `swift` names the view and hands it props, as a Rails action
@@ -129,13 +131,11 @@ module InstantRecord
 
       # One line of a list. `id` is the record it shows, which is how the list
       # keeps its place when it is drawn again. `link` names the screen a tap
-      # opens and `params` are handed to that screen. A row with an `action`
-      # has it performed with `args` before the screen opens.
-      def row(id: "", link: "", params: Node.strings, action: "", args: Node.strings)
+      # opens over this one and `params` are handed to that screen, which
+      # hears of it as `perform("open", ...)`.
+      def row(id: "", link: "", params: Node.strings)
         node = add("row")
         node.id = id
-        node.action = action
-        node.args = args
         node.link_params = params
         node.set("link", link)
         inside(node) { yield }
@@ -148,13 +148,21 @@ module InstantRecord
         inside(node) { yield }
       end
 
+      # Empty room in a stack: what follows it sits at the far edge.
+      def spacer
+        add("spacer")
+      end
+
       # `style` is one of the system's text styles: "headline", "body",
-      # "subheadline", "caption", "title". `tone` is "secondary" for quieter text.
-      def text(value, style: "", tone: "")
+      # "subheadline", "caption", "title". `tone` is "secondary" for quieter
+      # text. `lines` is the most lines it may take, or 0 for as many as it
+      # needs.
+      def text(value, style: "", tone: "", lines: 0)
         node = add("text")
         node.text = value
         node.set("style", style)
         node.set("tone", tone)
+        node.set("lines", lines.to_s) if lines > 0
         node
       end
 
@@ -168,7 +176,10 @@ module InstantRecord
         node
       end
 
-      # A system symbol by name, such as "envelope.badge".
+      # An icon by what it means: "person", "filter", "archive", "inbox",
+      # "unread", "read", "send", "compose". The renderer picks the platform's
+      # symbol for it and says its name aloud. A name it does not know is
+      # used as the platform's own, such as "envelope.badge".
       def image(name, tone: "")
         node = add("image")
         node.text = name
@@ -188,13 +199,17 @@ module InstantRecord
       end
 
       # One line of a menu. With an `action` it is performed like a button's.
-      # With a `link` it opens that screen with `params` in place of the first
-      # screen, as choosing another account does. `selected` gives it a tick.
-      def item(title, action: "", args: Node.strings, link: "", params: Node.strings, image: "", role: "", selected: false)
+      # With a `link` it opens that screen with `params` over this one, as a
+      # row does. With `replace` the screen it names takes the place of the
+      # first screen, as choosing another account does. `selected` gives it a
+      # tick.
+      def item(title, action: "", args: Node.strings, link: "", replace: "", params: Node.strings, image: "", role: "", selected: false)
+        raise ArgumentError, "Give a menu item link: or replace:, not both" if link.length > 0 && replace.length > 0
         node = add("item")
         act(node, title, action, args, role)
         node.link_params = params
         node.set("link", link)
+        node.set("replace", replace)
         node.set("image", image)
         node.set("selected", "true") if selected
         node
@@ -253,6 +268,38 @@ module InstantRecord
       # Controls in the navigation bar: buttons, and buttons that open a menu.
       def toolbar
         inside(add("toolbar")) { yield }
+      end
+
+      # A bar pinned under the screen, above the keyboard: a reply box.
+      def bottom
+        inside(add("bottom")) { yield }
+      end
+
+      # A box to type in. `label` is what it shows while empty and what it is
+      # called aloud. What is typed stays on the phone until the next action
+      # from this screen, reaches `perform` in `values` under `name`, and the
+      # box is emptied once that action has been performed. A button beside a
+      # field cannot be pressed while every field of the screen is blank.
+      def field(name, label: "", value: "", multiline: false)
+        node = add("field")
+        node.text = value
+        node.set("name", name)
+        node.set("label", label)
+        node.set("multiline", "true") if multiline
+        node
+      end
+
+      # The list goes on at the server. When this comes into view the app
+      # asks the sync address for `records?<query>` and hands the answer to
+      # the library, which keeps the page and writes down whether more lies
+      # below it: `InstantRecord::SyncMetadata.get("history:" + key)` is
+      # "more" or "end", and nil before any page. The screen is then drawn
+      # again, and leaves this out once the answer is "end".
+      def more(key, query:)
+        node = add("more")
+        node.id = key
+        node.set("query", query)
+        node
       end
 
       private

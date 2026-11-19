@@ -15,8 +15,11 @@ class NativeScreenTest < ActiveSupport::TestCase
         list do
           section "Open" do
             letters.each do |letter|
-              row id: letter.id, link: "letter", params: { "id" => letter.id }, action: "read", args: { "id" => letter.id } do
-                text letter.from, style: "headline"
+              row id: letter.id, link: "letter", params: { "id" => letter.id } do
+                stack "horizontal" do
+                  text letter.from, style: "headline", lines: 1
+                  spacer
+                end
                 text letter.subject
                 swipe "Archive", action: "archive", args: { "id" => letter.id }, role: "destructive"
               end
@@ -41,7 +44,7 @@ class NativeScreenTest < ActiveSupport::TestCase
         toolbar do
           button "Boxes", image: "person.crop.circle", position: "leading" do
             item "Inbox", link: "menu", params: { "box" => "inbox" }, image: "tray", selected: param("box") == "inbox"
-            item "Sent", link: "menu", params: { "box" => "sent" }, selected: param("box") == "sent"
+            item "Sent", replace: "menu", params: { "box" => "sent" }, selected: param("box") == "sent"
             item "Empty", action: "empty", args: { "box" => param("box") }, role: "destructive"
           end
           button "New", action: "compose", position: "trailing"
@@ -80,6 +83,22 @@ class NativeScreenTest < ActiveSupport::TestCase
     end
   end
 
+  class BothScreen < InstantRecord::Native::Screen
+    def body
+      toolbar { button("Boxes") { item "Inbox", link: "menu", replace: "menu" } }
+    end
+  end
+
+  class ReplyScreen < InstantRecord::Native::Screen
+    def body
+      bottom do
+        field "body", label: "Reply", value: param("draft"), multiline: true
+        button "Send", action: "reply"
+      end
+      more "older:letters", query: "type=Letter&before_id=a1" if param("older") == "yes"
+    end
+  end
+
   class EmptyScreen < InstantRecord::Native::Screen
     def body
       list
@@ -103,7 +122,7 @@ class NativeScreenTest < ActiveSupport::TestCase
     section = navigation.children.first.children.first
     assert_equal ["section", "Open"], [section.kind, section.text]
     assert_equal %w[a1 b2], section.children.map(&:id)
-    assert_equal %w[text text swipe], section.children.first.children.map(&:kind)
+    assert_equal %w[stack text swipe], section.children.first.children.map(&:kind)
   end
 
   test "a row names its record, the screen it opens and that screen's params" do
@@ -111,7 +130,7 @@ class NativeScreenTest < ActiveSupport::TestCase
 
     assert_equal "a1", row.id
     assert_equal ["letter", { "id" => "a1" }], [row.props["link"], row.link_params]
-    assert_equal ["read", { "id" => "a1" }], [row.action, row.args]
+    assert_equal ["", {}], [row.action, row.args]
   end
 
   test "a swipe carries the action the host sends back" do
@@ -128,8 +147,9 @@ class NativeScreenTest < ActiveSupport::TestCase
     assert_equal "a1", row["id"]
     assert_equal({ "link" => "letter" }, row["props"])
     assert_equal({ "id" => "a1" }, row["params"])
-    assert_equal({ "id" => "a1" }, row["args"])
-    assert_equal({ "kind" => "text", "id" => "", "text" => "Rae", "action" => "", "params" => {}, "args" => {}, "props" => { "style" => "headline" }, "children" => [] }, row["children"].first)
+    assert_equal({}, row["args"])
+    assert_equal({ "id" => "a1" }, row["children"].last["args"])
+    assert_equal({ "kind" => "text", "id" => "", "text" => "Night shift", "action" => "", "params" => {}, "args" => {}, "props" => {}, "children" => [] }, row["children"][1])
   end
 
   test "quotes, newlines, control characters and non-ASCII text survive" do
@@ -166,7 +186,7 @@ class NativeScreenTest < ActiveSupport::TestCase
     inbox, sent, empty = toolbar(MenuScreen.new("box" => "sent")).first.children
 
     assert_equal [nil, "true", nil], [inbox, sent, empty].map { |item| item.props["selected"] }
-    assert_equal({ "link" => "menu", "selected" => "true" }, JSON.parse(MenuScreen.new("box" => "sent").json).dig("children", 0, "children", 1, "children", 0, "children", 1, "props"))
+    assert_equal({ "replace" => "menu", "selected" => "true" }, JSON.parse(MenuScreen.new("box" => "sent").json).dig("children", 0, "children", 1, "children", 0, "children", 1, "props"))
   end
 
   test "a list can ask to be refreshed by a pull, and does not by default" do
@@ -218,6 +238,38 @@ class NativeScreenTest < ActiveSupport::TestCase
     LettersScreen.new.perform("archive", { "id" => "a1" }, {})
 
     assert_equal %w[b2], rows(LettersScreen.new.render).map(&:id)
+  end
+
+  test "a stack holds a spacer where room is wanted, and text says how many lines it may take" do
+    name, room = rows(LettersScreen.new.render).first.children.first.children
+
+    assert_equal ["text", "1", "spacer"], [name.kind, name.props["lines"], room.kind]
+    assert_nil rows(LettersScreen.new.render).first.children[1].props["lines"]
+  end
+
+  test "a menu item opens a screen over this one or in place of the first, and may not ask for both" do
+    inbox, sent = MenuScreen.new.render.children.first.children.last.children.first.children
+
+    assert_equal ["menu", nil], inbox.props.values_at("link", "replace")
+    assert_equal [nil, "menu"], sent.props.values_at("link", "replace")
+    error = assert_raises(ArgumentError) { BothScreen.new.render }
+    assert_match "link: or replace:", error.message
+  end
+
+  test "a bar under the screen holds a field by name and the button that sends it" do
+    bar = ReplyScreen.new.render.children.sole
+    field, send = bar.children
+
+    assert_equal ["bottom", "field", "button"], [bar.kind, field.kind, send.kind]
+    assert_equal({ "name" => "body", "label" => "Reply", "multiline" => "true" }, field.props)
+    assert_equal ["", "reply"], [field.text, send.action]
+    assert_equal "kept", ReplyScreen.new("draft" => "kept").render.children.sole.children.first.text
+  end
+
+  test "a list that goes on at the server says what to ask for and the key the answer is kept under" do
+    more = ReplyScreen.new("older" => "yes").render.children.last
+
+    assert_equal ["more", "older:letters", "type=Letter&before_id=a1"], [more.kind, more.id, more.props["query"]]
   end
 
   test "a form's values reach the action beside its args" do

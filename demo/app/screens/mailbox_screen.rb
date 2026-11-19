@@ -2,84 +2,79 @@
 # Opened with `member` and `inbox`, and with `filter: "unread"` to list only
 # what the member has not read.
 class MailboxScreen < InstantRecord::Native::Screen
+  include MailAccess
   extend InstantRecord::RuntimeScoped
 
-  def member = param("member")
-  def inbox = param("inbox")
   def unread_only? = param("filter") == "unread"
 
   def body
+    unread = unread_ids
+    shown = messages
+    waiting = shown.count { |entry| unread.key?(entry.id) }
+    older = older?
     navigation title: inbox.capitalize do
       list refreshable: true do
-        unread = unread_ids
-        shown = messages
-        # One view among the rows that the app wrote in SwiftUI.
+        # One view among the rows that the app wrote in SwiftUI. The unread
+        # figure counts what is on the phone, so it is a floor ("12+") while
+        # older mail is still on the server.
         swift "InboxSummary" do
           prop "inbox", inbox.capitalize
           number "unread", unread.size
           number "showing", shown.size
-          prop "filter", unread_only? ? "unread" : "all"
+          flag "filtered", unread_only?
+          flag "more", older
         end
         shown.each do |entry|
-          message = { "id" => entry.id.to_s }
-          row id: entry.id, link: "thread", params: thread_place(entry.id.to_s), action: "read", args: message do
+          row id: entry.id, link: "thread", params: thread_place(entry.id.to_s) do
             stack "horizontal" do
-              image "circle.fill", tone: "accent" if unread.key?(entry.id)
-              text entry.author, style: "headline"
+              image "unread", tone: "accent" if unread.key?(entry.id)
+              text entry.author, style: "headline", lines: 1
+              spacer
               date entry.created_at.utc.iso8601(6), style: "caption", tone: "secondary"
             end
-            text entry.subject.to_s
-            text entry.body.to_s, style: "subheadline", tone: "secondary"
-            swipe "Archive", action: "archive", args: message, role: "destructive", image: "archivebox"
+            text entry.subject.to_s, lines: 1
+            text entry.body.to_s, style: "subheadline", tone: "secondary", lines: 2
+            swipe "Archive", action: "archive", args: { "id" => entry.id.to_s }, role: "destructive", image: "archive"
           end
         end
+        text(unread_only? ? "You're all caught up" : "No mail", tone: "secondary") if shown.empty?
+        more "older:#{inbox}", query: below(shown.last) if older && !shown.empty?
       end
       toolbar do
-        button "Inboxes", image: "person.crop.circle", position: "leading" do
+        button "Inboxes", image: "person", position: "leading" do
           MailDirectory.inboxes(member).each do |name|
-            item name.capitalize, link: "mailbox", params: place_in("#{name}"), image: "tray", selected: name == inbox
+            item name.capitalize, replace: "mailbox", params: place_in("#{name}"), image: "inbox", selected: name == inbox
           end
         end
-        button "View", image: "slider.horizontal.3", position: "trailing" do
-          item "All", link: "mailbox", params: place, selected: !unread_only?
-          item "Unread", link: "mailbox", params: unread_place, selected: unread_only?
-          item "Mark all read", action: "read_all", image: "envelope.open"
+        button "View", image: "filter", position: "trailing" do
+          item "All", replace: "mailbox", params: place, selected: !unread_only?
+          item "Unread", replace: "mailbox", params: unread_place, selected: unread_only?
+          item "Mark #{waiting} as read", action: "read_all", image: "read" if waiting > 0
         end
       end
     end
   end
 
-  # "read" and "archive" name a message of this inbox by its `id`.
-  # "read_all" marks the listed mail read.
+  # "archive" names a message of this inbox by its `id`. "read_all" marks the
+  # listed mail read.
   def perform(action, args, values)
     return unless allowed?
-    return read_all if action == "read_all"
-    message = MailEntry.find_by(id: args.fetch("id", ""), mailbox_id: inbox, kind: "message")
-    return unless message
 
     case action
-    when "read" then append("read", message.id) if unread_ids.key?(message.id)
-    when "archive" then append("archive", message.id)
+    when "read_all" then read_all
+    when "archive"
+      entry = message(args.fetch("id", ""))
+      append("archive", entry.id) if entry
     end
   end
 
   private
 
-  # Where this screen is: what a link to the same inbox starts from.
-  def place = { "member" => member, "inbox" => inbox }
-
-  # The places a link from here leads, each a hash of strings.
-  def place_in(name) = { "member" => member, "inbox" => name }
-  def unread_place = { "member" => member, "inbox" => inbox, "filter" => "unread" }
-  def thread_place(id) = { "member" => member, "inbox" => inbox, "thread" => id }
-
-  def allowed? = MailDirectory.inboxes(member).include?(inbox)
-
   def messages
     return [] unless allowed?
     open = MailEntry.open_messages.where(mailbox_id: inbox)
     open = open.where(MailEntry::UNREAD, member: member) if unread_only?
-    open.order(created_at: :desc, id: :desc).limit(MailEntry::PAGE_SIZE).to_a
+    held(open.order(created_at: :desc, id: :desc)).to_a
   end
 
   def read_all
@@ -87,23 +82,30 @@ class MailboxScreen < InstantRecord::Native::Screen
     messages.each { |entry| append("read", entry.id) if unread.key?(entry.id) }
   end
 
-  def unread_ids
-    ids = {}
-    MailEntry.open_messages.where(mailbox_id: inbox).where(MailEntry::UNREAD, member: member).each { |entry| ids[entry.id] = true }
-    ids
+  # What the app asks the sync address's records door for: the page of mail
+  # below this message.
+  def below(entry)
+    "type=MailEntry&before_created_at=" + entry.created_at.utc.iso8601(6) + "&before_id=" + entry.id.to_s
   end
 
-  # The same two halves as Email::MailboxesController: the server numbers the
-  # entry itself, and the phone writes locally and lets sync carry it.
+  # The server holds the whole inbox and shows its first page, as the web
+  # Inbox's first render does. The phone holds the pages it has loaded and
+  # shows all of them.
   server_only do
-    def append(kind, parent)
-      Mailbox.open_demo(inbox).append!(id: SecureRandom.uuid, author: member, attributes: { kind: kind, parent_id: parent })
-    end
+    def held(scope) = scope.limit(MailEntry::PAGE_SIZE)
+    def older? = false
   end
 
   browser_only do
-    def append(kind, parent)
-      MailEntry.create!(mailbox_id: inbox, author: member, kind: kind, parent_id: parent)
+    def held(scope) = scope
+
+    # What the last page of older mail said, or before any was asked for,
+    # whether the first page came full.
+    def older?
+      return false unless allowed?
+      mark = InstantRecord::SyncMetadata.get("history:older:" + inbox)
+      return mark == "more" unless mark.nil?
+      MailEntry.open_messages.where(mailbox_id: inbox).count >= MailEntry::PAGE_SIZE
     end
   end
 end
