@@ -162,6 +162,13 @@ if not os.environ.get("INSTANT_RECORD_APP"):
     for sheet in Path(app, "app/assets/stylesheets").glob("*.css"):
         digest = hashlib.sha256(sheet.read_bytes()).hexdigest()[:10]
         sheet.rename(sheet.with_name(f"{sheet.stem}-{digest}.css"))
+    # The Inbox's script has one name in every build, and a browser that has opened the demo
+    # keeps it: its own cache for an hour, the service worker until it is refreshed. A page
+    # of this build would run an earlier build's script.
+    bundle = Path(app, "app/assets/builds/inbox.js")
+    if bundle.is_file():
+        edit("app/views/email/mailboxes/index.html.erb", '<%= asset_path("inbox.js") %>',
+             "/assets/inbox.js?v=" + hashlib.sha256(bundle.read_bytes()).hexdigest()[:10])
     # The source drawer loads generated source fragments for this build.
     target = os.path.join(app, "app/views/layouts/application.html.erb")
     source = open(target).read()

@@ -255,7 +255,8 @@ def warm_scripts(assets_dir):
     The page the app writes names its scripts only once the app is up, and they import one
     another several levels deep: a round trip a level, all of it after the boot. A plain fetch
     parses nothing and resolves no specifier. It only has the response cached, under the
-    address the page will ask for: a controller's carries the version emit_tree gave it.
+    address the page will ask for: a controller's carries the version emit_tree gave it, and
+    the Inbox's bundle the one vendor_gem.py wrote into its view.
     """
     urls = []
     seen = hashlib.sha256()
@@ -269,7 +270,8 @@ def warm_scripts(assets_dir):
             with open(path, "rb") as f:
                 digest = hashlib.sha256(f.read()).hexdigest()[:10]
             seen.update((name + digest).encode())
-            urls.append(prefix + name + ("?v=" + digest if prefix.endswith("controllers/") else ""))
+            versioned = prefix.endswith("controllers/") or (name == "inbox.js" and not APP_SOURCE)
+            urls.append(prefix + name + ("?v=" + digest if versioned else ""))
     if not urls:
         return []
     # Once a browser, for these scripts: on a later visit they are cached already, and asking
