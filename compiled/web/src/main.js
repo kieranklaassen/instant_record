@@ -219,6 +219,7 @@ if (resource?.decodedBodySize) {
     { phase: "compile", ms: Math.max(0, compileEnd - resource.responseEnd) },
     { phase: "sqlite", ms: boot.storageMs }, { phase: "vm", ms: boot.runtimeMs },
     { phase: "schema", ms: boot.bootstrapMs }, { phase: "render", ms: result.ms },
+    ...(boot.shell ? [{ phase: "shell", ms: boot.shell.ms, bytes: boot.shell.bytes }] : []),
   ] };
   window.__spinel.ledger = ledger;
   try { localStorage.setItem("instant_record.compiled.boot." + (cached ? "cache" : "network"), JSON.stringify(ledger)); } catch {}

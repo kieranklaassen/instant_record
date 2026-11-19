@@ -64,6 +64,10 @@ const targetSchema = Number(import.meta.env.VITE_SCHEMA_VERSION);
 const legacySchema = import.meta.env.VITE_SCHEMA_BASELINE;
 const migrationHistory = JSON.parse(import.meta.env.VITE_MIGRATION_HISTORY);
 const schemaDigest = import.meta.env.VITE_SCHEMA_DIGEST;
+// A shell is a SQLite file the server built ahead of time for a first sync. It stays off until
+// a build turns it on or the page asks with ?shell=1: no compiled build has opened one yet.
+const shellFingerprint = import.meta.env.VITE_SHELL_FINGERPRINT;
+const shellAlways = import.meta.env.VITE_SHELL_SNAPSHOT === "1";
 let snapshotRevision;
 let changes;
 
@@ -270,6 +274,27 @@ function navigate({ method, path, body, contentType }) {
   return { result: { ...result, ms: performance.now() - started }, redirected, finalPath };
 }
 
+// A browser with no database of its own asks for the inbox's shell. Anything short of a whole
+// SQLite file built for this schema is no shell, and the normal bootstrap runs as before.
+async function fetchShell(scope, path) {
+  const asked = new URL(path || "/", self.location.origin).searchParams.get("shell") === "1";
+  if (!scope || !shellFingerprint || !(shellAlways || asked) || simulation.offline) return null;
+  const started = performance.now();
+  try {
+    if (await withFiles("readonly", get => get(DATABASE))) return null;
+    const grant = await fetchReply("GET", "/shell?fingerprint=" + shellFingerprint);
+    if (grant.status !== 200) return null;
+    const { path: file, cursor } = JSON.parse(grant.text);
+    const response = await fetch(syncEndpoint + file, { signal: AbortSignal.timeout(30000) });
+    if (!response.ok) return null;
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (new TextDecoder().decode(bytes.subarray(0, 15)) !== "SQLite format 3") return null;
+    return { bytes, cursor, ms: performance.now() - started };
+  } catch {
+    return null;
+  }
+}
+
 async function boot(payload = {}) {
   const scope = mailboxScope(payload.path || "/");
   openSnapshot(scope);
@@ -277,14 +302,18 @@ async function boot(payload = {}) {
   changes.onmessage = () => { if (host) self.postMessage({ type: "records_changed" }); };
   if (scope) syncEndpoint = publicEndpoint.replace(/\/instant_record\/?$/, "") + "/email/sync/" + scope;
   const started = performance.now();
+  // The shell downloads while the module compiles.
+  const shellFetch = fetchShell(scope, payload.path);
   const module = payload.module || await WebAssembly.compileStreaming(fetch(import.meta.env.VITE_WASM_URL || "/app.wasm"));
   const compiled = performance.now();
   let storageMs, runtimeMs;
-  const restored = await withFiles("readwrite", async (get, put) => {
+  let shell = await shellFetch;
+  const open = () => withFiles("readwrite", async (get, put) => {
+    const opening = performance.now();
     const [bytes, version, revision, savedSecret, history, previousDigest] = await Promise.all([
       get(DATABASE), get(SCHEMA), get(REVISION), get("secret_key_base"), get("migration_history"), get("schema_digest"),
     ]);
-    storageMs = performance.now() - compiled;
+    storageMs = performance.now() - opening;
     if (bytes && version == null && !legacySchema) throw new Error("Set compiled_migration_baseline to the schema version of the previously deployed browser app.");
     const previous = version ?? Number(legacySchema);
     if (bytes && (previous > targetSchema || (legacySchema && previous < Number(legacySchema)))) {
@@ -307,12 +336,22 @@ async function boot(payload = {}) {
     const secret = savedSecret || [...crypto.getRandomValues(new Uint8Array(64))].map(b => b.toString(16).padStart(2, "0")).join("");
     if (!savedSecret) put("secret_key_base", secret);
     const candidate = new AppHost(module, { env: { SECRET_KEY_BASE: secret } });
+    // Another tab may have saved a database while the shell downloaded. That one wins.
+    const fromShell = !bytes && !!shell;
     if (bytes) candidate.restoreDatabase(bytes, previous);
+    if (fromShell) candidate.restoreDatabase(shell.bytes, targetSchema);
     const initStart = performance.now();
     candidate.ensureBooted();
     runtimeMs = performance.now() - initStart;
+    if (fromShell) {
+      // The shell's cursor is its last write. One that did not arrive whole has none.
+      const state = candidate.syncState();
+      if (!state.bootstrapped || state.cursor !== shell.cursor) throw new Error("The shell does not carry its cursor.");
+    } else {
+      shell = null;
+    }
     snapshotRevision = revision;
-    if (version !== targetSchema || !previousDigest) {
+    if (fromShell || version !== targetSchema || !previousDigest) {
       snapshotRevision = (revision ?? 0) + 1;
       put(DATABASE, candidate.databaseBytes());
       put(REVISION, snapshotRevision);
@@ -323,8 +362,22 @@ async function boot(payload = {}) {
     host = candidate;
     return !!bytes;
   });
+  let restored;
+  try {
+    restored = await open();
+  } catch (error) {
+    // A shell this build cannot open costs one attempt. The transaction rolled back, so the
+    // second attempt starts from an empty database and bootstraps as it always has.
+    if (!shell) throw error;
+    report({ kind: "sync", method: "GET", path: "/shell", status: "rejected", ms: Math.round(shell.ms) });
+    shell = null;
+    restored = await open();
+  }
   const bootstrapStart = performance.now();
-  if (!restored) await drain(true);
+  if (!restored && !shell) await drain(true);
+  // The shell is as old as its cursor. Ask for what came after it now, not at the first
+  // interval, and do not hold the first page for the answer.
+  if (shell) pollChanges();
   const bootstrapMs = performance.now() - bootstrapStart;
 
   if (scope) {
@@ -338,7 +391,8 @@ async function boot(payload = {}) {
   }
   const first = payload.path ? await runRequest("GET", () => navigate({ method: "GET", path: payload.path })) : null;
   setInterval(pollChanges, POLL_EVERY_MS);
-  return { compileMs: compiled - started, restored, storageMs, runtimeMs, bootstrapMs, first };
+  return { compileMs: compiled - started, restored, storageMs, runtimeMs, bootstrapMs, first,
+    shell: shell ? { ms: shell.ms, bytes: shell.bytes.length, cursor: shell.cursor } : null };
 }
 
 self.onmessage = async (event) => {
