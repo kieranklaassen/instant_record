@@ -59,12 +59,24 @@ export default class extends Controller {
       return
     }
 
-    // This browser's database follows on its next sync pass, and the page is
-    // told when it has (refresh, below). The timer is for a pass that changed
-    // nothing.
-    this.whoTarget.textContent += " Syncing this browser…"
+    // This browser's database follows in two sync passes: one empties it of
+    // the last person's notes, the next fills it with this one's. The page is
+    // told after each (refresh, below), and drawing the empty moment between
+    // them would blank the list. So it waits for as many notes as the server
+    // says this session is sent, and the notes both people hold never move.
+    // The timer is for a count that never comes, such as a note written
+    // elsewhere in the meantime.
+    this.awaiting = this.session.notes_for_you
+    this.listTarget.setAttribute("aria-busy", "true")
     clearTimeout(this.settling)
-    this.settling = setTimeout(() => this.refresh(), 4000)
+    this.settling = setTimeout(() => this.settle(), 3000)
+  }
+
+  settle() {
+    this.awaiting = null
+    this.listTarget.removeAttribute("aria-busy")
+    clearTimeout(this.settling)
+    this.refresh()
   }
 
   // A form in the notes section: a new note, or a Delete. It is posted as the
@@ -89,17 +101,20 @@ export default class extends Controller {
 
   // The page again, as it stands now, folded into the one on screen.
   async refresh() {
-    clearTimeout(this.settling)
-    if (this.refreshing) return
+    // A signal that arrives while one is being answered is answered after it.
+    if (this.refreshing) return (this.again = true)
     this.refreshing = true
     try {
       const response = await fetch(window.location.pathname, { credentials: "same-origin" })
       if (response.ok) this.fold(await response.text())
-      if (this.session) this.show(this.session)
     } catch {
       // keep what is on screen until the next signal
     } finally {
       this.refreshing = false
+      if (this.again) {
+        this.again = false
+        this.refresh()
+      }
     }
   }
 
@@ -107,6 +122,12 @@ export default class extends Controller {
     const fresh = new DOMParser().parseFromString(html, "text/html")
     const list = fresh.querySelector("[data-auth-target=list]")
     if (!list) return
+    if (this.awaiting != null) {
+      if (list.querySelectorAll(".auth-note").length !== this.awaiting) return
+      this.awaiting = null
+      this.listTarget.removeAttribute("aria-busy")
+      clearTimeout(this.settling)
+    }
     foldRows(this.listTarget, list)
     const held = fresh.querySelector("[data-auth-target=held]")
     if (held) this.heldTarget.textContent = held.textContent

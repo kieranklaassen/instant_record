@@ -110,7 +110,9 @@
   from { opacity: 0; transform: translateY(-8px); }
   to { opacity: 1; transform: none; }
 }
-.demo-auth .auth-who { transition: opacity 160ms ease; }
+/* Between one person's notes and the next's the list waits, a little dimmed. */
+.demo-auth .auth-list { transition: opacity 160ms ease; }
+.demo-auth .auth-list[aria-busy="true"] { opacity: 0.6; }
 @media (prefers-reduced-motion: reduce) {
   .demo-auth .auth-enter { animation: none; }
   .demo-auth .auth-leave { transition: none; }

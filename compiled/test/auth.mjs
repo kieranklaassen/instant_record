@@ -80,14 +80,20 @@ try {
   await settle("Signed in as Ben.", ben);
 
   // Switch to Ada: Ben's own notes leave this browser, the admins' note arrives.
+  // The notes both of them hold are the same elements afterwards: the list
+  // was never emptied on the way.
+  const kept = ids => page.evaluate(wanted => wanted.map(id => document.querySelector(`.auth-note[data-id="${id}"]`)?.__kept === true), ids);
+  await page.evaluate(() => document.querySelectorAll(".auth-note").forEach(note => { note.__kept = true; }));
   await page.getByRole("button", { name: /Ada/ }).click();
   await settle("Signed in as Ada.", ada);
+  assert.deepEqual(await kept(["auth-welcome", "auth-lunch", "auth-ada"]), [true, true, false]);
   assert.equal(await held(), 4);
   assert.ok(!(await page.content()).includes("gift list"));
 
   // Sign out: everything but the public note is taken out again.
   await page.getByRole("button", { name: "Sign out" }).click();
   await settle("Signed out.", everyone);
+  assert.deepEqual(await kept(["auth-welcome"]), [true]);
   assert.equal(await held(), 1);
   assert.ok(!(await page.content()).includes("Payroll"));
 
