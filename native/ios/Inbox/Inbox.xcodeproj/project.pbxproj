@@ -13,6 +13,7 @@
 		1D1C00000000000000000003 /* LibraryEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D1A00000000000000000003 /* LibraryEngine.swift */; };
 		1D1E00000000000000000000 /* InboxUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D1D00000000000000000000 /* InboxUITests.swift */; };
 		1D1000000000000000000000 /* InstantRecordNative in Frameworks */ = {isa = PBXBuildFile; productRef = 1D0F00000000000000000000 /* InstantRecordNative */; };
+		1D1000000000000000000001 /* Feedback in Frameworks */ = {isa = PBXBuildFile; productRef = 1D0F00000000000000000001 /* Feedback */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -43,6 +44,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1D1000000000000000000000 /* InstantRecordNative in Frameworks */,
+				1D1000000000000000000001 /* Feedback in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -105,6 +107,7 @@
 			name = Inbox;
 			packageProductDependencies = (
 				1D0F00000000000000000000 /* InstantRecordNative */,
+				1D0F00000000000000000001 /* Feedback */,
 			);
 			productName = Inbox;
 			productReference = 1D0A00000000000000000000 /* Inbox.app */;
@@ -146,6 +149,7 @@
 			mainGroup = 1D0100000000000000000000;
 			packageReferences = (
 				1D0E00000000000000000000 /* XCLocalSwiftPackageReference "../InstantRecordNative" */,
+				1D0E00000000000000000001 /* XCLocalSwiftPackageReference "../../../../swift-libraries/feedback" */,
 			);
 			productRefGroup = 1D0400000000000000000000 /* Products */;
 			projectDirPath = "";
@@ -327,12 +331,20 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = ../InstantRecordNative;
 		};
+		1D0E00000000000000000001 /* XCLocalSwiftPackageReference "../../../../swift-libraries/feedback" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../../../../swift-libraries/feedback;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		1D0F00000000000000000000 /* InstantRecordNative */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = InstantRecordNative;
+		};
+		1D0F00000000000000000001 /* Feedback */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = Feedback;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

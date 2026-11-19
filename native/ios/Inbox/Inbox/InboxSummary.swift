@@ -8,6 +8,7 @@ import SwiftUI
 struct InboxSummary: View {
     let props: Props
     @Environment(\.dynamicTypeSize) private var size
+    @Environment(\.theme) private var theme
 
     var body: some View {
         // At the largest text sizes the count sits over the words, not beside
@@ -17,17 +18,18 @@ struct InboxSummary: View {
             // A floor while older mail is still on the server: "12+".
             Text("\(props.int("unread"))" + (props.bool("more") ? "+" : ""))
                 .font(.system(.largeTitle, design: .rounded).bold())
-                .foregroundStyle(.tint)
+                .foregroundStyle(theme.tint)
             VStack(alignment: .leading, spacing: 2) {
-                Text("unread in \(props["inbox"])").font(.headline)
-                Text(caption).font(.subheadline).foregroundStyle(.secondary)
+                Text("unread in \(props["inbox"])").font(.headline).foregroundStyle(theme.ink)
+                Text(caption).font(.subheadline).foregroundStyle(theme.muted)
             }
             if !size.isAccessibilitySize {
                 Spacer()
-                Image(systemName: "tray.full").font(.title2).foregroundStyle(.tint)
+                Image(systemName: "tray.full").font(.title2).foregroundStyle(theme.tint)
             }
         }
         .padding(.vertical, 6)
+        .fontDesign(theme.ui)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("summary")
     }

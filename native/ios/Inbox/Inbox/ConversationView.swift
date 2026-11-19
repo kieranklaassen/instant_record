@@ -11,21 +11,24 @@ import SwiftUI
 struct ConversationView: View {
     let props: Props
     let actions: Actions
+    @Environment(\.theme) private var theme
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(props["subject"]).font(.title2.bold())
-                    Label(props["participants"], systemImage: "person.2").font(.subheadline).foregroundStyle(.secondary)
+                    // What is read is set in the reading face: the subject and each message.
+                    Text(props["subject"]).font(.title2.bold()).fontDesign(theme.reading).foregroundStyle(theme.ink)
+                    Label(props["participants"], systemImage: "person.2").font(.subheadline).fontDesign(theme.ui).foregroundStyle(theme.muted)
                     if props.bool("archived") {
-                        Label("Archived", systemImage: "archivebox").font(.caption).foregroundStyle(.secondary)
+                        Label("Archived", systemImage: "archivebox").font(.caption).fontDesign(theme.ui).foregroundStyle(theme.muted)
                     }
                 }
                 ForEach(Array(props.list("messages").enumerated()), id: \.offset) { bubble($0.element) }
             }
             .padding()
         }
+        .background { theme.page?.ignoresSafeArea() }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if !props.bool("archived") {
@@ -40,17 +43,22 @@ struct ConversationView: View {
         let mine = message.bool("mine")
         return VStack(alignment: mine ? .trailing : .leading, spacing: 4) {
             HStack(spacing: 6) {
-                Text(message["author"]).font(.footnote.weight(.semibold))
-                if !message["address"].isEmpty { Text(message["address"]).font(.footnote).foregroundStyle(.secondary) }
+                Text(message["author"]).font(.footnote.weight(.semibold)).foregroundStyle(theme.ink)
+                if !message["address"].isEmpty { Text(message["address"]).font(.footnote).foregroundStyle(theme.muted) }
                 if let date = message.date("date") {
-                    Text(date, format: .dateTime.month(.abbreviated).day().hour().minute()).font(.footnote).foregroundStyle(.secondary)
+                    Text(date, format: .dateTime.month(.abbreviated).day().hour().minute()).font(.footnote).foregroundStyle(theme.muted)
                 }
             }
+            .fontDesign(theme.ui)
+            // Your own words on the accent, the others' on the quiet fill
+            // with a hairline. Flat: no shadow under either.
             Text(message["body"])
+                .fontDesign(theme.reading)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
-                .foregroundStyle(mine ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
-                .background(mine ? AnyShapeStyle(.tint) : AnyShapeStyle(.fill.tertiary), in: RoundedRectangle(cornerRadius: 18))
+                .foregroundStyle(mine ? theme.onAccent : theme.ink)
+                .background(mine ? AnyShapeStyle(theme.accent) : theme.fill.map(AnyShapeStyle.init) ?? AnyShapeStyle(.fill.tertiary), in: RoundedRectangle(cornerRadius: 18))
+                .overlay { if !mine, let line = theme.hairline { RoundedRectangle(cornerRadius: 18).strokeBorder(line) } }
         }
         .frame(maxWidth: .infinity, alignment: mine ? .trailing : .leading)
         .padding(mine ? .leading : .trailing, 40)

@@ -7,22 +7,36 @@ public struct AppView: View {
     @ObservedObject private var host: AppHost
     @Environment(\.scenePhase) private var phase
     private let waiting: String
+    private let theme: Theme
 
     /// `waiting` is what the first screen says while a database that has
-    /// never synced is being filled, such as "Getting your mail".
-    public init(host: AppHost, waiting: String = "Loading") {
+    /// never synced is being filled, such as "Getting your mail". `theme`
+    /// is how the app looks: the system's own look unless it is given one.
+    public init(host: AppHost, waiting: String = "Loading", theme: Theme = .system) {
         self.host = host
         self.waiting = waiting
+        self.theme = theme
+        theme.styleBars()
     }
 
     public var body: some View {
-        NavigationStack(path: $host.path) {
-            // A first screen put in another's place starts afresh.
-            ScreenView(route: host.root, host: host, first: true, waiting: waiting)
-                .id(host.root)
-                .navigationDestination(for: Route.self) { ScreenView(route: $0, host: host, first: false, waiting: waiting) }
+        // The status line sits over the navigation bar, not on it: as an
+        // inset of the stack it was drawn across the bar's buttons.
+        VStack(spacing: 0) {
+            banner
+            NavigationStack(path: $host.path) {
+                // A first screen put in another's place starts afresh.
+                ScreenView(route: host.root, host: host, first: true, waiting: waiting)
+                    .id(host.root)
+                    .navigationDestination(for: Route.self) { ScreenView(route: $0, host: host, first: false, waiting: waiting) }
+            }
         }
-        .safeAreaInset(edge: .top, spacing: 0) { banner }
+        .background { theme.page?.ignoresSafeArea() }
+        .sheet(isPresented: Binding(get: { host.sheet != nil }, set: { if !$0 { host.sheet = nil } })) {
+            if let route = host.sheet { SheetView(route: route, host: host, theme: theme) }
+        }
+        .tint(theme.tint)
+        .environment(\.theme, theme)
         .onChange(of: phase, initial: true) { _, now in host.front(now == .active) }
         .onChange(of: host.status.message) { _, now in
             if let now { AccessibilityNotification.Announcement(now).post() }
@@ -35,15 +49,51 @@ public struct AppView: View {
             HStack(alignment: .firstTextBaseline) {
                 Label(message, systemImage: failed ? "exclamationmark.triangle" : host.status.offline ? "wifi.slash" : "arrow.triangle.2.circlepath")
                     .font(.footnote)
+                    .fontDesign(theme.ui)
+                    .foregroundStyle(theme.ink)
                     .accessibilityElement(children: .combine)
                     .accessibilityIdentifier("sync-status")
                 Spacer()
-                if failed { Button("Dismiss") { host.dismissError() }.font(.footnote) }
+                if failed { Button("Dismiss") { host.dismissError() }.font(.footnote).fontDesign(theme.ui) }
             }
             .padding(.horizontal)
             .padding(.vertical, 8)
-            .background(failed ? AnyShapeStyle(.yellow.opacity(0.25)) : AnyShapeStyle(.bar))
+            .background((failed ? AnyShapeStyle(.yellow.opacity(0.25)) : theme.fill.map(AnyShapeStyle.init) ?? AnyShapeStyle(.bar)), ignoresSafeAreaEdges: .top)
+            .background { theme.page?.ignoresSafeArea(edges: .top) }
         }
+    }
+}
+
+/// A screen brought up as a sheet. One that Ruby draws gets a navigation
+/// stack, for its title and bar buttons. One that is a single Swift view is
+/// shown as it is: such a view brings its own bar, and a stack inside a
+/// stack is not allowed.
+private struct SheetView: View {
+    let route: Route
+    @ObservedObject var host: AppHost
+    let theme: Theme
+
+    var body: some View {
+        Group {
+            // Nothing until the screen is drawn: which of the two it is
+            // must not change under a view that holds what was typed.
+            if host.screens[route] == nil {
+                Color.clear
+            } else if bare {
+                ScreenView(route: route, host: host, first: false)
+            } else {
+                NavigationStack { ScreenView(route: route, host: host, first: false) }
+            }
+        }
+        .tint(theme.tint)
+        .environment(\.theme, theme)
+        .presentationBackground(theme.page.map(AnyShapeStyle.init) ?? AnyShapeStyle(.background))
+    }
+
+    private var bare: Bool {
+        guard let screen = host.screens[route] else { return false }
+        let holder = screen.children.first { $0.kind == "navigation" } ?? screen
+        return !holder.children.isEmpty && holder.children.allSatisfy { $0.kind == "swift" }
     }
 }
 
@@ -54,6 +104,7 @@ struct ScreenView: View {
     let first: Bool
     let waiting: String
     @ObservedObject private var watched: AppHost
+    @Environment(\.theme) private var theme
 
     init(route: Route, host: AppHost, first: Bool, waiting: String = "Loading") {
         self.route = route
@@ -65,7 +116,11 @@ struct ScreenView: View {
 
     var body: some View {
         if host.fetchingFirst, first {
-            ProgressView(waiting).frame(maxWidth: .infinity, maxHeight: .infinity)
+            ProgressView(waiting)
+                .fontDesign(theme.ui)
+                .foregroundStyle(theme.muted)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background { theme.page?.ignoresSafeArea() }
         } else if let screen = host.screens[route] {
             NodeView(node: screen, route: route, host: host, first: first)
         } else {
@@ -87,6 +142,7 @@ struct NodeView: View {
     /// True for what sits beside fields that are all blank: there is
     /// nothing to send yet.
     var idle = false
+    @Environment(\.theme) private var theme
 
     var body: some View {
         switch node.kind {
@@ -96,8 +152,8 @@ struct NodeView: View {
         case "row": row
         case "stack": stack
         case "spacer": Spacer(minLength: 8)
-        case "text": Text(node.text).font(font).foregroundStyle(tone).lineLimit(Int(node.prop("lines")))
-        case "date": Text(Moment.written(node.text)).font(font).foregroundStyle(tone)
+        case "text": Text(node.text).font(font).fontDesign(face).foregroundStyle(tone).lineLimit(Int(node.prop("lines")))
+        case "date": Text(Moment.written(node.text)).font(font).fontDesign(theme.ui).foregroundStyle(tone)
         case "image": image
         case "button": button
         case "item": item
@@ -138,6 +194,7 @@ struct NodeView: View {
                 VStack(alignment: .leading, spacing: 8) { each(content) }
                     .padding()
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .background { theme.page?.ignoresSafeArea() }
             }
         }
         .modifier(Titled(title: node.kind == "navigation" ? node.prop("title") : nil, large: first))
@@ -150,17 +207,21 @@ struct NodeView: View {
                 HStack(alignment: .bottom, spacing: 10) { each(Node.keyed(under), idle: blank) }
                     .padding(.horizontal)
                     .padding(.vertical, 8)
-                    .background(.bar)
+                    .background(theme.page.map(AnyShapeStyle.init) ?? AnyShapeStyle(.bar))
+                    .overlay(alignment: .top) { theme.hairline.frame(height: 1) }
             }
         }
     }
 
     // Pulling a list that asks for it syncs and draws the screens again.
     @ViewBuilder private var list: some View {
+        let rows = List { each(node.keyed).listRowBackground(theme.surface).listRowSeparatorTint(theme.hairline) }
+            .scrollContentBackground(theme.page == nil ? .automatic : .hidden)
+            .background { theme.page?.ignoresSafeArea() }
         if node.prop("refresh") == "true" {
-            List { each(node.keyed) }.refreshable { await host.refresh() }
+            rows.refreshable { await host.refresh() }
         } else {
-            List { each(node.keyed) }
+            rows
         }
     }
 
@@ -240,12 +301,15 @@ struct NodeView: View {
     }
 
     // One line of a menu, ticked when it is the selected one. With `replace`
-    // it puts that screen in the first one's place, with `link` it opens it
-    // over this one, and otherwise it is an action.
+    // it puts that screen in the first one's place, with `sheet` it brings
+    // it up as a sheet, with `link` it opens it over this one, and
+    // otherwise it is an action.
     private var item: some View {
         Button(role: role) {
             if !node.prop("replace").isEmpty {
                 host.replace(with: Route(node.prop("replace"), node.params))
+            } else if !node.prop("sheet").isEmpty {
+                host.sheet = Route(node.prop("sheet"), node.params)
             } else if !node.prop("link").isEmpty {
                 host.path.append(Route(node.prop("link"), node.params))
             } else {
@@ -258,12 +322,15 @@ struct NodeView: View {
 
     private var role: ButtonRole? { node.prop("role") == "destructive" ? .destructive : nil }
 
-    @ViewBuilder private func label(image: String) -> some View {
-        if image.isEmpty {
-            Text(node.text)
-        } else {
-            Label(node.text, systemImage: Icons.symbol(image))
+    private func label(image: String) -> some View {
+        Group {
+            if image.isEmpty {
+                Text(node.text)
+            } else {
+                Label(node.text, systemImage: Icons.symbol(image))
+            }
         }
+        .fontDesign(theme.ui)
     }
 
     // A box to type in. What is typed is the host's to keep, by screen, so
@@ -271,15 +338,28 @@ struct NodeView: View {
     private var field: some View {
         let name = node.prop("name")
         let text = Binding(get: { shown(node) }, set: { host.typed[route, default: [:]][name] = $0 })
-        return Group {
+        let box = Group {
             if node.prop("multiline") == "true" {
                 TextField(node.prop("label"), text: text, axis: .vertical).lineLimit(1...5)
             } else {
                 TextField(node.prop("label"), text: text)
             }
         }
-        .textFieldStyle(.roundedBorder)
         .accessibilityIdentifier(name)
+        return Group {
+            if let fill = theme.fill {
+                // Flat, with a hairline: the theme's own box.
+                box.textFieldStyle(.plain)
+                    .fontDesign(theme.reading)
+                    .foregroundStyle(theme.ink)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(fill, in: RoundedRectangle(cornerRadius: 10))
+                    .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(theme.hairline ?? .clear))
+            } else {
+                box.textFieldStyle(.roundedBorder)
+            }
+        }
     }
 
     // The list goes on at the server. Coming into view fetches the next page.
@@ -287,11 +367,12 @@ struct NodeView: View {
         if host.paging[node.id] == .failed {
             Button("Could not load more. Tap to retry") { host.loadMore(node.id, query: node.prop("query")) }
                 .font(.footnote)
+                .fontDesign(theme.ui)
                 .accessibilityIdentifier("more-failed")
         } else {
             HStack {
                 Spacer()
-                ProgressView()
+                ProgressView().tint(theme.muted)
                 Spacer()
             }
             .accessibilityIdentifier("more")
@@ -321,11 +402,15 @@ struct NodeView: View {
         }
     }
 
-    private var tone: AnyShapeStyle {
+    // A text with no style is running text, set in the theme's reading
+    // face. Every other style is a label, in the face of the controls.
+    private var face: Font.Design { node.prop("style").isEmpty ? theme.reading : theme.ui }
+
+    private var tone: Color {
         switch node.prop("tone") {
-        case "secondary": AnyShapeStyle(.secondary)
-        case "accent": AnyShapeStyle(.tint)
-        default: AnyShapeStyle(.primary)
+        case "secondary": theme.muted
+        case "accent": theme.tint
+        default: theme.ink
         }
     }
 }

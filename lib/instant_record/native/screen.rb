@@ -201,15 +201,21 @@ module InstantRecord
       # One line of a menu. With an `action` it is performed like a button's.
       # With a `link` it opens that screen with `params` over this one, as a
       # row does. With `replace` the screen it names takes the place of the
-      # first screen, as choosing another account does. `selected` gives it a
-      # tick.
-      def item(title, action: "", args: Node.strings, link: "", replace: "", params: Node.strings, image: "", role: "", selected: false)
-        raise ArgumentError, "Give a menu item link: or replace:, not both" if link.length > 0 && replace.length > 0
+      # first screen, as choosing another account does. With `sheet` the screen
+      # it names comes up over this one and is dismissed, not gone back from.
+      # `selected` gives it a tick.
+      def item(title, action: "", args: Node.strings, link: "", replace: "", sheet: "", params: Node.strings, image: "", role: "", selected: false)
+        places = 0
+        places += 1 if link.length > 0
+        places += 1 if replace.length > 0
+        places += 1 if sheet.length > 0
+        raise ArgumentError, "Give a menu item one of link:, replace: or sheet:" if places > 1
         node = add("item")
         act(node, title, action, args, role)
         node.link_params = params
         node.set("link", link)
         node.set("replace", replace)
+        node.set("sheet", sheet)
         node.set("image", image)
         node.set("selected", "true") if selected
         node

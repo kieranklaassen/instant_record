@@ -1,9 +1,10 @@
+import Feedback
 import InstantRecordNative
 import SwiftUI
 
 /// The Inbox demo on iPhone. Its screens are Ruby, in demo/app/screens. This
 /// file names the first one, says where a mailbox keeps its data, and
-/// registers the two views that screens ask for by name.
+/// registers the views that screens ask for by name.
 ///
 /// Launch arguments:
 ///   -server http://localhost:3000   the Rails demo
@@ -12,6 +13,7 @@ import SwiftUI
 ///   -dev YES                        ask Rails for each screen: no rebuild after an edit
 ///   -follow NO                      do not follow the server's events while in front
 ///   -reset YES                      start from an empty local database
+///   -relay http://localhost:8787    where the feedback form sends its notes
 @main
 struct InboxApp: App {
     @StateObject private var host: AppHost
@@ -20,8 +22,14 @@ struct InboxApp: App {
         var views = Screens()
         views.register("ConversationView") { props, actions in ConversationView(props: props, actions: actions) }
         views.register("InboxSummary") { props, _ in InboxSummary(props: props) }
+        views.register("FeedbackForm") { props, _ in FeedbackScreen(props: props) }
 
         let defaults = UserDefaults.standard
+        // The form is the Feedback library's (EveryInc/swift-libraries). Its
+        // relay files a note only for the products it lists, and this one is
+        // not listed yet, so Send is answered with the relay's refusal.
+        Feedback.setUp(product: "instant-record-inbox",
+                       relay: URL(string: defaults.string(forKey: "relay") ?? "https://feedback-relay.jolly-math-3be9.workers.dev")!)
         let server = defaults.string(forKey: "server") ?? "http://localhost:3000"
         let first = Route("mailbox", ["member": defaults.string(forKey: "member") ?? "maya", "inbox": defaults.string(forKey: "inbox") ?? "support"])
         // Every request says who is asking, when the app was given a token.
@@ -46,6 +54,20 @@ struct InboxApp: App {
     }
 
     var body: some Scene {
-        WindowGroup { AppView(host: host, waiting: "Getting your mail") }
+        WindowGroup { AppView(host: host, waiting: "Getting your mail", theme: .cora) }
+    }
+}
+
+/// The Feedback library's form for the screen `feedback`, which the mailbox
+/// brings up as a sheet. The form has its own bar, with Cancel and Send, and
+/// closes the sheet itself. Who is writing, and from which inbox, go with
+/// the note and are shown under it like the rest. The face is the app's.
+/// What the form draws inside is the library's own.
+private struct FeedbackScreen: View {
+    let props: Props
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        FeedbackForm(details: ["From": props["from"], "Inbox": props["inbox"]]).fontDesign(theme.ui)
     }
 }

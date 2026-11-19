@@ -87,6 +87,7 @@ class LettersScreen < InstantRecord::Native::Screen
           item "Inbox", replace: "letters", params: { "box" => "inbox" }, image: "inbox", selected: param("box") == "inbox"
           item "Sent \"mail\"", replace: "letters", params: { "box" => "sent" }, selected: param("box") == "sent"
           item "Empty", action: "empty", args: { "box" => param("box") }, role: "destructive"
+          item "About", sheet: "letters", params: place
         end
       end
     end

@@ -154,6 +154,29 @@ final class InboxUITests: XCTestCase {
         XCTAssertTrue(summary.label.contains("Showing unread only"), summary.label)
     }
 
+    func testTheViewMenuOpensTheFeedbackFormAndCancelComesBack() {
+        // A relay nothing listens at: no note can leave the simulator.
+        launch(["-relay", "http://localhost:9"])
+
+        app.buttons["View"].tap()
+        XCTAssertTrue(app.buttons["Send feedback"].waitForExistence(timeout: 5))
+        app.buttons["Send feedback"].tap()
+        if app.buttons["Send feedback"].waitForExistence(timeout: 2), app.buttons["Send feedback"].isHittable { app.buttons["Send feedback"].tap() }
+
+        XCTAssertTrue(app.staticTexts["Sent with your note"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.navigationBars["Feedback"].firstMatch.exists)
+        // Who is writing and from which inbox go with the note, and are shown.
+        XCTAssertTrue(app.staticTexts["From"].exists)
+        XCTAssertTrue(app.staticTexts["maya"].exists)
+        XCTAssertTrue(app.staticTexts["support"].exists)
+        XCTAssertFalse(app.buttons["Send"].isEnabled, "an empty note can be sent")
+
+        app.buttons["Cancel"].tap()
+
+        XCTAssertTrue(app.navigationBars["Support"].waitForExistence(timeout: 5))
+        XCTAssertTrue(row("ui-60").exists)
+    }
+
     func testOlderMailLoadsAsTheListIsScrolled() {
         launch()
         XCTAssertTrue(summary.label.contains("more on the server"), summary.label)
