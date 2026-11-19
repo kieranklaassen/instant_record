@@ -48,21 +48,24 @@ module InstantRecord
       end
 
       # A name for the asker that changes when the person behind a browser
-      # does, for apps where that happens (sign in, sign out). An identity
-      # opts in by answering `sync_identity_key`. Not a secret and not a
-      # credential: the server always scopes by the request's own identity.
+      # does (sign in, sign out). It is what the identity says it is
+      # (`sync_identity_key`), or its class and id, or itself as a string, and
+      # nobody at all has a name too. Not a secret and not a credential: the
+      # server always scopes by the request's own identity.
       def key(identity)
-        return nil unless identity.respond_to?(:sync_identity_key)
-
-        Digest::SHA256.hexdigest(identity.sync_identity_key.to_s)[0, 16]
+        name =
+          if identity.respond_to?(:sync_identity_key) then identity.sync_identity_key
+          elsif identity.respond_to?(:id) then "#{identity.class.name}:#{identity.id}"
+          else identity
+          end
+        Digest::SHA256.hexdigest(name.to_s.presence || "anonymous")[0, 16]
       end
 
       # Whether the key a client bootstrapped under is no longer this request's
       # identity. A request that names no key is judged by who it is now: it is
       # a client that synced before keys existed, or no sync client at all.
       def stale?(sent_key, identity)
-        current = key(identity)
-        !current.nil? && sent_key.present? && sent_key != current
+        sent_key.present? && sent_key != key(identity)
       end
 
       def scoped?(model)
@@ -70,25 +73,30 @@ module InstantRecord
       end
 
       def visible(model, identity)
-        rows = model.instant_record_visible_to(token(identity))
-        block = model.instant_record_visibility
-        block ? rows.merge(model.instance_exec(identity, &block)) : rows
+        both(model, model.instant_record_visible_to(token(identity)), model.instant_record_visibility, identity)
       end
 
       def writable(model, identity)
-        rows = model.instant_record_sync_scope ? model.where(model.instant_record_sync_scope => token(identity)) : model.all
-        block = model.instant_record_writability
-        block ? rows.merge(model.instance_exec(identity, &block)) : rows
+        column = model.instant_record_sync_scope
+        both(model, column ? model.where(column => token(identity)) : model.all, model.instant_record_writability, identity)
       end
 
       def scoped_types
         InstantRecord.syncable_models.select { |model| scoped?(model) }.map(&:name)
       end
 
-      # The one event a stale client is sent. It names the scoped types because
-      # the browser build cannot know them.
+      # The models a change of this identity's key empties in a browser: every
+      # scoped one, unless the identity names them. An identity whose key
+      # leaves part of itself out (the demo's leaves out the browser's own
+      # token) says which models the rest decides.
+      def reset_types(identity)
+        identity.respond_to?(:sync_reset_types) ? identity.sync_reset_types : scoped_types
+      end
+
+      # The one event a stale client is sent. It names the types because the
+      # browser build cannot know them.
       def reset_event(identity)
-        { operation: RESET, types: scoped_types, identity: key(identity) }
+        { operation: RESET, types: reset_types(identity), identity: key(identity) }
       end
 
       # Change-log rows as the events one asker may receive, as [id, event]
@@ -102,8 +110,8 @@ module InstantRecord
       def events_for(changes, identity)
         current = visible_records(changes, identity)
         changes.map do |change|
-          model = InstantRecord.synced_model(change.record_type)
-          next [change.id, change.as_event] if change.operation == "destroy" || model.nil? || model.instant_record_visibility.nil?
+          model = ruled_model(change.record_type)
+          next [change.id, change.as_event] if change.operation == "destroy" || model.nil?
 
           record = current[[change.record_type, change.record_id]]
           event =
@@ -118,12 +126,29 @@ module InstantRecord
 
       private
 
+      # A column rule and a block rule both hold. As a subquery, since merging
+      # two conditions on one column keeps only the second.
+      def both(model, rows, block, identity)
+        return rows unless block
+
+        ruled = model.instance_exec(identity, &block)
+        model.instant_record_sync_scope ? rows.where(model.primary_key => ruled.select(model.primary_key)) : ruled
+      end
+
+      # The model behind a logged type, when it has a `syncable_to` rule. Asked
+      # of the class itself too: a model left out of `InstantRecord.sync` still
+      # logs its changes, and its rule still decides who reads them.
+      def ruled_model(type)
+        model = InstantRecord.synced_model(type) || type.to_s.safe_constantize
+        model if model.respond_to?(:instant_record_visibility) && model.instant_record_visibility
+      end
+
       # One query per `syncable_to` model in the batch.
       def visible_records(changes, identity)
         found = {}
         changes.reject { |change| change.operation == "destroy" }.group_by(&:record_type).each do |type, list|
-          model = InstantRecord.synced_model(type)
-          next unless model && model.instant_record_visibility
+          model = ruled_model(type)
+          next unless model
 
           model.connection_pool.with_connection do
             model.uncached do

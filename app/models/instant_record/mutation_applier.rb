@@ -23,13 +23,15 @@ module InstantRecord
     # Replayed mutation ids return their original result without re-applying.
     def apply
       if (existing = AppliedMutation.find_by(mutation_id: @mutation[:id]))
-        return existing.result_payload.symbolize_keys
+        return replayed(existing.result_payload.symbolize_keys)
       end
 
       model = InstantRecord.synced_model(@mutation[:record_type])
       return record_result(status: "rejected", reason: "unknown record type") unless model
 
-      result = ActiveRecord::Base.transaction do
+      # Its own savepoint when a caller holds a transaction open, so a write
+      # that is refused after it was made is undone either way.
+      result = ActiveRecord::Base.transaction(requires_new: true) do
         InstantRecord.applying_client_mutation { perform(model) }
       end
       record_result(**result)
@@ -159,6 +161,16 @@ module InstantRecord
     def server_attributes_for(model)
       record = model && SyncScope.visible(model, @identity).find_by(id: @mutation[:record_id])
       InstantRecord.wire_attributes(record.attributes) if record
+    end
+
+    # A stored answer, for whoever is asking now. The ledger knows a mutation
+    # by its id alone, so a row it kept for the first sender is read again
+    # through what this one may see.
+    def replayed(result)
+      model = InstantRecord.synced_model(@mutation[:record_type])
+      return result unless result[:server_attributes] && model && SyncScope.scoped?(model)
+
+      result.merge(server_attributes: server_attributes_for(model))
     end
 
     # The record exists and a `syncable_to` rule keeps it from the sender.

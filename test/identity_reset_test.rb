@@ -119,6 +119,19 @@ class IdentityResetTest < Minitest::Test
     assert_equal "Open,Secret", InstantRecord::SyncMetadata.get("compiled_models")
   end
 
+  def test_the_poll_after_the_new_bootstrap_starts_where_the_old_one_stopped
+    sync_as("key-of-ada", [record("Open", "o-1")])
+    @transport.events = [RESET]
+    in_browser { InstantRecord.tick }
+    @transport.events = []
+    @transport.bootstrap_body = { "cursor" => 20, "identity" => "key-of-ben", "records" => [] }
+    in_browser { 2.times { InstantRecord.tick } }
+
+    assert_equal "/events?after=9&window=0&identity=key-of-ben", @transport.event_paths.last,
+      "a destroy between the two cursors would otherwise never reach the rows that stayed"
+    assert_nil InstantRecord::SyncMetadata.get("replay_from")
+  end
+
   def test_the_pass_after_a_reset_bootstraps_as_the_new_identity
     sync_as("key-of-ada", [record("Secret", "s-1")])
     @transport.events = [RESET]
@@ -130,7 +143,7 @@ class IdentityResetTest < Minitest::Test
 
     assert_equal %w[s-9], @secret.pluck(:id)
     assert_equal "key-of-ben", InstantRecord::Client.identity_key
-    assert_equal 20, InstantRecord.cursor
+    assert InstantRecord::Client.bootstrapped?
   end
 
   def test_a_reset_delivered_through_a_held_stream_leaves_the_client_unbootstrapped

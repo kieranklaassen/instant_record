@@ -15,6 +15,9 @@ end
 DemoAsker = Struct.new(:token, :person_id) do
   def to_s = token.to_s
   def sync_identity_key = person_id || "anonymous"
+  # The token never changes in a browser, so the Assistant's chats stay put
+  # when the person does.
+  def sync_reset_types = ["AuthNote"]
 end
 
 InstantRecord.configure do |config|

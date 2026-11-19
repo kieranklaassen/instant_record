@@ -78,9 +78,7 @@ module InstantRecord
       assert_equal 1, response.body.scan("data: ").size
       reset = JSON.parse(response.body[/^data: (.+)$/, 1])
       assert_equal "reset", reset["operation"]
-      assert_includes reset["types"], "AuthNote"
-      assert_includes reset["types"], "AssistantChat"
-      refute_includes reset["types"], "Todo"
+      assert_equal ["AuthNote"], reset["types"], "the Assistant's chats follow the browser's token, which did not change"
       refute_includes response.body, "Ada only"
     end
 

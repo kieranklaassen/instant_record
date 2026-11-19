@@ -154,6 +154,25 @@ class MutationAuthorizationTest < Minitest::Test
     assert_equal 1, @model.count
   end
 
+  def test_a_replay_by_someone_else_does_not_carry_the_first_senders_row
+    seed("a", "ada")
+    mutation = { id: "known", record_type: "Item", record_id: "a", operation: "update", base_version: 0,
+      changes: { "title" => "late", "updated_at" => 1.day.ago.iso8601 } }
+
+    first = on_server { InstantRecord::MutationApplier.apply(mutation, @ada) }
+    again = on_server { InstantRecord::MutationApplier.apply(mutation, @ben) }
+
+    assert first[:server_attributes], "the first sender is given their own row"
+    assert_nil again[:server_attributes]
+  end
+
+  def test_a_refused_write_is_undone_inside_a_callers_transaction
+    result = ActiveRecord::Base.transaction { apply(@ben, "create", "forged", "title" => "x", "state" => "ada") }
+
+    assert_equal "not permitted", result[:reason]
+    refute @model.exists?("forged")
+  end
+
   def test_an_unscoped_model_takes_writes_from_anyone
     open_model = syncable_model("Open")
     InstantRecord.sync(@model, open_model)

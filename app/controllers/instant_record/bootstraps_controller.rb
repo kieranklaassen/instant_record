@@ -13,12 +13,10 @@ module InstantRecord
         cursor = Change.maximum(:id) || 0
         { cursor: cursor, records: bootstrap_models.flat_map { |model| serialize_rows(model, identity) } }
       end
-      # The key a client keeps and sends back, so either side notices when the
-      # person behind the browser changes. Only an identity that names one has it.
-      if (key = SyncScope.key(identity))
-        payload[:identity] = key
-        headers["cache-control"] = "no-store"
-      end
+      # The key a client keeps and sends back, so the server notices when the
+      # person behind the browser changes.
+      payload[:identity] = SyncScope.key(identity)
+      headers["cache-control"] = "no-store"
       render json: payload
     end
 

@@ -160,6 +160,10 @@ module InstantRecord
         OutboxMutation.all.each do |mutation|
           mutation.destroy if types.include?(mutation.record_type)
         end
+        # The rows that stay were last brought up to date at this cursor. The
+        # bootstrap to come only adds and changes rows, so the poll after it
+        # starts here again and a destroy made in between is not missed.
+        SyncMetadata.set("replay_from", cursor) if bootstrapped? && SyncMetadata.get("replay_from").nil?
         SyncMetadata.all.each do |entry|
           entry.destroy if entry.key == "cursor" || entry.key == "identity" || entry.key.start_with?("history:")
         end
@@ -184,7 +188,13 @@ module InstantRecord
           # tick re-bootstraps; upserts make the retry idempotent. A failure
           # never falls through to a cursor-0 poll of the full change log.
           SyncMetadata.set("identity", body["identity"]) if body["identity"]
-          self.cursor = body["cursor"]
+          replay = SyncMetadata.get("replay_from")
+          if replay.nil? || replay.to_i > body["cursor"].to_i
+            self.cursor = body["cursor"]
+          else
+            self.cursor = replay.to_i
+          end
+          SyncMetadata.all.each { |entry| entry.destroy if entry.key == "replay_from" } unless replay.nil?
           true
         end
       rescue Transport::Error => e

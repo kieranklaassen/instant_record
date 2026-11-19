@@ -17,7 +17,7 @@ module InstantRecord
       # Writes to scoped records that were queued as someone else are refused.
       # They are not written to the ledger: the client drops them when its next
       # poll tells it to reset.
-      stale = SyncScope.stale?(params[:identity], identity) ? SyncScope.scoped_types : []
+      stale = SyncScope.stale?(params[:identity], identity) ? SyncScope.reset_types(identity) : []
       results = Array(params.require(:mutations)).map do |raw|
         mutation = raw.permit(:id, :record_type, :record_id, :operation, :base_version, changes: {})
         if stale.include?(mutation[:record_type])

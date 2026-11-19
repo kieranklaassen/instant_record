@@ -36,10 +36,41 @@ class SyncIdentityTest < Minitest::Test
     assert_equal %w[a p], Scope.writable(open_model, nil).pluck(:id).sort
   end
 
-  def test_an_identity_that_names_no_key_has_none_and_is_never_stale
-    assert_nil Scope.key(nil)
-    assert_nil Scope.key("a-visitor-token")
-    refute Scope.stale?("anything", "a-visitor-token")
+  def test_every_identity_has_a_key_even_nobody
+    user = Struct.new(:id)
+
+    assert_equal 4, [Scope.key(nil), Scope.key("a-visitor-token"), Scope.key(user.new(1)), Scope.key(user.new(2))].uniq.size
+    assert_equal Scope.key(nil), Scope.key("")
+    assert Scope.stale?(Scope.key(user.new(1)), nil), "signing out is a change of person"
+    refute Scope.stale?(Scope.key("a-visitor-token"), "a-visitor-token")
+  end
+
+  def test_an_identity_may_name_the_models_its_key_decides
+    partial = Struct.new(:id) { def sync_reset_types = ["Other"] }
+
+    assert_equal ["Item"], Scope.reset_types(@ada)
+    assert_equal ["Other"], Scope.reset_event(partial.new(1))[:types]
+  end
+
+  def test_a_column_and_a_rule_on_one_model_both_hold
+    model = syncable_model("Both") do
+      sync_scope :owner
+      syncable_to { |_who| where(owner: %w[ada ben]) }
+    end
+    on_server { %w[ada ben].each { |owner| model.create!(id: owner, title: owner, owner: owner) } }
+
+    assert_equal %w[ada], Scope.visible(model, "ada").pluck(:id)
+    assert_empty Scope.visible(model, "cleo").pluck(:id)
+  end
+
+  def test_a_ruled_model_left_out_of_the_sync_list_still_keeps_its_changes_to_itself
+    Object.const_set(:LeftOut, scoped_model("LeftOut"))
+    on_server { LeftOut.create!(id: "a", title: "secret", state: "ada") }
+    InstantRecord.sync(syncable_model("Open"))
+
+    assert_equal [{}], events(@ben).map { |event| event[:attributes] }
+  ensure
+    Object.send(:remove_const, :LeftOut)
   end
 
   def test_each_identity_sees_its_own_records
