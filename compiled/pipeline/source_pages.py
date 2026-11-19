@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 PAGES = {
+    "assistant": ("assistant/chats", "index", ("issue",)),
     "home": ("home", "index", ()),
     "email": ("email/mailboxes", "index", ("mail_entry", "mail_directory")),
     "todo": ("todo/issues", "index", ("issue",)),
@@ -14,7 +15,7 @@ PAGES = {
 }
 MARKER = re.compile(r"InstantRecord[.:]|\b(?:server_only|browser_only|sync_window|sync_state|pending_count|on_discarded_change)\b")
 
-def write_source_pages(app, dist, version):
+def write_source_pages(app, dist, version, demo):
     root = Path(app)
     dest = Path(dist, "assets", "source", version)
     dest.mkdir(parents=True, exist_ok=True)
@@ -22,6 +23,17 @@ def write_source_pages(app, dist, version):
         files = [(f"app/models/{model}.rb", root / f"app/models/{model}.rb") for model in models]
         files.extend((rel, root / rel) for rel in [
             f"app/controllers/{controller}_controller.rb", f"app/views/{controller}/{action}.html.erb"])
+        if key in ("assistant", "email"):
+            script_name = "assistant_chat" if key == "assistant" else "mailbox"
+            script = f"app/javascript/controllers/{script_name}_controller.js"
+            files.append((script, root / script))
+        if key == "assistant":
+            samples = "app/javascript/controllers/assistant_examples.js"
+            files.append((samples, root / samples))
+            history = "app/controllers/assistant/history_controller.rb"
+            files.append((history, root / history))
+            server = "app/controllers/assistant/replies_controller.rb"
+            files.append((server, Path(demo) / server))
         if key == "migrate":
             files[1] = ("compiled/pipeline/sqlite_release.rb", Path(__file__).with_name("sqlite_release.rb"))
         parts = ['<p class="source-note">Source used by this compiled build. Marked lines use InstantRecord.</p>']

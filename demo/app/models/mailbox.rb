@@ -6,6 +6,28 @@ class Mailbox < ApplicationRecord
     "billing" => ["Sam", "sam@example.test", "A copy of the October invoice", "Could you send over the October invoice before Friday?"]
   }.freeze
 
+  INCOMING = {
+    "support" => [
+      ["Nora Bell", "nora", "Moving our team into one inbox", "Hi there, we’re bringing two teams together next week. Can we keep our existing conversations when we move?"],
+      ["Alex Chen", "alex", "A quick question about invitations", "I just invited a colleague and noticed a typo in their address. What’s the easiest way to resend the invite?"],
+      ["June Park", "june", "Thanks for the walkthrough", "The shared inbox is working beautifully for our studio. Thanks for helping us get set up yesterday!"]
+    ],
+    "billing" => [
+      ["Lena Ortiz", "lena", "Updating our billing contact", "Could you put our finance team on the next invoice? Happy to send the details over."],
+      ["Eli Brooks", "eli", "Receipt for our annual plan", "We renewed last week. Could you send a copy of the receipt for our records?"],
+      ["Mina Lee", "mina", "Adding two more seats", "We have two people joining on Monday. How will the extra seats show up on our next bill?"]
+    ]
+  }.freeze
+
+  def generate_incoming!
+    examples = INCOMING.fetch(id)
+    recent = mail_entries.where(subject: examples.map(&:third)).order(server_version: :desc).limit(examples.size - 1).pluck(:subject)
+    sender, handle, subject, body = examples.reject { |example| recent.include?(example.third) }.sample
+    append!(id: SecureRandom.uuid, author: sender, attributes: {
+      kind: "message", address: "#{handle}@example.test", subject: subject, body: body
+    })
+  end
+
   def self.open_demo(name)
     find_by(id: name) || transaction do
       author, address, subject, body = WELCOME.fetch(name)

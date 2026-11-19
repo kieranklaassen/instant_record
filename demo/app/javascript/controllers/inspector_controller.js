@@ -175,6 +175,7 @@ export default class extends Controller {
 
   push() {
     saveUi()
+    window.dispatchEvent(new CustomEvent("instant-record:connection-changed"))
     const wantBacklog = !adopted
     adopted = true
     tellWorker(

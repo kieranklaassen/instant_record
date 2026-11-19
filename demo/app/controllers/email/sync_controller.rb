@@ -12,7 +12,27 @@ module Email
 
     def bootstrap
       cursor = @mailbox.revision
-      render json: { cursor: cursor, records: @mailbox.mail_entries.map { |entry| InstantRecord.record_payload(entry) } }
+      page = message_page
+      render json: { cursor: cursor, records: payloads(page) }
+    end
+
+    def records
+      if params[:thread].present?
+        entry = @mailbox.mail_entries.find_by(id: params[:thread], kind: "message")
+        return render json: { records: payloads(Array.wrap(entry)), has_more: false }
+      end
+      return head :bad_request unless params[:type] == "MailEntry" && params[:before_id].present?
+      at = Time.iso8601(params[:before_created_at].to_s)
+      page = message_page.where("created_at < :at OR (created_at = :at AND id < :id)", at: at, id: params[:before_id])
+      rows = page.limit(MailEntry::PAGE_SIZE + 1).to_a
+      render json: { records: payloads(rows.first(MailEntry::PAGE_SIZE)), has_more: rows.size > MailEntry::PAGE_SIZE }
+    rescue ArgumentError
+      head :bad_request
+    end
+
+    def incoming
+      entry = @mailbox.generate_incoming!
+      render json: { id: entry.id }, status: :created
     end
 
     def events
@@ -33,6 +53,16 @@ module Email
     end
 
     private
+
+    def message_page
+      @mailbox.mail_entries.open_messages.order(created_at: :desc, id: :desc).limit(MailEntry::PAGE_SIZE)
+    end
+
+    def payloads(page)
+      messages = page.to_a
+      actions = @mailbox.mail_entries.where(parent_id: messages.map(&:id), kind: %w[reply archive]).order(:server_version)
+      (messages + actions).map { |entry| InstantRecord.record_payload(entry) }
+    end
 
     def load_mailbox
       @member = params[:member]

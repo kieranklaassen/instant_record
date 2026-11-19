@@ -213,7 +213,11 @@ async function loadHistory(request) {
     before_id: request.before.id, limit: String(request.limit) });
   if (request.partition != null) query.set("partition", request.partition);
   const key = query.toString();
-  const local = host.history(key);
+  return loadHistoryQuery(key);
+}
+
+async function loadHistoryQuery(key) {
+  const local = await withSnapshot("readonly", () => host.history(key));
   if (local.ok) return local;
   const revision = snapshotRevision;
   const reply = await fetchReply("GET", "/records?" + key);
@@ -320,6 +324,15 @@ async function boot(payload = {}) {
   if (!restored) await drain(true);
   const bootstrapMs = performance.now() - bootstrapStart;
 
+  if (scope) {
+    const url = new URL(payload.path, self.location.origin);
+    for (const id of new Set([url.searchParams.get("before"), url.searchParams.get("thread")])) {
+      if (id) await loadHistoryQuery(new URLSearchParams({ thread: id }).toString());
+    }
+    const before = url.searchParams.get("before");
+    const at = url.searchParams.get("at");
+    if (before && at) await loadHistory({ type: "MailEntry", before: { id: before, created_at: at }, limit: 50 });
+  }
   const first = payload.path ? await runRequest("GET", () => navigate({ method: "GET", path: payload.path })) : null;
   setInterval(pollChanges, POLL_EVERY_MS);
   return { compileMs: compiled - started, restored, storageMs, runtimeMs, bootstrapMs, first };
@@ -352,11 +365,14 @@ self.onmessage = async (event) => {
     }
     if (type === "serverRequest") {
       const url = new URL(payload.path, self.location.origin);
-      const allowed = (payload.method === "GET" && url.pathname === "/receipts/probe") ||
-        (payload.method === "POST" && url.pathname === "/slack/reset");
+      const chat = import.meta.env.VITE_SHARED_INBOX_DEMO && payload.method === "POST" && url.pathname === "/assistant/replies";
+      const allowed = chat || (payload.method === "GET" && url.pathname === "/receipts/probe") ||
+        (payload.method === "POST" && (url.pathname === "/slack/reset" ||
+          (import.meta.env.VITE_SHARED_INBOX_DEMO && url.pathname === new URL(syncEndpoint, self.location.origin).pathname + "/incoming" &&
+            url.pathname.startsWith("/email/sync/"))));
       if (!allowed) throw new Error("Unknown demo server action");
       const root = publicEndpoint.replace(/\/instant_record\/?$/, "");
-      const reply = await fetchReply(payload.method, url.pathname + url.search, "", root);
+      const reply = await fetchReply(payload.method, url.pathname + url.search, chat ? payload.body : "", root);
       return self.postMessage({ id, result: reply });
     }
     if (type === "boot") return self.postMessage({ id, result: await boot(payload) });

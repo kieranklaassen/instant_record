@@ -42,7 +42,7 @@
     <details id="source-drawer"
              data-controller="source"
              data-source-url-value="<%= source_path(page: controller_path, view: action_name) %>"
-             data-action="toggle->source#load">
+             data-action="toggle->source#load click@document->source#reveal">
       <summary>
         <span class="micro-label">The code behind this page</span>
         <span class="meta">Read live out of app.wasm — not a snippet</span>

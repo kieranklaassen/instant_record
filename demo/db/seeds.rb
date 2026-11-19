@@ -9,3 +9,8 @@
 Slack::Seeds.apply unless InstantRecord.browser?
 
 Mailbox::WELCOME.each_key { |name| Mailbox.open_demo(name) }
+
+unless InstantRecord.browser?
+  require_relative "seeds/mail_history"
+  MailHistory.populate
+end

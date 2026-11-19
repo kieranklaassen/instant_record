@@ -32,6 +32,7 @@ Rails.application.routes.draw do
   draw(:receipts)
   draw(:console)
   draw(:email)
+  draw(:assistant)
 
   # The deployed PWA's static index.html (boot splash) shadows root when
   # served from public/ (ActionDispatch::Static wins). In the browser runtime
