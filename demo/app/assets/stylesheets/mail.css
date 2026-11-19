@@ -1,6 +1,7 @@
 /* Inbox demo (namespaced under body.demo-email).
    Paper rail, a quiet conversation list, and the reader as one white card.
-   The list pages by scrolling alone: .mail-older is an invisible sentinel. */
+   The list is virtual: one scroll through the whole mailbox, with only the
+   rows on screen in the page. */
 
 .maildesk {
   display: grid;
@@ -160,7 +161,8 @@
 
 /* --- Conversation list ---------------------------------------------------- */
 
-.mail-list { overflow-anchor: none; min-width: 0; overflow: auto; padding: 0 4px 24px; }
+.mail-list { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 0 4px; }
+.mail-scroll { flex: 1; min-height: 0; }
 .mail-list header { justify-content: space-between; gap: 10px; padding: 0 10px 14px; }
 .mail-list h2 { font-family: var(--serif); font-size: 30px; font-weight: 400; letter-spacing: -0.02em; }
 .mail-list header a { font-size: 13px; color: var(--accent); }
@@ -172,9 +174,9 @@
   border-radius: 12px;
 }
 
-.mail-row + .mail-row { margin-top: 2px; }
 .mail-row:hover { background: rgba(126, 114, 96, 0.07); }
 
+/* The row in the reader is a card; the row the keys are on wears the ring. */
 .mail-row[aria-current=true] {
   background: var(--card);
   box-shadow: 0 0 0 1px rgba(10, 10, 10, 0.06), 0 1px 3px rgba(48, 43, 38, 0.06);
@@ -210,7 +212,9 @@
 .mail-empty-list { padding: 0 10px; font-size: 14px; }
 
 /* Older mail loads when this scrolls near the bottom of the list. */
-.maildesk .mail-older { height: 24px; }
+.mail-row[data-focused=true] { box-shadow: 0 0 0 2px var(--accent); background: var(--card); }
+/* Room for the ring. Padding, not a margin: the list measures each item. */
+.mail-item { padding: 2px; }
 
 /* --- Reader --------------------------------------------------------------- */
 
@@ -368,7 +372,8 @@
   .mail-bar { padding: 4px 16px 10px; flex-wrap: wrap; }
   .mail-tools { flex-wrap: wrap; }
   .mail-panes { display: block; padding: 0 12px 16px; }
-  .mail-list { max-height: calc(100svh - 190px); }
+  .mail-list { height: calc(100svh - 190px); }
+  .maildesk .mail-keys-hint { display: none; }
   .mail-reader { display: none; padding: 16px 20px 24px; }
   .maildesk[data-detail=true] .mail-list { display: none; }
   .maildesk[data-detail=true] .mail-reader { display: block; }
@@ -377,3 +382,55 @@
   .mail-replies .mail-message p { margin-left: 0; }
   .mail-return { display: inline-block; margin-bottom: 14px; font-size: 13px; color: var(--muted) !important; }
 }
+
+/* --- Keys ----------------------------------------------------------------- */
+
+.maildesk kbd {
+  display: inline-block;
+  min-width: 20px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  border: 1px solid rgba(10, 10, 10, 0.12);
+  background: var(--card);
+  font: 500 12px/18px var(--mono, ui-monospace, monospace);
+  text-align: center;
+  color: var(--ink-2);
+}
+
+.maildesk .mail-keys-hint {
+  margin-top: auto;
+  padding: 8px 10px;
+  border: 0;
+  background: none;
+  font-size: 13px;
+  color: var(--muted);
+  text-align: left;
+  cursor: pointer;
+}
+
+.maildesk .mail-compose-link { border: 0; cursor: pointer; }
+.maildesk .mail-compose-close, .maildesk .mail-return { border: 0; background: none; cursor: pointer; }
+.maildesk .mail-compose-close { font-size: 22px; line-height: 1; color: var(--muted); }
+
+.mail-keys {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  background: rgba(48, 43, 38, 0.28);
+}
+
+.mail-keys-card {
+  width: min(360px, calc(100vw - 32px));
+  padding: 22px 26px;
+  border-radius: 16px;
+  background: var(--card);
+  box-shadow: var(--ring), 0 24px 48px -20px rgba(48, 43, 38, 0.35);
+}
+
+.mail-keys-card h2 { margin: 0 0 12px; font-family: var(--serif); font-size: 24px; font-weight: 400; }
+.mail-keys-card dl { margin: 0; }
+.mail-keys-card dl div { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 6px 0; }
+.mail-keys-card dt span { font-size: 12px; color: var(--muted); }
+.mail-keys-card dd { margin: 0; font-size: 14px; color: var(--ink-2); }

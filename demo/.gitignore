@@ -22,3 +22,8 @@ public/rails.sw.js
 public/favicon.ico
 public/assets/
 public/instant_record_compiled/
+
+# The Inbox bundle, written by `npm run build`
+/app/assets/builds/*
+!/app/assets/builds/.keep
+/Gemfile.cloud*
