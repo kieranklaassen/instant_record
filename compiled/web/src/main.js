@@ -12,7 +12,7 @@ worker.onmessage = (event) => {
     return;
   }
   if (type === "records_changed") {
-    if (marks.rendered) recordsChanged();
+    if (marks.rendered) recordsChanged(event.data.changes);
     return;
   }
   const entry = waiting.get(id);
@@ -137,9 +137,11 @@ window.fetch = async (input, init) => {
 
 // The gem's service worker posts records_changed to its clients; the demo's layout turns that
 // into this window event for pages that refresh in place, and reloads the rest.
-function recordsChanged() {
+// `changes` lists the records that changed as { type, id }, or is null when
+// the sync pass could not list them: then anything may have changed.
+function recordsChanged(changes) {
   if (document.querySelector("[data-instant-refresh]")) {
-    window.dispatchEvent(new CustomEvent("instant-record:records-changed"));
+    window.dispatchEvent(new CustomEvent("instant-record:records-changed", { detail: { changes: changes || null } }));
   } else {
     window.location.reload(); // what the demo's layout does for pages without an in-place refresh
   }

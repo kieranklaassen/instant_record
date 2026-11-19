@@ -174,7 +174,7 @@ async function drain(initial = false) {
     }
     return result;
   });
-  if (!initial && result.notified) self.postMessage({ type: "records_changed" });
+  if (!initial && result.notified) self.postMessage({ type: "records_changed", changes: result.changes });
   return result;
 }
 
@@ -204,10 +204,10 @@ async function pollChanges() {
       currentCursor = consumed.cursor;
       if (consumed.applied > 0 || consumed.notified) {
         save();
-        return true;
+        return { changes: consumed.changes };
       }
     });
-    if (changed) self.postMessage({ type: "records_changed" });
+    if (changed) self.postMessage({ type: "records_changed", changes: changed.changes });
   } catch {
     // offline: try again on the next interval
   } finally {
