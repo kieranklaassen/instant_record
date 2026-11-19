@@ -32,7 +32,12 @@ About 400 lines, none of which knows about mail. They ship in the gem, in `front
 | `http.js` | The HTTP client for the compiled runtime |
 | `window.js` | `useLiveWindow` (a list prop that widens with the scroll), `useLiveParam` (a query parameter and the props that depend on it), `useStableRows` |
 | `LiveList.js` | A react-virtuoso list that holds the reader's place while rows arrive above |
-| `keyboard.js`, `focus.js` | `useKeyboardNavigation`: a focused row, a key map, a scroll registry, focus that survives a redraw |
+| `keyboard.js`, `focus.js` | `useKeyboardNavigation`: a focused row, a scroll registry, focus that survives a redraw |
+| `chord.js`, `shortcuts.js` | `useShortcuts`: one table of bindings (keys, label, group, when it applies) that the key handler, the key list and the key caps on buttons all read |
+| `range.js`, `selection.js` | `useSelection`: a set of selected ids with an anchor, a range to any row, select all |
+| `held.js`, `undo.js` | `useUndoable`: a write held for five seconds so it can be taken back, sent when the time passes or the page is left |
+
+The second half of that table came with the polish of 2026-11-19 (`docs/plans/2026-11-19-0536-feat-inbox-polish-plan.md`), which also added `write` to `http.js`: a form post that does not visit, so marking twenty rows does not redraw the page twenty times. The files that hold logic and no React (`chord.js`, `range.js`, `held.js`, `focus.js`) are the ones with node tests, since the package has no dependencies of its own to import React from.
 
 In Ruby, `lib/instant_record/inertia.rb` adds `live:` to `render inertia:`. It names the synced models each prop is made from, and the page object carries `liveProps` with one event per model.
 
@@ -69,4 +74,6 @@ What did run: the Rails suite, the gem suite, the hook's unit tests, and a walk 
 
 ## Left out on purpose
 
-Shift+J / Shift+K range selection and bulk actions, as the requirements say. `/` does nothing because the demo has no search.
+`/` does nothing because the demo has no search. Range selection, bulk actions and undo were left out of the first round and built in the polish that followed. That polish leaves out, on purpose: undo for a sent reply (the write landing at once is what the demo shows), an unarchive on the server (undo holds the write instead, so the mail log stays append-only), and one request for a bulk action (it is one light write per conversation and then one reload).
+
+The polish ran in Chromium against the Rails-served page only: keys, selection, archive and undo, the reply flow, two members, a narrow window and a refused write. As above, none of it has run in the compiled runtime. There `write` goes to `window.fetch`, not through the Inertia client `http.js` hands to the local database, so whether the worker answers it is the first thing to check.
