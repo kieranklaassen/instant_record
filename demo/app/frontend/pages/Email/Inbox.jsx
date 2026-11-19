@@ -2,7 +2,7 @@ import { Head, router, usePage } from "@inertiajs/react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import MailList from "../../components/MailList"
 import { Clear, Composer, KeyList, Thread } from "../../components/MailReader"
-import { useKeyboardNavigation, useLiveParam, useLiveWindow, useStableRows } from "../../instant_record"
+import { useKeyboardNavigation, useLiveParam, useLiveWindow, useStableRows } from "instant_record"
 import { inboxPath, initial, mailRow, replyRow } from "../../lib/mail"
 
 const mailCursor = (row) => ({ created_at: row[5], id: row[0] })
@@ -25,7 +25,7 @@ function useSettled(value, ms) {
 //   thread   the conversation the address names, a live prop.
 //
 // Reading is a partial reload and writing is a form post. InstantRecord sits
-// under Inertia (app/frontend/instant_record): it tells Inertia when to
+// under Inertia (the gem's frontend package): it tells Inertia when to
 // reload a live prop, and beside a local database it answers the visit.
 export default function Inbox({ member, inbox, inboxes, people, mail, thread, composing }) {
   const scope = useMemo(() => ({ member, inbox }), [member, inbox])

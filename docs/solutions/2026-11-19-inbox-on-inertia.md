@@ -6,17 +6,17 @@ Date: 2026-11-19. Answers `docs/brainstorms/2026-11-19-inbox-inertia-react-requi
 
 InstantRecord works under Inertia, and the page stays an ordinary Inertia page. Its state is its props and its address. Reading is a partial reload, writing is a form post, and nothing holds a second copy of the data.
 
-Inertia 3 already has the two seams this needed, and the demo fills each with one small file:
+Inertia 3 already has the two seams this needed, and the gem's `frontend/` package fills each with one small file:
 
-- **Live props.** A page object names, under `liveProps`, the events each prop listens for, and Inertia reloads a prop when its event arrives: throttled, paused in a hidden tab, repeated on reconnect. `app/frontend/instant_record/live.js` is a transport with one event, the gem's `instant-record:records-changed`.
-- **A pluggable HTTP client.** In the compiled runtime `app/frontend/instant_record/http.js` sends Inertia's requests to the app's own controller in the worker, so a partial reload is answered by the local database and no request reaches Rails.
+- **Live props.** A page object names, under `liveProps`, the events each prop listens for, and Inertia reloads a prop when its event arrives: throttled, paused in a hidden tab, repeated on reconnect. `frontend/live.js` is a transport over the gem's `instant-record:records-changed`, with one event per synced model.
+- **A pluggable HTTP client.** In the compiled runtime `frontend/http.js` sends Inertia's requests to the app's own controller in the worker, so a partial reload is answered by the local database and no request reaches Rails.
 
 `createInertiaApp({ ...instantRecord(), resolve, setup })` wires both.
 
 ## How a change reaches the screen
 
 1. Sync or a local write touches the local database and the gem fires its event.
-2. Inertia marks `mail` and `thread` dirty and reloads them, once per burst.
+2. Inertia marks the props made of the changed models dirty and reloads them, once per burst.
 3. The controller answers from the local database. Inertia merges the props and re-renders.
 4. Rows are memoized on their own data, so a change to one conversation redraws one row. The list is virtual, so only the rows on screen exist.
 
@@ -24,22 +24,29 @@ A write is `router.post` or `useForm`, with Inertia's `optimistic` option for ar
 
 ## What it cost
 
-About 370 lines in `demo/app/frontend/instant_record/`, none of which knows about mail:
+About 400 lines, none of which knows about mail. They ship in the gem, in `frontend/`, as a package an app installs with `npm install "$(bundle show instant_record)/frontend"`:
 
 | File | Job |
 | --- | --- |
 | `live.js` | The live transport |
 | `http.js` | The HTTP client for the compiled runtime |
 | `window.js` | `useLiveWindow` (a list prop that widens with the scroll), `useLiveParam` (a query parameter and the props that depend on it), `useStableRows` |
-| `LiveList.jsx` | A react-virtuoso list that holds the reader's place while rows arrive above |
-| `keyboard.js` | `useKeyboardNavigation`: a focused row, a key map, a scroll registry, focus that survives a redraw |
+| `LiveList.js` | A react-virtuoso list that holds the reader's place while rows arrive above |
+| `keyboard.js`, `focus.js` | `useKeyboardNavigation`: a focused row, a key map, a scroll registry, focus that survives a redraw |
 
-## What the gem would need to offer it properly
+In Ruby, `lib/instant_record/inertia.rb` adds `live:` to `render inertia:`. It names the synced models each prop is made from, and the page object carries `liveProps` with one event per model.
 
-1. **Changed ids in the signal.** The event says something changed, not what. So each change reloads the whole list prop. Inertia's live envelope can carry props by value, which would skip the reload: that needs the gem to say which records changed.
-2. **`liveProps` from Ruby.** inertia_rails 3.23 has no word for live props, so `config/initializers/inertia_rails.rb` prepends eight lines to its renderer. A `live:` option on `render inertia:` belongs upstream or in this gem.
-3. **Headers through the worker.** The worker's requests carry no headers, which is why `http.js` says `_inertia=1` and `_only=` in the address and the controller has a `browser_only` half that writes the page object by hand. With headers, the compiled controller could be the same code as the server's.
-4. **The files themselves.** `instant_record/` is written to move into the gem as an npm package.
+## What the change signal says
+
+`instant-record:records-changed` carries `detail.changes`, a list of `{ type, id }`, when the sync pass can list what it changed (a stream batch or a poll, up to 200 records). The transport reloads a prop only when a record of one of its models is in the list. A bootstrap, an eviction, an acknowledged write and another tab's write are not listed: `changes` is `null` and every live prop reloads.
+
+The ids reach a page as the payload of Inertia's `live` event. Nothing patches a row by value yet: a row here is what the controller makes of several records (its unread mark is a query), so an id alone does not say what the row became.
+
+## What is still missing
+
+1. **Rows by value.** Inertia's live envelope can carry a prop's new value and skip the reload. That needs a way to ask the controller for the rows of given ids, and a list prop keyed by id to merge them into.
+2. **Headers through the worker.** The worker's requests carry no headers, which is why `http.js` says `_inertia=1` and `_only=` in the address and the controller has a `browser_only` half that writes the page object and `liveProps` by hand. With headers, and inertia_rails compiled in, the two halves could be one.
+3. **`live:` upstream.** The gem prepends to inertia_rails's renderer, which is private to it. A test in the demo fails if an upgrade moves it.
 
 ## The open questions, answered
 
@@ -55,6 +62,7 @@ The compiled toolchain (Spinel, Roundhouse) was not available where this was bui
 - whether Roundhouse compiles the controller's new Ruby (`JSON.generate` of a nested hash, `gsub`, a hash built by assignment);
 - `http.js` against the real worker, and so every local read and write, the offline walk (R13), and the Offline switch;
 - `compiled/pipeline` now copying `app/assets/builds` and dropping `config/initializers/inertia_rails.rb`;
+- the change list on its way through the worker (`compiled/web/src/changes.js`, `app-host.js`, `worker.js`, `main.js`), and whether Spinel compiles the Ruby that writes it. The Ruby is covered by the gem's tests and the parser by a node test;
 - `compiled/test/mail-volume.mjs` and `compiled/test/shared-inbox.mjs`, which drive the old markup (`fragment=1`, `.mail-older`) and need rewriting against the new page.
 
 What did run: the Rails suite, the gem suite, the hook's unit tests, and a walk of the Rails-served page in Chromium (keys, 10,000 messages, two personas, a narrow screen). Served by Rails alone there is no local database, so that walk exercises Inertia's stock XHR client and a four-second poll in place of the change signal.

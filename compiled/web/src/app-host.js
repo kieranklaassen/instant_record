@@ -5,9 +5,11 @@
 //   /host      in / out   request/sync input and output buffers
 //              request    the gem writes "METHOD URL\nbody"
 //              response   opening it makes the host perform that request, synchronously
-//              notify     the gem writes "records_changed" when a sync pass moved rows
+//              notify     the gem writes "records_changed" when a sync pass moved rows,
+//                         and the records it can list after it (changes.js)
 // Works the same in Node (tests) and in a browser worker; only `exchange` differs.
 import { WASI, File, OpenFile, Directory, PreopenDirectory, ConsoleStdout } from "@bjorn3/browser_wasi_shim";
+import { readNotice } from "./changes.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -193,7 +195,7 @@ export class AppHost {
       changed: text.startsWith("changed"),
       pending: Number(/pending=(\d+)/.exec(text)?.[1] ?? -1),
       cursor: Number(/cursor=(\d+)/.exec(text)?.[1] ?? 0),
-      notified: decoder.decode(notifyEntry.data) === "records_changed",
+      ...readNotice(decoder.decode(notifyEntry.data)),
       exchanges: this.exchanges,
       exit: result.exit,
       errors: result.errors,
@@ -210,7 +212,7 @@ export class AppHost {
     return {
       applied: Number(/applied=(\d+)/.exec(text)?.[1] ?? 0),
       cursor: Number(/cursor=(\d+)/.exec(text)?.[1] ?? 0),
-      notified: decoder.decode(notifyEntry.data) === "records_changed",
+      ...readNotice(decoder.decode(notifyEntry.data)),
       exit: result.exit,
       errors: result.errors,
     };

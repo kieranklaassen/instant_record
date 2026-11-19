@@ -1,0 +1,15 @@
+{
+  "name": "instant_record",
+  "version": "0.2.0",
+  "description": "InstantRecord for an Inertia page in React: live props from the local database, and the list and keyboard pieces built on them",
+  "license": "MIT",
+  "type": "module",
+  "main": "index.js",
+  "exports": { ".": "./index.js" },
+  "peerDependencies": {
+    "@inertiajs/core": "^3.11.0",
+    "@inertiajs/react": "^3.11.0",
+    "react": "^19.0.0",
+    "react-virtuoso": "^4.18.0"
+  }
+}

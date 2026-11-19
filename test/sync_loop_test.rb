@@ -35,8 +35,18 @@ end
 class FakeNotifier
   attr_reader :notifications
 
-  def initialize = @notifications = 0
-  def records_changed = @notifications += 1
+  attr_reader :notices
+
+  def initialize
+    @notifications = 0
+    @notices = []
+  end
+
+  # What the worker's notifier would write for the page at this moment.
+  def records_changed
+    @notices << InstantRecord::Client.changes_notice
+    @notifications += 1
+  end
 end
 
 class ConfigurationTest < Minitest::Test
@@ -261,6 +271,35 @@ class SyncLoopTest < Minitest::Test
 
     assert_equal %w[split-1], @model.pluck(:id)
     assert_equal 41, InstantRecord.cursor
+  end
+
+  def test_a_stream_batch_tells_the_page_which_records_changed
+    in_browser do
+      InstantRecord::Client.consume_stream(sse_frame(71, "n-1") + sse_frame(72, "n-2"))
+      InstantRecord::Client.consume_stream(sse_frame(73, "n-3"))
+    end
+
+    assert_equal ["records_changed\nMemo:n-1\nMemo:n-2", "records_changed\nMemo:n-3"], @notifier.notices
+  end
+
+  def test_a_pass_that_drained_the_outbox_does_not_list_its_changes
+    in_browser do
+      @model.create!(id: "local-1", title: "mine")
+      InstantRecord.start
+      InstantRecord.tick
+    end
+
+    assert_equal ["records_changed"], @notifier.notices
+  end
+
+  def test_more_changes_than_can_be_listed_are_not_listed
+    in_browser do
+      frames = (0..InstantRecord::Client::MAX_LISTED_CHANGES).map { |i| sse_frame(100 + i, "many-#{i}") }.join
+      InstantRecord::Client.consume_stream(frames)
+      InstantRecord::Client.consume_stream(sse_frame(900, "after"))
+    end
+
+    assert_equal ["records_changed", "records_changed\nMemo:after"], @notifier.notices
   end
 
   def test_reopening_the_stream_discards_a_half_received_frame

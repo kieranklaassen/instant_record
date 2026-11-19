@@ -12,6 +12,9 @@ module InstantRecord
     # acknowledged twice.
     BOOKKEEPING_COLUMNS = %w[server_version sync_state].freeze
 
+    # More changes than this in one notice are not listed one by one.
+    MAX_LISTED_CHANGES = 200
+
     class << self
       # Applying remote state must never enqueue new outbox mutations.
       def applying_remote? = @applying_remote
@@ -41,9 +44,42 @@ module InstantRecord
       def sync_pass
         changed = evict_beyond_windows
         changed = drain || changed
+        # Evictions and acknowledged writes are not listed one by one, and
+        # neither is a bootstrap: the page is told that anything may have changed.
+        unlisted_changes if changed || !bootstrapped?
         changed = (bootstrapped? ? poll_changes : bootstrap) || changed
-        notifier.records_changed if changed
+        notify_changed if changed
         changed
+      end
+
+      # Which records changed since the page was last told, as "Type:id"
+      # lines after the notice itself. The notice alone means anything may have.
+      def changes_notice
+        return "records_changed" if @unlisted_changes || changed_records.empty?
+
+        "records_changed\n" + changed_records.join("\n")
+      end
+
+      def changed_records
+        @changed_records ||= []
+      end
+
+      def unlisted_changes
+        @unlisted_changes = true
+      end
+
+      def note_change(type, id)
+        if changed_records.size >= MAX_LISTED_CHANGES
+          unlisted_changes
+        else
+          changed_records << "#{type}:#{id}"
+        end
+      end
+
+      def notify_changed
+        notifier.records_changed
+        changed_records.clear
+        @unlisted_changes = false
       end
 
       # Arm the boot-time trim; InstantRecord.start sets this on cold boots
@@ -186,7 +222,7 @@ module InstantRecord
         # One cursor write per batch, as poll_changes does: a crash before this
         # re-applies the batch, which the upserts make safe.
         self.cursor = newest_cursor if newest_cursor
-        notifier.records_changed if applied.positive?
+        notify_changed if applied.positive?
         instrument("stream", applied: applied) if applied.positive?
         applied
       end
@@ -318,13 +354,15 @@ module InstantRecord
         model = InstantRecord.synced_model(event["type"])
         return false unless model
 
-        applying_remote do
+        applied = applying_remote do
           if event["operation"] == "destroy"
             !!model.find_by(id: event["id"])&.destroy!
           else
             upsert_from_server(model, event["attributes"], event["version"])
           end
         end
+        note_change(event["type"], event["id"]) if applied
+        applied
       end
 
       private

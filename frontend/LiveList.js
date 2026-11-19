@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react"
+import { createElement, useEffect, useMemo, useRef } from "react"
 import { Virtuoso } from "react-virtuoso"
 
 // Virtuoso numbers rows from `firstItemIndex`. Lowering it by the rows that
@@ -35,22 +35,21 @@ export default function LiveList({ rows, children, onEnd, register, openAt = 0, 
 
   useEffect(() => register?.((index) => list.current?.scrollIntoView({ index, behavior: "auto" })), [register])
 
-  return (
-    <Virtuoso
-      ref={list}
-      className={className}
-      data={rows}
-      firstItemIndex={start}
-      initialTopMostItemIndex={{ index: Math.min(openAt, Math.max(rows.length - 1, 0)), align: "center" }}
-      computeItemKey={(_, row) => row.id}
-      increaseViewportBy={600}
-      endReached={() => onEnd?.()}
-      rangeChanged={({ startIndex }) => {
-        const { rows, start } = now.current
-        // At the top a new row should show, so nothing is held there.
-        anchor.current = startIndex - start > 0 ? rows[startIndex - start]?.id : null
-      }}
-      itemContent={(index, row) => children(row, index - now.current.start)}
-    />
-  )
+  // Plain createElement, so the package needs no JSX transform where it is installed.
+  return createElement(Virtuoso, {
+    ref: list,
+    className,
+    data: rows,
+    firstItemIndex: start,
+    initialTopMostItemIndex: { index: Math.min(openAt, Math.max(rows.length - 1, 0)), align: "center" },
+    computeItemKey: (_, row) => row.id,
+    increaseViewportBy: 600,
+    endReached: () => onEnd?.(),
+    rangeChanged: ({ startIndex }) => {
+      const { rows, start } = now.current
+      // At the top a new row should show, so nothing is held there.
+      anchor.current = startIndex - start > 0 ? rows[startIndex - start]?.id : null
+    },
+    itemContent: (index, row) => children(row, index - now.current.start),
+  })
 }

@@ -5,11 +5,12 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite build --watch",
-    "test": "node --test app/frontend/instant_record/*.test.js"
+    "test": "node --test ../frontend/*.test.js"
   },
   "dependencies": {
     "@inertiajs/core": "^3.11.0",
     "@inertiajs/react": "^3.11.0",
+    "instant_record": "file:../frontend",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "react-virtuoso": "^4.18.23"

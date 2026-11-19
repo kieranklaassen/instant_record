@@ -5,6 +5,8 @@ import react from "@vitejs/plugin-react"
 // Propshaft serves it like any other asset and the compiled build picks it up.
 export default defineConfig({
   plugins: [react()],
+  // The gem's frontend package lives outside this app: its imports resolve here.
+  resolve: { dedupe: ["react", "react-dom", "react-virtuoso", "@inertiajs/core", "@inertiajs/react"] },
   publicDir: false,
   build: {
     outDir: "app/assets/builds",
