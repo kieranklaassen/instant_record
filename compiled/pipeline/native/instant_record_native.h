@@ -8,12 +8,15 @@
 
 /* The app asks for the network through this during a "sync" call. `request`
    is "METHOD URL\n" and then the body. Answer with the status on the first
-   line and then the response body, or "0\n" when the network failed. */
+   line and then the response body, or "0\n" when the network failed. The
+   call waits for the answer, so give the request a timeout. */
 typedef const char *(*ir_exchange_fn)(const char *request, void *context);
 void ir_set_exchange(ir_exchange_fn exchange, void *context);
 
 /* Open the SQLite file at `database_path`, creating it and its tables when
-   it is new. Call once, before anything else. Returns 0 when the app is up. */
+   it is new. Call before anything else. Returns 0 when the app is up. A
+   database syncs with one address, so an app that changes account calls this
+   again with that account's file. The file opened before is not closed. */
 int ir_boot(const char *database_path);
 
 /* Run one entry point with `input` and return what it wrote, or NULL when
