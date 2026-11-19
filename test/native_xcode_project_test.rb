@@ -7,7 +7,8 @@ class NativeXcodeProjectTest < ActiveSupport::TestCase
 
   test "the Inbox's project is what the generator writes for the files in its folder" do
     project = InstantRecord::Native::XcodeProject.new(folder: INBOX, name: "Inbox", bundle_id: "dev.instantrecord.Inbox",
-      package: "../InstantRecordNative", headers: "../../../compiled/pipeline/native", libraries: "../../../compiled/.build-native")
+      package: "../InstantRecordNative", headers: "../../../compiled/pipeline/native", libraries: "../../../compiled/.build-native",
+      packages: { "Feedback" => "../../../../swift-libraries/feedback" })
 
     assert_equal File.read(File.join(INBOX, "Inbox.xcodeproj/project.pbxproj")), project.pbxproj, "run ruby native/ios/Inbox/project.rb"
     assert_equal File.read(File.join(INBOX, "Inbox.xcodeproj/xcshareddata/xcschemes/Inbox.xcscheme")), project.scheme
@@ -34,6 +35,21 @@ class NativeXcodeProjectTest < ActiveSupport::TestCase
       assert_includes project.pbxproj, "/* CartView.swift in Sources */,"
       assert_not_includes project.pbxproj, "notes.txt"
       assert_empty project.ui_tests
+    end
+  end
+
+  test "another package the app links is referenced by its path and linked by its product" do
+    Dir.mktmpdir do |folder|
+      FileUtils.mkdir_p(File.join(folder, "Shop"))
+      File.write(File.join(folder, "Shop/ShopApp.swift"), "")
+      pbxproj = InstantRecord::Native::XcodeProject.new(folder: folder, name: "Shop", bundle_id: "com.example.Shop", package: "../pkg", headers: "../h", libraries: "../lib",
+        packages: { "Feedback" => "../../feedback" }).pbxproj
+
+      assert_includes pbxproj, "relativePath = ../pkg;"
+      assert_includes pbxproj, "relativePath = ../../feedback;"
+      assert_includes pbxproj, "productName = Feedback;"
+      assert_includes pbxproj, "/* Feedback in Frameworks */,"
+      assert_equal pbxproj.scan(/^\t\t(1D\h{22}) /).flatten.size, pbxproj.scan(/^\t\t(1D\h{22}) /).flatten.uniq.size, "two objects share an id"
     end
   end
 

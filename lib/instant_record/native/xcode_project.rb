@@ -19,13 +19,15 @@ module InstantRecord
     # when it has any. `package`, `headers` and `libraries` are paths from
     # `folder`: the InstantRecordNative Swift package, the folder with
     # instant_record_native.h, and the folder whose `iphonesimulator`
-    # subfolder holds the built libraries.
+    # subfolder holds the built libraries. `packages` are other Swift
+    # packages the app links, each product's name with its path from
+    # `folder`: `packages: { "Feedback" => "../../feedback" }`.
     class XcodeProject
-      def initialize(folder:, name:, bundle_id:, package:, headers:, libraries:)
+      def initialize(folder:, name:, bundle_id:, package:, headers:, libraries:, packages: {})
         @folder = Pathname(folder)
         @name = name
         @bundle_id = bundle_id
-        @package = package
+        @packages = [["InstantRecordNative", package]] + packages.to_a
         @headers = headers
         @libraries = libraries
       end
@@ -56,7 +58,7 @@ module InstantRecord
           /* Begin PBXBuildFile section */
           #{app.each_with_index.map { |file, n| "\t\t#{id(:build, n)} /* #{file} in Sources */ = {isa = PBXBuildFile; fileRef = #{id(:file, n)} /* #{file} */; };" }.join("\n")}
           #{tests.each_with_index.map { |file, n| "\t\t#{id(:test_build, n)} /* #{file} in Sources */ = {isa = PBXBuildFile; fileRef = #{id(:test_file, n)} /* #{file} */; };" }.join("\n")}
-          		#{id(:package_build)} /* InstantRecordNative in Frameworks */ = {isa = PBXBuildFile; productRef = #{id(:package_product)} /* InstantRecordNative */; };
+          #{each_package { |product, _, n| "\t\t#{id(:package_build, n)} /* #{product} in Frameworks */ = {isa = PBXBuildFile; productRef = #{id(:package_product, n)} /* #{product} */; };" }}
           /* End PBXBuildFile section */
 
           /* Begin PBXContainerItemProxy section */
@@ -82,7 +84,7 @@ module InstantRecord
           			isa = PBXFrameworksBuildPhase;
           			buildActionMask = 2147483647;
           			files = (
-          				#{id(:package_build)} /* InstantRecordNative in Frameworks */,
+          #{each_package { |product, _, n| "\t\t\t\t#{id(:package_build, n)} /* #{product} in Frameworks */," }}
           			);
           			runOnlyForDeploymentPostprocessing = 0;
           		};
@@ -139,7 +141,7 @@ module InstantRecord
           			);
           			name = #{@name};
           			packageProductDependencies = (
-          				#{id(:package_product)} /* InstantRecordNative */,
+          #{each_package { |product, _, n| "\t\t\t\t#{id(:package_product, n)} /* #{product} */," }}
           			);
           			productName = #{@name};
           			productReference = #{id(:app_product)} /* #{@name}.app */;
@@ -180,7 +182,7 @@ module InstantRecord
           			);
           			mainGroup = #{id(:root_group)};
           			packageReferences = (
-          				#{id(:package)} /* XCLocalSwiftPackageReference "#{@package}" */,
+          #{each_package { |_, path, n| %(\t\t\t\t#{id(:package, n)} /* XCLocalSwiftPackageReference "#{path}" */,) }}
           			);
           			productRefGroup = #{id(:products_group)} /* Products */;
           			projectDirPath = "";
@@ -235,17 +237,11 @@ module InstantRecord
           /* End XCConfigurationList section */
 
           /* Begin XCLocalSwiftPackageReference section */
-          		#{id(:package)} /* XCLocalSwiftPackageReference "#{@package}" */ = {
-          			isa = XCLocalSwiftPackageReference;
-          			relativePath = #{@package};
-          		};
+          #{each_package { |_, path, n| %(\t\t#{id(:package, n)} /* XCLocalSwiftPackageReference "#{path}" */ = {\n\t\t\tisa = XCLocalSwiftPackageReference;\n\t\t\trelativePath = #{path};\n\t\t};) }}
           /* End XCLocalSwiftPackageReference section */
 
           /* Begin XCSwiftPackageProductDependency section */
-          		#{id(:package_product)} /* InstantRecordNative */ = {
-          			isa = XCSwiftPackageProductDependency;
-          			productName = InstantRecordNative;
-          		};
+          #{each_package { |product, _, n| "\t\t#{id(:package_product, n)} /* #{product} */ = {\n\t\t\tisa = XCSwiftPackageProductDependency;\n\t\t\tproductName = #{product};\n\t\t};" }}
           /* End XCSwiftPackageProductDependency section */
           	};
           	rootObject = #{id(:project)} /* Project object */;
@@ -292,6 +288,11 @@ module InstantRecord
       # An object's id: 24 hex digits that say what it is and which one.
       def id(kind, index = 0)
         format("1D%02X%020X", KINDS.index(kind), index)
+      end
+
+      # A line, or a few, for every package the app links.
+      def each_package
+        @packages.each_with_index.map { |(product, path), n| yield product, path, n }.join("\n")
       end
 
       def swift_files(subfolder)

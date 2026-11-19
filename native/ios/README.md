@@ -20,7 +20,9 @@ xcodebuild -project native/ios/Shop/Shop.xcodeproj -scheme Shop -destination 'pl
 The generator writes a thin app in `native/ios/Shop`: the first screen's
 name, the server's address, and the Xcode project. The project file is
 generated from the Swift files in the folder. After adding one, run the
-generator again with `--force`.
+generator again with `--force`. `XcodeProject.new(packages: { "Feedback" =>
+"../../feedback" })` links another Swift package by its path from the app's
+folder.
 
 ## The Inbox demo
 
@@ -160,6 +162,39 @@ reads as empty, false, zero or nil. `actions.perform` can carry arguments:
 Used inside a list, `swift` puts one hand-written view among stock ones, as a
 partial would. A name nobody registered shows a warning in its place.
 
+### A view from a library: the feedback form
+
+The Inbox's View menu ends with "Send feedback". The screen behind it is
+four lines of Ruby (`demo/app/screens/feedback_screen.rb`) that name a Swift
+view, `FeedbackForm`, and hand it the member and the inbox. The view is not
+this repo's: it is the form of the `Feedback` package in
+[EveryInc/swift-libraries](https://github.com/EveryInc/swift-libraries), which
+files a note as a GitHub issue through a relay.
+
+- **The package is taken by path** from a checkout beside this repo:
+  `../swift-libraries` next to `instant_record`. `project.rb` names it
+  (`packages: { "Feedback" => "../../../../swift-libraries/feedback" }`), so
+  the project holds no path of anyone's machine. Without that checkout the
+  Inbox does not build: `git clone https://github.com/EveryInc/swift-libraries`
+  beside this repo first.
+- **`InboxApp.swift`** calls `Feedback.setUp(product: "instant-record-inbox",
+  relay:)` once and registers the form as `FeedbackForm`. The form holds a
+  navigation stack of its own, which SwiftUI refuses inside a pushed screen
+  (it stops the app), so the screen opens it as a sheet, the way the library
+  means it to be used, and goes back when the sheet closes. The member and
+  inbox are listed under the note as "From" and "Inbox" with the rest of what
+  is sent.
+- **Nothing is filed yet.** The relay files only for the products in its own
+  list, and `instant-record-inbox` is not in it. Send is answered with "This
+  form is not set up to send feedback yet.", shown in red under the form, and
+  the note stays where it was. Adding the product is a line in the relay's
+  `PRODUCTS` and a deploy, which is the relay owner's to do. With no
+  connection the form says "That couldn’t be sent. Check your connection and
+  try again."
+- `-relay http://localhost:8787` sends to another relay: `node relay/demo.js`
+  in the library's `feedback` folder runs one on this Mac that sends nothing
+  anywhere.
+
 ## What the renderer draws
 
 | Element | Drawn as |
@@ -249,7 +284,7 @@ from it, not from the address. There is no sign-in screen yet.
   recreates a database of its own (`postgres:///instant_record_native_ui`),
   seeds a fixed inbox, starts the demo with a token required, and stops it
   afterwards, so it can be run again and again. It covers open and read,
-  reply, archive, switching inbox, unread only, older mail, a message
+  reply, archive, switching inbox, unread only, the feedback form, older mail, a message
   arriving with no touch, pull to refresh, an archive the server refuses,
   an archive made offline that goes out when the server returns, and the
   main controls in dark mode at the largest text size. The script refuses
