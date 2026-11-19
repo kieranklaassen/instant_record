@@ -213,10 +213,9 @@ What ran, on macOS arm64 with Xcode 27.2 and the iPhone 17 simulator on iOS
   filter from its bar menus, and archives with the server stopped. The
   archive reached the server on the next launch after it came back.
 
-What did not: nothing was signed or run on a phone, and the `iphoneos` target
-of the build has not run. What is described above from `more` on has run on
-Linux against the compiled library and under CRuby, and not yet in the
-simulator with this seam.
+`build_native.py iphoneos` builds the same two libraries for a device, and the
+Inbox builds against them unsigned. What did not run: nothing was signed or
+installed on a phone.
 
 ## Deploying it
 
