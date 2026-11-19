@@ -123,6 +123,7 @@ const KEYS = [
   ["e", null, "Archive"],
   ["r", null, "Reply"],
   ["c", null, "Compose"],
+  ["/", null, "Search"],
   ["?", null, "Show or hide this list"],
 ]
 

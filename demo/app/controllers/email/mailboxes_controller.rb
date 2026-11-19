@@ -68,6 +68,10 @@ module Email
       limit = [params[:limit].to_i, MailEntry::PAGE_SIZE].max
       limit = [limit, MailEntry::LIVE_LIMIT].min
       messages = MailEntry.open_messages.where(mailbox_id: @inbox)
+      # A search narrows the same list. Beside a local database it answers
+      # from what is held, and the page asks the sync server for the rest.
+      term = params[:q].to_s.strip
+      messages = messages.where(MailEntry::MATCHING, q: MailEntry.pattern(term)) unless term.empty?
       entries = messages.order(created_at: :desc, id: :desc).limit(limit + 1).to_a
       more = entries.size > limit
       entries.pop if more
@@ -81,7 +85,7 @@ module Email
       entries.each { |entry| rows << mail_row(entry, marked.key?(entry.id)) }
       # `more` speaks for this database alone. Beside a local one the page
       # also asks the sync server for older mail as the reader nears the end.
-      { rows: rows, unread_count: unread.count, more: more, limit: limit }
+      { rows: rows, unread_count: unread.count, more: more, limit: limit, q: term }
     end
 
     # The conversation the address names, or the newest one.
@@ -155,6 +159,8 @@ module Email
         url += "&thread=#{params[:thread]}" unless params[:thread].to_s.empty?
         url += "&limit=#{params[:limit].to_i}" if params[:limit].to_i > MailEntry::PAGE_SIZE
         url += "&compose=1" if params[:compose] == "1"
+        term = params[:q].to_s.strip
+        url += "&q=" + term.gsub("%", "%25").gsub("&", "%26").gsub("+", "%2B").gsub("#", "%23").gsub(" ", "+") unless term.empty?
         page = JSON.generate({ component: "Email/Inbox", props: props, url: url, version: "", liveProps: LIVE_PROPS })
         if params[:_inertia] == "1"
           render plain: page, content_type: "application/json"

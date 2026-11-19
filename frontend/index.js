@@ -15,7 +15,7 @@ import { local } from "./window.js"
 export const instantRecord = () => ({ live: liveTransport, ...(local() ? { http: localHttpClient } : {}) })
 
 export { localHttpClient, liveTransport }
-export { local, useLiveParam, useLiveWindow, useStableRows, widenWindow } from "./window.js"
+export { local, useHistory, useLiveParam, useLiveSearch, useLiveWindow, useStableRows, widenWindow } from "./window.js"
 export { resolveFocus } from "./focus.js"
 export { useKeyboardNavigation } from "./keyboard.js"
 export { default as LiveList } from "./LiveList.js"

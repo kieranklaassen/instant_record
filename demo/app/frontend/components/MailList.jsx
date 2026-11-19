@@ -27,14 +27,15 @@ const Row = memo(function Row({ row, scope, focused, onOpen }) {
 })
 
 // The whole mailbox as one list. Only the rows on screen are in the page.
-export default function MailList({ scope, title, rows, unreadCount, focusedId, openAt, onOpen, onEnd, register }) {
+export default function MailList({ scope, title, rows, unreadCount, whole, searching, focusedId, openAt, onOpen, onEnd, register }) {
   return (
     <section className="mail-list" aria-label="Conversations">
       <header>
         <h2>{title}</h2>
-        {unreadCount > 0 && <span className="mail-unread-count">{unreadCount} unread</span>}
+        {/* Counted in the local database: a floor until the whole inbox is in it. */}
+        {unreadCount > 0 && <span className="mail-unread-count" title={whole ? undefined : "Counted in the mail on this device so far"}>{unreadCount}{whole ? "" : "+"} unread</span>}
       </header>
-      {rows.length === 0 && <p className="mail-empty-list">No open conversations.</p>}
+      {rows.length === 0 && <p className="mail-empty-list">{searching ? "No conversations match." : "No open conversations."}</p>}
       <LiveList className="mail-scroll" rows={rows} onEnd={onEnd} register={register} openAt={openAt}>
         {(row) => (
           <div className="mail-item">

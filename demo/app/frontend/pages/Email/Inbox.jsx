@@ -2,13 +2,14 @@ import { Head, router, usePage } from "@inertiajs/react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import MailList from "../../components/MailList"
 import { Clear, Composer, KeyList, Thread } from "../../components/MailReader"
-import { useKeyboardNavigation, useLiveParam, useLiveWindow, useStableRows } from "instant_record"
+import { useHistory, useKeyboardNavigation, useLiveParam, useLiveSearch, useLiveWindow, useStableRows } from "instant_record"
 import { inboxPath, initial, mailRow, replyRow } from "../../lib/mail"
 
 const mailCursor = (row) => ({ created_at: row[5], id: row[0] })
 const capitalize = (word) => word[0].toUpperCase() + word.slice(1)
 const WRITE = { preserveState: true, preserveScroll: true, async: true }
 const THREAD = ["thread"]
+const MAIL = ["mail"]
 
 function useSettled(value, ms) {
   const [settled, setSettled] = useState(value)
@@ -38,9 +39,18 @@ export default function Inbox({ member, inbox, inboxes, people, mail, thread, co
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState("")
 
+  // A search is in the address like everything else. The list answers it from
+  // the local database at once, and the sync server adds what it holds beyond.
+  const [term, setTerm] = useState(mail.q || "")
+  const q = useSettled(term.trim(), 200)
+  useLiveParam("q", q, { only: MAIL, answered: mail.q || "", omit: (value) => value === "" })
+  const search = useLiveSearch(q, { only: MAIL, model: "MailEntry" })
+  const history = useHistory()
+  const searchBox = useRef(null)
+
   const rows = useStableRows(mail.rows, mailRow)
   const ids = useMemo(() => rows.map((row) => row.id), [rows])
-  const { more, older, failed } = useLiveWindow({ prop: "mail", window: mail, model: "MailEntry", cursor: mailCursor })
+  const { more, older, failed } = useLiveWindow({ prop: "mail", window: mail, model: "MailEntry", cursor: mailCursor, search: q })
   const now = useRef({})
 
   useEffect(() => {
@@ -117,6 +127,7 @@ export default function Inbox({ member, inbox, inboxes, people, mail, thread, co
       setReplyFocus((count) => count + 1)
     },
     c: () => compose(true),
+    "/": () => searchBox.current?.focus(),
     "?": () => setHelp((shown) => !shown),
   }
 
@@ -208,7 +219,9 @@ export default function Inbox({ member, inbox, inboxes, people, mail, thread, co
         <header className="mail-bar">
           <h1>Shared inbox</h1>
           <div className="mail-tools">
-            <span role="status">{status}</span>
+            <input ref={searchBox} type="search" className="mail-search" placeholder="Search mail" aria-label="Search mail"
+              value={term} onChange={(event) => setTerm(event.target.value)} />
+            <span role="status">{status || (q && search.partial && !history.done ? "Showing matches on this device. Older mail needs a connection." : "")}</span>
             <button type="button" className="mail-incoming" disabled={busy} onClick={generate}>
               <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 4v11" /><path d="m7 10 5 5 5-5" /><path d="M5 20h14" /></svg>
               Generate incoming email
@@ -216,7 +229,7 @@ export default function Inbox({ member, inbox, inboxes, people, mail, thread, co
           </div>
         </header>
         <div className="mail-panes">
-          <MailList scope={scope} title={`${capitalize(inbox)} inbox`} rows={rows} unreadCount={mail.unread_count}
+          <MailList scope={scope} title={`${capitalize(inbox)} inbox`} rows={rows} unreadCount={mail.unread_count} whole={history.done} searching={!!q}
             focusedId={focusedId} openAt={Math.max(ids.indexOf(address), 0)} onOpen={openRow} onEnd={() => older()} register={register} />
           <section className="mail-reader" data-thread={message?.id || ""} data-compose={String(composing)}>
             <button type="button" className="mail-return" onClick={back}>← {capitalize(inbox)}</button>
