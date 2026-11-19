@@ -34,16 +34,26 @@ module Email
       send_file shell.path, type: "application/vnd.sqlite3", disposition: "inline"
     end
 
+    # Older mail than the browser holds, a page at a time: the page below a
+    # row, or with `search` the conversations that match it. Either way the
+    # answer is records, and the browser's own query shows them once they land.
     def records
       if params[:thread].present?
         entry = @mailbox.mail_entries.find_by(id: params[:thread], kind: "message")
         return render json: { records: payloads(Array.wrap(entry)), has_more: false }
       end
-      return head :bad_request unless params[:type] == "MailEntry" && params[:before_id].present?
-      at = Time.iso8601(params[:before_created_at].to_s)
-      page = message_page.where("created_at < :at OR (created_at = :at AND id < :id)", at: at, id: params[:before_id])
-      rows = page.limit(MailEntry::PAGE_SIZE + 1).to_a
-      render json: { records: payloads(rows.first(MailEntry::PAGE_SIZE)), has_more: rows.size > MailEntry::PAGE_SIZE }
+      searching = params[:search].present?
+      return head :bad_request unless searching || (params[:type] == "MailEntry" && params[:before_id].present?)
+      page = message_page
+      page = page.where(MailEntry::MATCHING, q: MailEntry.pattern(params[:search])) if searching
+      if params[:before_id].present?
+        at = Time.iso8601(params[:before_created_at].to_s)
+        page = page.where("created_at < :at OR (created_at = :at AND id < :id)", at: at, id: params[:before_id])
+      end
+      # The background fill asks for bigger pages than a reader's scroll does.
+      size = params[:limit].to_i.clamp(MailEntry::PAGE_SIZE, MailEntry::FILL_PAGE_SIZE)
+      rows = page.limit(size + 1).to_a
+      render json: { records: payloads(rows.first(size)), has_more: rows.size > size }
     rescue ArgumentError
       head :bad_request
     end

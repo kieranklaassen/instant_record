@@ -119,6 +119,13 @@
 .mail-bar { justify-content: space-between; gap: 12px; padding: 16px 20px 12px 12px; }
 .mail-bar h1 { font-family: var(--sans); font-size: 14px; font-weight: 500; letter-spacing: 0; color: var(--muted); }
 .mail-tools { gap: 12px; }
+.mail-tools [role=status] { color: var(--muted); font-size: 13px; }
+.mail-tools [role=status]:empty { display: none; }
+.maildesk .mail-search {
+  width: 220px; max-width: 100%; padding: 7px 12px; border: 1px solid var(--hairline-soft); border-radius: 999px;
+  background: var(--card); color: inherit; font: inherit; font-size: 13px;
+}
+.maildesk .mail-search:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 .maildesk .mail-incoming {
   display: inline-flex;

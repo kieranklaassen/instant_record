@@ -79,7 +79,6 @@ What that run found and fixed:
 ## Not verified
 
 - `compiled/test/mail-volume.mjs` with `--all` (the whole inbox) and `--mobile`, and the other compiled tests (`full-demo`, `sync-inspector`, `release-upgrade` and the rest), none of which this change touches;
-- the shell snapshot (`?shell=1`) together with the new page;
 - a compiled build served by its deploy (nginx, the service worker's cache): `/assets/inbox.js` has no digest in its name there, so a cache that keeps it must be told when it changes;
 - any browser but Chromium.
 
@@ -90,6 +89,6 @@ What that run found and fixed:
 
 ## Left out on purpose
 
-`/` does nothing because the demo has no search. Range selection, bulk actions and undo were left out of the first round and built in the polish that followed. That polish leaves out, on purpose: undo for a sent reply (the write landing at once is what the demo shows), an unarchive on the server (undo holds the write instead, so the mail log stays append-only), and one request for a bulk action (it is one light write per conversation and then one reload).
+Search came after this was written: `/` focuses it, and `compiled/test/offline-inbox.mjs` runs it, the background fill and the shell snapshot (`?shell=1`) with this page in a compiled build. Range selection, bulk actions and undo were left out of the first round and built in the polish that followed. That polish leaves out, on purpose: undo for a sent reply (the write landing at once is what the demo shows), an unarchive on the server (undo holds the write instead, so the mail log stays append-only), and one request for a bulk action (it is one light write per conversation and then one reload).
 
 The polish ran in Chromium against the Rails-served page only: keys, selection, archive and undo, the reply flow, two members, a narrow window and a refused write. None of the polish has run in the compiled runtime, which was verified before it landed. `compiled/test/shared-inbox.mjs` and `compiled/test/mail-volume.mjs` were brought to the new markup (a row's link is `.mail-row-link`, the reply box opens from `.mail-reply-prompt`, the button is Send) without a toolchain to run them. There `write` goes to `window.fetch`, not through the Inertia client `http.js` hands to the local database, so whether the worker answers it is the first thing to check.
