@@ -25,7 +25,7 @@ export { localHttpClient, liveTransport, write }
 export { local, useLiveParam, useLiveWindow, useStableRows, widenWindow } from "./window.js"
 export { resolveFocus } from "./focus.js"
 export { useKeyboardNavigation } from "./keyboard.js"
-export { chord, isApple, keycaps, match } from "./chord.js"
+export { chord, keycaps, match } from "./chord.js"
 export { useShortcuts } from "./shortcuts.js"
 export { rangeBetween } from "./range.js"
 export { useSelection } from "./selection.js"
