@@ -68,6 +68,15 @@ module Email
       limit = [params[:limit].to_i, MailEntry::PAGE_SIZE].max
       limit = [limit, MailEntry::LIVE_LIMIT].min
       messages = MailEntry.open_messages.where(mailbox_id: @inbox)
+      # The conversation the address names is in the list: the window widens
+      # to the page that holds it, so a link opens it however deep it lies.
+      thread = params[:thread].to_s
+      named = MailEntry.find_by(id: thread, mailbox_id: @inbox, kind: "message") unless thread.empty?
+      if named
+        ahead = messages.where("created_at > :at OR (created_at = :at AND id > :id)", at: named.created_at, id: named.id).count
+        held = (ahead / MailEntry::PAGE_SIZE + 1) * MailEntry::PAGE_SIZE
+        limit = held if held > limit && held <= MailEntry::LIVE_LIMIT
+      end
       entries = messages.order(created_at: :desc, id: :desc).limit(limit + 1).to_a
       more = entries.size > limit
       entries.pop if more
@@ -159,7 +168,7 @@ module Email
         if params[:_inertia] == "1"
           render plain: page, content_type: "application/json"
         else
-          @page = page.gsub("<", "\\u003c")
+          @page = page
         end
       end
 

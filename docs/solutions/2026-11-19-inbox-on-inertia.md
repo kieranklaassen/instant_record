@@ -55,17 +55,28 @@ The ids reach a page as the payload of Inertia's `live` event. Nothing patches a
 3. **Build tooling.** Vite writes one file, `app/assets/builds/inbox.js`, and Propshaft serves it. `bin/rails test` and `assets:precompile` build it first. No other demo has a build step.
 4. **Older mail.** One data path. The address carries `limit`; scrolling widens the local window (`instant_record.fetch_history`), then the limit. A reload returns to the same depth.
 
+## Verified in the compiled runtime
+
+Later the same day the toolchain was built in a cloud thread (Roundhouse `b937108ce`, Spinel `7c56323d2`, WASI SDK 34, SQLite 3.54.1 built to an amalgamation from its GitHub source) and the demo was compiled and run in Chromium beside a local Rails sync server. What ran there:
+
+- a walk of the Inbox in the real worker: j/k, Enter, reply, archive, older mail fetched from the sync server, compose, reload, with no page error;
+- two workers in separate profiles: a message sent in one reached the other in under a second, as a change event carrying `{ type: "MailEntry", id }`, in the same document;
+- `compiled/test/shared-inbox.mjs` (offline reply, reload, inbox switch, teammate delivery, a kept draft) and `compiled/test/mail-volume.mjs --incoming` (10,000 messages), both brought up to the new page. `mail-volume.mjs` also passes against the Rails-served page.
+
+What that run found and fixed:
+
+- the layout asked for `controller_path`, which a Roundhouse layout does not have: the bundle's script tag moved into the two roots;
+- the first page sat in a `raw` script element behind a `gsub`: it now sits in an escaped `data-page` attribute that `instantRecord()` hands to Inertia;
+- the compiled build of `main` did not build at all: the shell snapshot's `MailShell` and `Email::ShellBuildJob` name the server's `Mailbox`, and are now carved out of the browser's copy;
+- the source drawer still listed the removed Stimulus controller;
+- a link to a conversation deep in the list opened the newest one in a browser that had not scrolled that far, in both runtimes: the list now widens to hold the conversation the address names, and a row's link carries its depth.
+
 ## Not verified
 
-The compiled toolchain (Spinel, Roundhouse) was not available where this was built, so **nothing here has run in the compiled runtime**. That covers:
-
-- whether Roundhouse compiles the controller's new Ruby (`JSON.generate` of a nested hash, `gsub`, a hash built by assignment);
-- `http.js` against the real worker, and so every local read and write, the offline walk (R13), and the Offline switch;
-- `compiled/pipeline` now copying `app/assets/builds` and dropping `config/initializers/inertia_rails.rb`;
-- the change list on its way through the worker (`compiled/web/src/changes.js`, `app-host.js`, `worker.js`, `main.js`), and whether Spinel compiles the Ruby that writes it. The Ruby is covered by the gem's tests and the parser by a node test;
-- `compiled/test/mail-volume.mjs` and `compiled/test/shared-inbox.mjs`, which drive the old markup (`fragment=1`, `.mail-older`) and need rewriting against the new page.
-
-What did run: the Rails suite, the gem suite, the hook's unit tests, and a walk of the Rails-served page in Chromium (keys, 10,000 messages, two personas, a narrow screen). Served by Rails alone there is no local database, so that walk exercises Inertia's stock XHR client and a four-second poll in place of the change signal.
+- `compiled/test/mail-volume.mjs` with `--all` (the whole inbox) and `--mobile`, and the other compiled tests (`full-demo`, `sync-inspector`, `release-upgrade` and the rest), none of which this change touches;
+- the shell snapshot (`?shell=1`) together with the new page;
+- a compiled build served by its deploy (nginx, the service worker's cache): `/assets/inbox.js` has no digest in its name there, so a cache that keeps it must be told when it changes;
+- any browser but Chromium.
 
 ## Left out on purpose
 

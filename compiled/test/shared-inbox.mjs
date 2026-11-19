@@ -19,7 +19,7 @@ try {
   await maya.getByRole("heading", { name: "Support inbox" }).waitFor();
   assert.equal(await theo.locator(".mail-folders a").count(), 1);
   await maya.getByLabel("Offline", { exact: true }).check();
-  await maya.getByRole("link", { name: "Compose" }).click();
+  await maya.getByRole("button", { name: "Compose" }).click();
   await maya.getByLabel("To", { exact: true }).fill("dispatch@example.test");
   await maya.getByLabel("Subject", { exact: true }).fill(subject);
   await maya.getByLabel("Message", { exact: true }).fill("Please confirm receipt.");
@@ -59,7 +59,7 @@ try {
   const onlineSubject = "Online " + randomUUID();
   const response = "Confirmed " + randomUUID();
   const thread = page => page.getByRole("link", { name: new RegExp(onlineSubject) });
-  await sender.getByRole("link", { name: "Compose" }).click();
+  await sender.getByRole("button", { name: "Compose" }).click();
   await sender.getByLabel("To", { exact: true }).fill("support@example.test");
   await sender.getByLabel("Subject", { exact: true }).fill(onlineSubject);
   await sender.getByLabel("Message", { exact: true }).fill("Testing two open Support windows.");
@@ -75,7 +75,7 @@ try {
   await theo.getByRole("button", { name: "Archive conversation" }).click();
   await thread(mirror).waitFor({ state: "detached" });
   await thread(sender).waitFor({ state: "detached" });
-  await mirror.getByRole("link", { name: "Compose" }).click();
+  await mirror.getByRole("button", { name: "Compose" }).click();
   await mirror.getByLabel("Subject", { exact: true }).fill("Unfinished draft");
   const before = await theo.locator(".mail-row").evaluateAll(rows => rows.map(row => row.href));
   await sender.getByRole("button", { name: "Generate incoming email" }).click();
