@@ -148,6 +148,22 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
     assert_empty Dir.children(@folder).reject { |name| name.start_with?("inbox.sqlite3") }, "the app wrote outside its database"
   end
 
+  test "a sync pass alone brings a change from elsewhere" do
+    @phone.sync
+    arrived = write("jo", "Receipt")
+
+    @phone.sync
+
+    assert_equal [arrived.id, @newer.id, @older.id], rows.map { |row| row["id"] }
+  end
+
+  test "a screen nobody wrote is an error, not an empty screen" do
+    error = assert_raises(RuntimeError) { @phone.render("nowhere", "maya/support") }
+
+    assert_match "No screen named nowhere", error.message
+    assert_equal [@newer.id, @older.id], (@phone.sync && rows).map { |row| row["id"] }
+  end
+
   test "a change from elsewhere arrives over the feed and names what changed" do
     @phone.sync
     arrived = write("jo", "Receipt")

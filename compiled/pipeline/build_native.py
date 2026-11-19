@@ -54,7 +54,8 @@ def main():
         target = os.path.join(out, os.path.basename(source)[:-2] + ".o")
         run([cc, *cflags, *includes, "-c", source, "-o", target], log="cc.log")
         objects.append(target)
-    # The Spinel packages the app uses, and Spinel's runtime, go into the one archive a host links.
+    # The Spinel packages the app uses go into the archive. A host links Spinel's runtime
+    # (libspinel_rt.a) beside it, as the host below does.
     objects += [os.path.join(spinel_home, "packages", name, f"sp_{name}.o") for name in ("json", "stringio", "zlib")]
     library = os.path.join(B, "libinstant_record_app.a")
     if os.path.exists(library):

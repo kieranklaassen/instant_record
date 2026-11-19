@@ -141,8 +141,8 @@ cd demo && INSTANT_RECORD_NATIVE_HOST=../compiled/.build-native/host bin/rails t
 A screen is a Ruby class (`InstantRecord::Native::Screen`) whose `body` describes
 what to draw and whose `perform` answers a tap. The library has five functions,
 declared in `pipeline/native/instant_record_native.h`: `ir_boot` opens the
-SQLite file, and `ir_call` runs `render`, `action`, `sync_plan`, `handle_sync`,
-`handle_stream` and the rest, each taking and returning a string. A render
+SQLite file, and `ir_call` runs `render`, `action`, `sync`, `stream` and the rest the header
+lists, each taking and returning a string. A render
 returns the screen as JSON. The library never opens a connection: when it needs
 the server it calls the host back with one request and the host answers.
 

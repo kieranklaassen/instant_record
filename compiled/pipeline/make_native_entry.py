@@ -47,7 +47,7 @@ entry = f'''
 module NativeScreens
   def self.find(name, arg)
     case name
-{cases}    else InstantRecord::Native::Screen.new(arg)
+{cases}    else raise ArgumentError, "No screen named " + name
     end
   end
 end
@@ -70,6 +70,13 @@ end
 '''
 
 source = open(os.path.join(tree, "main_wasm.rb")).read()
+
+# The browser's page holds the event stream and the worker never polls. Here a sync pass
+# pulls through the host, and a host that also holds a stream hands its batches to "stream".
+streaming = "InstantRecord::Client.streaming = true\n"
+if source.count(streaming) != 1:
+    sys.exit("main_wasm.rb does not turn streaming on where expected")
+source = source.replace(streaming, "InstantRecord::Client.streaming = false\n")
 marker = "\nmodule WasmBridge\n"
 if source.count(marker) != 1:
     sys.exit("main_wasm.rb has no WasmBridge to start from")
