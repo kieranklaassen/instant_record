@@ -107,7 +107,7 @@ class MailboxScreen < InstantRecord::Native::Screen
     def older? = false
   end
 
-  browser_only do
+  client_only do
     def held(scope) = scope
 
     # What the last page of older mail said, or before any was asked for,

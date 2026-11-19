@@ -39,7 +39,7 @@ class MailAccess
     end
   end
 
-  browser_only do
+  client_only do
     def append(kind, parent)
       MailEntry.create!(mailbox_id: @inbox, author: @member, kind: kind, parent_id: parent)
     end
