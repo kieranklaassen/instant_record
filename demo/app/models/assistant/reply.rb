@@ -68,9 +68,9 @@ module Assistant
       nil
     end
 
-    # The endpoint answers any origin, so the per-address throttle alone does
-    # not bound what visitors spend. A cache store that cannot count allows
-    # nothing, and the count is as wide as the store: one machine for a file store.
+    # A turn reaches Rails from any browser's outbox, so no per-address throttle
+    # bounds what visitors spend. This count does. A cache store that cannot count
+    # allows nothing, and the count is as wide as the store: one machine for a file store.
     def within_budget?
       limit = ENV.fetch("ASSISTANT_DAILY_LIMIT", DAILY_LIMIT).to_i
       count = Rails.cache.increment("assistant/replies/#{Time.now.utc.to_date}", 1, expires_in: 2.days)

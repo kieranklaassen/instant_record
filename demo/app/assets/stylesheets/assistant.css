@@ -182,8 +182,12 @@
 .relay-starters button span { font-family: var(--mono); font-size: 13px; color: var(--accent); }
 
 .relay-transcript, .relay-foot { width: 100%; max-width: 760px; margin: 0 auto; }
-.relay-transcript { padding: 28px 0 8px; }
-.relay-welcome:not([hidden]) + .relay-transcript { display: none; }
+.relay-transcript { padding: 28px 0 8px; list-style: none; }
+/* An empty chat is its welcome, centred in the pane. */
+.relay-transcript:has(.relay-welcome) { min-height: 100%; padding: 0; display: grid; }
+/* While the browser's model writes, its words are plain text; the saved reply is drawn by the view. */
+.relay-turn[data-busy] .relay-response { white-space: pre-wrap; overflow-wrap: anywhere; }
+.relay-flag { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; }
 
 .relay .relay-user {
   width: fit-content;
@@ -343,7 +347,7 @@
   font-weight: 500;
 }
 
-.relay button.relay-older { display: block; margin: 12px auto; color: var(--accent); font-size: 13px; font-weight: 500; }
+.relay a.relay-older { display: block; width: fit-content; margin: 0 auto 20px; color: var(--accent); font-size: 13px; font-weight: 500; }
 
 @media (max-width: 700px) {
   .relay-sidebar { position: absolute; inset: 0 auto 0 0; width: 240px; z-index: 4; box-shadow: 9px 0 24px rgba(54, 46, 35, 0.1); }

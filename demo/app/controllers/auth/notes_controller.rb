@@ -42,11 +42,12 @@ module Auth
     # that scope the sync endpoints scope this page.
     server_only do
       def current_person = AuthPerson.find(session[:auth_person_id])
-      def notes_scope = InstantRecord::SyncScope.visible(AuthNote, current_person)
-      def deletable_scope = InstantRecord::SyncScope.writable(AuthNote, current_person)
+      def asker = InstantRecord::SyncScope.identity(request)
+      def notes_scope = InstantRecord::SyncScope.visible(AuthNote, asker)
+      def deletable_scope = InstantRecord::SyncScope.writable(AuthNote, asker)
       def note_owner = current_person&.id
 
-      private :current_person, :notes_scope, :deletable_scope, :note_owner
+      private :current_person, :asker, :notes_scope, :deletable_scope, :note_owner
     end
   end
 end

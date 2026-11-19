@@ -51,6 +51,8 @@ class IdentityResetTest < Minitest::Test
   end
 
   def teardown
+    # A poll called on its own leaves its notice for the pass that would follow.
+    InstantRecord::Client.notify_changed
     InstantRecord.sync
     InstantRecord::Client.transport = nil
     InstantRecord::Client.notifier = nil
@@ -96,9 +98,12 @@ class IdentityResetTest < Minitest::Test
     assert_equal [:mutations], @transport.posted.last.keys
   end
 
-  def test_a_reset_drops_the_named_types_the_outbox_and_the_cursor_and_nothing_else
+  def test_a_reset_drops_the_named_types_their_queued_writes_and_the_cursor_and_nothing_else
     sync_as("key-of-ada", [record("Secret", "s-1"), record("Open", "o-1")])
-    in_browser { @secret.create!(id: "s-2", title: "queued as ada") }
+    in_browser do
+      @secret.create!(id: "s-2", title: "queued as ada")
+      @open.find("o-1").update!(title: "queued for everyone")
+    end
     InstantRecord::SyncMetadata.set("history:Secret", "more")
     InstantRecord::SyncMetadata.set("compiled_models", "Open,Secret")
     @transport.events = [RESET, record("Secret", "s-3").merge("operation" => "create", "cursor" => 12)]
@@ -107,7 +112,7 @@ class IdentityResetTest < Minitest::Test
 
     assert_equal 0, @secret.count, "a change that follows the reset must not be applied either"
     assert_equal %w[o-1], @open.pluck(:id)
-    assert_equal 0, InstantRecord::OutboxMutation.count
+    assert_equal %w[Open], InstantRecord::OutboxMutation.pluck(:record_type)
     refute InstantRecord::Client.bootstrapped?
     assert_nil InstantRecord::Client.identity_key
     assert_nil InstantRecord::SyncMetadata.get("history:Secret")

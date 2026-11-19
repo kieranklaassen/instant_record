@@ -7,8 +7,18 @@ if (window = ENV["INSTANT_RECORD_SSE_WINDOW_SECONDS"])
   Rails.application.config.instant_record.sse_window_seconds = window.to_f
 end
 
-# Who a sync request comes from: the person the Auth demo's session names, or
-# nobody. Models that declare `syncable_to` are sent, and written, by this.
+# Who a sync request comes from, in the two ways the demo knows a browser: the
+# token it keeps for itself (the Assistant's `sync_scope :visitor_id`), and the
+# person its session names (the Auth demo's `syncable_to` and `writable_by`).
+# The key changes when the person does, which is what tells a browser to drop
+# what it was sent as someone else.
+DemoAsker = Struct.new(:token, :person) do
+  def to_s = token.to_s
+  def sync_identity_key = person ? person.id : "anonymous"
+end
+
 InstantRecord.configure do |config|
-  config.sync_identity = ->(request) { AuthPerson.find(request.session[:auth_person_id]) }
+  config.scope_from = lambda do |request|
+    DemoAsker.new(request.params["scope"], AuthPerson.find(request.session[:auth_person_id]))
+  end
 end

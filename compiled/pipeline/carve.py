@@ -26,9 +26,10 @@ REMOVE = [
     # The Inbox speaks Inertia's protocol itself in the browser (its controller's
     # browser_only half); the gem's setup stays on the server.
     "config/initializers/inertia_rails.rb", "app/views/inertia.html.erb",
-    "app/controllers/source_controller.rb", "app/controllers/assistant/replies_controller.rb",
-    # RubyLLM answers on the server only. Offline, the page asks the browser's own model.
-    "config/initializers/ruby_llm.rb", "app/models/assistant",
+    "app/controllers/source_controller.rb",
+    # RubyLLM answers on the server only: its setup, the reply and the job that asks for
+    # one stay there. The browser asks its own model and saves the answer as a record.
+    "config/initializers/ruby_llm.rb", "app/models/assistant", "app/jobs/assistant",
     "app/controllers/slack/resets_controller.rb", "app/controllers/email/sync_controller.rb", "app/models/mailbox.rb",
     # The shell snapshot is built on the server, from the server's Mailbox.
     "app/models/mail_shell.rb", "app/jobs/email/shell_build_job.rb",
@@ -64,8 +65,10 @@ open(os.path.join(app, "config/routes.rb"), "w").write('''Rails.application.rout
     post "ship", to: "releases#create"
     delete "ship", to: "releases#destroy"
   end
-  get "assistant", to: "assistant/chats#index"
-  get "assistant/history", to: "assistant/history#index"
+  namespace :assistant do
+    resources :turns, only: [:create, :update]
+    root "turns#index" # /assistant
+  end
   get "email", to: "email/mailboxes#index"
   post "email", to: "email/mailboxes#create"
   namespace :console do

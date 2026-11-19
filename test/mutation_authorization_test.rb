@@ -22,7 +22,7 @@ class MutationAuthorizationTest < Minitest::Test
 
   def apply(identity, operation, id, type: "Item", **changes)
     mutation = { id: "m-#{@sequence += 1}", record_type: type, record_id: id, operation: operation, changes: changes }
-    with_sync_identity { on_server { InstantRecord::MutationApplier.apply(mutation, identity) } }
+    on_server { InstantRecord::MutationApplier.apply(mutation, identity) }
   end
 
   def reply(result) = result.except(:mutation_id)
@@ -148,9 +148,7 @@ class MutationAuthorizationTest < Minitest::Test
     mutation = { id: "replayed", record_type: "Item", record_id: "new", operation: "create",
       changes: { "title" => "mine", "state" => "ada" } }
 
-    first, second = with_sync_identity do
-      on_server { 2.times.map { InstantRecord::MutationApplier.apply(mutation, @ada) } }
-    end
+    first, second = on_server { 2.times.map { InstantRecord::MutationApplier.apply(mutation, @ada) } }
 
     assert_equal first, second
     assert_equal 1, @model.count
@@ -161,15 +159,6 @@ class MutationAuthorizationTest < Minitest::Test
     InstantRecord.sync(@model, open_model)
 
     result = apply(nil, "create", "o", "title" => "for all", type: "Open")
-
-    assert_equal "applied", result[:status]
-  end
-
-  def test_nothing_configured_takes_writes_to_a_declared_model_from_anyone
-    mutation = { id: "open", record_type: "Item", record_id: "new", operation: "create",
-      changes: { "title" => "anon", "state" => "ben" } }
-
-    result = on_server { InstantRecord::MutationApplier.apply(mutation) }
 
     assert_equal "applied", result[:status]
   end

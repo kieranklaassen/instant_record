@@ -3,18 +3,21 @@ module InstantRecord
   # change-log row, and idempotency-ledger row, in one transaction. This is
   # the server half of the sync protocol; the HTTP layer above it is thin.
   class MutationApplier
-    # A write the identity may not make. Raised inside the transaction, so
+    # A write the sender may not make. Raised inside the transaction, so
     # whatever the write did is rolled back with it.
     NotPermitted = Class.new(StandardError)
 
+    # `identity` is the sender (SyncScope.identity). It only matters to a model
+    # that declares sync_scope, or syncable_to and writable_by.
     def self.apply(mutation, identity = nil)
       new(mutation, identity).apply
     end
 
     def initialize(mutation, identity = nil)
       @mutation = mutation
-      @identity = identity
       @changes = (mutation[:changes] || {}).to_h
+      @identity = identity
+      @scope = SyncScope.token(identity)
     end
 
     # Replayed mutation ids return their original result without re-applying.
@@ -60,11 +63,21 @@ module InstantRecord
     private
 
     def perform(model)
+      # A scoped model's rows are the sender's own: the scope column is never
+      # taken from the client, and another scope's row is as good as absent.
+      if (column = model.instant_record_sync_scope)
+        return { status: "rejected", reason: "a scope is required" } unless @scope
+        @changes = @changes.except(column)
+        @changes[column] = @scope if @mutation[:operation] == "create"
+        existing = model.find_by(id: @mutation[:record_id])
+        return { status: "rejected", reason: "record not found" } if existing && existing[column] != @scope
+      end
+
       case @mutation[:operation]
       when "create"
-        # An id that belongs to a record this identity cannot see is answered
-        # as any other create it may not make, before the database can say
-        # "id already exists" about a row the client was never shown.
+        # An id that belongs to a record the sender cannot see is answered as
+        # any other create it may not make, before the database can say "id
+        # already exists" about a row the client was never shown.
         raise NotPermitted if hidden?(model)
 
         record = model.new(@changes.merge("id" => @mutation[:record_id]))
@@ -93,7 +106,7 @@ module InstantRecord
           record.sync_state = "synced"
           record.save!
           # Again after the write: a change of owner or audience must leave the
-          # record somewhere this identity may still write.
+          # record somewhere the sender may still write.
           permit!(model)
           log_change(record, "update")
           { status: "applied", version: record.server_version }
@@ -107,7 +120,7 @@ module InstantRecord
 
         permit!(model) if record
         record&.destroy!
-        log_destroy(model)
+        log_destroy(model, record)
         { status: "applied" }
       else
         { status: "rejected", reason: "unknown operation" }
@@ -125,36 +138,39 @@ module InstantRecord
         record_id: record.id,
         operation: operation,
         version: record.server_version,
-        attributes_payload: InstantRecord.wire_attributes(record.attributes)
+        attributes_payload: InstantRecord.wire_attributes(record.attributes),
+        scope: InstantRecord.scope_of(record)
       )
     end
 
-    def log_destroy(model)
+    def log_destroy(model, record)
       Change.create!(
         record_type: model.name,
         record_id: @mutation[:record_id],
         operation: "destroy",
         version: 0,
-        attributes_payload: {}
+        attributes_payload: {},
+        scope: record && InstantRecord.scope_of(record)
       )
     end
 
-    # The server's row as this identity may see it, for a client to roll back
-    # to. Every rejection reads through here, so none carries a hidden record.
+    # The server's row as the sender may see it, for a client to roll back to.
+    # Every rejection reads through here, so none carries a hidden record.
     def server_attributes_for(model)
       record = model && SyncScope.visible(model, @identity).find_by(id: @mutation[:record_id])
       InstantRecord.wire_attributes(record.attributes) if record
     end
 
-    # The record exists and this identity may not see it.
+    # The record exists and a `syncable_to` rule keeps it from the sender.
     def hidden?(model)
-      SyncScope.scoped?(model) && model.exists?(id: @mutation[:record_id]) &&
+      model.instant_record_visibility && model.exists?(id: @mutation[:record_id]) &&
         !SyncScope.visible(model, @identity).exists?(id: @mutation[:record_id])
     end
 
-    # The record, as it stands inside this transaction, is one this identity may write.
+    # The record, as it stands inside this transaction, is one the sender may
+    # write. A `sync_scope` column is settled before the write (see perform).
     def permit!(model)
-      return unless SyncScope.scoped?(model)
+      return unless model.instant_record_writability
 
       raise NotPermitted unless SyncScope.writable(model, @identity).exists?(id: @mutation[:record_id])
     end

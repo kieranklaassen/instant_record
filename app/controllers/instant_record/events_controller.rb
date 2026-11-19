@@ -20,10 +20,10 @@ module InstantRecord
 
     class EventStream
       # `identity` is who the stream was opened by, for as long as it stays
-      # open: the cookie is read once, when the request arrives.
+      # open: the request is read once, when it arrives.
       def initialize(cursor:, deadline:, heartbeat: 15.0, identity: nil)
-        @identity = identity
         @cursor = cursor
+        @identity = identity
         @deadline = deadline
         @heartbeat = heartbeat
         @last_write = Time.current
@@ -31,7 +31,8 @@ module InstantRecord
 
       def each
         loop do
-          SyncScope.events_for(Change.poll(@cursor), @identity).each do |id, event|
+          changes = Change.poll(@cursor, scope: SyncScope.token(@identity))
+          SyncScope.events_for(changes, @identity).each do |id, event|
             @cursor = id
             @last_write = Time.current
             yield "id: #{id}\nevent: change\ndata: #{event.to_json}\n\n"
@@ -74,9 +75,9 @@ module InstantRecord
 
       self.response_body = EventStream.new(
         cursor: cursor,
+        identity: identity,
         deadline: Time.current + window_seconds,
-        heartbeat: Rails.application.config.instant_record.sse_heartbeat_seconds.to_f,
-        identity: identity
+        heartbeat: Rails.application.config.instant_record.sse_heartbeat_seconds.to_f
       )
     end
 

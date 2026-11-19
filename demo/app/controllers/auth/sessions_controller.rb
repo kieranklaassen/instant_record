@@ -44,7 +44,7 @@ module Auth
         # Counts, never contents: how many notes exist, and how many of them
         # this session may be sent.
         notes_on_server: AuthNote.count,
-        notes_for_you: InstantRecord::SyncScope.visible(AuthNote, person).count
+        notes_for_you: InstantRecord::SyncScope.visible(AuthNote, InstantRecord::SyncScope.identity(request)).count
       }
     end
   end

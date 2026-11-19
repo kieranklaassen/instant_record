@@ -190,7 +190,25 @@ end
 **Where authorization actually lives:** browser-side checks are UX, never enforcement — the user owns the client and everything in it. Real enforcement has exactly two places, both on the server:
 
 1. **The mutations endpoint** — server-side validations and `server_only` model rules reject writes the client wasn't allowed to make; the client rolls back.
-2. **What you sync down** — a client can only render what the change stream delivered to it. (Per-user scoping of the stream itself — `syncable_to` — is on the roadmap; today the PoC syncs every registered model to every client.)
+2. **What you sync down** — a client can only render what the change stream delivered to it. A model that declares `sync_scope` is sent only to the client its rows belong to (below); every other model syncs to every client.
+
+#### Rows that belong to one client: `sync_scope`
+
+```ruby
+class Note < ApplicationRecord
+  include InstantRecord::Syncable
+  sync_scope :user_id   # the column that says whose row this is
+end
+
+# config/initializers/instant_record.rb
+InstantRecord.config.scope_from = ->(request) { request.session[:user_id] }
+```
+
+`scope_from` reads a sync request's scope. With it and `sync_scope`, the sync endpoints keep a model's rows to their owner: the bootstrap, the change stream and history pages carry the rows whose column equals the request's scope, plus the rows where it is `NULL`, which belong to everyone. A create is stamped with the sender's scope whatever it claims, and a row of another scope cannot be changed or removed (the mutation is rejected, and the client rolls back). A request with no scope gets only the `NULL` rows and can write nothing to the model.
+
+The default `scope_from` trusts a `scope` parameter, and the compiled site sends one: a random token it keeps in `localStorage`. That makes a browser its own scope with no sign-in, which is what the demo's Assistant uses. It is a capability, not authentication: anyone holding the token reads those rows. An app with accounts should read the scope from its session, as above.
+
+Limits, as built: a row's scope is fixed at create, a scoped model with a `sync_window` ranks its window before the scope is applied, and the Ruby client (`InstantRecord::Client`, which the native build uses) sends no scope yet.
 
 A `server_only` controller filter protects the server-rendered surface; it cannot and need not protect the browser's local rendering.
 
@@ -356,7 +374,7 @@ class Issue < ApplicationRecord
 end
 ```
 
-Also out of scope for the PoC, on purpose: CRDTs, Postgres logical replication, multi-tab leader election, attachments, authentication/authorization on the sync endpoints, and migration generators. The Inbox demo runs as an Inertia page in React, with its props kept live from the local database: `docs/solutions/2026-11-19-inbox-on-inertia.md` says what held and what the gem would need to offer it properly.
+Also out of scope for the PoC, on purpose: CRDTs, Postgres logical replication, multi-tab leader election, attachments, authentication on the sync endpoints (beyond `sync_scope`), and migration generators. The Inbox demo runs as an Inertia page in React, with its props kept live from the local database: `docs/solutions/2026-11-19-inbox-on-inertia.md` says what held and what the gem would need to offer it properly.
 
 ## History
 

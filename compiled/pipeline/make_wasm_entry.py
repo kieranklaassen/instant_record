@@ -122,11 +122,11 @@ if InstantRecord::SyncMetadata.get("compiled_models") != model_set
 end
 Tep::APP.name = Rails.application.global_id_app
 Message.sync_window(limit: 50, partition_by: :channel_id)
-InstantRecord.sync(Issue, ChatUser, Channel, Message, Note, MailEntry)
+InstantRecord.sync(Issue, ChatUser, Channel, Message, Note, MailEntry, AssistantChat, AssistantTurn)
 # JS worker owns non-blocking inbound polling; Client#sync_pass handles bootstrap + outbox drain.
 InstantRecord::Client.streaming = true
 '''
-models = ["Issue", "ChatUser", "Channel", "Message", "Note", "MailEntry"]
+models = ["Issue", "ChatUser", "Channel", "Message", "Note", "MailEntry", "AssistantChat", "AssistantTurn"]
 if os.environ.get("INSTANT_RECORD_APP"):
     with open(os.environ["INSTANT_RECORD_MIGRATION_PLAN"]) as file:
         plan = json.load(file)
@@ -148,7 +148,7 @@ if os.environ.get("INSTANT_RECORD_APP"):
     if not models or not all(re.fullmatch(r"[A-Z]\w*(?:::[A-Z]\w*)*", name) for name in models):
         sys.exit("Declare at least one named model that includes InstantRecord::Syncable.")
     entry = entry.replace("Message.sync_window(limit: 50, partition_by: :channel_id)\n", "")
-    entry = entry.replace("InstantRecord.sync(Issue, ChatUser, Channel, Message, Note, MailEntry)", "InstantRecord.sync(" + ", ".join(models) + ")")
+    entry = entry.replace("InstantRecord.sync(Issue, ChatUser, Channel, Message, Note, MailEntry, AssistantChat, AssistantTurn)", "InstantRecord.sync(" + ", ".join(models) + ")")
 entry = entry.replace("COMPILED_MODEL_SET", ",".join(sorted(models)))
 open(os.path.join(root, "main_wasm.rb"), "w").write(head + entry)
 print("wrote main_wasm.rb:", len(head.splitlines()), "lines of main.rb +", len(entry.splitlines()), "entry lines")

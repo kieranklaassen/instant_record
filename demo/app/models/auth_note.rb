@@ -16,7 +16,8 @@ class AuthNote < ApplicationRecord
     # Signed out: public notes. Signed in: those, the members' notes and your
     # own. An admin also sees the admins' notes. A note for its owner alone is
     # seen by its owner alone.
-    syncable_to do |person|
+    syncable_to do |asker|
+      person = asker&.person
       if person.nil?
         where(audience: "everyone")
       elsif person.admin?
@@ -27,8 +28,8 @@ class AuthNote < ApplicationRecord
     end
 
     # You write your own notes and nobody else's. Signed out, you write nothing.
-    writable_by do |person|
-      person ? where(owner_id: person.id) : none
+    writable_by do |asker|
+      asker&.person ? where(owner_id: asker.person.id) : none
     end
 
     # The demo's starting notes, one or more for each audience. Idempotent.

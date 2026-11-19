@@ -146,16 +146,20 @@ module InstantRecord
       end
 
       # The server says this browser synced as someone else. Everything it was
-      # sent for that person goes, with the writes they had queued, and the
-      # next pass starts again from a bootstrap as whoever is here now.
+      # sent for that person goes, with the writes they had queued to those
+      # models, and the next pass starts again from a bootstrap as whoever is
+      # here now. Models every client may see keep their queued writes.
       def reset(event)
+        types = Array(event["types"])
         applying_remote do
-          Array(event["types"]).each do |type|
+          types.each do |type|
             model = InstantRecord.synced_model(type)
             model.delete_all if model
           end
         end
-        OutboxMutation.delete_all
+        OutboxMutation.all.each do |mutation|
+          mutation.destroy if types.include?(mutation.record_type)
+        end
         SyncMetadata.all.each do |entry|
           entry.destroy if entry.key == "cursor" || entry.key == "identity" || entry.key.start_with?("history:")
         end

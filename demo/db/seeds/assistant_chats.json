@@ -1,0 +1,132 @@
+[
+  {
+    "id": "chat-scrollback",
+    "title": "Keep my place in chat",
+    "turns": [
+      [
+        "I’m reading yesterday’s messages. Why does the channel jump when an older page loads?",
+        "Imagine the first visible line is “Meet at noon.” Adding twenty older messages above it pushes that line down the page. The scrollbar offset still points to the same pixel, but that pixel now belongs to a different message."
+      ],
+      [
+        "What should I remember before fetching more?",
+        "Keep the ID of the first visible message and its distance from the top of the scroll container. A stable message ID still points to the right sentence after the list changes."
+      ],
+      [
+        "Why use an ID instead of the row index?",
+        "If the visible message is row 3 and you insert 20 rows, it becomes row 23. Its ID stays the same. Reaction counts and timestamps can change too, so neither is a good identity."
+      ],
+      [
+        "Show me the measurement.",
+        "Use the container as your reference point. This also works when the conversation sits below a toolbar.\n\n```js\nconst offset = row.getBoundingClientRect().top\n  - scroller.getBoundingClientRect().top\n```"
+      ],
+      [
+        "And after the older page arrives?",
+        "Find the same row again. If it used to be 12 pixels below the top and is now 460 pixels below it, scroll down by 448 pixels. The reader sees the same line in the same place."
+      ],
+      [
+        "What if the reader keeps scrolling while the request runs?",
+        "Measure immediately before inserting the rows. A measurement taken when the request started describes where the reader used to be. On a slow connection that could be several screens away."
+      ],
+      [
+        "Two pages share the same boundary message. Which copy wins?",
+        "Merge by message ID before inserting. The overlap is useful: it lets the server include the boundary item without making the browser show it twice. If the server sends an updated revision, update the existing row."
+      ],
+      [
+        "Would a timestamp make a good page cursor?",
+        "Two messages can share a timestamp. Order by creation time and ID together, then carry both into the next request. That gives the boundary a deterministic position."
+      ],
+      [
+        "Suppose I switch channels halfway through the fetch.",
+        "Associate the request with the channel that started it. Cancel on navigation and check the channel again before inserting. Otherwise a late result from Support can land above a conversation in Design."
+      ],
+      [
+        "How should new messages behave while I’m reading the middle?",
+        "Leave the viewport where it is. Add the messages below and offer a jump to the latest message. The reader can finish the paragraph before deciding to move."
+      ],
+      [
+        "What about when I’m already at the bottom?",
+        "Measure the gap before appending. A small tolerance handles fractional pixels.\n\n```js\nconst gap = scroller.scrollHeight\n  - scroller.clientHeight - scroller.scrollTop\nconst following = gap < 64\n```\n\nIf the reader was following the conversation, keep the newest line visible."
+      ],
+      [
+        "How do I test this without relying on my eyes?",
+        "Record the visible row’s ID and top offset, prepend a page, then measure again. Assert the ID matches and the offset differs by at most a pixel. Repeat while a delayed request is in flight."
+      ],
+      [
+        "What do we ship first?",
+        "Start with three checks: opening a thread lands on its newest reply, scrolling back leaves the composer in reach, and a new reply doesn’t pull someone out of history. Try scrolling to the first question in this thread, then use Latest to return here."
+      ]
+    ]
+  },
+  {
+    "id": "inbox-delivery",
+    "title": "Trace a missing email",
+    "turns": [
+      [
+        "Maya sent a message, but Theo can’t see it. Where do we start?",
+        "Open Support in two independent browser profiles. The sender can see her own local write before the server has accepted it. Theo’s window tests the other half of delivery."
+      ],
+      [
+        "Both windows say Support. What’s the next clue?",
+        "Open the Sync inspector on Maya’s side. Look for the mutation POST, its HTTP status, and the pending count. A successful bootstrap only tells you the app could read existing mail."
+      ],
+      [
+        "It says one pending and HTTP 400.",
+        "Check whether Rails reached the mailbox controller. A JSON parsing error can reject a valid-looking request before any inbox code or SQL runs."
+      ],
+      [
+        "Why did the local test pass?",
+        "Check the dependencies installed in the deployed image. In this demo the production build resolved a different JSON major version. The read endpoint didn’t exercise the incompatible parser call."
+      ],
+      [
+        "How can we check the parser without filling Support with test mail?",
+        "Send the deployment probe. It submits a well-formed envelope with an unsupported operation. A structured rejection with the same mutation ID shows the parser and validation ran without creating mail."
+      ],
+      [
+        "And how do we prove real delivery?",
+        "Leave Theo’s Support window open. Send one labeled conversation from Maya, wait for it to appear for Theo, then reply from Theo. Watch for the reply in Maya’s original window without refreshing."
+      ],
+      [
+        "What about Billing?",
+        "Keep a third window on Billing while testing Support. The Support message should stay out of that list. An inbox name in the interface is only meaningful if the server also scopes its change feed."
+      ],
+      [
+        "What happens to the message that was already pending?",
+        "Keep the sending window online during recovery. The queued write can retry. Confirm Theo gets one copy, then archive the test conversation so the inbox is tidy."
+      ]
+    ]
+  },
+  {
+    "id": "offline-todos",
+    "title": "Build an offline Todo",
+    "turns": [
+      [
+        "Can a checkbox feel instant on a train connection?",
+        "Let the click update the local record first. The list can show the new state as soon as the local transaction commits, even while the connection is unavailable."
+      ],
+      [
+        "Where do we remember what Rails still needs?",
+        "Write a mutation to the outbox in the same transaction. Saving the new checkbox state and its pending mutation together avoids a visible change with nothing left to send."
+      ],
+      [
+        "Can I see the open items with a small query?",
+        "Yes. Ask for just the titles you need.\n\n```ruby\nIssue.where(state: \"open\")\n     .order(created_at: :desc)\n     .limit(5)\n     .pluck(:title)\n```"
+      ],
+      [
+        "What if the tab closes before reconnecting?",
+        "Open the demo again with Offline still checked. The issue should reappear from its saved local state, and the inspector should still show a pending write. That checks persistence before you test delivery."
+      ],
+      [
+        "The server saved the mutation, but the response got lost.",
+        "Retry with the same mutation ID. The server can recognize the write it already applied and return its acknowledgment again. Generating a new ID for each attempt would turn one click into several operations."
+      ],
+      [
+        "When do we clear the pending indicator?",
+        "Wait for an acknowledgment for that mutation. If the user edited the issue again during the request, that newer change still needs its own acknowledgment."
+      ],
+      [
+        "What’s a good end-to-end check?",
+        "Create and toggle an issue offline, reload, then reconnect. Open a fresh profile and find the same issue in the expected state. That final read shows the change made it all the way back to Rails."
+      ]
+    ]
+  }
+]

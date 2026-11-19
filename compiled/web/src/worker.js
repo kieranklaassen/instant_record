@@ -13,6 +13,9 @@ const QUIET_MS = 30;
 const DRAIN_RETRY_BASE_MS = 500;
 const DRAIN_RETRY_CAP_MS = 10000;
 
+// This browser's sync scope: an unguessable token the page keeps (main.js) and every sync
+// request carries, so the server can keep a scoped model's rows to the browser that owns them.
+let syncScope = "";
 let simulation = { offline: false, latencyMs: 0, report: false };
 const history = [];
 
@@ -43,7 +46,8 @@ async function fetchReply(method, path, body = "", endpoint = syncEndpoint) {
       options.headers = { "Content-Type": "application/json" };
       options.body = body;
     }
-    const response = await fetch(url, options);
+    const scoped = syncScope ? url + (url.includes("?") ? "&" : "?") + "scope=" + encodeURIComponent(syncScope) : url;
+    const response = await fetch(scoped, options);
     text = await response.text();
     outcome = status = response.status;
   } catch {
@@ -417,6 +421,7 @@ async function earlyBootstrap(path) {
 
 async function boot(payload = {}) {
   const scope = mailboxScope(payload.path || "/");
+  syncScope = typeof payload.scope === "string" ? payload.scope : "";
   openSnapshot(scope);
   changes = new BroadcastChannel("instant-record-spinel-changes" + (scope ? "/" + scope : ""));
   changes.onmessage = () => { if (host) self.postMessage({ type: "records_changed" }); };
@@ -548,14 +553,13 @@ self.onmessage = async (event) => {
     }
     if (type === "serverRequest") {
       const url = new URL(payload.path, self.location.origin);
-      const chat = import.meta.env.VITE_SHARED_INBOX_DEMO && payload.method === "POST" && url.pathname === "/assistant/replies";
-      const allowed = chat || (payload.method === "GET" && url.pathname === "/receipts/probe") ||
+      const allowed = (payload.method === "GET" && url.pathname === "/receipts/probe") ||
         (payload.method === "POST" && (url.pathname === "/slack/reset" ||
           (import.meta.env.VITE_SHARED_INBOX_DEMO && url.pathname === new URL(syncEndpoint, self.location.origin).pathname + "/incoming" &&
             url.pathname.startsWith("/email/sync/"))));
       if (!allowed) throw new Error("Unknown demo server action");
       const root = publicEndpoint.replace(/\/instant_record\/?$/, "");
-      const reply = await fetchReply(payload.method, url.pathname + url.search, chat ? payload.body : "", root);
+      const reply = await fetchReply(payload.method, url.pathname + url.search, "", root);
       return self.postMessage({ id, result: reply });
     }
     if (type === "boot") return self.postMessage({ id, result: await boot(payload) });

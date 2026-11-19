@@ -25,6 +25,7 @@ ActiveRecord::Schema.define do
   create_table :items, id: :string, force: true do |t|
     t.string :title
     t.string :state
+    t.string :owner
     t.integer :server_version, null: false, default: 0
     t.string :sync_state, null: false, default: "synced"
     t.timestamps
@@ -70,24 +71,19 @@ module InstantRecordTestHelpers
     InstantRecord::AppliedMutation.delete_all
   end
 
-  # A person as an app would hand one to the gem: anything with an id.
-  Person = Struct.new(:id)
-
-  # Runs the block with identities configured, the way an app's initializer
-  # would leave things. The identity is whatever the "request" is.
-  def with_sync_identity(&block)
-    InstantRecord.config.sync_identity = ->(request) { request }
-    block.call
-  ensure
-    InstantRecord.config.sync_identity = nil
+  # Who is asking, as an app's `scope_from` would hand it to the gem. An id of
+  # nil is a browser nobody is signed in on. It names its own key, so a client
+  # can tell when the person behind it changes.
+  Person = Struct.new(:id) do
+    def sync_identity_key = id || "anonymous"
   end
 
   # Rows whose `state` is "public" are for everyone; any other state names the
   # one person who may see the row. Only that person may write it.
   def scoped_model(name = "Item")
     syncable_model(name) do
-      syncable_to { |who| who ? where(state: ["public", who.id]) : where(state: "public") }
-      writable_by { |who| who ? where(state: who.id) : none }
+      syncable_to { |who| who&.id ? where(state: ["public", who.id]) : where(state: "public") }
+      writable_by { |who| who&.id ? where(state: who.id) : none }
     end
   end
 end
