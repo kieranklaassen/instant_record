@@ -318,6 +318,7 @@ DEPENDENCIES
   falcon
   importmap-rails
   instant_record!
+  json (< 3)
   metrics
   pg (~> 1.1)
   propshaft
