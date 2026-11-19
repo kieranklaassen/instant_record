@@ -1,5 +1,5 @@
 import { Head, router, usePage } from "@inertiajs/react"
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import {
   useHistory, useKeyboardNavigation, useLiveParam, useLiveSearch, useLiveWindow, useSelection, useShortcuts, useStableRows, useUndoable,
 } from "instant_record"
@@ -29,6 +29,35 @@ function useSettled(value, ms) {
     return () => clearTimeout(timer)
   }, [value, ms])
   return settled
+}
+
+// The page is held unpainted (mail.css) until the Inbox is whole: the list
+// has drawn its rows, or has none to draw. Then it is painted once. A list
+// that opens at its top has its rows in the first draw; one that opens
+// deeper scrolls first, and the page waits for it.
+function usePaintWhenDrawn(count) {
+  useLayoutEffect(() => {
+    const drawn = () => !!document.querySelector(".mail-row")
+    const show = () => { document.documentElement.dataset.mailReady = "" }
+    if (count === 0 || drawn()) return show()
+    // A list that scrolls to its place draws a row to measure, takes it away
+    // and draws the real ones. Rows that are still there a frame on are real.
+    let frame
+    const watch = new MutationObserver(() => {
+      if (!drawn()) return
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => {
+        if (!drawn()) return
+        watch.disconnect()
+        show()
+      })
+    })
+    watch.observe(document.body, { childList: true, subtree: true })
+    return () => {
+      watch.disconnect()
+      cancelAnimationFrame(frame)
+    }
+  }, [])
 }
 
 // An ordinary Inertia page: its state is its props and its address.
@@ -77,6 +106,7 @@ export default function Inbox({ member, inbox, inboxes, people, mail, thread, co
     [loaded, mail.unread_count, undoable.held, actions.marks],
   )
   const ids = useMemo(() => rows.map((row) => row.id), [rows])
+  usePaintWhenDrawn(rows.length)
   const { more, older, failed } = useLiveWindow({ prop: "mail", window: mail, model: "MailEntry", cursor: mailCursor, search: q })
   const { focusedId, focus, move, register } = useKeyboardNavigation({ ids, more, onNeed: older, startAt: address })
   const selection = useSelection(ids)

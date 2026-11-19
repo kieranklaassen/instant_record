@@ -1,9 +1,11 @@
-import { createElement, useEffect, useMemo, useRef } from "react"
+import { createElement, useEffect, useMemo, useRef, useState } from "react"
 import { Virtuoso } from "react-virtuoso"
 
 // Virtuoso numbers rows from `firstItemIndex`. Lowering it by the rows that
 // arrived above the reader keeps the row they are on where it is.
 const START = 1_000_000
+// Rows in the first draw, before the list knows its height: a screenful.
+const FIRST_DRAW = 20
 
 function useSteadyStart(rows, anchor) {
   const before = useRef({ start: START, at: new Map() })
@@ -34,6 +36,14 @@ export default function LiveList({ rows, children, onEnd, register, openAt = 0, 
   const now = useRef({})
   now.current = { rows, start }
 
+  // Opened at its top, the list's first draw holds rows. Left to itself it
+  // draws empty, measures its box and draws again, and the reader sees the
+  // empty one. Opened deeper it has to scroll before it can show a row, so
+  // there it keeps the empty draw.
+  const [opening] = useState(() => (openAt > 0
+    ? { initialTopMostItemIndex: { index: Math.min(openAt, rows.length - 1), align: "center" } }
+    : { initialItemCount: Math.min(rows.length, FIRST_DRAW) }))
+
   useEffect(() => register?.((index) => list.current?.scrollIntoView({ index, behavior: "auto" })), [register])
 
   // Plain createElement, so the package needs no JSX transform where it is installed.
@@ -42,7 +52,7 @@ export default function LiveList({ rows, children, onEnd, register, openAt = 0, 
     className,
     data: rows,
     firstItemIndex: start,
-    initialTopMostItemIndex: { index: Math.min(openAt, Math.max(rows.length - 1, 0)), align: "center" },
+    ...opening,
     computeItemKey: (_, row) => row.id,
     increaseViewportBy: 600,
     endReached: () => onEnd?.(),

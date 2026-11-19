@@ -156,10 +156,12 @@ function syncPass() {
   return draining;
 }
 
-async function drain(initial = false) {
+// `early` is a bootstrap asked for before the app was up (earlyBootstrap). One that did not
+// arrive is asked for again here.
+async function drain(initial = false, early = null) {
   const { plan, revision } = await withSnapshot("readonly", () => ({ plan: host.syncPlan(), revision: snapshotRevision }));
   const push = plan.push ? await fetchReply("POST", "/mutations", plan.push) : null;
-  const snapshot = plan.bootstrap ? await fetchReply("GET", "/bootstrap") : null;
+  const snapshot = plan.bootstrap ? (early?.status === 200 ? early : await fetchReply("GET", "/bootstrap")) : null;
 
   // An edit made during the network wait takes precedence over an old rejection or
   // snapshot. Retry from SQLite with the original mutation IDs for idempotent replay.
@@ -391,6 +393,20 @@ async function fetchShell(scope, path) {
   }
 }
 
+// A browser with no database of its own will ask for a first sync as soon as the app is up.
+// Nothing in the question depends on the app, so it is asked while the module compiles and the
+// answer is waiting when the app wants it. A build that loads a shell has no use for it.
+async function earlyBootstrap(path) {
+  const asked = new URL(path || "/", self.location.origin).searchParams.get("shell") === "1";
+  if (shellFingerprint && (shellAlways || asked)) return null;
+  try {
+    if ((await withFiles("readonly", get => get(SCHEMA))) != null) return null;
+    return await fetchReply("GET", "/bootstrap");
+  } catch {
+    return null;
+  }
+}
+
 async function boot(payload = {}) {
   const scope = mailboxScope(payload.path || "/");
   syncScope = typeof payload.scope === "string" ? payload.scope : "";
@@ -401,6 +417,7 @@ async function boot(payload = {}) {
   const started = performance.now();
   // The shell downloads while the module compiles.
   const shellFetch = fetchShell(scope, payload.path);
+  const bootstrapFetch = earlyBootstrap(payload.path);
   const module = payload.module || await WebAssembly.compileStreaming(fetch(import.meta.env.VITE_WASM_URL || "/app.wasm"));
   const compiled = performance.now();
   let storageMs, runtimeMs;
@@ -471,7 +488,7 @@ async function boot(payload = {}) {
     restored = await open();
   }
   const bootstrapStart = performance.now();
-  if (!restored && !shell) await drain(true);
+  if (!restored && !shell) await drain(true, await bootstrapFetch);
   // The shell is as old as its cursor. Ask for what came after it now, not at the first
   // interval, and do not hold the first page for the answer.
   if (shell) pollChanges();
