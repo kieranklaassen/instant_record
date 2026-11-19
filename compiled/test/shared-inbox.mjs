@@ -15,6 +15,21 @@ try {
     await page.getByRole("heading", { name: "Shared inbox" }).waitFor();
   };
   await open(maya);
+  // The page names its script after the script's content, and the shell fetched it early
+  // under that name: a browser that kept an earlier build's script does not run it here.
+  const script = await maya.evaluate(async () => {
+    const { src } = document.querySelector('script[src*="/assets/inbox.js"]');
+    const bytes = await (await fetch(src, { cache: "no-store" })).arrayBuffer();
+    const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map(byte => byte.toString(16).padStart(2, "0")).join("");
+    const address = new URL(src);
+    // A folder of the site answers with the shell, and the app is not asked for it.
+    const shell = await (await fetch("/harness/", { cache: "no-store" })).text();
+    return { version: address.searchParams.get("v"), digest, warmed: shell.includes(address.pathname + address.search) };
+  });
+  if (await maya.evaluate(() => !!window.__spinel)) {
+    assert.equal(script.version, script.digest.slice(0, 10), "the Inbox's script is named after its content");
+    assert.ok(script.warmed, "the shell fetches the Inbox's script under the name the page asks for");
+  }
   await open(theo, "?member=theo&inbox=support");
   await maya.getByRole("heading", { name: "Support inbox" }).waitFor();
   assert.equal(await theo.locator(".mail-folders a").count(), 1);
