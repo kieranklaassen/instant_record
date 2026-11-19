@@ -3,16 +3,18 @@
   <% if @mail_entries.empty? %><p class="mail-empty-list">No open conversations.</p><% end %>
   <% @mail_entries.each do |entry| %>
     <a class="mail-row" data-id="<%= entry.id %>" data-at="<%= entry.created_at.utc.iso8601(6) %>" href="/email?member=<%= @member %>&amp;inbox=<%= @inbox %>&amp;before=<%= @before_id %>&amp;at=<%= @before_at %>&amp;thread=<%= entry.id %>" aria-current="<%= @selected&.id == entry.id %>">
-      <span class="mail-row-meta"><b><% if MailDirectory.inboxes(entry.author).empty? %><%= entry.author %><% else %>To <%= entry.address %><% end %></b><time datetime="<%= entry.created_at.utc.iso8601 %>"><%= entry.created_at.strftime("%b %d") %></time></span>
-      <strong><%= entry.subject %></strong><span class="mail-snippet"><%= entry.body %></span>
+      <span class="mail-avatar avatar-<%= entry.author %>" aria-hidden="true"><%= entry.author[0].upcase %></span>
+      <span class="mail-row-text"><span class="mail-row-meta"><b><% if MailDirectory.inboxes(entry.author).empty? %><%= entry.author %><% else %>To <%= entry.address %><% end %></b><time datetime="<%= entry.created_at.utc.iso8601 %>"><%= entry.created_at.strftime("%b %d") %></time></span>
+      <strong><%= entry.subject %></strong><span class="mail-snippet"><%= entry.body %></span></span>
     </a>
   <% end %>
   <% if @mail_entries.last && (@mail_entries.size == @limit || InstantRecord.browser?) %>
-    <button type="button" class="mail-older" data-mailbox-target="older" data-action="mailbox#older" data-id="<%= @mail_entries.last.id %>" data-at="<%= @mail_entries.last.created_at.utc.iso8601(6) %>">Load older conversations</button>
+    <%# A sentinel, not a control: older pages load as it scrolls into view. %>
+    <div class="mail-older" aria-hidden="true" data-mailbox-target="older" data-id="<%= @mail_entries.last.id %>" data-at="<%= @mail_entries.last.created_at.utc.iso8601(6) %>"></div>
   <% end %>
 </section>
 <section class="mail-reader" data-thread="<%= @selected&.id %>" data-compose="<%= @composing %>">
-  <a class="mail-return" href="/email?member=<%= @member %>&amp;inbox=<%= @inbox %>">← Inbox</a>
+  <a class="mail-return" href="/email?member=<%= @member %>&amp;inbox=<%= @inbox %>">← <%= @inbox.capitalize %></a>
   <% if @composing %>
     <div class="mail-compose-head"><h2>New conversation</h2><a aria-label="Close composer" href="/email?member=<%= @member %>&amp;inbox=<%= @inbox %>">×</a></div>
     <%= form_with url: "/email", method: :post, class: "mail-compose" do |f| %>
@@ -24,7 +26,7 @@
     <% end %>
   <% elsif @selected %>
     <article class="mail-thread">
-      <header class="mail-thread-tools"><span>Conversation</span>
+      <header class="mail-thread-tools"><span><%= "#{@replies.size + 1} #{"message".pluralize(@replies.size + 1)}" %></span>
         <%= form_with url: "/email", method: :post do |f| %>
           <input type="hidden" name="member" value="<%= @member %>"><input type="hidden" name="inbox" value="<%= @inbox %>"><input type="hidden" name="kind" value="archive"><input type="hidden" name="parent_id" value="<%= @selected.id %>"><button aria-label="Archive conversation">Archive</button>
         <% end %>
@@ -43,9 +45,10 @@
     <%= form_with url: "/email", method: :post, class: "mail-reply" do |f| %>
       <input type="hidden" name="member" value="<%= @member %>"><input type="hidden" name="inbox" value="<%= @inbox %>"><input type="hidden" name="kind" value="reply"><input type="hidden" name="parent_id" value="<%= @selected.id %>">
       <h3>Reply to <%= @selected.address %></h3>
-      <textarea aria-label="Reply" name="body" placeholder="Write a reply…" maxlength="5000" required></textarea><button class="mail-primary">Send reply</button>
+      <textarea aria-label="Reply" name="body" placeholder="Write a reply…" maxlength="5000" required></textarea>
+      <div class="mail-reply-foot"><span>Saved on this device first, then sent</span><button class="mail-primary">Send reply</button></div>
     <% end %>
   <% else %>
-    <div class="mail-empty"><span class="mail-mark" aria-hidden="true">✳</span><h2>Your inbox is clear</h2><p>Generate an incoming email to start a conversation.</p></div>
+    <div class="mail-empty"><span class="mail-mark" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 4 4L19 6"/></svg></span><h2>Your inbox is clear</h2><p>Generate an incoming email to start a conversation.</p></div>
   <% end %>
 </section>

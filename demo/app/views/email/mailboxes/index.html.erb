@@ -1,12 +1,15 @@
-<% content_for(:title, "Postroom · Shared inbox") %>
+<% content_for(:title, "Inbox · Shared inbox") %>
 <main class="maildesk" data-controller="mailbox" data-instant-refresh data-detail="<%= @detail %>">
   <aside class="mail-rail">
-    <div class="mail-brand"><span class="mail-mark" aria-hidden="true">✳</span> Postroom</div>
-    <a class="mail-primary mail-compose-link" href="/email?member=<%= @member %>&amp;inbox=<%= @inbox %>&amp;compose=1"><span aria-hidden="true">＋</span> Compose</a>
+    <div class="mail-brand">
+      <span class="mail-mark" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M3.5 7.5 12 13l8.5-5.5"/></svg></span>
+      Inbox
+    </div>
+    <a class="mail-primary mail-compose-link" href="/email?member=<%= @member %>&amp;inbox=<%= @inbox %>&amp;compose=1"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>Compose</a>
     <div class="mail-rail-section">Mailboxes</div>
     <nav aria-label="Mailboxes" class="mail-folders">
       <% @inboxes.each do |box| %>
-        <a data-turbo="false" href="/email?member=<%= @member %>&amp;inbox=<%= box %>" aria-current="<%= box == @inbox %>"><span class="mail-envelope" aria-hidden="true"></span><%= box.capitalize %></a>
+        <a data-turbo="false" href="/email?member=<%= @member %>&amp;inbox=<%= box %>" aria-current="<%= box == @inbox %>"><svg class="mail-folder-icon" aria-hidden="true" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 13h5l1.5 3h5L16 13h5"/><path d="M5.5 5h13L21 13v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-5Z"/></svg><%= box.capitalize %></a>
       <% end %>
     </nav>
     <div class="mail-team">
@@ -17,10 +20,9 @@
         <% end %>
       </nav>
     </div>
-    <div class="mail-back"><a href="/" data-turbo="false">All demos</a><a href="#source-drawer" data-turbo="false" data-open-source>View source</a></div>
   </aside>
   <div class="mail-workspace">
-    <header class="mail-bar"><h1>Shared inbox</h1><div class="mail-tools"><span role="status" data-mailbox-target="status"></span><button type="button" class="mail-incoming" data-action="mailbox#generate" data-url="/email/sync/<%= @member %>/<%= @inbox %>/incoming?instant_record_network=1"><span aria-hidden="true">↓</span> Generate incoming email</button></div></header>
+    <header class="mail-bar"><h1>Shared inbox</h1><div class="mail-tools"><span role="status" data-mailbox-target="status"></span><button type="button" class="mail-incoming" data-action="mailbox#generate" data-url="/email/sync/<%= @member %>/<%= @inbox %>/incoming?instant_record_network=1"><svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/></svg>Generate incoming email</button></div></header>
     <div class="mail-panes" data-mailbox-target="mail"><%= render "mail" %></div>
   </div>
 </main>

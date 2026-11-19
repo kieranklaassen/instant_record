@@ -1,7 +1,7 @@
 import { fetchHistoryViaWorker } from "controllers/history_page"
 import { Controller } from "@hotwired/stimulus"
 
-// Conversation behavior for the Swiss Slack demo: scroll up for older pages,
+// Conversation behavior for the Chat demo: scroll up for older pages,
 // fold live changes in, submit the composer without navigating.
 //
 // Three rules keep it from flickering. They are the whole design:

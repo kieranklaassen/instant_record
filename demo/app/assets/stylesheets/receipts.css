@@ -1,145 +1,163 @@
-/* Receipts (namespaced under body.demo-receipts)
-
-   The numbers are the content, so they get the mono column, tabular figures and
-   a hard right edge to align on. Everything else is Swiss defaults: black on
-   white, one red accent, rules instead of boxes. */
+/* Receipts (namespaced under body.demo-receipts).
+   Every figure is written by measure_controller.js from something it measured
+   in this browser. The ledgers are set as printed receipts: white paper,
+   monospace figures that line up, and a ruled total. */
 
 .demo-receipts .page { max-width: 880px; }
 
+.demo-receipts .receipts-kicker {
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  margin: 0 0 14px;
+  padding: 0 12px;
+  border-radius: 9999px;
+  background: var(--card);
+  box-shadow: 0 0 0 1px var(--hairline);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink-2);
+}
+
 .demo-receipts .lede {
   max-width: 42rem;
-  font-size: 1.05rem;
-  margin: 1.25rem 0 0;
+  margin: 16px 0 0;
+  font-family: var(--serif);
+  font-size: 19px;
+  line-height: 1.55;
+  color: var(--ink-2);
 }
 
-.demo-receipts section { margin-top: 3rem; }
+.demo-receipts .page-header .meta[data-figure="runtime"] {
+  display: inline-flex;
+  margin-top: 16px;
+  padding: 6px 12px;
+  border-radius: 10px;
+  background: var(--paper-2);
+  font-size: 14px;
+  color: var(--ink);
+}
+
+.demo-receipts section { margin-top: 48px; }
 
 .demo-receipts section h2 {
-  padding-bottom: 0.4rem;
-  border-bottom: 2px solid var(--ink);
+  font-family: var(--serif);
+  font-size: 30px;
+  font-weight: 400;
+  letter-spacing: -0.02em;
 }
 
-.demo-receipts section .meta { max-width: 42rem; }
+.demo-receipts section .meta { max-width: 42rem; color: var(--ink-2); }
 
 .demo-receipts .ledger {
   width: 100%;
-  margin-top: 1.25rem;
-  border-collapse: collapse;
-  font-size: 0.85rem;
+  margin-top: 18px;
+  border-collapse: separate;
+  border-spacing: 0;
+  padding: 6px 22px 10px;
+  border-radius: 14px;
+  background: var(--card);
+  box-shadow: var(--ring), 0 14px 30px -24px rgba(48, 43, 38, 0.35);
+  font-variant-numeric: tabular-nums;
 }
 
 .demo-receipts .ledger th,
 .demo-receipts .ledger td {
-  padding: 0.55rem 0.5rem 0.55rem 0;
+  padding: 12px 0;
+  border-bottom: 1px dashed var(--hairline);
   text-align: left;
   vertical-align: baseline;
-  border-bottom: 1px solid var(--hairline);
 }
 
+.demo-receipts .ledger tr:last-child th,
+.demo-receipts .ledger tr:last-child td { border-bottom: 0; }
+
 .demo-receipts .ledger thead th {
-  font-size: 0.7rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
+  font-size: 12px;
+  font-weight: 500;
   color: var(--muted);
-  border-bottom: 2px solid var(--ink);
+  border-bottom-style: solid;
 }
 
 .demo-receipts .ledger thead th + th { text-align: right; }
 
 .demo-receipts .ledger tbody th {
-  font-weight: 700;
   width: 40%;
+  font-weight: 600;
 }
 
 .demo-receipts .ledger .bought {
   display: block;
-  margin-top: 0.15rem;
   font-weight: 400;
-  font-size: 0.75rem;
+  font-size: 13px;
   color: var(--muted);
 }
 
-.demo-receipts .ledger td.bought {
-  display: table-cell;
-  margin: 0;
-  font-size: 0.8rem;
-}
+.demo-receipts .ledger td.bought { display: table-cell; padding-right: 1rem; }
 
 .demo-receipts .ledger .figure {
-  padding-right: 0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-variant-numeric: tabular-nums;
+  padding-left: 1rem;
   text-align: right;
   white-space: nowrap;
+  font-family: var(--mono);
+  font-size: 14px;
 }
 
-.demo-receipts .ledger .figure.accent { color: var(--red); }
+.demo-receipts .ledger .figure.accent { color: #2F6CA3; }
 
-/* The exact count under a rounded one: measuring is the whole point, so the
-   round number never stands alone. */
 .demo-receipts .ledger .figure .exact {
   display: block;
-  margin-top: 0.15rem;
-  font-size: 0.7rem;
+  font-size: 12px;
   color: var(--muted);
-  white-space: normal;
 }
 
 .demo-receipts .ledger tr.total th,
 .demo-receipts .ledger tr.total td {
   border-top: 2px solid var(--ink);
-  border-bottom: none;
+  border-bottom: 0;
 }
 
-.demo-receipts .ledger tr.total .figure { font-size: 1.05rem; font-weight: 700; }
+.demo-receipts .ledger tr.total .figure { font-size: 16px; font-weight: 500; }
 
 .demo-receipts .ledger tr.recorded th,
 .demo-receipts .ledger tr.recorded td {
-  border-bottom: none;
+  border-bottom: 0;
+  padding-top: 4px;
   font-weight: 400;
-  font-size: 0.75rem;
+  font-size: 12px;
   color: var(--muted);
 }
 
 .demo-receipts .actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.75rem;
-  margin-top: 1.5rem;
+  gap: 10px;
+  margin-top: 20px;
 }
 
-.demo-receipts button.secondary {
-  background: var(--paper);
-  color: var(--ink);
-}
-
-.demo-receipts button:disabled {
-  background: var(--paper);
-  border-color: var(--hairline);
-  color: var(--muted);
-  cursor: default;
-}
-
-.demo-receipts button:disabled:hover {
-  background: var(--paper);
-  border-color: var(--hairline);
-  color: var(--muted);
-}
+.demo-receipts .actions button { background: var(--ink); }
+.demo-receipts .actions button.secondary { background: var(--card); color: var(--ink); box-shadow: 0 0 0 1px var(--hairline); }
 
 .demo-receipts ul.method {
-  margin: 1.25rem 0 0;
-  padding: 0;
-  list-style: none;
   max-width: 42rem;
+  margin: 18px 0 0;
+  padding: 6px 20px;
+  list-style: none;
+  border-radius: 14px;
+  background: var(--paper-2);
 }
 
 .demo-receipts ul.method li {
-  padding: 0.75rem 0;
+  padding: 12px 0;
   border-bottom: 1px solid var(--hairline);
-  font-size: 0.85rem;
+  font-size: 14px;
+  color: var(--ink-2);
 }
 
+.demo-receipts ul.method li:last-child { border-bottom: 0; }
+.demo-receipts ul.method strong { color: var(--ink); }
+
 @media (max-width: 40rem) {
+  .demo-receipts .ledger { padding: 4px 14px 8px; }
   .demo-receipts .ledger tbody th { width: auto; }
 }

@@ -123,7 +123,7 @@ const flowsFor = (entry) => {
 }
 
 export default class extends Controller {
-  static targets = ["log", "offline", "slow"]
+  static targets = ["log", "offline", "slow", "headerOffline"]
 
   connect() {
     this.pulseTimers = new Map()
@@ -142,6 +142,7 @@ export default class extends Controller {
 
     this.offlineTarget.checked = ui.offline
     this.slowTarget.checked = ui.slow
+    this.mirrorOffline()
     this.draw()
     this.markStream()
 
@@ -161,8 +162,20 @@ export default class extends Controller {
   simulate() {
     ui.offline = this.offlineTarget.checked
     ui.slow = this.slowTarget.checked
+    this.mirrorOffline()
     this.push()
     this.markBrokenWires()
+  }
+
+  // The top bar's Online/Offline switch: the same simulation, so it sets the
+  // inspector's own checkbox and goes through simulate() like a click there.
+  toggleOffline() {
+    this.offlineTarget.checked = this.headerOfflineTarget.checked
+    this.simulate()
+  }
+
+  mirrorOffline() {
+    if (this.hasHeaderOfflineTarget) this.headerOfflineTarget.checked = this.offlineTarget.checked
   }
 
   clear() {

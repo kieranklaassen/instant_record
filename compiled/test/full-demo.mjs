@@ -14,14 +14,9 @@ const ready = name => page.waitForFunction(name => window.Stimulus?.controllers.
 const go = async path => { await page.goto(new URL(path, origin).href); await ready("inspector"); };
 try {
   await go("/");
-  assert.deepEqual(await page.locator(".demo-card").evaluateAll(cards => cards.map(c => c.getAttribute("href"))), ["/todo","/slack","/migrate","/console","/email","/assistant"]);
+  assert.deepEqual(await page.locator(".demo-card").evaluateAll(cards => cards.map(c => c.getAttribute("href"))), ["/todo","/slack","/email","/assistant","/migrate","/console"]);
   await page.getByRole("link",{name:/performance receipts/i}).waitFor();
-  const previews = page.locator(".demo-card img");
-  assert.equal(await previews.count(), 6);
-  for (const preview of await previews.all()) {
-    await preview.scrollIntoViewIfNeeded();
-    await preview.evaluate(img => img.decode());
-  }
+  assert.equal(await page.locator(".demo-card .card-art").count(), 6);
   assert.equal(await page.locator(".demo-grid").evaluate(grid => getComputedStyle(grid).display), "grid");
   await page.locator('link[rel="icon"]').evaluateAll(icons => Promise.all(icons.map(icon => {
     const image = new Image();

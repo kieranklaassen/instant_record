@@ -14,12 +14,12 @@ export default class extends Controller {
     window.addEventListener("instant-record:records-changed", this.changed)
   }
 
-  olderTargetConnected(button) {
+  olderTargetConnected(sentinel) {
     this.observer?.disconnect()
     this.observer = new IntersectionObserver(entries => {
-      if (entries.some(entry => entry.isIntersecting) && button.isConnected) this.older()
-    }, { root: button.closest(".mail-list"), rootMargin: "0px 0px 240px" })
-    this.observer.observe(button)
+      if (entries.some(entry => entry.isIntersecting) && sentinel.isConnected) this.older()
+    }, { root: sentinel.closest(".mail-list"), rootMargin: "0px 0px 240px" })
+    this.observer.observe(sentinel)
   }
 
   olderTargetDisconnected() { this.observer?.disconnect() }
@@ -110,12 +110,12 @@ export default class extends Controller {
         combined.splice(MAX_ROWS).forEach(row => row.remove())
       }
       if (newer || (more && rows.length && fragment.querySelector(".mail-older"))) {
-        const next = button || document.createElement("button")
-        next.type = "button"
+        // An invisible sentinel, not a button: older mail arrives as the
+        // reader scrolls, with nothing to press.
+        const next = button || document.createElement("div")
         next.className = "mail-older"
-        next.dataset.action = "mailbox#older"
+        next.setAttribute("aria-hidden", "true")
         next.dataset.mailboxTarget = "older"
-        next.textContent = "Load older conversations"
         Object.assign(next.dataset, { id: combined.at(-1).dataset.id, at: combined.at(-1).dataset.at })
         list.append(next)
       }

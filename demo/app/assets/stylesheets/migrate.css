@@ -1,130 +1,200 @@
-/* Ship v2 demo (namespaced under body.demo-migrate) */
+/* Ship v2 demo (namespaced under body.demo-migrate).
+   Purple accent. The numbers the visitor reads twice sit on one white card. */
 
 /* Schema names and counts are data, not prose: monospace, tabular figures, so
    a column list and a row count line up between two readings of the page. */
 .demo-migrate .data,
 .demo-migrate code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--mono);
   font-variant-numeric: tabular-nums;
 }
 
+.demo-migrate .page { max-width: 880px; }
 .demo-migrate p { margin: 0 0 1rem; }
 
-.demo-migrate ol.run {
-  margin: 0 0 2rem;
-  padding-left: 1.25rem;
-  font-size: 0.9rem;
+.demo-migrate .schema-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  margin: 14px 0 0;
+  padding: 0 12px;
+  border-radius: 9999px;
+  background: var(--card);
+  box-shadow: 0 0 0 1px var(--hairline);
+  font-size: 13px;
   color: var(--muted);
 }
 
-.demo-migrate ol.run li { margin-bottom: 0.25rem; }
+.demo-migrate .schema-pill strong { font-weight: 500; font-size: 12.5px; color: var(--ink); }
+.demo-migrate .schema-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--offline); }
+.demo-migrate .schema-pill.applied .schema-dot { background: var(--accent); }
+
+.demo-migrate .intro {
+  max-width: 42rem;
+  font-family: var(--serif);
+  font-size: 19px;
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+
+/* The steps, as numbered markers. */
+.demo-migrate ol.run {
+  counter-reset: step;
+  display: grid;
+  gap: 10px;
+  margin: 24px 0 32px;
+  padding: 0;
+  list-style: none;
+  color: var(--ink-2);
+}
+
+.demo-migrate ol.run li {
+  counter-increment: step;
+  position: relative;
+  padding-left: 36px;
+}
+
+.demo-migrate ol.run li::before {
+  content: counter(step);
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .demo-migrate ol.run strong { color: var(--ink); }
 
 /* --- The numbers -----------------------------------------------------------
-   The panel the visitor reads twice, so it is the one boxed block on the page. */
+   The panel the visitor reads twice, so it is the one card on the page. */
 
 .demo-migrate .state {
-  margin: 0 0 2.5rem;
-  padding: 1.25rem 1.5rem 1.5rem;
-  border: 2px solid var(--rule);
+  margin: 0 0 40px;
+  padding: 22px 24px 24px;
+  border-radius: 16px;
+  background: var(--card);
+  box-shadow: var(--ring);
 }
 
 .demo-migrate .state h2,
-.demo-migrate .scope h2 { margin-bottom: 1rem; }
+.demo-migrate .scope h2 { margin-bottom: 12px; }
 
 .demo-migrate .facts {
   display: grid;
-  grid-template-columns: 1fr auto;
-  margin: 1rem 0 0;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-auto-flow: column;
+  grid-template-rows: auto auto;
+  gap: 2px 12px;
+  margin: 0;
+  padding: 16px 18px;
+  border-radius: 14px;
+  background: var(--paper-2);
 }
 
-.demo-migrate .facts dt {
-  padding: 0.4rem 1rem 0.4rem 0;
-  border-bottom: 1px solid var(--hairline);
-  font-size: 0.85rem;
-}
+.demo-migrate .facts dt { font-size: 13px; color: var(--muted); }
 
 .demo-migrate .facts dd {
   margin: 0;
-  padding: 0.4rem 0;
-  border-bottom: 1px solid var(--hairline);
-  font-size: 1.5rem;
-  font-weight: 700;
-  line-height: 1;
-  text-align: right;
+  font-family: var(--serif);
+  font-size: 40px;
+  line-height: 1.1;
 }
 
 .demo-migrate ul.columns {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.35rem;
+  gap: 6px;
   list-style: none;
-  margin: 1rem 0 0;
+  margin: 16px 0 0;
   padding: 0;
 }
 
 .demo-migrate ul.columns li {
-  padding: 0.15rem 0.45rem;
-  border: 1px solid var(--hairline);
-  font-size: 0.7rem;
-  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 8px;
+  background: var(--paper);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+  font-size: 12.5px;
+  color: var(--ink-2);
 }
 
 /* The column the migration added: the single delta, so it takes the accent. */
 .demo-migrate ul.columns li.added {
-  border-color: var(--red);
-  color: var(--red);
-  font-weight: 700;
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px rgba(106, 79, 160, 0.35);
+  color: var(--accent);
+  font-weight: 600;
 }
 
 .demo-migrate .change {
-  margin: 1.25rem 0 1rem;
-  font-size: 0.85rem;
-  color: var(--muted);
+  margin: 18px 0 16px;
+  font-size: 14px;
+  color: var(--ink-2);
 }
 
 .demo-migrate .change strong { color: var(--ink); }
+
+.demo-migrate .state form input[type="submit"] { height: 40px; padding: 0 20px; }
+.demo-migrate .state .note { margin: 12px 0 0; font-size: 13px; color: var(--muted); }
 
 /* --- Notes ---------------------------------------------------------------- */
 
 .demo-migrate .note-form {
   display: flex;
-  gap: 0.5rem;
-  margin: 0 0 1.5rem;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 20px;
 }
 
 .demo-migrate .note-form input[type="text"] { flex: 0 0 12rem; }
-.demo-migrate .note-form textarea { flex: 1; }
+.demo-migrate .note-form textarea { flex: 1 1 16rem; min-height: 42px; resize: vertical; }
+.demo-migrate .note-form input[type="submit"] { height: 42px; background: var(--ink); }
 
 .demo-migrate table.notes {
   width: 100%;
-  border-collapse: collapse;
-  border-top: 2px solid var(--rule);
-  font-size: 0.85rem;
+  border-collapse: separate;
+  border-spacing: 0;
+  padding: 4px 18px;
+  border-radius: 14px;
+  background: var(--card);
+  box-shadow: var(--ring-1);
+  font-size: 14px;
 }
 
 .demo-migrate table.notes th {
-  padding: 0.5rem 0.5rem 0.5rem 0;
-  border-bottom: 1px solid var(--rule);
+  padding: 10px 10px 10px 0;
+  border-bottom: 1px solid var(--hairline);
   text-align: left;
-  font-size: 0.65rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
+  font-size: 12px;
+  font-weight: 500;
   color: var(--muted);
 }
 
 .demo-migrate table.notes td {
-  padding: 0.6rem 0.5rem 0.6rem 0;
-  border-bottom: 1px solid var(--hairline);
+  padding: 10px 10px 10px 0;
+  border-bottom: 1px solid var(--hairline-soft);
   vertical-align: top;
 }
+
+.demo-migrate table.notes tbody tr:last-child td { border-bottom: 0; }
 
 .demo-migrate table.notes th.num,
 .demo-migrate table.notes td.num { text-align: right; padding-left: 1rem; }
 
-/* A column name is a name, not a label: keep it lowercase in the header. */
-.demo-migrate table.notes th.data { text-transform: none; letter-spacing: 0; }
+.demo-migrate table.notes th.num { color: var(--accent); }
 
 .demo-migrate table.notes td.body {
   color: var(--muted);
@@ -134,13 +204,18 @@
 /* --- Scope ---------------------------------------------------------------- */
 
 .demo-migrate .scope {
-  margin-top: 3rem;
-  padding-top: 1.25rem;
-  border-top: 2px solid var(--rule);
-  font-size: 0.85rem;
-  color: var(--muted);
+  margin-top: 40px;
+  padding: 18px 20px;
+  border-radius: 14px;
+  background: var(--paper-2);
+  font-size: 14px;
+  color: var(--ink-2);
 }
 
+.demo-migrate .scope p:last-child { margin-bottom: 0; }
 .demo-migrate .scope strong { color: var(--ink); }
-.demo-migrate .scope ul { margin: 0 0 1rem; padding-left: 1.25rem; }
-.demo-migrate .scope li { margin-bottom: 0.5rem; }
+
+@media (max-width: 40rem) {
+  .demo-migrate .facts { grid-template-columns: 1fr; grid-auto-flow: row; grid-template-rows: none; }
+  .demo-migrate .facts dd { font-size: 32px; margin-bottom: 8px; }
+}

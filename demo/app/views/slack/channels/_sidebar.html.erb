@@ -1,7 +1,10 @@
 <aside class="sidebar">
   <header class="sidebar-header">
-    <p class="brand">Swiss Slack</p>
-    <p class="micro-label">Demo 02 · Chat</p>
+    <span class="brand-mark" aria-hidden="true"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 0 1-11.8 7L4 20l1.1-4.6A8 8 0 1 1 21 12Z"/></svg></span>
+    <div>
+      <p class="brand">Chat</p>
+      <p class="micro-label">InstantRecord demo</p>
+    </div>
   </header>
 
   <div class="sidebar-scroll">
@@ -11,7 +14,7 @@
         <% @channels.each do |channel| %>
           <li class="<%= "active" if channel == @channel %>">
             <%= link_to slack_channel_path(channel) do %>
-              <span class="hash">#</span><span class="name"><%= channel.name %></span><span class="count"><%= format("%02d", @channel_counts&.fetch(channel.id, 0).to_i) %></span>
+              <span class="hash" aria-hidden="true">#</span><span class="name"><%= channel.name %></span><span class="count"><%= @channel_counts&.fetch(channel.id, 0).to_i %></span>
             <% end %>
           </li>
         <% end %>
@@ -25,7 +28,7 @@
           <% dm_user = @users_by_id ? @users_by_id[dm.dm_user_id] : dm.dm_user %>
           <li class="<%= "active" if dm == @channel %>">
             <%= link_to slack_channel_path(dm) do %>
-              <span class="dot"></span><span class="name"><%= dm_user&.name || dm.name %></span>
+              <span class="dm-tile <%= slack_tile_class(dm_user) %>" aria-hidden="true"><%= slack_initials(dm_user) %></span><span class="name"><%= dm_user&.name || dm.name %></span>
             <% end %>
           </li>
         <% end %>
@@ -46,7 +49,7 @@
 
   <footer class="sidebar-footer">
     <% if InstantRecord.browser? %>
-      <p class="outbox-row"><span>Outbox</span><span class="count"><%= format("%02d", @pending_count.to_i) %></span></p>
+      <p class="outbox-row"><span>Outbox</span><span class="count"><%= @pending_count.to_i %></span></p>
     <% end %>
     <%# Posted by the reset controller, which then reloads — a reset is the one
         thing that deletes records, and live updates never remove rows. %>

@@ -6,13 +6,13 @@
     data-thread-fragment-url="<%= slack_channel_path(@channel, fragment: 1, thread: @thread_parent.id) %>">
   <% @thread_replies.each do |reply| %>
     <li class="<%= "own" if reply.from_visitor? %>" data-id="<%= reply.id %>">
-      <div class="tile"><%= slack_initials(reply.chat_user) %></div>
+      <div class="tile <%= slack_tile_class(reply.chat_user) %>" aria-hidden="true"><%= slack_initials(reply.chat_user) %></div>
       <div class="message-main">
         <div class="message-head">
           <span class="author"><%= reply.chat_user&.name || "Unknown" %></span>
           <span class="timestamp"><%= reply.created_at.strftime("%H:%M") %></span>
           <% if reply.sync_state != "synced" %>
-            <span class="flag">· pending</span>
+            <span class="flag">Waiting to sync</span>
           <% end %>
         </div>
         <p class="body"><%= reply.body %></p>

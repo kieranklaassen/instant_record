@@ -15,6 +15,12 @@
     <link rel="icon" href="<%= asset_path("icon.svg") %>" type="image/svg+xml">
     <link rel="apple-touch-icon" href="<%= asset_path("icon.png") %>">
 
+    <%# Brand type, with full system fallbacks: offline or blocked, the page
+        still renders in the platform's own sans and serif. %>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,400;6..72,500&family=JetBrains+Mono:wght@400;500&display=swap">
+
     <%# Includes all stylesheet files in app/assets/stylesheets %>
     <%= stylesheet_link_tag :app, "data-turbo-track": "reload" %>
     <%= javascript_importmap_tags %>
@@ -27,11 +33,34 @@
 
   <body class="demo-<%= controller_path.split("/").first %>"
         data-controller="inspector">
-    <nav class="site-nav">
-      <%= link_to "InstantRecord", root_path, class: "wordmark" %>
-      <span class="micro-label">Local-first Rails demos —
-        <a href="https://github.com/kieranklaassen/instant_record">open&#8209;source gem</a></span>
-    </nav>
+    <% demo = controller_path.split("/").first %>
+    <header class="site-bar">
+      <a class="wordmark" href="/">
+        <span class="wordmark-mark" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7Z"/></svg></span>
+        <span class="wordmark-text">InstantRecord</span>
+      </a>
+      <%# Spelled out rather than looped: the compiled runtime builds this
+          template ahead of time, and plain markup is the safest input. %>
+      <nav class="site-tabs" aria-label="Demos">
+        <a href="/" aria-current="<%= demo == "home" ? "page" : "false" %>">Home</a>
+        <a href="/todo" aria-current="<%= demo == "todo" ? "page" : "false" %>">Todo</a>
+        <a href="/slack" aria-current="<%= demo == "slack" ? "page" : "false" %>">Chat</a>
+        <a href="/email" data-turbo="false" aria-current="<%= demo == "email" ? "page" : "false" %>">Inbox</a>
+        <a href="/assistant" aria-current="<%= demo == "assistant" ? "page" : "false" %>">Assistant</a>
+        <a href="/migrate" aria-current="<%= demo == "migrate" ? "page" : "false" %>">Ship v2</a>
+        <a href="/console" aria-current="<%= demo == "console" ? "page" : "false" %>">Console</a>
+      </nav>
+      <%# Mirrors the inspector's own Offline checkbox; inspector#toggleOffline
+          keeps the two in step, so either one drives the same simulation. %>
+      <label class="net-switch">
+        <input type="checkbox" role="switch" aria-label="Offline mode"
+               data-inspector-target="headerOffline"
+               data-action="inspector#toggleOffline">
+        <span class="net-dot" aria-hidden="true"></span><span class="net-label" aria-hidden="true"></span>
+        <span class="net-track" aria-hidden="true"></span>
+      </label>
+      <a class="site-source" href="#source-drawer" data-turbo="false" data-open-source>View source</a>
+    </header>
 
     <%= yield %>
 

@@ -1,4 +1,4 @@
-# Seed data for the Swiss Slack demo. Fixed ids keep the routine idempotent,
+# Seed data for the Chat demo. Fixed ids keep the routine idempotent,
 # and the reset endpoint reuses it so "reset" and "fresh install" are the
 # same state.
 module Slack

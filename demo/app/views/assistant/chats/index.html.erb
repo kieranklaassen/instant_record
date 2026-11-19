@@ -1,25 +1,23 @@
-<% content_for(:title, "Relay · Assistant chat") %>
+<% content_for(:title, "Assistant · InstantRecord") %>
 <main class="relay" data-controller="assistant-chat" data-instant-refresh
       data-action="instant-record:connection-changed@window->assistant-chat#connection online@window->assistant-chat#connection offline@window->assistant-chat#connection storage@window->assistant-chat#storage pagehide@window->assistant-chat#stop turbo:before-cache@document->assistant-chat#stop">
   <aside class="relay-sidebar" aria-label="Chat history">
-    <div class="relay-wordmark"><span class="relay-sign" aria-hidden="true">✳</span>Relay</div>
-    <button class="relay-new" data-action="assistant-chat#newChat"><span aria-hidden="true">＋</span> New chat</button>
+    <div class="relay-wordmark"><span class="relay-sign" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M5.6 18.4l2.8-2.8M15.6 8.4l2.8-2.8"/></svg></span>Assistant</div>
+    <button class="relay-new" data-action="assistant-chat#newChat"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>New chat</button>
     <div class="relay-history-scroll">
-      <p class="relay-caption">Conversations</p>
+      <p class="relay-caption">Saved on this device</p>
       <nav data-assistant-chat-target="history" aria-label="Conversations"></nav>
     </div>
-    <a class="relay-back" href="/" data-turbo="false">← All demos</a>
   </aside>
   <section class="relay-main">
     <header class="relay-bar">
-      <button class="relay-menu" aria-label="Toggle chat history" aria-expanded="false" data-action="assistant-chat#toggleHistory">☰</button>
+      <button class="relay-menu" aria-label="Toggle chat history" aria-expanded="false" data-action="assistant-chat#toggleHistory"><svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
       <strong data-assistant-chat-target="title">New chat</strong>
-      <span class="relay-device">Saved on this device</span>
-      <a class="relay-source" href="#source-drawer" data-turbo="false" data-open-source>View source</a>
+      <span class="relay-device">Saved locally</span>
     </header>
     <div class="relay-scroll" tabindex="0" role="region" aria-label="Conversation messages" data-action="scroll->assistant-chat#scrolled" data-assistant-chat-target="scroll">
       <div class="relay-welcome" data-assistant-chat-target="welcome">
-        <span class="relay-sign relay-hero" aria-hidden="true">✳</span>
+        <span class="relay-sign relay-hero" aria-hidden="true"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M5.6 18.4l2.8-2.8M15.6 8.4l2.8-2.8"/></svg></span>
         <h1>What are we building?</h1>
         <div class="relay-starters" data-action="click->assistant-chat#suggest">
           <button type="button"><span aria-hidden="true">▤</span> Inspect my workspace</button>
@@ -36,7 +34,7 @@
         <textarea data-assistant-chat-target="input" aria-label="Message" rows="2" maxlength="8000" placeholder="Ask a question or paste some code…" data-action="keydown->assistant-chat#key input->assistant-chat#saveDraft"></textarea>
         <div class="relay-controls">
           <span class="relay-engine"><span class="relay-dot" aria-hidden="true"></span> Rails demo guide</span>
-          <button class="relay-send" data-assistant-chat-target="send" aria-label="Send message">↑</button>
+          <button class="relay-send" data-assistant-chat-target="send" aria-label="Send message"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
           <button class="relay-stop" type="button" data-assistant-chat-target="stop" data-action="assistant-chat#stop" hidden>Stop</button>
         </div>
       </form>

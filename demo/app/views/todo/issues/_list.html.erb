@@ -3,23 +3,26 @@
 <% pending_text = "#{@pending_count} #{"mutation".pluralize(@pending_count)}" %>
 <ul class="issues"
     data-issues-target="list"
-    data-open="<%= format("%02d", open_issues) %>"
-    data-done="<%= format("%02d", done_issues) %>"
+    data-open="<%= open_issues %>"
+    data-done="<%= done_issues %>"
     data-pending="<%= pending_text %>">
-  <% @issues.each_with_index do |issue, index| %>
+  <% @issues.each do |issue| %>
     <% issue_href = todo_issue_path(issue) %>
     <li class="<%= issue.state %>" data-id="<%= issue.id %>">
-      <span class="issue-no"><%= format("%02d", index + 1) %></span>
       <%# The checkbox is the control: ticking it submits the form it sits
           in; the issues controller catches the submit and morphs instead
-          of navigating. %>
+          of navigating. The title is its label, so the whole row is the
+          hit area. %>
       <%= form_with url: issue_href, method: :patch, class: "toggle", data: { turbo: false, action: "submit->issues#submit" } do %>
-        <%= label_tag "issue-#{issue.id}-done", issue.title, class: "title" %>
         <%= check_box_tag "done", "1", issue.state == "done",
                           id: "issue-#{issue.id}-done",
                           onchange: "this.form.requestSubmit()" %>
+        <%= label_tag "issue-#{issue.id}-done", issue.title, class: "title" %>
       <% end %>
-      <%= button_to "×", issue_href, method: :delete, form: { data: { turbo: false, action: "submit->issues#submit" } } %>
+      <% if issue.sync_state == "pending" %>
+        <span class="badge badge-pending">Waiting to sync</span>
+      <% end %>
+      <%= button_to "×", issue_href, method: :delete, aria: { label: "Delete issue" }, form: { data: { turbo: false, action: "submit->issues#submit" } } %>
     </li>
   <% end %>
 </ul>

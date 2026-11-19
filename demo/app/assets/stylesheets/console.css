@@ -1,17 +1,11 @@
 /* Code as content: the source drawer (every page) and the console REPL.
    Both surfaces exist to be read, so the typography is the design — one
-   monospace face, a fixed line box, hard rules, and the red accent reserved for
-   the lines that are actually about InstantRecord.
+   monospace face, a fixed line box, and the demo's accent reserved for the
+   lines that are actually about InstantRecord.
 
-   Note on registration: `stylesheet_link_tag :app` in the layout expands to
-   every sheet in app/assets/stylesheets, alphabetically. Nothing to register.
-   Since `console.css` sorts before `swiss.css`, every rule here is scoped by an
-   id or a class so specificity — not order — decides. */
-
-:root {
-  /* Belongs in swiss.css the moment a third sheet needs it. */
-  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-}
+   `stylesheet_link_tag :app` in the layout expands to every sheet in
+   app/assets/stylesheets, alphabetically, so every rule here is scoped by an id
+   or a class and specificity — not order — decides. */
 
 /* --- The source drawer -----------------------------------------------------
    In flow at the foot of every page rather than fixed: it is documentation, so
@@ -19,34 +13,45 @@
    composer or fight the sync inspector for the right-hand column. */
 
 #source-drawer {
-  border-top: 2px solid var(--rule);
-  padding: 0 1.5rem 3rem;
+  max-width: 1120px;
+  margin: 24px auto 48px;
+  padding: 0 24px;
 }
 
 #source-drawer > summary {
   display: flex;
   align-items: baseline;
   gap: 0.75rem;
-  padding: 0.9rem 0;
+  padding: 14px 18px;
+  border-radius: 14px;
+  background: var(--card);
+  box-shadow: var(--ring-1);
   cursor: pointer;
   list-style: none;
 }
+
+#source-drawer[open] > summary { margin-bottom: 20px; }
+#source-drawer > summary .micro-label { color: var(--ink); font-size: 14px; }
 
 #source-drawer > summary::-webkit-details-marker { display: none; }
 
 /* A typographic disclosure indicator: no icon set, no image. */
 #source-drawer > summary::before {
   content: "+";
-  font-weight: 700;
-  font-size: 0.9rem;
+  font-weight: 600;
+  font-size: 1rem;
   line-height: 1;
-  color: var(--red);
+  color: var(--accent);
 }
 
 #source-drawer[open] > summary::before { content: "–"; }
 
 #source-drawer > summary .meta { margin: 0; }
-#source-drawer > summary:hover .micro-label { color: var(--ink); }
+
+@media (max-width: 640px) {
+  #source-drawer { padding: 0 12px; }
+  #source-drawer > summary .meta { display: none; }
+}
 
 .source-body {
   max-width: 60rem;
@@ -71,28 +76,29 @@
   justify-content: space-between;
   gap: 1rem;
   padding-bottom: 0.4rem;
-  border-bottom: 2px solid var(--rule);
+  border-bottom: 1px solid var(--hairline);
 }
 
 .source-path {
   font-family: var(--mono);
   font-size: 0.8rem;
-  font-weight: 700;
+  font-weight: 500;
 }
 
 .source-count {
-  font-size: 0.65rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  color: var(--red);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
   white-space: nowrap;
 }
 
 /* Long lines scroll inside the block; the page never widens. */
 .source-code {
   overflow-x: auto;
-  border-bottom: 1px solid var(--hairline);
+  padding: 8px 0;
+  border-radius: 0 0 12px 12px;
+  background: var(--card);
+  box-shadow: var(--ring-1);
   font-family: var(--mono);
   font-size: 0.78rem;
   line-height: 1.7;
@@ -103,7 +109,7 @@
 .source-ln {
   flex: 0 0 2.5rem;
   text-align: right;
-  color: var(--hairline);
+  color: #C4B8A6;
   user-select: none;
 }
 
@@ -112,27 +118,27 @@
 /* The whole argument, in one rule: the marked lines are the price of admission,
    and there are almost none of them. */
 .source-line.instant-record {
-  background: #fff0f1;
-  box-shadow: inset 3px 0 0 var(--red);
+  background: var(--accent-soft);
+  box-shadow: inset 3px 0 0 var(--accent);
 }
 
-.source-line.instant-record .source-ln { color: var(--red); }
+.source-line.instant-record .source-ln { color: var(--accent); }
 
 /* Syntax highlighting (Rouge token classes).
-   Red stays reserved for the InstantRecord marking above — if literals were red
-   too, the one thing this drawer exists to point at would stop standing out. So
-   the code is built from ink weights plus a single desaturated slate for
+   The accent stays reserved for the InstantRecord marking above — if literals
+   were coloured too, the one thing this drawer exists to point at would stop
+   standing out. So the code is built from ink weights plus one warm grey for
    literals: enough structure to read, quiet enough that the marked lines still
    win the page. */
 .source-text .k, .source-text .kd, .source-text .kn,
 .source-text .kp, .source-text .kr, .source-text .kv {
-  font-weight: 700;
+  font-weight: 600;
 }
 
 /* Class and module names, constants, symbols in a definition position. */
 .source-text .nc, .source-text .nn, .source-text .no {
-  font-weight: 700;
-  color: #1b1b1b;
+  font-weight: 600;
+  color: var(--ink);
 }
 
 /* Method definitions read as structure; calls stay plain ink. */
@@ -144,12 +150,12 @@
 .source-text .si, .source-text .sr, .source-text .ss, .source-text .sx,
 .source-text .dl, .source-text .m, .source-text .mf, .source-text .mh,
 .source-text .mi, .source-text .mo {
-  color: #4a5568;
+  color: #6E6456;
 }
 
 /* Instance and class variables, and the globals a Rails file occasionally uses. */
 .source-text .nv, .source-text .vi, .source-text .vc, .source-text .vg {
-  color: #2d3748;
+  color: #52483D;
 }
 
 .source-text .c, .source-text .c1, .source-text .cm,
@@ -161,16 +167,16 @@
 /* ERB's own delimiters, and the preprocessor class Rouge gives them. Bracketing
    the Ruby inside a template is structure worth seeing. */
 .source-text .cp, .source-text .cpf {
-  color: #718096;
+  color: #8E8474;
   font-weight: 700;
 }
 
-.source-text .o, .source-text .ow, .source-text .p { color: #4a5568; }
+.source-text .o, .source-text .ow, .source-text .p { color: #6E6456; }
 
 /* An ERB template is mostly markup: the tag names carry the structure a reader
    is scanning for, so they get the weight and the attribute names recede. */
-.source-text .nt { font-weight: 700; color: #1b1b1b; }
-.source-text .na { color: #718096; }
+.source-text .nt { font-weight: 600; color: var(--ink); }
+.source-text .na { color: #8E8474; }
 
 /* An unrecognised token should look like code, not like an error. */
 .source-text .err, .source-text .gr { color: inherit; background: none; }
@@ -183,83 +189,89 @@
 
 .source-missing code { font-family: var(--mono); }
 
+
 /* --- The console -----------------------------------------------------------
-   Namespaced under body.demo-console, like every other per-demo sheet. */
+   Namespaced under body.demo-console, like every other per-demo sheet. The
+   prompt, transcript and input share one dark terminal card. */
 
-.demo-console .page { max-width: 60rem; }
+.demo-console .page { max-width: 1040px; }
 
-.demo-console .lede {
-  max-width: 42rem;
-  font-size: 1.1rem;
-  margin: 1.25rem 0 0;
+.demo-console .console-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0 0;
 }
 
 .demo-console .console-warning {
-  max-width: 42rem;
-  margin: 2rem 0;
-  padding: 1rem 1.25rem;
-  border: 2px solid var(--red);
+  display: flex;
+  gap: 14px;
+  margin: 0 0 24px;
+  padding: 14px 18px;
+  border-radius: 14px;
+  background: #FBF1DE;
+  box-shadow: inset 0 0 0 1px #F0DDB8;
+  color: #5A3E0E;
 }
 
-.demo-console .console-warning p:last-child {
-  margin: 0.5rem 0 0;
-  font-size: 0.85rem;
-}
+.demo-console .console-warning svg { flex: none; margin-top: 2px; }
+.demo-console .console-warning p { margin: 0; font-size: 14px; }
+.demo-console .console-warning code { font-size: 13px; }
 
-.demo-console .console-warning code {
-  font-family: var(--mono);
-  font-size: 0.8rem;
+.demo-console .console-terminal {
+  --term-ink: #EDE6DA;
+  --term-muted: #8E8474;
+  --term-accent: #E8A87C;
+  border-radius: 16px;
+  background: #2A2521;
+  color: var(--term-ink);
+  overflow: hidden;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.2), 0 18px 40px -24px rgba(42, 37, 33, 0.6);
 }
 
 .demo-console .console-snippets {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem;
-  margin: 2rem 0 1.5rem;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
-.demo-console .console-snippets .micro-label {
-  flex: 0 0 100%;
-  margin-bottom: 0.25rem;
-}
+.demo-console .console-try { margin-right: 4px; font-size: 12px; color: #B4A996; }
 
-/* Snippets are code, so they are set as code — the button is just the rule
-   around it. */
+/* Snippets are code, so they are set as code. */
 .demo-console .console-snippets button {
-  padding: 0.35rem 0.55rem;
+  max-width: 100%;
+  height: auto;
+  min-height: 28px;
+  padding: 4px 12px;
+  text-align: left;
+  overflow-wrap: anywhere;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: none;
+  color: var(--term-ink);
   font-family: var(--mono);
-  font-size: 0.7rem;
+  font-size: 12.5px;
   font-weight: 400;
-  text-transform: none;
-  letter-spacing: 0;
-  background: var(--paper);
-  color: var(--ink);
-  border-width: 1px;
 }
 
-.demo-console .console-snippets button:hover {
-  background: var(--ink);
-  border-color: var(--ink);
-  color: var(--paper);
-}
+.demo-console .console-snippets button:hover { background: rgba(255, 255, 255, 0.16); filter: none; }
 
 .demo-console .console-transcript {
   list-style: none;
   margin: 0;
   padding: 0;
   font-family: var(--mono);
-  font-size: 0.8rem;
-  line-height: 1.6;
+  font-size: 14px;
+  line-height: 1.65;
 }
 
-.demo-console .console-transcript:not(:empty) {
-  border-top: 2px solid var(--rule);
-}
+.demo-console .console-transcript:not(:empty) { padding: 8px 0; }
 
 .demo-console .console-entry {
-  padding: 0.75rem 0;
-  border-bottom: 1px solid var(--hairline);
+  padding: 10px 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 .demo-console .console-echo,
@@ -270,45 +282,97 @@
 }
 
 .demo-console .console-echo code,
-.demo-console .console-result code { white-space: pre-wrap; }
+.demo-console .console-result code { white-space: pre-wrap; font-size: inherit; }
 
-.demo-console .console-echo code { font-weight: 700; }
-.demo-console .console-result code { overflow-wrap: anywhere; }
+.demo-console .console-result code { overflow-wrap: anywhere; color: #9BC7A6; }
 
 .demo-console .console-prompt {
   flex: 0 0 1.5rem;
-  color: var(--red);
+  color: var(--term-accent);
   user-select: none;
 }
 
+.demo-console .console-result .console-prompt { color: var(--term-muted); }
+
 .demo-console .console-meta {
-  margin: 0.35rem 0 0 2.1rem;
-  font-size: 0.65rem;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  color: var(--muted);
+  margin: 2px 0 0 2.1rem;
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--term-muted);
 }
 
-.demo-console .console-entry.failed .console-result code { color: var(--red); }
-.demo-console .console-entry.failed .console-meta { color: var(--red); }
+.demo-console .console-entry.failed .console-result code,
+.demo-console .console-entry.failed .console-meta { color: #F0A090; }
 
-.demo-console .console-form { margin-top: 2rem; }
+.demo-console .console-form {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px 16px 16px 20px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.demo-console .console-form .console-prompt { flex: none; padding-top: 8px; font-family: var(--mono); }
 
 .demo-console .console-form textarea {
-  display: block;
-  width: 100%;
-  margin-top: 0.4rem;
+  flex: 1;
+  min-width: 0;
+  padding: 6px 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--term-ink);
   font-family: var(--mono);
-  font-size: 0.85rem;
+  font-size: 14px;
   line-height: 1.6;
   resize: vertical;
 }
 
-.demo-console .console-actions {
-  display: flex;
+.demo-console .console-form textarea::placeholder { color: var(--term-muted); }
+
+.demo-console .console-form button {
+  flex: none;
+  display: inline-flex;
   align-items: center;
-  gap: 1rem;
-  margin-top: 0.75rem;
+  gap: 8px;
+  height: 34px;
+  padding: 0 8px 0 14px;
+  background: var(--term-ink);
+  box-shadow: none;
+  color: #2A2521;
 }
 
-.demo-console .console-actions .meta { margin: 0; font-family: var(--mono); }
+.demo-console .console-form kbd {
+  padding: 1px 6px;
+  border-radius: 9999px;
+  background: rgba(42, 37, 33, 0.1);
+  font-family: inherit;
+  font-size: 11px;
+}
+
+/* The compiled build's console: fixed queries as links, one result block. */
+.demo-console .console-snippets a {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--term-ink);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  text-decoration: none;
+}
+
+.demo-console .console-snippets a:hover { background: rgba(255, 255, 255, 0.16); }
+
+.demo-console pre.console-result {
+  margin: 0;
+  padding: 16px 20px 20px;
+  color: #9BC7A6;
+  font-family: var(--mono);
+  font-size: 14px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

@@ -158,6 +158,8 @@ if not os.environ.get("INSTANT_RECORD_APP"):
     # scope just as it supplies its title, so styles stay confined to that demo.
     target = Path(app, "app/views/layouts/application.html.erb")
     source = target.read_text().replace('demo-<%= controller_path.split("/").first %>', 'demo-<%= content_for(:demo_scope) %>')
+    # The top bar marks the current demo's tab from the same scope.
+    source = source.replace('<% demo = controller_path.split("/").first %>', '<% demo = content_for(:demo_scope).to_s %>')
     target.write_text(source)
     for view in Path(app, "app/views").rglob("*.html.erb"):
         if view.name.startswith("_") or view.parent.name == "layouts":
