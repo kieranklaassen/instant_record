@@ -13,4 +13,6 @@ Mailbox::WELCOME.each_key { |name| Mailbox.open_demo(name) }
 unless InstantRecord.browser?
   require_relative "seeds/mail_history"
   MailHistory.populate
+  require_relative "seeds/assistant_chats"
+  AssistantChats.apply
 end

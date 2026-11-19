@@ -4,7 +4,9 @@ Date: 2026-11-19. Plan: `docs/plans/2026-11-19-001-feat-assistant-ruby-llm-local
 
 ## What stands
 
-Online, `Assistant::Reply` asks a model through RubyLLM. Offline, the page asks the browser's built-in model through Chrome's Prompt API (`LanguageModel`). A switch chooses Auto, Server or On-device. Both paths end in the same saved turn.
+Online, `Assistant::Reply` asks a model through RubyLLM. Offline, the page asks the browser's built-in model through Chrome's Prompt API (`LanguageModel`). A switch chooses Auto, Server or On-device.
+
+Later the same day the conversations moved out of the page's script and into records (`AssistantChat`, `AssistantTurn`). A question is a write; a `server_only` callback enqueues `Assistant::ReplyJob`, which writes Rails' answer onto the turn, and the browser's model saves its answer onto the turn too. The reply endpoint and its history parameters are gone, so the notes below about the endpoint describe the first version. What they taught still holds for the job.
 
 ## What we believed, and what was true
 
@@ -18,7 +20,7 @@ Online, `Assistant::Reply` asks a model through RubyLLM. Offline, the page asks 
 
 ## For the next paid endpoint in a demo
 
-The demos answer any origin (`InstantRecord::CORS_HEADERS`), so a per-address throttle does not bound spend. What bounds it here: a daily count in `Rails.cache` that fails closed when the store cannot count, a cap on output tokens, a cap on tool rounds, and a deadline on the whole call. The count is only as wide as the cache store.
+The demos answer any origin (`InstantRecord::CORS_HEADERS`), and a turn now reaches Rails through any browser's outbox, so a per-address throttle does not bound spend. What bounds it here: a daily count in `Rails.cache` that fails closed when the store cannot count, a cap on output tokens, a cap on tool rounds, and a deadline on the whole call. The count is only as wide as the cache store.
 
 ## Not yet run
 

@@ -1,4 +1,5 @@
 // The Assistant's engines: Rails, the browser's own model, and the switch between them.
+// Either one answers by writing its reply onto the turn's record.
 // Run against a Rails-served or compiled demo. A browser under test may offer
 // LanguageModel but has no model to run, so a stand-in is installed before the page loads.
 import assert from "node:assert/strict";
@@ -51,154 +52,132 @@ function fakeModel(state) {
 const providerCalls = [];
 const browser = await chromium.launch({ channel: "chrome" });
 try {
-  const open = async state => {
+  const open = async (state, path = "/assistant") => {
     const context = await browser.newContext({ viewport: { width: 1440, height: 840 } });
     await context.addInitScript(fakeModel, state);
     // A model provider is only ever asked by Rails: the browser must never call one.
     context.on("request", request => {
       const url = new URL(request.url());
       if (/anthropic|openai|googleapis\.com\/v1|generativelanguage/.test(url.host + url.pathname)) providerCalls.push(request.url());
-      if (url.pathname.startsWith("/assistant/replies") && url.origin !== new URL(origin).origin) providerCalls.push(request.url());
     });
     const page = await context.newPage();
     const errors = [];
     page.on("pageerror", error => errors.push(error.message));
-    await page.goto(new URL("/assistant", origin).href);
+    await page.goto(new URL(path, origin).href);
     await page.getByRole("link", { name: "Keep my place in chat" }).waitFor();
     return { context, page, errors };
   };
   const helpers = page => {
     const input = page.getByRole("textbox", { name: "Message" });
     const status = text => page.getByRole("status").filter({ hasText: text }).waitFor();
+    const turns = page.locator(".relay-turn");
     return {
-      input, status,
+      input, status, turns,
       engine: name => page.locator(".relay-engine label").filter({ hasText: name }).click(),
-      answers: () => page.locator(".relay-answer"),
+      author: () => turns.last().locator(".relay-author").textContent(),
       idle: () => page.getByRole("button", { name: "Stop", exact: true }).waitFor({ state: "hidden" }),
       ask: async prompt => { await input.fill(prompt); await input.press("Enter"); },
-      newChat: () => page.getByRole("button", { name: "New chat", exact: true }).click()
+      newChat: async () => {
+        await page.getByRole("button", { name: "New chat", exact: true }).click();
+        await page.locator(".relay-bar strong").filter({ hasText: "New chat" }).waitFor();
+      }
     };
   };
 
   // A browser with a model ready.
   {
     const { context, page, errors } = await open("available");
-    const { input, status, engine, answers, idle, ask, newChat } = helpers(page);
-    const posts = [];
-    context.on("request", request => {
-      if (request.url().includes("/assistant/replies") && request.method() === "POST") posts.push(JSON.parse(request.postData()));
-    });
+    const { input, status, engine, turns, author, idle, ask, newChat } = helpers(page);
+    const compiled = await page.evaluate(() => !!window.__spinel?.worker);
     const local = () => page.evaluate(() => window.__localCalls);
+    const offline = page.getByLabel("Offline", { exact: true });
 
-    // Auto, online: Rails answers, and the second question carries the first turn.
+    // Auto, online: Rails answers, in a job, and the reply arrives as a record.
     await status("Replies come from Rails");
     await newChat();
     await ask("Explain offline sync");
-    await answers().last().getByText(/worker sends pending mutations/).waitFor();
-    await idle();
-    await ask("Show a Rails query");
-    await page.locator(".relay-response code").waitFor();
-    await idle();
-    assert.equal(posts.length, 2);
-    assert.deepEqual(posts[0].history, []);
-    assert.equal(posts[1].history.length, 1);
-    assert.equal(posts[1].history[0][0], "Explain offline sync");
-    assert.match(posts[1].history[0][1], /worker sends pending mutations/);
-    assert.equal(await answers().last().locator(".relay-author").textContent(), "Demo guide");
+    await turns.last().getByText(/worker sends pending mutations/).waitFor();
+    assert.equal(await author(), "Demo guide");
     assert.deepEqual(await local(), []);
 
-    // Auto, offline: the browser's model answers, nothing is posted, and the turn is saved.
-    await page.getByLabel("Offline", { exact: true }).check();
+    // Auto, offline: the browser's model answers, with the earlier turn as context, and its reply is saved.
+    await offline.check();
     await status("Replies come from the model in this browser");
-    assert.equal(await page.getByRole("button", { name: "Send message" }).isDisabled(), false);
     await ask("What is an outbox?");
-    await answers().last().getByText("On-device answer to: What is an outbox?").waitFor();
+    await turns.last().getByText("On-device answer to: What is an outbox?").waitFor();
     await idle();
-    assert.equal(await answers().last().locator(".relay-author").textContent(), "On-device model");
-    assert.equal(posts.length, 2);
-    assert.deepEqual(await local(), [{ prompt: "What is an outbox?", turns: 4 }]);
+    assert.equal(await author(), "On-device model");
+    assert.deepEqual(await local(), [{ prompt: "What is an outbox?", turns: 2 }]);
     assert.equal(await input.inputValue(), "");
+    const chat = page.url();
     await page.reload();
-    await answers().last().getByText("On-device answer to: What is an outbox?").waitFor();
-    assert.equal(await answers().last().locator(".relay-author").textContent(), "On-device model");
+    await turns.last().getByText("On-device answer to: What is an outbox?").waitFor();
+    assert.equal(await author(), "On-device model");
+    assert.equal(await turns.count(), 2);
 
-    // Stop ends a local reply where it stands.
+    // Stop ends a local reply where it stands, and what was said is kept.
     await status("Replies come from the model in this browser");
     await ask("slow answer please");
-    await answers().last().getByText(/On-device answer/).waitFor();
+    await turns.last().getByText(/On-device answer/).waitFor();
     await page.getByRole("button", { name: "Stop", exact: true }).click();
-    await answers().last().getByText(/Reply stopped/).waitFor();
+    await turns.last().getByText(/Reply stopped/).waitFor();
+    await idle();
+    await page.reload();
+    await turns.last().getByText(/Reply stopped/).waitFor();
 
-    // Server while offline cannot answer.
-    await engine("Server");
-    await status("Reconnect to send");
-    assert.equal(await page.getByRole("button", { name: "Send message" }).isDisabled(), true);
-
-    // A long local reply, with an emoji where the clip falls, does not stop Rails from answering the next question.
-    await engine("Auto");
+    // A long local reply is saved whole, and the next question forgets the oldest turns to fit.
+    await status("Replies come from the model in this browser");
     await ask("a long answer " + "x".repeat(1985) + "😀😀");
     await idle();
-    assert.ok((await answers().last().locator(".relay-response").textContent()).length > 2000);
-    // The next local question no longer fits with every earlier turn: the oldest are forgotten.
+    await page.waitForFunction(() => document.querySelector(".relay-turn:last-child").dataset.pending === "false");
+    assert.ok((await turns.last().locator(".relay-response").textContent()).length > 2000);
     await ask("And after that?");
-    await answers().last().getByText("On-device answer to: And after that?").waitFor();
+    await turns.last().getByText("On-device answer to: And after that?").waitFor();
     await idle();
-    assert.ok((await local()).at(-1).turns < 10);
-    await page.getByLabel("Offline", { exact: true }).uncheck();
+    assert.ok((await local()).at(-1).turns < 8);
+
+    // Server, chosen while offline: the question is saved, and Rails answers once it can.
     await engine("Server");
+    await status("Rails answers once it syncs");
+    assert.equal(await page.getByRole("button", { name: "Send message" }).isDisabled(), false);
+    const before = (await local()).length;
+    await ask("Show a Rails query");
+    if (compiled) await turns.last().getByText("Waiting for Rails…").waitFor();
+    await offline.uncheck();
     await status("Replies come from Rails");
-    const posted = context.waitForEvent("response", response => response.url().includes("/assistant/replies") && response.request().method() === "POST");
-    await ask("Explain offline sync");
-    assert.equal((await posted).status(), 200);
-    await idle();
-    assert.ok(posts.at(-1).history.every(turn => turn.every(text => Array.from(text).length <= 2000)));
-    assert.ok(posts.at(-1).history.length <= 6);
+    await turns.last().locator(".relay-response code").waitFor();
+    assert.equal((await local()).length, before);
 
-    // On-device while online: nothing is posted, and the choice survives a reload.
-    const before = posts.length;
+    // On-device while online, and the choice survives a reload.
     await engine("On-device");
-    await status("Nothing leaves the device");
+    await status("Replies come from the model in this browser");
     await ask("Stay local");
-    await answers().last().getByText("On-device answer to: Stay local").waitFor();
+    await turns.last().getByText("On-device answer to: Stay local").waitFor();
     await idle();
-    assert.equal(posts.length, before);
     await page.reload();
-    await status("Nothing leaves the device");
+    await status("Replies come from the model in this browser");
     assert.equal(await page.getByRole("radio", { name: "On-device" }).isChecked(), true);
-
-    // Auto, online, Rails out of reach: the browser's model answers instead.
     await engine("Auto");
-    await context.route("**/assistant/replies*", async route => { await new Promise(resolve => setTimeout(resolve, 1500)); await route.abort("failed"); });
-    await ask("Asked as the connection drops");
-    await status("Waiting for Rails");
-    await page.getByLabel("Offline", { exact: true }).check();
-    await answers().last().getByText("On-device answer to: Asked as the connection drops").waitFor();
-    await idle();
-    await page.getByLabel("Offline", { exact: true }).uncheck();
-    await context.unroute("**/assistant/replies*");
-    await context.route("**/assistant/replies*", route => route.abort("failed"));
-    await ask("Is Rails there?");
-    await answers().last().getByText("On-device answer to: Is Rails there?").waitFor();
-    await idle();
-    await context.unroute("**/assistant/replies*");
+
+    // A browser that was never here gets the on-device replies from Rails, like any record.
+    const other = await open(null, new URL(chat).pathname + new URL(chat).search);
+    await other.page.locator(".relay-turn").filter({ hasText: "On-device answer to: Stay local" }).waitFor();
+    assert.equal(await other.page.locator(".relay-turn").filter({ hasText: "On-device answer to: What is an outbox?" }).locator(".relay-author").textContent(), "On-device model");
+    assert.deepEqual(other.errors, []);
+    await other.context.close();
     assert.deepEqual(errors, []);
     await context.close();
   }
 
-  // A browser with no model: On-device is off, and offline keeps the draft as before.
+  // A browser with no model: On-device is off, and Rails is asked.
   {
     const { context, page, errors } = await open(null);
-    const { input, status, ask, newChat } = helpers(page);
+    const { status, turns, ask, newChat } = helpers(page);
     await status("Replies come from Rails");
     assert.equal(await page.getByRole("radio", { name: "On-device" }).isDisabled(), true);
-    await page.getByLabel("Offline", { exact: true }).check();
-    await status("Reconnect to send");
     await newChat();
     await ask("Show a Rails query");
-    assert.equal(await page.getByRole("button", { name: "Send message" }).isDisabled(), true);
-    assert.equal(await input.inputValue(), "Show a Rails query");
-    assert.equal(await page.locator(".relay-answer").count(), 0);
-    await page.getByLabel("Offline", { exact: true }).uncheck();
+    await turns.last().locator(".relay-response code").waitFor();
     assert.deepEqual(errors, []);
     await context.close();
   }
@@ -206,19 +185,20 @@ try {
   // A browser whose model must be downloaded: choosing On-device fetches it.
   {
     const { context, page, errors } = await open("downloadable");
-    const { status, engine, answers, idle, ask, newChat } = helpers(page);
+    const { status, engine, turns, idle, ask, newChat } = helpers(page);
     await status("Replies come from Rails");
     assert.equal(await page.getByRole("radio", { name: "On-device" }).isDisabled(), false);
     await engine("On-device");
     await status("Downloading the on-device model");
-    await status("Nothing leaves the device");
+    await status("Replies come from the model in this browser");
     await newChat();
     await ask("Ready?");
-    await answers().last().getByText("On-device answer to: Ready?").waitFor();
+    await turns.last().getByText("On-device answer to: Ready?").waitFor();
     await idle();
+    await engine("Auto");
     assert.deepEqual(errors, []);
     await context.close();
   }
   assert.deepEqual(providerCalls, []);
-  console.log("Server replies with history, offline replies from the browser's model, the engine switch, stop, fallback, no model and download passed.");
+  console.log("Rails' replies and the browser model's replies as records, the engine switch, stop, a small context, a question saved offline, no model and download passed.");
 } finally { await browser.close(); }

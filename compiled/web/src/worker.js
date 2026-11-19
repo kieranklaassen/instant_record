@@ -519,14 +519,13 @@ self.onmessage = async (event) => {
     }
     if (type === "serverRequest") {
       const url = new URL(payload.path, self.location.origin);
-      const chat = import.meta.env.VITE_SHARED_INBOX_DEMO && payload.method === "POST" && url.pathname === "/assistant/replies";
-      const allowed = chat || (payload.method === "GET" && url.pathname === "/receipts/probe") ||
+      const allowed = (payload.method === "GET" && url.pathname === "/receipts/probe") ||
         (payload.method === "POST" && (url.pathname === "/slack/reset" ||
           (import.meta.env.VITE_SHARED_INBOX_DEMO && url.pathname === new URL(syncEndpoint, self.location.origin).pathname + "/incoming" &&
             url.pathname.startsWith("/email/sync/"))));
       if (!allowed) throw new Error("Unknown demo server action");
       const root = publicEndpoint.replace(/\/instant_record\/?$/, "");
-      const reply = await fetchReply(payload.method, url.pathname + url.search, chat ? payload.body : "", root);
+      const reply = await fetchReply(payload.method, url.pathname + url.search, "", root);
       return self.postMessage({ id, result: reply });
     }
     if (type === "boot") return self.postMessage({ id, result: await boot(payload) });
