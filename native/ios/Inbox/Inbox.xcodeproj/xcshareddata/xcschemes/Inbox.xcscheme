@@ -3,7 +3,7 @@
    <BuildAction parallelizeBuildables = "YES" buildImplicitDependencies = "YES">
       <BuildActionEntries>
          <BuildActionEntry buildForTesting = "YES" buildForRunning = "YES" buildForProfiling = "YES" buildForArchiving = "YES" buildForAnalyzing = "YES">
-            <BuildableReference BuildableIdentifier = "primary" BlueprintIdentifier = "A50000000000000000000001" BuildableName = "Inbox.app" BlueprintName = "Inbox" ReferencedContainer = "container:Inbox.xcodeproj">
+            <BuildableReference BuildableIdentifier = "primary" BlueprintIdentifier = "1D0500000000000000000000" BuildableName = "Inbox.app" BlueprintName = "Inbox" ReferencedContainer = "container:Inbox.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -11,15 +11,15 @@
    <TestAction buildConfiguration = "Debug" selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv = "YES">
       <Testables>
          <TestableReference skipped = "NO">
-            <BuildableReference BuildableIdentifier = "primary" BlueprintIdentifier = "A50000000000000000000002" BuildableName = "InboxUITests.xctest" BlueprintName = "InboxUITests" ReferencedContainer = "container:Inbox.xcodeproj">
+            <BuildableReference BuildableIdentifier = "primary" BlueprintIdentifier = "1D0600000000000000000000" BuildableName = "InboxUITests.xctest" BlueprintName = "InboxUITests" ReferencedContainer = "container:Inbox.xcodeproj">
             </BuildableReference>
          </TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction buildConfiguration = "Debug" selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB" launchStyle = "0" useCustomWorkingDirectory = "NO" ignoresPersistentStateOnLaunch = "NO" debugDocumentVersioning = "YES" debugServiceExtension = "internal" allowLocationSimulation = "YES">
       <BuildableProductRunnable runnableDebuggingMode = "0">
-         <BuildableReference BuildableIdentifier = "primary" BlueprintIdentifier = "A50000000000000000000001" BuildableName = "Inbox.app" BlueprintName = "Inbox" ReferencedContainer = "container:Inbox.xcodeproj">
-         </BuildableReference>
+         <BuildableReference BuildableIdentifier = "primary" BlueprintIdentifier = "1D0500000000000000000000" BuildableName = "Inbox.app" BlueprintName = "Inbox" ReferencedContainer = "container:Inbox.xcodeproj">
+            </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
 </Scheme>

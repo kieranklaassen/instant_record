@@ -125,6 +125,16 @@ finish = source.index("\nTep::APP.name = ", start) + 1
 if finish == 0:
     sys.exit("main_wasm.rb does not name the app after opening its database, where expected")
 opening = source[start:finish].replace("db_path = Main.default_db_path\n", "", 1)
+# A consumer app's boot runs the migrations a restored database has not had. The browser's host
+# tells it the version the database is at. A native host has no such thing to tell, so the
+# version is kept in the database itself and written once the pending statements have run.
+versions = re.findall(r'previous < "(\d{20})"', opening)
+if versions:
+    asked = 'previous = NativeHost.ir_host_take("schema_version")\n'
+    if opening.count(asked) != 1:
+        sys.exit("main_wasm.rb does not ask the host for the schema version where expected")
+    opening = opening.replace(asked, 'previous = InstantRecord::SyncMetadata.get("schema_version").to_s\n')
+    opening += f'InstantRecord::SyncMetadata.set("schema_version", "{max(versions)}")\n'
 method = "module NativeDatabase\n  def self.path = @path.to_s\n\n  def self.open(db_path)\n    @path = db_path\n" + "".join("    " + line + "\n" if line else "\n" for line in opening.rstrip("\n").split("\n")) + "  end\nend\nNativeDatabase.open(Main.default_db_path)\n"
 source = source[:start] + method + source[finish:]
 # The browser keeps its database in memory and saves snapshots, so it locks the file to one

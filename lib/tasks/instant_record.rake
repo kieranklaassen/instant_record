@@ -16,6 +16,25 @@ namespace :instant_record do
 
   desc "Build the compiled browser site"
   task build: :compile
+
+  desc "Build this Rails app, with its app/screens, as libraries a native app links: instant_record:native[iphonesimulator]"
+  task :native, [:target] => :environment do |_task, args|
+    require "instant_record/compiler"
+    Rails.application.eager_load!
+    toolchain = ENV.fetch("INSTANT_RECORD_TOOLCHAIN") { Rails.root.join("config/instant_record_toolchain.env") }
+    abort "No toolchain file at #{toolchain}. Run bin/rails generate instant_record:install, or set INSTANT_RECORD_TOOLCHAIN." unless File.file?(toolchain)
+    abort "Unknown target #{args[:target]}. Leave it out for this machine, or use iphonesimulator." unless [nil, "iphonesimulator"].include?(args[:target])
+    output = InstantRecord::Compiler.build_native(
+      root: Rails.root,
+      models: InstantRecord.syncable_models.map(&:name),
+      toolchain: toolchain,
+      target: args[:target],
+      endpoint: ENV.fetch("SYNC_ENDPOINT") { Rails.application.config.instant_record.mount_path || InstantRecord::DEFAULT_MOUNT_PATH },
+      baseline: Rails.application.config.instant_record.compiled_migration_baseline,
+      migration_paths: Rails.application.config.paths["db/migrate"].existent
+    )
+    puts "Native libraries: #{output}"
+  end
 end
 
 Rake::Task.define_task("assets:precompile").enhance do
