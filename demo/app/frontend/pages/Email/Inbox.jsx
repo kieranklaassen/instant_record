@@ -221,7 +221,7 @@ export default function Inbox({ member, inbox, inboxes, people, mail, thread, co
           <div className="mail-tools">
             <input ref={searchBox} type="search" className="mail-search" placeholder="Search mail" aria-label="Search mail"
               value={term} onChange={(event) => setTerm(event.target.value)} />
-            <span role="status">{status || (q && search.partial && !history.done ? "Showing matches on this device. Older mail needs a connection." : "")}</span>
+            <span role="status">{q && search.partial && !history.done ? "Showing matches on this device. Older mail needs a connection." : status}</span>
             <button type="button" className="mail-incoming" disabled={busy} onClick={generate}>
               <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 4v11" /><path d="m7 10 5 5 5-5" /><path d="M5 20h14" /></svg>
               Generate incoming email

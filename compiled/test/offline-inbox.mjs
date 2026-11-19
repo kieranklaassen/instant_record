@@ -95,7 +95,9 @@ try {
   await fromShell.reload();
   await fromShell.locator(".mail-row").first().waitFor();
   await filled(fromShell);
-  assert.deepEqual(shellRequests.filter(path => /^(records|bootstrap|shell|file)/.test(path)), [], "a reload fetches no history");
+  // The address names the open conversation, and the worker asks for that one by id the
+  // first time it boots at it (records?thread=). That is a lookup, not a page of history.
+  assert.deepEqual(shellRequests.filter(path => /^(records\?type=|bootstrap|shell|file)/.test(path)), [], "a reload fetches no history");
   say("6. A reload is whole at once, with no history request.");
 
   // 7. Before the fill has run, a search widens from the server. The fill is held back here.
