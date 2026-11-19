@@ -7,6 +7,9 @@ class AssistantTurn < ApplicationRecord
   LOCAL_AUTHOR = "On-device model"
   MAX_REPLY = 20_000
 
+  # A turn is its visitor's own, also when it follows up on an example chat.
+  sync_scope :visitor_id
+
   belongs_to :assistant_chat
 
   validates :prompt, presence: true, length: { maximum: 8_000 }

@@ -157,7 +157,22 @@ function recordsChanged(changes) {
 
 // The shell began compiling the module before this script loaded; pass it on, and ask for the
 // current page in the same message so boot and first render are one round trip.
-const boot = await call("boot", { module: await window.__wasm, path: location.pathname + location.search }).catch(error => {
+// Who this browser is to the sync server, for models that declare sync_scope. Every tab of
+// the browser shares it. Where storage is refused, the token lasts for this page.
+function syncScope() {
+  const key = "instant_record.sync_scope";
+  try {
+    const saved = localStorage.getItem(key);
+    if (saved) return saved;
+    const token = crypto.randomUUID();
+    localStorage.setItem(key, token);
+    return localStorage.getItem(key) || token;
+  } catch {
+    return crypto.randomUUID();
+  }
+}
+
+const boot = await call("boot", { module: await window.__wasm, path: location.pathname + location.search, scope: syncScope() }).catch(error => {
   document.body.textContent = "The app could not open this release. Your saved database was kept. " + error.message;
   throw error;
 });

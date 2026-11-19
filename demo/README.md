@@ -28,14 +28,18 @@ composer (Auto, Server, On-device) chooses who that is. The page's script holds
 no conversation state: it sends writes, folds the views' answer into the page,
 and talks to the browser's model.
 
-Chats are shared by every visitor, like Chat's messages, so a prompt typed here
-is public. The newest 40 visitor chats are kept
-(`Assistant::ReplyJob::KEPT_CHATS`); the three examples are seeded by
+Chats are private to a visitor (`sync_scope :visitor_id` on both models). The
+compiled site keeps a random token in `localStorage` and sends it with every
+sync request; Rails sends that browser its own chats and the three examples,
+which have no visitor, and takes no write to anyone else's. On the Rails-served
+pages a signed cookie stands for the visitor. The token is a capability, not a
+sign-in: clearing site data starts a new visitor. A visitor keeps their newest
+40 chats for 30 days (`Assistant::ReplyJob`); the examples are seeded by
 `db/seeds/assistant_chats.rb`.
 
 **Server.** A `server_only` callback on `AssistantTurn` enqueues
 `Assistant::ReplyJob`, which writes Rails' answer onto the turn. The change log
-carries it to every browser. This holds for a turn posted to Rails and for one a
+carries it to that visitor's browsers. This holds for a turn posted to Rails and for one a
 browser saved offline and synced later. The job asks a model through
 [RubyLLM](https://rubyllm.com) (`app/models/assistant/reply.rb`) when one of
 these is set:

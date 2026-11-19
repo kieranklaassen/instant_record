@@ -128,8 +128,9 @@ try {
     // A long local reply is saved whole, and the next question forgets the oldest turns to fit.
     await status("Replies come from the model in this browser");
     await ask("a long answer " + "x".repeat(1985) + "😀😀");
-    await idle();
+    await turns.last().locator(".relay-user").filter({ hasText: "a long answer" }).waitFor();
     await page.waitForFunction(() => document.querySelector(".relay-turn:last-child").dataset.pending === "false");
+    await idle();
     assert.ok((await turns.last().locator(".relay-response").textContent()).length > 2000);
     await ask("And after that?");
     await turns.last().getByText("On-device answer to: And after that?").waitFor();
@@ -159,10 +160,20 @@ try {
     assert.equal(await page.getByRole("radio", { name: "On-device" }).isChecked(), true);
     await engine("Auto");
 
-    // A browser that was never here gets the on-device replies from Rails, like any record.
+    // The on-device replies reached Rails as this browser's own records.
+    if (compiled) {
+      const token = await page.evaluate(() => localStorage.getItem("instant_record.sync_scope"));
+      const held = async scope => (await (await context.request.get(new URL("/instant_record/bootstrap" + scope, origin).href)).json()).records
+        .filter(record => record.type === "AssistantTurn").map(record => record.attributes.reply);
+      assert.ok((await held("?scope=" + token)).includes("On-device answer to: Stay local"));
+      assert.ok(!(await held("")).some(reply => reply.includes("On-device answer")));
+    }
+
+    // Another browser is sent none of it: the chat's address opens an empty chat there.
     const other = await open(null, new URL(chat).pathname + new URL(chat).search);
-    await other.page.locator(".relay-turn").filter({ hasText: "On-device answer to: Stay local" }).waitFor();
-    assert.equal(await other.page.locator(".relay-turn").filter({ hasText: "On-device answer to: What is an outbox?" }).locator(".relay-author").textContent(), "On-device model");
+    await other.page.locator(".relay-bar strong").filter({ hasText: "New chat" }).waitFor();
+    assert.equal(await other.page.locator(".relay-turn").count(), 0);
+    assert.equal(await other.page.locator("#relay-chats a").count(), 3);
     assert.deepEqual(other.errors, []);
     await other.context.close();
     assert.deepEqual(errors, []);
@@ -200,5 +211,5 @@ try {
     await context.close();
   }
   assert.deepEqual(providerCalls, []);
-  console.log("Rails' replies and the browser model's replies as records, the engine switch, stop, a small context, a question saved offline, no model and download passed.");
+  console.log("Rails' replies and the browser model's replies as this browser's own records, the engine switch, stop, a small context, a question saved offline, no model and download passed.");
 } finally { await browser.close(); }

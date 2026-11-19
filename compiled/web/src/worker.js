@@ -13,6 +13,9 @@ const QUIET_MS = 30;
 const DRAIN_RETRY_BASE_MS = 500;
 const DRAIN_RETRY_CAP_MS = 10000;
 
+// This browser's sync scope: an unguessable token the page keeps (main.js) and every sync
+// request carries, so the server can keep a scoped model's rows to the browser that owns them.
+let syncScope = "";
 let simulation = { offline: false, latencyMs: 0, report: false };
 const history = [];
 
@@ -43,7 +46,8 @@ async function fetchReply(method, path, body = "", endpoint = syncEndpoint) {
       options.headers = { "Content-Type": "application/json" };
       options.body = body;
     }
-    const response = await fetch(url, options);
+    const scoped = syncScope ? url + (url.includes("?") ? "&" : "?") + "scope=" + encodeURIComponent(syncScope) : url;
+    const response = await fetch(scoped, options);
     text = await response.text();
     outcome = status = response.status;
   } catch {
@@ -389,6 +393,7 @@ async function fetchShell(scope, path) {
 
 async function boot(payload = {}) {
   const scope = mailboxScope(payload.path || "/");
+  syncScope = typeof payload.scope === "string" ? payload.scope : "";
   openSnapshot(scope);
   changes = new BroadcastChannel("instant-record-spinel-changes" + (scope ? "/" + scope : ""));
   changes.onmessage = () => { if (host) self.postMessage({ type: "records_changed" }); };

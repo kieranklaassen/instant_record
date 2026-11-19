@@ -4,8 +4,33 @@ module Assistant
   class TurnsControllerTest < ActionDispatch::IntegrationTest
     include ActiveJob::TestHelper
 
+    # The chat stands in for an example: it has no visitor, so anyone may read it.
     setup do
       @chat = AssistantChat.create!(id: "chat-test", title: "A test chat")
+    end
+
+    test "a visitor's chats and turns are theirs alone" do
+      post assistant_turns_url, params: { turn: { assistant_chat_id: "chat-mine", prompt: "My question" } }
+      post assistant_turns_url, params: { turn: { assistant_chat_id: @chat.id, prompt: "My follow-up" } }
+      mine = AssistantTurn.find_by!(prompt: "My question")
+      assert mine.visitor_id.present?
+      assert_equal [mine.visitor_id] * 2, [AssistantChat.find("chat-mine").visitor_id, AssistantTurn.find_by!(prompt: "My follow-up").visitor_id]
+
+      get assistant_root_url(chat: "chat-mine")
+      assert_select "#relay-chats a", text: "My question"
+      assert_select ".relay-user", text: "My question"
+
+      other = open_session
+      other.get assistant_root_url(chat: "chat-mine")
+      assert_equal 0, other.css_select("#relay-chats a").count { |link| link.text == "My question" }
+      assert_equal "New chat", other.css_select("#relay-title").text
+      assert_empty other.css_select(".relay-turn")
+      other.get assistant_root_url(chat: @chat.id)
+      assert_empty other.css_select(".relay-turn")
+
+      other.patch assistant_turn_url(mine), params: { turn: { reply: "Not yours." } }
+      assert_equal 404, other.response.status
+      assert_equal "", mine.reload.reply
     end
 
     test "the page lists the chats and draws the newest turns of the open one" do
@@ -68,7 +93,8 @@ module Assistant
     end
 
     test "the browser's model saves its reply onto its own turn" do
-      asked = turn("What is an outbox?", engine: "local")
+      post assistant_turns_url, params: { turn: { assistant_chat_id: @chat.id, prompt: "What is an outbox?", engine: "local" } }
+      asked = AssistantTurn.find_by!(prompt: "What is an outbox?")
 
       patch assistant_turn_url(asked, fragment: 1), params: { turn: { reply: "A table of writes." } }
 

@@ -24,11 +24,12 @@ module Assistant
       assert_equal "Demo guide", asked.author
     end
 
-    test "the model is given the chat's earlier answered turns, oldest first" do
+    test "the model is given the chat's earlier answered turns as this visitor sees them, oldest first" do
       turn("First?", reply: "One.", created_at: 3.minutes.ago)
       turn("Unanswered", created_at: 2.minutes.ago)
-      turn("Second?", reply: "Two.", created_at: 1.minute.ago)
-      asked = turn("Third?")
+      turn("Someone else's", reply: "Not yours.", visitor_id: "bob", created_at: 90.seconds.ago)
+      turn("Second?", reply: "Two.", visitor_id: "ada", created_at: 1.minute.ago)
+      asked = turn("Third?", visitor_id: "ada")
       asked_with = nil
 
       original = Assistant::Reply.method(:call)
@@ -55,16 +56,26 @@ module Assistant
       assert_equal "Already here.", answered.reload.reply
     end
 
-    test "the oldest visitor chats make room, and the examples stay" do
-      AssistantChat.create!(id: AssistantChat::EXAMPLES.first, title: "An example", created_at: 1.year.ago)
-      (Assistant::ReplyJob::KEPT_CHATS + 2).times { |i| AssistantChat.create!(id: "visitor-#{i}", title: "Chat #{i}", created_at: i.minutes.ago) }
-      oldest = AssistantTurn.create!(assistant_chat_id: "visitor-#{Assistant::ReplyJob::KEPT_CHATS + 1}", prompt: "Old", reply: "Old.")
+    test "a visitor's oldest chats make room, and nobody else's do" do
+      kept = Assistant::ReplyJob::KEPT_CHATS
+      (kept + 2).times { |i| AssistantChat.create!(id: "ada-#{i}", title: "Chat #{i}", visitor_id: "ada", created_at: i.minutes.ago) }
+      oldest = AssistantTurn.create!(assistant_chat_id: "ada-#{kept + 1}", prompt: "Old", reply: "Old.", visitor_id: "ada")
+      AssistantChat.create!(id: "bob-old", title: "Bob's", visitor_id: "bob", created_at: 1.day.ago)
+      AssistantChat.create!(id: "bob-ancient", title: "Bob's", visitor_id: "bob", created_at: Assistant::ReplyJob::KEPT_FOR.ago - 1.day)
 
-      Assistant::ReplyJob.perform_now(turn("Explain offline sync").id)
+      Assistant::ReplyJob.perform_now(AssistantTurn.create!(assistant_chat_id: "ada-0", prompt: "Explain offline sync", visitor_id: "ada").id)
 
-      assert_equal Assistant::ReplyJob::KEPT_CHATS, AssistantChat.where("id LIKE 'visitor-%' OR id = 'chat-test'").count
-      assert AssistantChat.exists?(AssistantChat::EXAMPLES.first)
+      assert_equal kept, AssistantChat.where(visitor_id: "ada").count
       assert_not AssistantTurn.exists?(oldest.id)
+      assert_equal %w[bob-old chat-test], AssistantChat.where.not(visitor_id: "ada").or(AssistantChat.where(visitor_id: nil)).pluck(:id).sort
+    end
+
+    test "Rails' answer is logged for its visitor alone" do
+      asked = turn("Explain offline sync", visitor_id: "ada")
+
+      Assistant::ReplyJob.perform_now(asked.id)
+
+      assert_equal "ada", InstantRecord::Change.where(record_id: asked.id).last.scope
     end
 
     private

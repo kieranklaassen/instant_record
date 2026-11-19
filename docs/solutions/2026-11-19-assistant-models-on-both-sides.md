@@ -6,7 +6,7 @@ Date: 2026-11-19. Plan: `docs/plans/2026-11-19-001-feat-assistant-ruby-llm-local
 
 Online, `Assistant::Reply` asks a model through RubyLLM. Offline, the page asks the browser's built-in model through Chrome's Prompt API (`LanguageModel`). A switch chooses Auto, Server or On-device.
 
-Later the same day the conversations moved out of the page's script and into records (`AssistantChat`, `AssistantTurn`). A question is a write; a `server_only` callback enqueues `Assistant::ReplyJob`, which writes Rails' answer onto the turn, and the browser's model saves its answer onto the turn too. The reply endpoint and its history parameters are gone, so the notes below about the endpoint describe the first version. What they taught still holds for the job.
+Later the same day the conversations moved out of the page's script and into records (`AssistantChat`, `AssistantTurn`). A question is a write; a `server_only` callback enqueues `Assistant::ReplyJob`, which writes Rails' answer onto the turn, and the browser's model saves its answer onto the turn too. Chats are private to a visitor through the gem's `sync_scope`, which this work added: the browser sends a token, and Rails keeps a scoped model's rows, changes and writes to the token they belong to. The reply endpoint and its history parameters are gone, so the notes below about the endpoint describe the first version. What they taught still holds for the job.
 
 ## What we believed, and what was true
 

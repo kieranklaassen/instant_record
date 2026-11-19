@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_11_19_000100) do
+ActiveRecord::Schema[8.1].define(version: 2026_11_19_000201) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -20,6 +20,8 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_19_000100) do
     t.string "sync_state", default: "synced", null: false
     t.string "title", null: false
     t.datetime "updated_at", null: false
+    t.string "visitor_id"
+    t.index ["visitor_id", "created_at"], name: "index_assistant_chats_on_visitor_id_and_created_at"
   end
 
   create_table "assistant_turns", id: :string, force: :cascade do |t|
@@ -32,6 +34,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_19_000100) do
     t.integer "server_version", default: 0, null: false
     t.string "sync_state", default: "synced", null: false
     t.datetime "updated_at", null: false
+    t.string "visitor_id"
     t.index ["assistant_chat_id", "created_at", "id"], name: "idx_on_assistant_chat_id_created_at_id_dab59499ed"
   end
 
@@ -87,6 +90,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_19_000100) do
     t.string "operation", null: false
     t.string "record_id", null: false
     t.string "record_type", null: false
+    t.string "scope"
     t.integer "version", default: 0, null: false
     t.index ["record_type", "record_id"], name: "index_instant_record_changes_on_record_type_and_record_id"
   end
