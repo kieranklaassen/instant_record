@@ -9,9 +9,11 @@ module InstantRecord
     # Accepts a batch of client mutations; MutationApplier owns the sync
     # semantics (idempotency, LWW, versioning, change logging).
     def create
+      scope = InstantRecord.request_scope(request)
       results = Array(params.require(:mutations)).map do |raw|
         MutationApplier.apply(
-          raw.permit(:id, :record_type, :record_id, :operation, :base_version, changes: {})
+          raw.permit(:id, :record_type, :record_id, :operation, :base_version, changes: {}),
+          scope
         )
       end
 

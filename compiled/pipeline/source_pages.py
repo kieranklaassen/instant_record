@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 PAGES = {
-    "assistant": ("assistant/chats", "index", ("issue",)),
+    "assistant": ("assistant/turns", "index", ("assistant_chat", "assistant_turn")),
     "home": ("home", "index", ()),
     "email": ("email/mailboxes", "index", ("mail_entry", "mail_directory")),
     "todo": ("todo/issues", "index", ("issue",)),
@@ -29,13 +29,10 @@ def write_source_pages(app, dist, version, demo):
                       else "app/frontend/pages/Email/Inbox.jsx")
             files.append((script, root / script))
         if key == "assistant":
-            samples = "app/javascript/controllers/assistant_examples.js"
-            files.append((samples, root / samples))
-            history = "app/controllers/assistant/history_controller.rb"
-            files.append((history, root / history))
-            local = "app/javascript/controllers/assistant_local_model.js"
-            files.append((local, root / local))
-            for server in ("app/controllers/assistant/replies_controller.rb", "app/models/assistant/reply.rb"):
+            for part in ("app/views/assistant/turns/_turns.html.erb", "app/javascript/controllers/assistant_local_model.js"):
+                files.append((part, root / part))
+            # What answers on the server is left out of the build, so it is read from the demo.
+            for server in ("app/jobs/assistant/reply_job.rb", "app/models/assistant/reply.rb"):
                 files.append((server, Path(demo) / server))
         if key == "migrate":
             files[1] = ("compiled/pipeline/sqlite_release.rb", Path(__file__).with_name("sqlite_release.rb"))

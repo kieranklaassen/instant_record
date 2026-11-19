@@ -11,9 +11,12 @@ module InstantRecord
     # checkout — an idle stream must not pin a database connection while it
     # sleeps — and uncached, because the request executor's query cache would
     # otherwise return the first poll's result forever.
-    def self.poll(cursor)
+    # What a client with `scope` may hear of: its own changes and everyone's.
+    scope :visible_to, ->(scope) { where(scope: [nil, scope.presence].uniq) }
+
+    def self.poll(cursor, scope: nil)
       connection_pool.with_connection do
-        uncached { after(cursor).to_a }
+        uncached { after(cursor).visible_to(scope).to_a }
       end
     end
 

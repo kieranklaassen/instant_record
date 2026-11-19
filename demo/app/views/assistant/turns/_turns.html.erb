@@ -1,0 +1,47 @@
+<%# One row per turn, keyed by its record id, so a refresh touches only the rows
+    that changed: a reply arriving, a "waiting to sync" flag clearing. %>
+<ol id="relay-turns" class="relay-transcript" data-live data-chat="<%= @chat_id %>" aria-label="Messages">
+  <% if @turns.empty? %>
+    <li id="relay-welcome" class="relay-welcome">
+      <span class="relay-sign relay-hero" aria-hidden="true"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M5.6 18.4l2.8-2.8M15.6 8.4l2.8-2.8"/></svg></span>
+      <h1>What are we building?</h1>
+      <div class="relay-starters" data-action="click->assistant-chat#suggest">
+        <button type="button"><span aria-hidden="true">▤</span> Inspect my workspace</button>
+        <button type="button"><span aria-hidden="true">⇄</span> Explain offline sync</button>
+        <button type="button"><span aria-hidden="true">{ }</span> Show a Rails query</button>
+      </div>
+    </li>
+  <% end %>
+  <% if @older %>
+    <li id="relay-older"><a class="relay-older" href="<%= assistant_root_path %>?chat=<%= @chat_id %>&amp;depth=<%= @depth + 8 %>" data-turbo="false" data-relay-link="older">Load earlier messages</a></li>
+  <% end %>
+  <% @turns.each do |turn| %>
+    <li id="turn-<%= turn.id %>" class="relay-turn" data-engine="<%= turn.engine %>" data-pending="<%= turn.reply == "" %>">
+      <p class="relay-user"><%= turn.prompt %></p>
+      <article class="relay-answer">
+        <% if turn.reply == "" %>
+          <h2 class="relay-author"><%= turn.engine == "local" ? AssistantTurn::LOCAL_AUTHOR : "Rails" %></h2>
+          <div class="relay-response"><p><%= turn.engine == "local" ? "No reply was saved." : "Waiting for Rails…" %></p></div>
+        <% else %>
+          <h2 class="relay-author"><%= turn.author %></h2>
+          <div class="relay-response">
+            <% assistant_blocks(turn.reply).each do |block| %>
+              <% if block[0] == "code" %>
+                <div class="relay-code"><button type="button" class="relay-copy" data-action="assistant-chat#copy">Copy code</button><pre><code><%= block[1] %></code></pre></div>
+              <% elsif block[0] == "ul" %>
+                <ul><% block[1].split("\n").each do |item| %><li><%= item %></li><% end %></ul>
+              <% elsif block[0] == "ol" %>
+                <ol><% block[1].split("\n").each do |item| %><li><%= item %></li><% end %></ol>
+              <% else %>
+                <p><%= block[1] %></p>
+              <% end %>
+            <% end %>
+          </div>
+        <% end %>
+        <% if turn.sync_state != "synced" %>
+          <small class="relay-flag">Waiting to sync</small>
+        <% end %>
+      </article>
+    </li>
+  <% end %>
+</ol>
