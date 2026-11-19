@@ -25,8 +25,9 @@ try {
   await maya.getByLabel("Message", { exact: true }).fill("Please confirm receipt.");
   await maya.getByRole("button", { name: "Send message" }).click();
   await maya.getByRole("heading", { name: subject }).waitFor();
+  await maya.locator(".mail-reply-prompt").click();
   await maya.getByLabel("Reply", { exact: true }).fill(reply);
-  await maya.getByRole("button", { name: "Send reply" }).click();
+  await maya.getByRole("button", { name: "Send", exact: true }).click();
   await maya.getByText(reply, { exact: true }).waitFor();
   await maya.reload();
   await maya.getByText(reply, { exact: true }).waitFor();
@@ -39,6 +40,7 @@ try {
   const received = theo.getByRole("link", { name: new RegExp(subject) });
   await received.click();
   await theo.getByText(reply, { exact: true }).waitFor();
+  await theo.locator(".mail-reply-prompt").click();
   await theo.getByRole("heading", { name: "Reply to dispatch@example.test" }).waitFor();
   assert.equal(await theo.getByText(reply, { exact: true }).count(), 1);
   await theo.getByRole("button", { name: "Archive conversation" }).click();
@@ -68,8 +70,9 @@ try {
   // This teammate uses a separate profile and can only receive through Rails.
   await thread(theo).click();
   await theo.getByRole("heading", { name: onlineSubject }).waitFor();
+  await theo.locator(".mail-reply-prompt").click();
   await theo.getByLabel("Reply", { exact: true }).fill(response);
-  await theo.getByRole("button", { name: "Send reply" }).click();
+  await theo.getByRole("button", { name: "Send", exact: true }).click();
   await theo.getByText(response, { exact: true }).waitFor();
   await sender.getByText(response, { exact: true }).waitFor();
   await theo.getByRole("button", { name: "Archive conversation" }).click();
@@ -77,14 +80,14 @@ try {
   await thread(sender).waitFor({ state: "detached" });
   await mirror.getByRole("button", { name: "Compose" }).click();
   await mirror.getByLabel("Subject", { exact: true }).fill("Unfinished draft");
-  const before = await theo.locator(".mail-row").evaluateAll(rows => rows.map(row => row.href));
+  const before = await theo.locator(".mail-row-link").evaluateAll(rows => rows.map(row => row.href));
   await sender.getByRole("button", { name: "Generate incoming email" }).click();
   await sender.getByRole("status").filter({ hasText: "Email received" }).waitFor();
-  await theo.waitForFunction(previous => Array.from(document.querySelectorAll(".mail-row")).some(row => !previous.includes(row.href)), before);
-  const incoming = await theo.locator(".mail-row").evaluateAll((rows, previous) => rows.find(row => !previous.includes(row.href)).getAttribute("href"), before);
-  await theo.locator(`.mail-row[href="${incoming}"]`).click();
+  await theo.waitForFunction(previous => Array.from(document.querySelectorAll(".mail-row-link")).some(row => !previous.includes(row.href)), before);
+  const incoming = await theo.locator(".mail-row-link").evaluateAll((rows, previous) => rows.find(row => !previous.includes(row.href)).getAttribute("href"), before);
+  await theo.locator(`.mail-row-link[href="${incoming}"]`).click();
   const id = new URL(incoming, origin).searchParams.get("thread");
-  await mirror.locator(`.mail-row[href$="thread=${id}"]`).waitFor();
+  await mirror.locator(`.mail-row-link[href$="thread=${id}"]`).waitFor();
   assert.equal(await mirror.getByLabel("Subject", { exact: true }).inputValue(), "Unfinished draft");
   await theo.getByRole("button", { name: "Archive conversation" }).click();
   console.log("Generated incoming email reached an independent teammate and preserved an open draft.");

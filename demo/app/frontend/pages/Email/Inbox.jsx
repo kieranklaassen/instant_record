@@ -1,13 +1,24 @@
 import { Head, router, usePage } from "@inertiajs/react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import MailList from "../../components/MailList"
-import { Clear, Composer, KeyList, Thread } from "../../components/MailReader"
-import { useKeyboardNavigation, useLiveParam, useLiveWindow, useStableRows } from "instant_record"
-import { inboxPath, initial, mailRow, replyRow } from "../../lib/mail"
+import {
+  useKeyboardNavigation, useLiveParam, useLiveWindow, useSelection, useShortcuts, useStableRows, useUndoable,
+} from "instant_record"
+import Composer from "../../components/mail/Composer"
+import EmptyState from "../../components/mail/EmptyState"
+import MailList from "../../components/mail/MailList"
+import Rail from "../../components/mail/Rail"
+import ReplyBox from "../../components/mail/ReplyBox"
+import Thread from "../../components/mail/Thread"
+import Icon from "../../components/ui/Icon"
+import KeyHelp from "../../components/ui/KeyHelp"
+import ShortcutHint from "../../components/ui/ShortcutHint"
+import Toasts, { useNotices } from "../../components/ui/Toasts"
+import { GROUPS, keyOf, mailBindings } from "../../lib/keys"
+import { capitalize, firstOf, mailRow, replyRow, withOverlay, withPending } from "../../lib/mail"
+import { useDrafts } from "../../lib/useDrafts"
+import { useMailActions } from "../../lib/useMailActions"
 
 const mailCursor = (row) => ({ created_at: row[5], id: row[0] })
-const capitalize = (word) => word[0].toUpperCase() + word.slice(1)
-const WRITE = { preserveState: true, preserveScroll: true, async: true }
 const THREAD = ["thread"]
 
 function useSettled(value, ms) {
@@ -24,63 +35,83 @@ function useSettled(value, ms) {
 //   mail     the list, a live prop. `limit` in the address says how deep.
 //   thread   the conversation the address names, a live prop.
 //
-// Reading is a partial reload and writing is a form post. InstantRecord sits
-// under Inertia (the gem's frontend package): it tells Inertia when to
-// reload a live prop, and beside a local database it answers the visit.
+// Reading is a partial reload. InstantRecord sits under Inertia (the gem's
+// frontend package): it tells Inertia when to reload a live prop, and beside
+// a local database it answers the visit.
+//
+// This file is composition. The writes are lib/useMailActions.js, the keys
+// are lib/keys.js, and what is on its way is laid over the props by
+// lib/mail.js.
 export default function Inbox({ member, inbox, inboxes, people, mail, thread, composing }) {
   const scope = useMemo(() => ({ member, inbox }), [member, inbox])
   const { url } = usePage()
   const address = new URL(url, window.location.origin).searchParams.get("thread") || thread.id
 
   const [open, setOpen] = useState(false)
-  const [replyFocus, setReplyFocus] = useState(0)
+  const [replying, setReplying] = useState(false)
+  const [replyVersion, setReplyVersion] = useState(0)
   const [help, setHelp] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [status, setStatus] = useState("")
+  const [restore, setRestore] = useState(null)
+  const sender = useRef(null)
+  const reader = useRef(null)
 
-  const rows = useStableRows(mail.rows, mailRow)
+  const { notices, notify, dismiss } = useNotices()
+  const undoable = useUndoable()
+  const actions = useMailActions(scope, { notify, hold: undoable.hold })
+  const drafts = useDrafts(scope)
+
+  const loaded = useStableRows(mail.rows, mailRow)
+  const { rows, unreadCount } = useMemo(
+    () => withOverlay(loaded, mail.unread_count, { held: undoable.held, marks: actions.marks }),
+    [loaded, mail.unread_count, undoable.held, actions.marks],
+  )
   const ids = useMemo(() => rows.map((row) => row.id), [rows])
   const { more, older, failed } = useLiveWindow({ prop: "mail", window: mail, model: "MailEntry", cursor: mailCursor })
+  const { focusedId, focus, move, register } = useKeyboardNavigation({ ids, more, onNeed: older, startAt: address })
+  const selection = useSelection(ids)
   const now = useRef({})
 
   useEffect(() => {
-    if (failed) setStatus("Older mail is unavailable. Scroll again to retry.")
-  }, [failed])
+    if (failed) notify("Older mail is unavailable. Scroll again to retry.")
+  }, [failed, notify])
 
   // Offline with no local database, a reload has nowhere to go. Keep the page.
   useEffect(() => router.on("networkError", (event) => {
     event.preventDefault()
-    setStatus("You’re offline. Showing what was loaded.")
-  }), [])
+    notify("You’re offline. Showing what was loaded.")
+  }), [notify])
 
-  const send = useCallback((fields, options = {}) => {
-    router.post("/email", { ...scope, ...fields }, {
-      ...WRITE, ...options, onHttpException: () => setStatus("Couldn’t save that."),
-    })
-  }, [scope])
+  // The address follows the focused row, and `thread` is reloaded for it.
+  // Holding j settles first, so the reader is asked for once.
+  const wanted = useSettled(composing ? null : focusedId, 60)
+  useLiveParam("thread", wanted, { only: THREAD, answered: thread.id })
 
-  // Each write shows at once and is put back if Rails refuses it.
-  const read = useCallback((id) => {
-    setOpen(true)
-    if (!now.current.rows.find((row) => row.id === id)?.unread) return
-    send({ kind: "read", parent_id: id }, {
-      optimistic: ({ mail }) => ({
-        mail: {
-          ...mail,
-          unread_count: Math.max(mail.unread_count - 1, 0),
-          rows: mail.rows.map((row) => (row[0] === id ? row.with(6, "") : row)),
-        },
-      }),
-    })
-  }, [send])
+  // The row paints the message at once; its replies follow with the prop.
+  const held = thread.id === focusedId
+  const message = composing ? null : rows.find((row) => row.id === focusedId) || (held && !thread.archived && !undoable.held.has(thread.id) ? mailRow(thread.message) : null)
+  const replies = useMemo(() => {
+    const answered = held ? thread.replies.map(replyRow) : []
+    return withPending(answered, actions.sending.filter((entry) => entry.parent === focusedId))
+  }, [held, thread.replies, actions.sending, focusedId])
+  now.current = { rows, ids, focusedId, open, composing, url, message, replies, selected: selection.selected }
 
-  const archive = useCallback((id) => {
-    if (!id) return
-    setOpen(false)
-    send({ kind: "archive", parent_id: id }, {
-      optimistic: ({ mail }) => ({ mail: { ...mail, rows: mail.rows.filter((row) => row[0] !== id) } }),
-    })
-  }, [send])
+  // A conversation in the reader is read. Moving through the list with the
+  // reader open reads each one the keys settle on.
+  useEffect(() => {
+    if (!open || composing || !wanted || wanted !== focusedId) return
+    if (now.current.rows.find((row) => row.id === wanted)?.unread) actions.mark([wanted], false)
+  }, [open, composing, wanted, focusedId, actions.mark])
+
+  // A reply box belongs to one conversation.
+  useEffect(() => setReplying(false), [focusedId])
+
+  // What an action applies to: the selection, or else the focused row.
+  const targets = () => {
+    const { ids, focusedId, selected } = now.current
+    if (selected.size) return ids.filter((id) => selected.has(id))
+    return focusedId ? [focusedId] : []
+  }
 
   // Composing is in the address and needs nothing from the server.
   const compose = useCallback((composing) => {
@@ -96,54 +127,111 @@ export default function Inbox({ member, inbox, inboxes, people, mail, thread, co
     })
   }, [])
 
-  const back = useCallback(() => {
-    const { help, composing } = now.current
-    if (help) setHelp(false)
-    else if (composing) compose(false)
-    else setOpen(false)
-  }, [compose])
-
-  const keys = {
-    j: () => step(1),
-    k: () => step(-1),
-    Enter: () => focusedId && openRow(focusedId),
-    o: () => focusedId && openRow(focusedId),
-    Escape: back,
-    u: back,
-    e: () => !composing && archive(focusedId),
-    r: () => {
-      if (composing || !focusedId) return
-      read(focusedId)
-      setReplyFocus((count) => count + 1)
-    },
-    c: () => compose(true),
-    "?": () => setHelp((shown) => !shown),
-  }
-
-  const { focusedId, focus, move, register } = useKeyboardNavigation({ ids, keys, more, onNeed: older, startAt: address })
-
   const openRow = useCallback((id) => {
     if (now.current.composing) compose(false)
     focus(id)
-    read(id)
-  }, [compose, focus, read])
+    setOpen(true)
+  }, [compose, focus])
 
-  // With a conversation open, j and k read the next one.
-  const step = (by) => {
-    const id = move(by)
-    if (id && open && !composing) read(id)
+  const archive = (list = targets()) => {
+    if (!list.length) return
+    const { ids, focusedId, open } = now.current
+    const gone = new Set(list)
+    // Focus goes to the top of the block, so it lands on the row that takes its place.
+    if (gone.has(focusedId)) focus(firstOf(ids, gone))
+    actions.archive(list, { focus: focusedId, open })
+    selection.clear()
   }
 
-  // The address follows the focused row, and `thread` is reloaded for it.
-  // Holding j settles first, so the reader is asked for once.
-  const wanted = useSettled(composing ? null : focusedId, 60)
-  useLiveParam("thread", wanted, { only: THREAD, answered: thread.id })
+  const undo = () => {
+    const action = undoable.undo()
+    if (action) setRestore(action.context)
+  }
 
-  // The row paints the message at once; its replies follow with the prop.
-  const held = thread.id === focusedId
-  const message = composing ? null : rows.find((row) => row.id === focusedId) || (held && !thread.archived ? mailRow(thread.message) : null)
-  const replies = held ? thread.replies.map(replyRow) : []
-  now.current = { rows, help, composing, url }
+  // An undone archive puts focus and the reader back once its rows return.
+  useEffect(() => {
+    if (!restore) return
+    if (restore.focus && !ids.includes(restore.focus)) return
+    if (restore.focus) focus(restore.focus)
+    setOpen(restore.open)
+    setRestore(null)
+  }, [restore, ids, focus])
+
+  // `only` is the reader's own button: that conversation, whatever is selected.
+  const mark = (unread, only) => {
+    const { rows, selected } = now.current
+    const state = new Map(rows.map((row) => [row.id, row.unread]))
+    const list = (only || targets()).filter((id) => state.get(id) !== unread)
+    if (unread && (only || !selected.size)) setOpen(false)
+    actions.mark(list, unread)
+  }
+
+  // Stable, so a row that did not change is not drawn again (MailRow is memoized).
+  const { toggle, extendTo } = selection
+  const select = useCallback((id, { range } = {}) => {
+    if (range) extendTo(id, now.current.focusedId)
+    else toggle(id)
+    focus(id)
+  }, [toggle, extendTo, focus])
+
+  const reply = () => {
+    if (!now.current.message) return
+    setOpen(true)
+    setReplying(true)
+  }
+
+  const sendReply = (body, { archive: thenArchive }) => {
+    const { id } = now.current.message
+    setReplying(false)
+    actions.reply(id, body, now.current.replies.filter((reply) => !reply.pending)).then((taken) => {
+      if (taken) return thenArchive && archive([id])
+      // Something may have been typed there since: keep both.
+      const since = drafts.read(id)
+      drafts.save(id, since ? `${body}\n\n${since}` : body)
+      notify("Couldn’t send your reply. It’s back in the box.")
+      if (now.current.focusedId !== id) return
+      setReplyVersion((version) => version + 1)
+      setReplying(true)
+    })
+  }
+
+  const back = () => {
+    if (now.current.selected.size) selection.clear()
+    else if (now.current.composing) compose(false)
+    else setOpen(false)
+  }
+
+  const bindings = mailBindings({
+    step: move,
+    enter: () => (now.current.open && !composing ? reply() : focusedId && openRow(focusedId)),
+    open: () => focusedId && openRow(focusedId),
+    back,
+    scroll: (by) => reader.current?.scrollBy({ top: by * reader.current.clientHeight * 0.85, behavior: "smooth" }),
+    archive,
+    markUnread: () => mark(true),
+    markRead: () => mark(false),
+    undo,
+    help: () => setHelp((shown) => !shown),
+    reply,
+    send: (options) => sender.current?.(options),
+    compose: () => compose(true),
+    select: () => focusedId && selection.toggle(focusedId),
+    extend: (by) => {
+      const from = focusedId
+      const id = move(by)
+      if (id) selection.extendTo(id, from)
+    },
+    selectAll: selection.all,
+  }, {
+    composing: () => composing,
+    writing: () => !!sender.current,
+    replying: () => !!sender.current && !composing,
+  })
+  useShortcuts(bindings)
+  const keys = {
+    reply: keyOf(bindings, "reply"), archive: keyOf(bindings, "archive"), unread: keyOf(bindings, "unread"), read: keyOf(bindings, "read"),
+    send: keyOf(bindings, "send"), sendArchive: keyOf(bindings, "send-archive"), back: keyOf(bindings, "back"),
+  }
 
   // A message just sent from here is opened when it reaches the list.
   const sent = useRef(null)
@@ -155,14 +243,12 @@ export default function Inbox({ member, inbox, inboxes, people, mail, thread, co
 
   const generate = async () => {
     setBusy(true)
-    setStatus("Receiving…")
     try {
       const response = await fetch(`/email/sync/${member}/${inbox}/incoming?instant_record_network=1`, { method: "POST" })
       if (!response.ok) throw new Error()
-      setStatus("Email received")
-      router.reload({ only: ["mail"] })
+      router.reload({ only: ["mail"], async: true })
     } catch {
-      setStatus("Couldn’t receive mail. Check your connection.")
+      notify("Couldn’t receive mail. Check your connection.")
     } finally {
       setBusy(false)
     }
@@ -171,67 +257,45 @@ export default function Inbox({ member, inbox, inboxes, people, mail, thread, co
   return (
     <main className="maildesk" data-turbo="false" data-instant-refresh data-detail={String(composing || open)}>
       <Head title="Inbox · Shared inbox" />
-      <aside className="mail-rail">
-        <div className="mail-brand">
-          <span className="mail-mark" aria-hidden="true">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="5" width="18" height="14" rx="3" /><path d="M3.5 7.5 12 13l8.5-5.5" /></svg>
-          </span>
-          Inbox
-        </div>
-        <button type="button" className="mail-primary mail-compose-link" onClick={keys.c}>
-          <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
-          Compose
-        </button>
-        <div className="mail-rail-section">Mailboxes</div>
-        <nav aria-label="Mailboxes" className="mail-folders">
-          {inboxes.map((box) => (
-            <a key={box} href={inboxPath({ member, inbox: box })} aria-current={String(box === inbox)}>
-              <svg className="mail-folder-icon" aria-hidden="true" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 13h5l1.5 3h5L16 13h5" /><path d="M5.5 5h13L21 13v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-5Z" /></svg>
-              {capitalize(box)}
-            </a>
-          ))}
-        </nav>
-        <div className="mail-team">
-          <div className="mail-rail-section">View as</div>
-          <nav aria-label="Demo teammate">
-            {people.map(([person, box]) => (
-              <a key={person} href={inboxPath({ member: person, inbox: box })} aria-current={String(person === member)}>
-                <span className={`mail-avatar avatar-${person}`} aria-hidden="true">{initial(person)}</span>
-                {capitalize(person)}
-              </a>
-            ))}
-          </nav>
-        </div>
-        <button type="button" className="mail-keys-hint" onClick={keys["?"]}><kbd>?</kbd> Keys</button>
-      </aside>
+      <Rail member={member} inbox={inbox} inboxes={inboxes} people={people}
+        composeKey={keyOf(bindings, "compose")} helpKey={keyOf(bindings, "help")}
+        onCompose={() => compose(true)} onHelp={() => setHelp(true)} />
       <div className="mail-workspace">
         <header className="mail-bar">
           <h1>Shared inbox</h1>
           <div className="mail-tools">
-            <span role="status">{status}</span>
             <button type="button" className="mail-incoming" disabled={busy} onClick={generate}>
-              <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 4v11" /><path d="m7 10 5 5 5-5" /><path d="M5 20h14" /></svg>
-              Generate incoming email
+              <Icon name="incoming" size={15} />
+              {busy ? "Receiving…" : "Generate incoming email"}
             </button>
           </div>
         </header>
         <div className="mail-panes">
-          <MailList scope={scope} title={`${capitalize(inbox)} inbox`} rows={rows} unreadCount={mail.unread_count}
-            focusedId={focusedId} openAt={Math.max(ids.indexOf(address), 0)} onOpen={openRow} onEnd={() => older()} register={register} />
+          <MailList scope={scope} title={`${capitalize(inbox)} inbox`} rows={rows} unreadCount={unreadCount}
+            focusedId={focusedId} open={open && !composing} selected={selection.selected} keys={keys}
+            openAt={Math.max(ids.indexOf(address), 0)} onOpen={openRow} onSelect={select} onEnd={() => older()} register={register}
+            bulk={{ onArchive: () => archive(), onRead: () => mark(false), onUnread: () => mark(true), onClear: selection.clear }} />
           <section className="mail-reader" data-thread={message?.id || ""} data-compose={String(composing)}>
-            <button type="button" className="mail-return" onClick={back}>← {capitalize(inbox)}</button>
+            <button type="button" className="mail-return" onClick={back}><Icon name="back" size={14} /> {capitalize(inbox)}</button>
             {composing ? (
-              <Composer scope={scope} onClose={back} onSent={() => compose(false)}
-                onSend={() => { sent.current = { top: rows[0]?.id } }} />
+              <Composer scope={scope} drafts={drafts} sender={sender} keys={keys} onClose={back} onSent={() => compose(false)}
+                onSend={() => { sent.current = { top: rows[0]?.id } }}
+                onFail={() => { sent.current = null; notify("Couldn’t send that. It’s still here.") }} />
             ) : message ? (
-              <Thread scope={scope} message={message} replies={replies} replyFocus={replyFocus}
-                onMark={(kind) => (kind === "read" ? read(message.id) : send({ kind, parent_id: message.id }))}
-                onArchive={() => archive(message.id)} />
-            ) : <Clear />}
+              <>
+                <Thread key={message.id} message={message} replies={replies} keys={keys} scroller={reader}
+                  onReply={reply} onUnread={() => mark(true, [message.id])} onArchive={() => archive([message.id])} />
+                <ReplyBox key={`${message.id}:${replyVersion}`} id={message.id} address={message.address} open={replying}
+                  keys={keys} drafts={drafts} sender={sender}
+                  onOpen={reply} onClose={() => setReplying(false)} onSend={sendReply} />
+              </>
+            ) : <EmptyState />}
           </section>
         </div>
       </div>
-      {help && <KeyList onClose={() => setHelp(false)} />}
+      <Toasts notices={notices} pending={undoable.pending} undoKey={keyOf(bindings, "undo")} onUndo={undo} onDismiss={dismiss} />
+      <ShortcutHint />
+      {help && <KeyHelp bindings={bindings} groups={GROUPS} onClose={() => setHelp(false)} />}
     </main>
   )
 }
