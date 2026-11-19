@@ -39,6 +39,11 @@ try {
     ? page.evaluate(async () => (await (await fetch("/auth")).text()).match(/class="card auth-note/g)?.length || 0)
     : page.locator(".auth-note").count();
 
+  // The page folds every change in: it is loaded once and never again.
+  await page.evaluate(() => { window.__loadedOnce = true; });
+  const loads = [];
+  page.on("framenavigated", frame => { if (frame === page.mainFrame()) loads.push(frame.url()); });
+
   const everyone = ["Welcome"];
   const ben = ["Ben's gift list", "Team lunch is Thursday", "Welcome"];
   const ada = ["Ada's draft", "Payroll runs on the 28th", "Team lunch is Thursday", "Welcome"];
@@ -61,12 +66,17 @@ try {
   await page.getByRole("textbox", { name: "Title" }).fill("Ben's new note");
   await page.getByRole("button", { name: "Add note" }).click();
   await settle("Signed in as Ben.", [...ben, "Ben's new note"].sort());
+  assert.equal(await page.getByRole("textbox", { name: "Title" }).inputValue(), "");
+
+  // Ben deletes his new note, and it closes up in place.
+  await page.locator(".auth-note", { hasText: "Ben's new note" }).getByRole("button", { name: "Delete" }).click();
+  await settle("Signed in as Ben.", ben);
 
   // Ben deletes a note that is not his. On the server page there is nothing to
   // press that works; in the browser it goes, is refused, and comes back.
   await page.locator('.auth-note[data-id="auth-welcome"]').getByRole("button", { name: "Delete" }).click();
   await page.waitForTimeout(2500); // long enough for the refusal to come back and the page to be redrawn
-  await settle("Signed in as Ben.", [...ben, "Ben's new note"].sort());
+  await settle("Signed in as Ben.", ben);
 
   // Switch to Ada: Ben's own notes leave this browser, the admins' note arrives.
   await page.getByRole("button", { name: /Ada/ }).click();
@@ -86,6 +96,8 @@ try {
   await stranger.waitForFunction(() => document.querySelector("[data-auth-target=who]")?.textContent.startsWith("Signed out."));
   assert.deepEqual(await stranger.locator(".auth-note h3").allTextContents(), everyone);
 
+  assert.deepEqual(loads, [], "the page was loaded again");
+  assert.equal(await page.evaluate(() => window.__loadedOnce), true);
   assert.deepEqual(errors, []);
   console.log(`auth: passed (${compiled ? "compiled" : "Rails-served"})`);
 } finally {
