@@ -5,43 +5,54 @@ import Foundation
 /// screens on show drawn from its local database, sends it taps and syncs it
 /// with the server. It knows a screen only by name and argument.
 public final class AppHost: ObservableObject {
+    /// Where a first screen keeps its data: the SQLite file, and the sync
+    /// address the app's server gives for it. One file syncs with one address.
+    public struct Store: Equatable {
+        public let database: String
+        public let endpoint: String
+
+        public init(database: String, endpoint: String) {
+            self.database = database
+            self.endpoint = endpoint
+        }
+    }
+
     /// The screens on show, as the app last described them.
     @Published public private(set) var screens: [Route: Node] = [:]
     /// The last thing the app raised, or empty.
     @Published public private(set) var failure = ""
+    /// The first screen.
+    @Published public private(set) var root: Route
     /// The screens pushed over the first one.
     @Published public var path: [Route] = [] {
-        didSet {
-            let showing = [root] + path
-            lock.withLock { visible = showing }
-            screens = screens.filter { showing.contains($0.key) }
-            thread.run { self.draw() }
-        }
+        didSet { show() }
     }
 
-    public let root: Route
     private let engine: Engine
-    private let endpoint: String
+    private let store: (Route) -> Store
     private let exchange: (String) -> String
     private let thread = EngineThread()
     private let lock = NSLock()
     private var visible: [Route]
+    private var open: Store?  // the engine thread's
 
-    /// `endpoint` is the sync address the app's server gives this member.
-    public init(engine: Engine, root: Route, endpoint: String, exchange: @escaping (String) -> String = Transport().exchange) {
+    /// `store` says where the first screen's data lives. It is asked again
+    /// when a menu item puts another screen in the first one's place.
+    public init(engine: Engine, root: Route, store: @escaping (Route) -> Store, exchange: @escaping (String) -> String = Transport().exchange) {
         self.engine = engine
         self.root = root
-        self.endpoint = endpoint
+        self.store = store
         self.exchange = exchange
         visible = [root]
     }
 
     /// Open the database, draw from it, then sync. The first screen does not
     /// wait for the network.
-    public func start(database: String) {
+    public func start() {
+        let store = store(root)
         thread.run {
             self.engine.onExchange(self.exchange)
-            guard self.engine.boot(database: database) else { return self.report() }
+            self.boot(store)
             self.draw()
             self.pass()
         }
@@ -49,6 +60,17 @@ public final class AppHost: ObservableObject {
 
     public func sync() {
         thread.run { self.pass() }
+    }
+
+    /// A pull on a list: sync, then draw whether or not anything changed.
+    public func refresh() async {
+        await withCheckedContinuation { done in
+            thread.run {
+                self.pass()
+                self.draw()
+                done.resume()
+            }
+        }
     }
 
     /// A tap: the screen at `route` performs `action`, the screens are drawn
@@ -69,6 +91,16 @@ public final class AppHost: ObservableObject {
         path.append(Route(screen, arg))
     }
 
+    /// Put another screen in the first one's place, as choosing another
+    /// account does. Its data may live in another database.
+    public func replace(with route: Route) {
+        let store = store(route)
+        thread.run { self.boot(store) }
+        root = route
+        path = []
+        sync()
+    }
+
     /// Returns when everything asked of the app so far has run and its
     /// results have been published.
     public func settle() {
@@ -80,10 +112,26 @@ public final class AppHost: ObservableObject {
         }
     }
 
+    private func show() {
+        let showing = [root] + path
+        lock.withLock { visible = showing }
+        screens = screens.filter { showing.contains($0.key) }
+        thread.run { self.draw() }
+    }
+
     // Everything below runs on the engine's thread.
 
+    private func boot(_ store: Store) {
+        if store.database == open?.database || engine.boot(database: store.database) {
+            open = store
+        } else {
+            report()
+        }
+    }
+
     private func pass() {
-        if engine.call("sync", endpoint) == nil { report() }
+        guard let open else { return }
+        if engine.call("sync", open.endpoint) == nil { report() }
         if engine.notice().hasPrefix("records_changed") { draw() }
     }
 

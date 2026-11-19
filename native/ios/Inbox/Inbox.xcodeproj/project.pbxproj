@@ -11,6 +11,8 @@
 		A10000000000000000000002 /* LibraryEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* LibraryEngine.swift */; };
 		A10000000000000000000003 /* InstantRecordNative in Frameworks */ = {isa = PBXBuildFile; productRef = A90000000000000000000002 /* InstantRecordNative */; };
 		A10000000000000000000004 /* InboxUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* InboxUITests.swift */; };
+		A10000000000000000000005 /* ConversationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000008 /* ConversationView.swift */; };
+		A10000000000000000000006 /* InboxSummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* InboxSummary.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -21,6 +23,8 @@
 		A20000000000000000000005 /* Inbox.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Inbox.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A20000000000000000000006 /* InboxUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxUITests.swift; sourceTree = "<group>"; };
 		A20000000000000000000007 /* InboxUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = InboxUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A20000000000000000000008 /* ConversationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationView.swift; sourceTree = "<group>"; };
+		A20000000000000000000009 /* InboxSummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InboxSummary.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXContainerItemProxy section */
@@ -59,6 +63,8 @@
 			children = (
 				A20000000000000000000001 /* InboxApp.swift */,
 				A20000000000000000000002 /* LibraryEngine.swift */,
+				A20000000000000000000008 /* ConversationView.swift */,
+				A20000000000000000000009 /* InboxSummary.swift */,
 				A20000000000000000000003 /* Inbox-Bridging-Header.h */,
 				A20000000000000000000004 /* Info.plist */,
 			);
@@ -157,6 +163,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000000000000000000001 /* InboxApp.swift in Sources */,
+				A10000000000000000000005 /* ConversationView.swift in Sources */,
+				A10000000000000000000006 /* InboxSummary.swift in Sources */,
 				A10000000000000000000002 /* LibraryEngine.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

@@ -13,6 +13,7 @@ final class FakeEngine: Engine {
 
     func boot(database: String) -> Bool {
         calls.append("boot " + database)
+        rows = database.contains("billing") ? ["b1"] : ["m2", "m1"]
         return true
     }
 
@@ -45,8 +46,12 @@ final class AppHostTests: XCTestCase {
     private var engine = FakeEngine()
 
     private func host(answer: @escaping (String) -> String = { _ in "200\n" }) -> AppHost {
-        let host = AppHost(engine: engine, root: mailbox, endpoint: "http://example.test/sync", exchange: answer)
-        host.start(database: "/tmp/inbox.sqlite3")
+        // "member/inbox", and anything after it is how to show the inbox.
+        let host = AppHost(engine: engine, root: mailbox, store: { route in
+            let place = route.arg.split(separator: "/").prefix(2).joined(separator: "-")
+            return AppHost.Store(database: "/tmp/\(place).sqlite3", endpoint: "http://example.test/" + place)
+        }, exchange: answer)
+        host.start()
         host.settle()
         return host
     }
@@ -54,7 +59,7 @@ final class AppHostTests: XCTestCase {
     func testItDrawsFromTheDatabaseBeforeItSyncs() {
         let host = host()
 
-        XCTAssertEqual(["boot /tmp/inbox.sqlite3", "render mailbox|maya/support", "sync http://example.test/sync"], engine.calls)
+        XCTAssertEqual(["boot /tmp/maya-support.sqlite3", "render mailbox|maya/support", "sync http://example.test/maya-support"], engine.calls)
         XCTAssertEqual(["m2", "m1"], host.screens[mailbox]?.children.map(\.id))
     }
 
@@ -65,7 +70,7 @@ final class AppHostTests: XCTestCase {
         host.perform("archive", arg: "maya/support/m2", on: mailbox)
         host.settle()
 
-        XCTAssertEqual(["action mailbox|maya/support|archive|maya/support/m2", "render mailbox|maya/support", "sync http://example.test/sync"], engine.calls)
+        XCTAssertEqual(["action mailbox|maya/support|archive|maya/support/m2", "render mailbox|maya/support", "sync http://example.test/maya-support"], engine.calls)
         XCTAssertEqual(["m1"], host.screens[mailbox]?.children.map(\.id))
     }
 
@@ -80,7 +85,7 @@ final class AppHostTests: XCTestCase {
         host.sync()
         host.settle()
 
-        XCTAssertEqual(["sync http://example.test/sync", "render mailbox|maya/support", "render thread|maya/support/m2"], engine.calls)
+        XCTAssertEqual(["sync http://example.test/maya-support", "render mailbox|maya/support", "render thread|maya/support/m2"], engine.calls)
         XCTAssertEqual(["m3", "m2", "m1"], host.screens[mailbox]?.children.map(\.id))
     }
 
@@ -91,7 +96,7 @@ final class AppHostTests: XCTestCase {
         host.sync()
         host.settle()
 
-        XCTAssertEqual(["sync http://example.test/sync"], engine.calls)
+        XCTAssertEqual(["sync http://example.test/maya-support"], engine.calls)
     }
 
     func testARowsActionIsPerformedBeforeTheScreenItOpensIsDrawn() {
@@ -106,6 +111,41 @@ final class AppHostTests: XCTestCase {
         XCTAssertLessThan(engine.calls.firstIndex(of: "action mailbox|maya/support|read|maya/support/m2")!,
                           engine.calls.firstIndex(of: "render thread|maya/support/m2")!)
         XCTAssertEqual("thread", host.screens[thread]?.text)
+    }
+
+    func testAnotherFirstScreenOpensItsOwnDatabaseAndSyncsWithItsOwnAddress() {
+        let host = host()
+        host.path = [thread]
+        host.settle()
+        engine.calls = []
+
+        host.replace(with: Route("mailbox", "maya/billing"))
+        host.settle()
+
+        XCTAssertEqual(["boot /tmp/maya-billing.sqlite3", "render mailbox|maya/billing", "sync http://example.test/maya-billing"], engine.calls)
+        XCTAssertEqual(Route("mailbox", "maya/billing"), host.root)
+        XCTAssertEqual([], host.path)
+        XCTAssertEqual([Route("mailbox", "maya/billing")], Array(host.screens.keys))
+        XCTAssertEqual(["b1"], host.screens[host.root]?.children.map(\.id))
+    }
+
+    func testAnotherViewOfTheSameDataDoesNotOpenItAgain() {
+        let host = host()
+        engine.calls = []
+
+        host.replace(with: Route("mailbox", "maya/support/unread"))
+        host.settle()
+
+        XCTAssertEqual(["render mailbox|maya/support/unread", "sync http://example.test/maya-support"], engine.calls)
+    }
+
+    func testAPullSyncsAndDrawsEvenWhenNothingChanged() async {
+        let host = host()
+        engine.calls = []
+
+        await host.refresh()
+
+        XCTAssertEqual(["sync http://example.test/maya-support", "render mailbox|maya/support"], engine.calls)
     }
 
     func testAScreenThatWasClosedIsNoLongerKeptOrDrawn() {

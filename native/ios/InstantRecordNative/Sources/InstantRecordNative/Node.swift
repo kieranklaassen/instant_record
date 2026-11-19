@@ -22,8 +22,10 @@ public struct Node: Decodable, Equatable {
 
     /// The children with the identity a list keeps them by: a node's `id`
     /// when it has one, which for a row is its record, or else its place.
-    public var keyed: [Keyed] {
-        children.enumerated().map { Keyed(key: $0.element.id.isEmpty ? "#\($0.offset)" : $0.element.id, node: $0.element) }
+    public var keyed: [Keyed] { Node.keyed(children) }
+
+    public static func keyed(_ nodes: [Node]) -> [Keyed] {
+        nodes.enumerated().map { Keyed(key: $0.element.id.isEmpty ? "#\($0.offset)" : $0.element.id, node: $0.element) }
     }
 
     public struct Keyed: Identifiable, Equatable {
