@@ -60,9 +60,12 @@ module InstantRecord
     class Screen
       attr_reader :params
 
-      # `params` are what the screen was opened with, strings by name.
+      # `params` are what the screen was opened with, strings by name. Every
+      # hash a screen gives to `params:` or `args:` holds strings too: write
+      # `entry.id.to_s` for a value that comes from a record, since the
+      # phone's compiler types a hash by what it holds and refuses another.
       def initialize(params = {})
-        @params = Screen.strings(params)
+        @params = params
         @open = []
       end
 
@@ -127,8 +130,8 @@ module InstantRecord
         node = add("row")
         node.id = id
         node.action = action
-        node.args = Screen.strings(args)
-        node.params = Screen.strings(params)
+        node.args = args
+        node.params = params
         node.set("link", link)
         inside(node) { yield }
       end
@@ -185,7 +188,7 @@ module InstantRecord
       def item(title, action: "", args: {}, link: "", params: {}, image: "", role: "", selected: false)
         node = add("item")
         act(node, title, action, args, role)
-        node.params = Screen.strings(params)
+        node.params = params
         node.set("link", link)
         node.set("image", image)
         node.set("selected", "true") if selected
@@ -265,7 +268,7 @@ module InstantRecord
       def act(node, label, action, args, role)
         node.text = label
         node.action = action
-        node.args = Screen.strings(args)
+        node.args = args
         node.set("role", role)
       end
 

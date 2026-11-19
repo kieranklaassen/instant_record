@@ -277,16 +277,6 @@ class NativeScreenTest < ActiveSupport::TestCase
     end
   end
 
-  test "params and args that are not strings reach the host as strings" do
-    screen = Class.new(InstantRecord::Native::Screen) do
-      define_method(:body) { row(id: "a", link: "x", params: { id: 7, "gone" => nil }, args: { "n" => 3 }) { } }
-    end
-    row = screen.new(member: :maya).render.children.sole
-
-    assert_equal [{ "id" => "7", "gone" => "" }, { "n" => "3" }], [row.params, row.args]
-    assert_equal "maya", screen.new(member: :maya).param("member")
-  end
-
   test "the client forgets what it held in memory about a database that was closed" do
     client = InstantRecord::Client
     client.note_change("Letter", "a1")

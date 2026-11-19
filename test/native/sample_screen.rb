@@ -44,7 +44,7 @@ class LettersScreen < InstantRecord::Native::Screen
       list refreshable: true do
         section "Open" do
           @box.letters.each do |letter|
-            message = { "id" => letter.id, "note" => letter.note }
+            message = { "id" => letter.id, "note" => letter.note.to_s }
             row id: letter.id, link: "letter", params: place.merge("id" => letter.id), action: "read", args: message do
               stack "horizontal" do
                 image "circle.fill", tone: "accent"
