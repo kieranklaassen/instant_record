@@ -36,8 +36,11 @@ The Assistant demo answers from two places, and the switch in its composer
 prompt and the last six turns of the conversation are sent to that provider.
 With no key the scripted guide (`app/models/assistant/guide.rb`) answers, and it
 also answers when the call fails or after `ASSISTANT_DAILY_LIMIT` model calls in
-a day (500 by default, counted in `Rails.cache`). The endpoint is throttled to
-12 requests a minute per address.
+a day (500 by default). That count lives in `Rails.cache`, so it is as wide as
+the cache store: with the default file store it is per machine and starts again
+when `tmp/` is cleared, and a store that cannot count allows no model call. The
+endpoint is throttled to 12 requests a minute per address, a reply may look at
+the workspace once, and the whole call has 30 seconds.
 
 **On-device.** The page asks the browser's built-in model through Chrome's
 Prompt API (`app/javascript/controllers/assistant_local_model.js`), which is

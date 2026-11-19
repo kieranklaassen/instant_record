@@ -10,6 +10,10 @@ module Assistant
       "GEMINI_API_KEY" => "gemini-3.1-flash-lite"
     }.freeze
     MAX_OUTPUT_TOKENS = 600
+    # One look at the workspace, then an answer: a second round of tool calls ends the reply.
+    TOOL_ROUNDS = 2
+    # Seconds for the whole reply, every round and retry included.
+    DEADLINE = 30
     DAILY_LIMIT = 500
 
     INSTRUCTIONS = <<~TEXT.squish
@@ -53,22 +57,24 @@ module Assistant
         .with_instructions(INSTRUCTIONS)
         .with_max_output_tokens(MAX_OUTPUT_TOKENS)
         .with_tools(WorkspaceTool)
+        .with_tool_options(rounds: TOOL_ROUNDS)
       @history.each do |prompt, reply|
         chat.add_message(role: :user, content: prompt)
         chat.add_message(role: :assistant, content: reply)
       end
-      chat.ask(@prompt).content.to_s.strip
+      Timeout.timeout(DEADLINE) { chat.ask(@prompt) }.content.to_s.strip
     rescue StandardError => error
       Rails.logger.warn("[assistant] #{error.class}: answering from the guide")
       nil
     end
 
     # The endpoint answers any origin, so the per-address throttle alone does
-    # not bound what visitors spend. A null cache store counts nothing.
+    # not bound what visitors spend. A cache store that cannot count allows
+    # nothing, and the count is as wide as the store: one machine for a file store.
     def within_budget?
       limit = ENV.fetch("ASSISTANT_DAILY_LIMIT", DAILY_LIMIT).to_i
       count = Rails.cache.increment("assistant/replies/#{Time.now.utc.to_date}", 1, expires_in: 2.days)
-      count.nil? || count <= limit
+      count.present? && count <= limit
     end
   end
 end

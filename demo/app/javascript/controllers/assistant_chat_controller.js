@@ -74,8 +74,14 @@ export default class extends Controller {
     return this.engine === "auto" && local ? "local" : null
   }
 
+  // In Auto, the browser's model can take over a question Rails has not answered.
+  get handoff() {
+    return this.engine === "auto" && this.local === "available" && this.active && !this.active.received
+  }
+
   connection() {
-    if (this.offline && this.active?.route === "server") this.stop()
+    // The connection dropped while Rails was asked: hand the question over, or end it.
+    if (this.offline && this.active?.route === "server") this.handoff ? this.active.request.abort() : this.stop()
     const route = this.route
     this.sendTarget.disabled = !route
     this.engineTargets.forEach(input => {
@@ -104,7 +110,9 @@ export default class extends Controller {
     this.connection()
   }
 
+  // A click, not a change: choosing On-device again retries a download that failed.
   async chooseEngine(event) {
+    if (event.target.name !== "engine") return
     this.engine = event.target.value
     try { localStorage.setItem(ENGINE_KEY, this.engine) } catch { this.storageFailed = true }
     this.connection()
@@ -347,12 +355,16 @@ export default class extends Controller {
     this.saveDraft()
     let route = this.route
     if (!route) return this.connection()
-    const clip = text => text.slice(0, HISTORY_TEXT)
+    // By character, as Rails counts them, so no emoji is cut in half.
+    const clip = text => Array.from(text).slice(0, HISTORY_TEXT).join("")
     const history = this.conversation.filter(earlier => earlier.reply).slice(-HISTORY_TURNS)
       .map(earlier => [clip(earlier.prompt), clip(earlier.reply)])
     const turn = { id: crypto.randomUUID(), thread: this.thread, time: Date.now(), prompt, reply: "", engine: "guide" }
+    // Stop ends the whole turn; request ends only the question to Rails.
     const controller = new AbortController()
-    this.active = { turn, controller, received: false, route }
+    const request = new AbortController()
+    controller.signal.addEventListener("abort", () => request.abort())
+    this.active = { turn, controller, request, received: false, route }
     this.inputTarget.readOnly = true
     this.sendTarget.hidden = true
     this.stopTarget.hidden = false
@@ -362,12 +374,9 @@ export default class extends Controller {
     this.jumpToLatest()
     try {
       if (route === "server") {
-        try { await this.askServer(turn, prompt, history, controller.signal) }
+        try { await this.askServer(turn, prompt, history, request.signal) }
         catch (error) {
-          // In Auto, a server that can't be reached hands the prompt to the browser's model.
-          const fallback = this.active?.turn === turn && !this.active.received && !controller.signal.aborted &&
-            this.engine === "auto" && this.local === "available"
-          if (!fallback) throw error
+          if (this.active?.turn !== turn || controller.signal.aborted || !this.handoff) throw error
           route = this.active.route = "local"
           this.statusTarget.textContent = "Couldn’t reach Rails. Thinking on this device…"
         }
@@ -375,8 +384,10 @@ export default class extends Controller {
       if (route === "local") await this.askLocal(turn, prompt, history, controller.signal)
     } catch {
       if (this.active?.turn !== turn) return
+      const cut = this.active.received
       this.stop()
-      this.statusTarget.textContent = (route === "local" ? "The on-device model couldn’t answer." : "Couldn’t reach the reply service.") + " Your draft is ready to retry."
+      this.statusTarget.textContent = cut ? "The reply was cut short." :
+        (route === "local" ? "The on-device model couldn’t answer." : "Couldn’t reach the reply service.") + " Your draft is ready to retry."
     } finally {
       if (this.active?.turn === turn) this.finish(turn)
     }

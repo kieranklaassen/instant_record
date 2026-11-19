@@ -127,9 +127,9 @@ try {
     await status("Reconnect to send");
     assert.equal(await page.getByRole("button", { name: "Send message" }).isDisabled(), true);
 
-    // A long local reply does not stop Rails from answering the next question.
+    // A long local reply, with an emoji where the clip falls, does not stop Rails from answering the next question.
     await engine("Auto");
-    await ask("a long answer");
+    await ask("a long answer " + "x".repeat(1985) + "😀😀");
     await idle();
     assert.ok((await answers().last().locator(".relay-response").textContent()).length > 2000);
     // The next local question no longer fits with every earlier turn: the oldest are forgotten.
@@ -144,7 +144,7 @@ try {
     await ask("Explain offline sync");
     assert.equal((await posted).status(), 200);
     await idle();
-    assert.ok(posts.at(-1).history.every(turn => turn.every(text => text.length <= 2000)));
+    assert.ok(posts.at(-1).history.every(turn => turn.every(text => Array.from(text).length <= 2000)));
     assert.ok(posts.at(-1).history.length <= 6);
 
     // On-device while online: nothing is posted, and the choice survives a reload.
@@ -161,6 +161,14 @@ try {
 
     // Auto, online, Rails out of reach: the browser's model answers instead.
     await engine("Auto");
+    await context.route("**/assistant/replies*", async route => { await new Promise(resolve => setTimeout(resolve, 1500)); await route.abort("failed"); });
+    await ask("Asked as the connection drops");
+    await status("Waiting for Rails");
+    await page.getByLabel("Offline", { exact: true }).check();
+    await answers().last().getByText("On-device answer to: Asked as the connection drops").waitFor();
+    await idle();
+    await page.getByLabel("Offline", { exact: true }).uncheck();
+    await context.unroute("**/assistant/replies*");
     await context.route("**/assistant/replies*", route => route.abort("failed"));
     await ask("Is Rails there?");
     await answers().last().getByText("On-device answer to: Is Rails there?").waitFor();

@@ -9,11 +9,15 @@ class Assistant::ReplyTest < ActiveSupport::TestCase
   setup do
     @env = ENV.to_h.slice(*KEYS)
     KEYS.each { |key| ENV.delete(key) }
+    # The test environment's null store cannot count, which allows no model call.
+    @cache = Rails.cache
+    Rails.cache = ActiveSupport::Cache::MemoryStore.new
   end
 
   teardown do
     KEYS.each { |key| ENV.delete(key) }
     ENV.update(@env)
+    Rails.cache = @cache
   end
 
   test "with no provider key the scripted guide answers" do
@@ -69,12 +73,25 @@ class Assistant::ReplyTest < ActiveSupport::TestCase
     ENV["ASSISTANT_DAILY_LIMIT"] = "1"
     stub_replies "From the model"
     _, chats = capture_chats do
-      with_cache(ActiveSupport::Cache::MemoryStore.new) do
-        assert_equal "ruby_llm", Assistant::Reply.call(prompt: "Hi")[:engine]
-        assert_equal "guide", Assistant::Reply.call(prompt: "Hi")[:engine]
-      end
+      assert_equal "ruby_llm", Assistant::Reply.call(prompt: "Hi")[:engine]
+      assert_equal "guide", Assistant::Reply.call(prompt: "Hi")[:engine]
     end
     assert_equal 1, chats.size
+  end
+
+  test "a cache store that cannot count allows no model call" do
+    ENV["ANTHROPIC_API_KEY"] = "test"
+    stub_replies "From the model"
+    Rails.cache = ActiveSupport::Cache::NullStore.new
+    assert_equal "guide", Assistant::Reply.call(prompt: "Hi")[:engine]
+  end
+
+  test "a model that keeps calling the tool is cut off after its second round" do
+    ENV["ANTHROPIC_API_KEY"] = "test"
+    stub_replies tool_call(:workspace_todos)
+    reply, chats = capture_chats { Assistant::Reply.call(prompt: "Count forever") }
+    assert_equal "guide", reply[:engine]
+    assert_equal 2, chats.sole.messages.count { |message| message.role == :tool }
   end
 
   test "the model can read the workspace through its tool" do
@@ -102,13 +119,5 @@ class Assistant::ReplyTest < ActiveSupport::TestCase
     [yield, chats]
   ensure
     RubyLLM.define_singleton_method(:chat, original)
-  end
-
-  def with_cache(store)
-    original = Rails.cache
-    Rails.cache = store
-    yield
-  ensure
-    Rails.cache = original
   end
 end
