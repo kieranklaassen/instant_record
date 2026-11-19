@@ -50,6 +50,9 @@ export default class extends Controller {
     const url = new URL(href, location.origin)
     url.searchParams.set("fragment", "1")
     this.pending = (this.pending || 0) + 1
+    // Rails checks the page's token on a write; the browser runtime has no session to protect.
+    const token = document.querySelector("meta[name=csrf-token]")?.content
+    if (options && token) options.headers = { "X-CSRF-Token": token }
     const request = this.requests.then(async () => {
       const response = await fetch(url.pathname + url.search, options)
       if (!response.ok) throw new Error(`Assistant answered ${response.status}`)
@@ -171,7 +174,7 @@ export default class extends Controller {
     delete turn.dataset.busy
     this.active = null
     this.working(false)
-    const body = new URLSearchParams({ _method: "patch", "turn[reply]": reply || "The on-device model gave no answer.", authenticity_token: this.inputTarget.form.elements.authenticity_token.value })
+    const body = new URLSearchParams({ _method: "patch", "turn[reply]": reply || "The on-device model gave no answer." })
     await this.load(`${this.inputTarget.form.getAttribute("action")}/${encodeURIComponent(turn.id.slice("turn-".length))}${location.search}`, { method: "POST", body })
       .catch(() => { this.statusTarget.textContent = "Couldn’t save the reply." })
   }

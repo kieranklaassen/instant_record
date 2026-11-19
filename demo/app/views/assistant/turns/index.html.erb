@@ -25,7 +25,6 @@
     <div class="relay-foot">
       <button type="button" class="relay-latest" data-assistant-chat-target="latest" data-action="assistant-chat#jumpToLatest" hidden>↓ Latest</button>
       <form class="relay-composer" action="<%= assistant_turns_path %>" method="post" data-turbo="false" data-action="submit->assistant-chat#send">
-        <input type="hidden" name="authenticity_token" value="<%= form_authenticity_token %>">
         <input type="hidden" name="turn[assistant_chat_id]" value="<%= @chat_id %>" data-assistant-chat-target="chat">
         <textarea name="turn[prompt]" data-assistant-chat-target="input" aria-label="Message" rows="2" maxlength="8000" placeholder="Ask a question or paste some code…" data-action="keydown->assistant-chat#key"></textarea>
         <div class="relay-controls">
