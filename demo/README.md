@@ -18,6 +18,28 @@ npm test        # the keyboard hook's unit tests
 
 `bin/rails test` and `bin/rails assets:precompile` build it first.
 
+## Auth
+
+`/auth` is sessions and permissions with nothing faked but the password. Three
+people (`AuthPerson`: Ada is an admin, Ben and Cleo are members) and a Rails
+session cookie that `Auth::SessionsController` sets and clears. The notes are
+synced records (`AuthNote`) with an audience each: everyone, signed-in people,
+admins, or only their owner.
+
+Who is sent which note is two blocks on the model, inside `server_only`:
+`syncable_to` and `writable_by`. `config/initializers/instant_record.rb` tells
+the gem who is asking (`scope_from`), from the session. The sync endpoints do
+the rest, so a signed-out browser's database holds one note, and the page's
+"Ask the sync server for everything" button shows that asking directly gets no
+more. Sign in and that person's notes arrive; switch or sign out and the
+browser is told to drop what it held and start again.
+
+In the compiled runtime the page lists whatever its local database holds and
+offers Delete on every note on purpose: delete one that is not yours and it
+goes, the server refuses the write, and it comes back. The session lives on
+the server only, so the page asks Rails for it, and the compiled site has to
+share an origin with Rails for the cookie to arrive.
+
 ## The Assistant
 
 A chat and each of its turns are synced records (`AssistantChat`,
