@@ -32,7 +32,7 @@ export const instantRecord = () => ({
 })
 
 export { localHttpClient, liveTransport, write }
-export { local, useLiveParam, useLiveWindow, useStableRows, widenWindow } from "./window.js"
+export { local, useHistory, useLiveParam, useLiveSearch, useLiveWindow, useStableRows, widenWindow } from "./window.js"
 export { resolveFocus } from "./focus.js"
 export { useKeyboardNavigation } from "./keyboard.js"
 export { chord, keycaps, match } from "./chord.js"

@@ -13,7 +13,7 @@ const depths = (index) => {
   return kept.get(limit)
 }
 
-export default function MailList({ scope, title, rows, unreadCount, focusedId, open, selected, keys, onOpen, onSelect, onEnd, register, openAt, bulk }) {
+export default function MailList({ scope, title, rows, unreadCount, whole, searching, focusedId, open, selected, keys, onOpen, onSelect, onEnd, register, openAt, bulk }) {
   const [atTop, setAtTop] = useState(true)
   return (
     <section className="mail-list" aria-label="Conversations" data-selecting={String(selected.size > 0)} data-scrolled={String(!atTop)}>
@@ -22,10 +22,11 @@ export default function MailList({ scope, title, rows, unreadCount, focusedId, o
       ) : (
         <header>
           <h2>{title}</h2>
-          {unreadCount > 0 && <span className="mail-unread-count">{unreadCount} unread</span>}
+          {/* Counted in the local database: a floor until the whole inbox is in it. */}
+          {unreadCount > 0 && <span className="mail-unread-count" title={whole ? undefined : "Counted in the mail on this device so far"}>{unreadCount}{whole ? "" : "+"} unread</span>}
         </header>
       )}
-      {rows.length === 0 && <p className="mail-empty-list">No open conversations.</p>}
+      {rows.length === 0 && <p className="mail-empty-list">{searching ? "No conversations match." : "No open conversations."}</p>}
       <LiveList className="mail-scroll" rows={rows} onEnd={onEnd} register={register} openAt={openAt} onTop={setAtTop}>
         {(row, index) => (
           <div className="mail-item">

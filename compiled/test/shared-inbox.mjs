@@ -29,6 +29,9 @@ try {
   await maya.getByLabel("Reply", { exact: true }).fill(reply);
   await maya.getByRole("button", { name: "Send", exact: true }).click();
   await maya.getByText(reply, { exact: true }).waitFor();
+  // The reply box holds the same text until the reply lands, and the address follows the open row.
+  await maya.getByText("2 messages", { exact: true }).waitFor();
+  await maya.waitForFunction(() => document.querySelector(".mail-row-link[aria-current=true]")?.href === location.href);
   await maya.reload();
   await maya.getByText(reply, { exact: true }).waitFor();
   assert.equal(await theo.getByRole("link", { name: new RegExp(subject) }).count(), 0);
@@ -82,7 +85,6 @@ try {
   await mirror.getByLabel("Subject", { exact: true }).fill("Unfinished draft");
   const before = await theo.locator(".mail-row-link").evaluateAll(rows => rows.map(row => row.href));
   await sender.getByRole("button", { name: "Generate incoming email" }).click();
-  await sender.getByRole("status").filter({ hasText: "Email received" }).waitFor();
   await theo.waitForFunction(previous => Array.from(document.querySelectorAll(".mail-row-link")).some(row => !previous.includes(row.href)), before);
   const incoming = await theo.locator(".mail-row-link").evaluateAll((rows, previous) => rows.find(row => !previous.includes(row.href)).getAttribute("href"), before);
   await theo.locator(`.mail-row-link[href="${incoming}"]`).click();

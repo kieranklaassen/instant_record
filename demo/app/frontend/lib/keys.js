@@ -20,6 +20,7 @@ export function mailBindings(does, is) {
     { id: "unread", group: "Actions", label: "Mark unread and go back", keys: ["u"], when: reading, run: does.markUnread },
     { id: "read", group: "Actions", label: "Mark read", keys: ["Shift+I"], when: reading, run: does.markRead },
     { id: "undo", group: "Actions", label: "Undo", keys: ["z", "Mod+z"], run: does.undo },
+    { id: "search", group: "Actions", label: "Search", keys: ["/"], run: does.search },
     { id: "help", group: "Actions", label: "Show or hide this list", keys: ["?"], dialog: true, run: does.help },
 
     { id: "reply", group: "Reply and compose", label: "Reply", keys: ["r"], when: reading, run: does.reply },

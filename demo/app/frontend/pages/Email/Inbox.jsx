@@ -1,7 +1,7 @@
 import { Head, router, usePage } from "@inertiajs/react"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
-  useKeyboardNavigation, useLiveParam, useLiveWindow, useSelection, useShortcuts, useStableRows, useUndoable,
+  useHistory, useKeyboardNavigation, useLiveParam, useLiveSearch, useLiveWindow, useSelection, useShortcuts, useStableRows, useUndoable,
 } from "instant_record"
 import Composer from "../../components/mail/Composer"
 import EmptyState from "../../components/mail/EmptyState"
@@ -20,6 +20,7 @@ import { useMailActions } from "../../lib/useMailActions"
 
 const mailCursor = (row) => ({ created_at: row[5], id: row[0] })
 const THREAD = ["thread"]
+const MAIL = ["mail"]
 
 function useSettled(value, ms) {
   const [settled, setSettled] = useState(value)
@@ -61,13 +62,22 @@ export default function Inbox({ member, inbox, inboxes, people, mail, thread, co
   const actions = useMailActions(scope, { notify, hold: undoable.hold })
   const drafts = useDrafts(scope)
 
+  // A search is in the address like everything else. The list answers it from
+  // the local database at once, and the sync server adds what it holds beyond.
+  const [term, setTerm] = useState(mail.q || "")
+  const q = useSettled(term.trim(), 200)
+  useLiveParam("q", q, { only: MAIL, answered: mail.q || "", omit: (value) => value === "" })
+  const search = useLiveSearch(q, { only: MAIL, model: "MailEntry" })
+  const history = useHistory()
+  const searchBox = useRef(null)
+
   const loaded = useStableRows(mail.rows, mailRow)
   const { rows, unreadCount } = useMemo(
     () => withOverlay(loaded, mail.unread_count, { held: undoable.held, marks: actions.marks }),
     [loaded, mail.unread_count, undoable.held, actions.marks],
   )
   const ids = useMemo(() => rows.map((row) => row.id), [rows])
-  const { more, older, failed } = useLiveWindow({ prop: "mail", window: mail, model: "MailEntry", cursor: mailCursor })
+  const { more, older, failed } = useLiveWindow({ prop: "mail", window: mail, model: "MailEntry", cursor: mailCursor, search: q })
   const { focusedId, focus, move, register } = useKeyboardNavigation({ ids, more, onNeed: older, startAt: address })
   const selection = useSelection(ids)
   const now = useRef({})
@@ -215,6 +225,7 @@ export default function Inbox({ member, inbox, inboxes, people, mail, thread, co
     reply,
     send: (options) => sender.current?.(options),
     compose: () => compose(true),
+    search: () => searchBox.current?.focus(),
     select: () => focusedId && selection.toggle(focusedId),
     extend: (by) => {
       const from = focusedId
@@ -264,6 +275,9 @@ export default function Inbox({ member, inbox, inboxes, people, mail, thread, co
         <header className="mail-bar">
           <h1>Shared inbox</h1>
           <div className="mail-tools">
+            <input ref={searchBox} type="search" className="mail-search" placeholder="Search mail" aria-label="Search mail"
+              value={term} onChange={(event) => setTerm(event.target.value)} />
+            <span role="status">{q && search.partial && !history.done ? "Showing matches on this device. Older mail needs a connection." : ""}</span>
             <button type="button" className="mail-incoming" disabled={busy} onClick={generate}>
               <Icon name="incoming" size={15} />
               {busy ? "Receiving…" : "Generate incoming email"}
@@ -271,7 +285,7 @@ export default function Inbox({ member, inbox, inboxes, people, mail, thread, co
           </div>
         </header>
         <div className="mail-panes">
-          <MailList scope={scope} title={`${capitalize(inbox)} inbox`} rows={rows} unreadCount={unreadCount}
+          <MailList scope={scope} title={`${capitalize(inbox)} inbox`} rows={rows} unreadCount={unreadCount} whole={history.done} searching={!!q}
             focusedId={focusedId} open={open && !composing} selected={selection.selected} keys={keys}
             openAt={Math.max(ids.indexOf(address), 0)} onOpen={openRow} onSelect={select} onEnd={() => older()} register={register}
             bulk={{ onArchive: () => archive(), onRead: () => mark(false), onUnread: () => mark(true), onClear: selection.clear }} />

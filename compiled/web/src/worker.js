@@ -2,6 +2,7 @@
 // retry-only outbox draining, and non-blocking async change polling (window=0, so the
 // worker never blocks on network I/O during user clicks and Puma threads are never held).
 import { AppHost } from "./app-host.js";
+import { advance, fresh, held, query } from "./history-fill.js";
 import { mailboxScope } from "./mailbox-scope.js";
 import { openSnapshot, withFiles } from "./snapshot-store.js";
 
@@ -58,6 +59,14 @@ async function fetchReply(method, path, body = "", endpoint = syncEndpoint) {
 }
 
 const DATABASE = "development.sqlite3";
+// Where the background fill of an inbox's history has come to (history-fill.js).
+const FILL = "history_fill";
+const FILL_PAGE = 200;
+const FILL_PAUSE_MS = 300;
+const FILL_RETRY_CAP_MS = 60000;
+// The database is one file, held in memory and saved whole. Past this the fill stops and
+// older mail stays on the server, fetched a page at a time as it always was.
+const FILL_BUDGET_BYTES = 24 * 1024 * 1024;
 const REVISION = "snapshot_revision";
 const SCHEMA = "rails_schema_version";
 const targetSchema = Number(import.meta.env.VITE_SCHEMA_VERSION);
@@ -108,7 +117,7 @@ async function withSnapshot(mode, operation) {
         put(DATABASE, bytes);
         put(REVISION, snapshotRevision);
         wrote = true;
-      });
+      }, put);
     });
     if (wrote) changes.postMessage(snapshotRevision);
     return result;
@@ -125,7 +134,10 @@ function kickSync(delay = QUIET_MS) {
 }
 
 // The connection came back: send what is waiting now, not at the next retry.
-self.addEventListener("online", () => kickSync(0));
+self.addEventListener("online", () => {
+  kickSync(0);
+  if (mailScope && fillState && !fillState.done && !fillState.full) scheduleFill(0);
+});
 
 function syncPass() {
   clearTimeout(kickTimer);
@@ -215,26 +227,106 @@ async function pollChanges() {
   }
 }
 
+// A page of older rows, or the rows matching `search`, brought into the local database.
+// Where the background fill already holds them, nothing is asked of the server.
 async function loadHistory(request) {
-  const query = new URLSearchParams({ type: request.type, before_created_at: request.before.created_at,
-    before_id: request.before.id, limit: String(request.limit) });
-  if (request.partition != null) query.set("partition", request.partition);
-  const key = query.toString();
+  // The fill's own copy of the state is not touched here: another tab may have finished it.
+  if (mailScope) {
+    const state = fillState?.done ? fillState : await withFiles("readonly", get => get(FILL));
+    if (held(state)) return { ok: true, applied: 0, has_more: false };
+  }
+  const params = new URLSearchParams(request.search ? { search: request.search } : { type: request.type });
+  if (request.before) {
+    params.set("before_created_at", request.before.created_at);
+    params.set("before_id", request.before.id);
+    params.set("limit", String(request.limit));
+  }
+  if (request.partition != null) params.set("partition", request.partition);
+  const key = params.toString();
   return loadHistoryQuery(key);
 }
 
-async function loadHistoryQuery(key) {
-  const local = await withSnapshot("readonly", () => host.history(key));
-  if (local.ok) return local;
+let mailScope = "";
+let fillState = null;
+let fillTimer = null;
+let fillDelayMs = FILL_PAUSE_MS;
+
+function scheduleFill(delay = fillDelayMs) {
+  clearTimeout(fillTimer);
+  fillTimer = setTimeout(runFill, delay);
+}
+
+// The page shows a count as a floor until the whole inbox is here.
+function announceFill() {
+  self.postMessage({ type: "instant_record.history", state: { done: fillState.done, full: fillState.full, rows: fillState.rows } });
+}
+
+// One page of the fill. Answers whether there is another to fetch.
+async function fillStep() {
+  fillState = (await withFiles("readonly", get => get(FILL))) || fresh();
+  announceFill();
+  if (fillState.done || fillState.full) return false;
+  // A write waiting to be sent goes first, and offline there is nothing to fetch.
+  if (simulation.offline || draining || kickTimer) return true;
+
+  const key = query(fillState, FILL_PAGE);
   const revision = snapshotRevision;
   const reply = await fetchReply("GET", "/records?" + key);
-  if (reply.status !== 200) return { ok: false, error: "History unavailable" };
-  return withSnapshot("readwrite", save => {
-    if (revision !== snapshotRevision) return { ok: false, busy: true };
-    const result = host.history(key, reply.text);
+  if (reply.status !== 200) {
+    fillDelayMs = Math.min(Math.max(fillDelayMs, 1000) * 2, FILL_RETRY_CAP_MS);
+    return true;
+  }
+  const page = JSON.parse(reply.text);
+  await withSnapshot("readwrite", (save, put) => {
+    // Another tab saved meanwhile. Its database was just loaded here: read the state again.
+    if (revision !== snapshotRevision) return;
+    host.history(key, reply.text);
+    fillState = advance(fillState, page, host.databaseBytes().length, FILL_BUDGET_BYTES);
+    // The edge is saved with the rows it describes, or not at all.
+    put(FILL, fillState);
     save();
-    return result;
   });
+  fillDelayMs = FILL_PAUSE_MS;
+  announceFill();
+  const more = !(fillState.done || fillState.full);
+  // Counts and "is there more" were answered for part of the inbox. Ask again for all of it.
+  if (!more) self.postMessage({ type: "records_changed" });
+  return more;
+}
+
+// One tab fills at a time. The others read what it saved.
+async function runFill() {
+  let more = true;
+  try {
+    const locks = self.navigator?.locks;
+    more = locks
+      ? await locks.request("instant-record-fill/" + mailScope, { ifAvailable: true }, lock => (lock ? fillStep() : true))
+      : await fillStep();
+  } catch {
+    fillDelayMs = Math.min(Math.max(fillDelayMs, 1000) * 2, FILL_RETRY_CAP_MS);
+  }
+  if (more) scheduleFill(simulation.offline ? 2000 : fillDelayMs);
+}
+
+async function loadHistoryQuery(key) {
+  // A save that lands during the fetch sends this round again. The background fill saves
+  // often, so one collision is ordinary and a reader should not be told the page failed.
+  let result;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const local = await withSnapshot("readonly", () => host.history(key));
+    if (local.ok) return local;
+    const revision = snapshotRevision;
+    const reply = await fetchReply("GET", "/records?" + key);
+    if (reply.status !== 200) return { ok: false, error: "History unavailable" };
+    result = await withSnapshot("readwrite", save => {
+      if (revision !== snapshotRevision) return { ok: false, busy: true };
+      const applied = host.history(key, reply.text);
+      save();
+      return applied;
+    });
+    if (!result.busy) return result;
+  }
+  return result;
 }
 
 function runRequest(method, render) {
@@ -391,6 +483,11 @@ async function boot(payload = {}) {
   }
   const first = payload.path ? await runRequest("GET", () => navigate({ method: "GET", path: payload.path })) : null;
   setInterval(pollChanges, POLL_EVERY_MS);
+  // With the first page on screen, bring the rest of the inbox down behind it.
+  if (scope && scope !== "invalid/invalid") {
+    mailScope = scope;
+    scheduleFill(1000);
+  }
   return { compileMs: compiled - started, restored, storageMs, runtimeMs, bootstrapMs, first,
     shell: shell ? { ms: shell.ms, bytes: shell.bytes.length, cursor: shell.cursor } : null };
 }

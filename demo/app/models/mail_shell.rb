@@ -34,6 +34,10 @@ class MailShell
   SQLITE_TYPES = { string: "varchar", text: "text", integer: "integer", bigint: "integer", float: "float",
     decimal: "decimal", datetime: "datetime(6)", date: "date", boolean: "boolean", json: "json", jsonb: "json" }.freeze
   SERVER_TABLES = %w[schema_migrations ar_internal_metadata].freeze
+  # How the compiled runtime stores a datetime: UTC, a space, six decimals and
+  # no zone ("2026-11-19 06:10:30.814075"). The list is ordered by this text,
+  # so a row written any other way sorts apart from the rows that sync in later.
+  DB_TIME = "%Y-%m-%d %H:%M:%S.%6N"
 
   attr_reader :path, :inbox, :cursor
 
@@ -93,7 +97,7 @@ class MailShell
     def write(inbox, cursor:, records:)
       final = root.join("#{inbox}.#{cursor}.#{fingerprint.first(16)}.sqlite3")
       draft = root.join("#{final.basename}.#{SecureRandom.hex(4)}.tmp")
-      stamp = Time.current.utc.iso8601(InstantRecord::TIME_PRECISION)
+      stamp = Time.current.utc.strftime(DB_TIME)
       database = SQLite3::Database.new(draft.to_s)
       # Most of the schema's tables are empty in an inbox's shell, and an empty
       # table or index still takes a page. Small pages keep the download small.
@@ -120,13 +124,18 @@ class MailShell
       FileUtils.rm_f(draft) if draft
     end
 
-    # A row as the client's upsert would leave it: the wire's own values, the
-    # version it arrived at, and nothing waiting to be sent.
+    # A row as the client's upsert would leave it: the wire's values with their
+    # datetimes as the runtime stores them, the version it arrived at, and
+    # nothing waiting to be sent.
     def insert(database, record)
       model = record[:type].constantize
       attributes = record[:attributes].slice(*model.column_names)
       attributes["server_version"] = record[:version] || attributes["server_version"] || 0
       attributes["sync_state"] = "synced"
+      model.columns.each do |column|
+        next unless column.type == :datetime && attributes[column.name]
+        attributes[column.name] = attributes[column.name].to_time.utc.strftime(DB_TIME)
+      end
       columns = attributes.keys.map { |name| %("#{name}") }.join(", ")
       values = attributes.values.map { |value| value == true ? 1 : value == false ? 0 : value }
       database.execute(%(INSERT INTO "#{model.table_name}" (#{columns}) VALUES (#{(["?"] * values.size).join(", ")})), values)
