@@ -126,7 +126,8 @@ def main():
     cc = ios_cc(target) if target else [os.environ.get("CC", "cc")]
 
     app, _emit, tree, _plan = build.emit_tree(python)
-    print(run([python, os.path.join(pipeline, "make_native_entry.py"), tree, app]).strip())
+    print(run([python, os.path.join(pipeline, "make_native_entry.py"), tree, app],
+              env={"INSTANT_RECORD_MIGRATION_PLAN": os.path.join(B, "browser-migrations.json") if build.APP_SOURCE else ""}).strip())
 
     out = os.path.join(tree, "build")
     os.makedirs(out, exist_ok=True)
