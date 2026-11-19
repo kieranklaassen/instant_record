@@ -19,7 +19,17 @@ import { localHttpClient, write } from "./http.js"
 import { liveTransport } from "./live.js"
 import { local } from "./window.js"
 
-export const instantRecord = () => ({ live: liveTransport, ...(local() ? { http: localHttpClient } : {}) })
+// The compiled runtime's own templates place the first page in an attribute
+// of the root element, where plain escaping is enough.
+const pageInAttribute = (id = "app") => {
+  const page = document.getElementById(id)?.dataset.page
+  return page ? { page: JSON.parse(page) } : {}
+}
+
+export const instantRecord = () => ({
+  live: liveTransport,
+  ...(local() ? { http: localHttpClient, ...pageInAttribute() } : {}),
+})
 
 export { localHttpClient, liveTransport, write }
 export { local, useLiveParam, useLiveWindow, useStableRows, widenWindow } from "./window.js"

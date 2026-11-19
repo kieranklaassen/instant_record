@@ -6,7 +6,10 @@ import Avatar from "../ui/Avatar"
 // the keys move), open (in the reader), selected (its box ticked) and unread.
 //
 // Memoized: an answer that changes one conversation redraws one row.
-export default memo(function MailRow({ row, scope, focused, open, selected, onOpen, onSelect }) {
+// `depth` is the list depth that holds the row; the link names it, as the
+// address does, so it opens the same conversation in a browser that has not
+// scrolled that far.
+export default memo(function MailRow({ row, scope, depth, focused, open, selected, onOpen, onSelect }) {
   const sender = row.outside ? row.author : `To ${row.address}`
 
   const click = (event) => {
@@ -24,7 +27,7 @@ export default memo(function MailRow({ row, scope, focused, open, selected, onOp
           onChange={() => {}} onClick={(event) => onSelect(row.id, { range: event.shiftKey })} />
         <Avatar name={row.author} />
       </label>
-      <a className="mail-row-link" href={inboxPath(scope, { thread: row.id })} onClick={click} aria-current={String(open)}>
+      <a className="mail-row-link" href={inboxPath(scope, { thread: row.id, ...depth })} onClick={click} aria-current={String(open)}>
         {row.unread && <span className="visually-hidden">Unread. </span>}
         <span className="mail-row-meta">
           <b data-address={String(!row.outside)}>{sender}</b>
