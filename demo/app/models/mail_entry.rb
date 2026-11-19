@@ -13,6 +13,8 @@ class MailEntry < ApplicationRecord
   # A search, said once for both databases: this runs on Postgres for the
   # server's page and on SQLite in the browser, so it is a plain LIKE over
   # lowered text. `%` and `_` in what the reader types match as LIKE reads them.
+  # The two fold case alike for ASCII only: SQLite leaves "É" as it is where
+  # Postgres lowers it, so a match on an accented capital is the server's alone.
   MATCHING = "(LOWER(mail_entries.subject) LIKE :q OR LOWER(mail_entries.body) LIKE :q OR LOWER(mail_entries.author) LIKE :q OR LOWER(mail_entries.address) LIKE :q)"
 
   def self.pattern(term)

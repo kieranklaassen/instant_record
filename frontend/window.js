@@ -138,7 +138,12 @@ export function useLiveWindow({ prop, window, model, cursor, search = "", pageSi
     busy.current = true
     try {
       const last = window.rows.at(-1)
-      if (last && !window.more) {
+      // Until the whole history is here, rows the database holds further down
+      // may lie past a gap (a search brought them in), so the page below the
+      // last row is asked for even when there are local rows to show. A page
+      // asked for before is answered by the worker without the server.
+      const whole = !local() || window.__spinel.history?.done === true
+      if (last && (!window.more || !whole)) {
         const reply = await widenWindow({ type: model, before: cursor(last), limit: pageSize, ...(search ? { search } : {}) })
         if (!reply.ok) throw new Error(reply.error)
         if (reply.has_more === false) setExhausted(true)

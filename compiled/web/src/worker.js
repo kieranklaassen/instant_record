@@ -230,9 +230,10 @@ async function pollChanges() {
 // A page of older rows, or the rows matching `search`, brought into the local database.
 // Where the background fill already holds them, nothing is asked of the server.
 async function loadHistory(request) {
+  // The fill's own copy of the state is not touched here: another tab may have finished it.
   if (mailScope) {
-    if (!fillState?.done) fillState = await withFiles("readonly", get => get(FILL));
-    if (held(fillState, request.before)) return { ok: true, applied: 0, has_more: !fillState.done };
+    const state = fillState?.done ? fillState : await withFiles("readonly", get => get(FILL));
+    if (held(state)) return { ok: true, applied: 0, has_more: false };
   }
   const params = new URLSearchParams(request.search ? { search: request.search } : { type: request.type });
   if (request.before) {
@@ -308,17 +309,24 @@ async function runFill() {
 }
 
 async function loadHistoryQuery(key) {
-  const local = await withSnapshot("readonly", () => host.history(key));
-  if (local.ok) return local;
-  const revision = snapshotRevision;
-  const reply = await fetchReply("GET", "/records?" + key);
-  if (reply.status !== 200) return { ok: false, error: "History unavailable" };
-  return withSnapshot("readwrite", save => {
-    if (revision !== snapshotRevision) return { ok: false, busy: true };
-    const result = host.history(key, reply.text);
-    save();
-    return result;
-  });
+  // A save that lands during the fetch sends this round again. The background fill saves
+  // often, so one collision is ordinary and a reader should not be told the page failed.
+  let result;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const local = await withSnapshot("readonly", () => host.history(key));
+    if (local.ok) return local;
+    const revision = snapshotRevision;
+    const reply = await fetchReply("GET", "/records?" + key);
+    if (reply.status !== 200) return { ok: false, error: "History unavailable" };
+    result = await withSnapshot("readwrite", save => {
+      if (revision !== snapshotRevision) return { ok: false, busy: true };
+      const applied = host.history(key, reply.text);
+      save();
+      return applied;
+    });
+    if (!result.busy) return result;
+  }
+  return result;
 }
 
 function runRequest(method, render) {

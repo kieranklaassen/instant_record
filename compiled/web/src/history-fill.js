@@ -14,16 +14,10 @@ export const START = { created_at: "9999-12-31T00:00:00.000000Z", id: "~" };
 
 export const fresh = () => ({ before: START, rows: 0, done: false, full: false });
 
-// Timestamps arrive in one fixed-width UTC form, so text order is time order.
-const newer = (a, b) => a.created_at > b.created_at || (a.created_at === b.created_at && a.id > b.id);
-
-// May a page of rows older than `before` be answered from the local database alone?
-// Yes once the beginning is here, and yes where the page starts above the fill's own edge.
-export function held(state, before) {
-  if (!state) return false;
-  if (state.done) return true;
-  return !!before && state.before !== START && newer(before, state.before);
-}
+// May a read be answered from the local database alone? Only once the beginning is here.
+// Short of that the server is asked: a page above the fill's edge can still end at a gap,
+// where a search or an opened conversation brought in rows the fill has not reached.
+export const held = state => !!state && state.done === true;
 
 // The state after one page from the records endpoint. The cursor moves to the page's oldest
 // conversation. Replies and marks ride along with their conversation and never move it.
