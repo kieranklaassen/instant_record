@@ -63,8 +63,15 @@ module InstantRecord
       # `entry.id.to_s` for a value that comes from a record, since the
       # phone's compiler types a hash by what it holds and refuses another.
       def initialize(params = Node.strings)
-        @given = params
+        open_with(params)
         @open = []
+      end
+
+      # Keeps the params. A method of its own because the phone's compilers
+      # take a type for it from sig/instant_record/native.rbs, which they do
+      # not for `initialize`.
+      def open_with(params)
+        @given = params
       end
 
       # What a host sent as a JSON object, as strings by name. Anything that

@@ -23,7 +23,7 @@ module InstantRecord
     end
 
     class Screen
-      def initialize: (?Hash[String, String] params) -> untyped
+      def open_with: (Hash[String, String] params) -> Hash[String, String]
       def self.strings: (untyped parsed) -> Hash[String, String]
       def param: (String name) -> String
       def row: (?id: String, ?link: String, ?params: Hash[String, String], ?action: String, ?args: Hash[String, String]) -> InstantRecord::Native::Node

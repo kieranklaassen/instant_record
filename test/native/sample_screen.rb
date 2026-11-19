@@ -86,7 +86,10 @@ class LettersScreen < InstantRecord::Native::Screen
   end
 
   # Where this screen is, built from its own params as a real screen does.
-  def place = { "box" => param("box"), "odd" => param("odd") }
+  def place = { "box" => box, "odd" => param("odd") }
+
+  # A param behind a method of its own, as a real screen reads one.
+  def box = param("box")
 
   def perform(action, args, values)
     case action
