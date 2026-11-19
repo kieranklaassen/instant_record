@@ -15,7 +15,7 @@ class SourceController < ApplicationController
   # table here; which models a page rendered is not something a path can tell us.
   # A demo missing from this list still gets its controller and view.
   MODELS = {
-    "assistant" => %w[app/models/issue.rb app/javascript/controllers/assistant_chat_controller.js app/javascript/controllers/assistant_examples.js app/controllers/assistant/replies_controller.rb app/controllers/assistant/history_controller.rb],
+    "assistant" => %w[app/models/issue.rb app/javascript/controllers/assistant_chat_controller.js app/javascript/controllers/assistant_local_model.js app/javascript/controllers/assistant_examples.js app/controllers/assistant/replies_controller.rb app/models/assistant/reply.rb app/controllers/assistant/history_controller.rb],
     "email" => %w[app/models/mail_entry.rb app/models/mail_directory.rb app/frontend/pages/Email/Inbox.jsx app/frontend/components/MailList.jsx app/frontend/components/MailReader.jsx],
     "todo" => %w[app/models/issue.rb],
     "slack" => %w[app/models/channel.rb app/models/chat_user.rb app/models/message.rb],

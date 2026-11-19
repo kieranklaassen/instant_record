@@ -285,9 +285,11 @@
 .relay-engine {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  height: 26px;
-  padding: 0 10px;
+  gap: 2px;
+  min-width: 0;
+  margin: 0;
+  padding: 2px;
+  border: 0;
   border-radius: 9999px;
   background: #F6F1E9;
   color: var(--ink-2);
@@ -295,7 +297,20 @@
   font-weight: 500;
 }
 
-.relay-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+.relay-engine label {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 10px;
+  border-radius: 9999px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.relay-engine input { position: absolute; opacity: 0; pointer-events: none; }
+.relay-engine label:has(input:checked) { background: #fff; color: var(--ink); box-shadow: var(--ring-1); }
+.relay-engine label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 1px; }
+.relay-engine label:has(input:disabled) { color: var(--muted); opacity: 0.6; cursor: not-allowed; }
 
 .relay button.relay-send,
 .relay button.relay-stop {

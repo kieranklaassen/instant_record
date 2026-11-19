@@ -1,9 +1,15 @@
 import { Controller } from "@hotwired/stimulus"
 
 import { exampleChats } from "controllers/assistant_examples"
+import * as localModel from "controllers/assistant_local_model"
 
 const PREFIX = "instant_record.relay.turn."
-const GUIDE_HINT = "Replies come from the scripted Rails demo guide."
+const ENGINE_KEY = "instant_record.relay.engine"
+// What the server accepts as context: the last turns, each text clipped.
+const HISTORY_TURNS = 6
+const HISTORY_TEXT = 2000
+// Chrome serves Gemini Nano through the Prompt API; another browser may serve another model.
+const LOCAL_NAME = "On-device model"
 const node = (tag, className, text) => {
   const element = document.createElement(tag)
   element.className = className
@@ -12,7 +18,7 @@ const node = (tag, className, text) => {
 }
 
 export default class extends Controller {
-  static targets = ["older", "latest", "history", "title", "welcome", "transcript", "scroll", "input", "send", "stop", "status"]
+  static targets = ["older", "latest", "history", "title", "welcome", "transcript", "scroll", "input", "send", "stop", "status", "engine"]
 
   connect() {
     this.turns = new Map()
@@ -41,10 +47,14 @@ export default class extends Controller {
     const wide = matchMedia("(min-width: 701px)").matches
     this.element.classList.toggle("history-open", wide)
     this.element.querySelector(".relay-menu").setAttribute("aria-expanded", String(wide))
+    this.local = "unavailable"
+    try { this.engine = localStorage.getItem(ENGINE_KEY) } catch { /* The default stands. */ }
+    if (!["server", "local"].includes(this.engine)) this.engine = "auto"
     this.render()
     this.jumpToLatest()
     this.restoreDraft()
     this.connection()
+    this.checkLocalModel()
   }
 
   disconnect() {
@@ -56,11 +66,55 @@ export default class extends Controller {
     return !navigator.onLine || document.querySelector("[data-inspector-target=offline]")?.checked
   }
 
+  // Where the next reply comes from: "server", "local", or null when nothing can answer.
+  get route() {
+    const local = this.local === "available"
+    if (this.engine === "local") return local ? "local" : null
+    if (!this.offline) return "server"
+    return this.engine === "auto" && local ? "local" : null
+  }
+
   connection() {
-    if (this.offline && this.active) this.stop()
-    this.sendTarget.disabled = Boolean(this.offline)
-    if (!this.active) this.statusTarget.textContent = this.offline ? "Offline. Reconnect to send your draft." :
-      this.storageFailed ? "Browser storage is unavailable. This chat will last for this visit." : GUIDE_HINT
+    if (this.offline && this.active?.route === "server") this.stop()
+    const route = this.route
+    this.sendTarget.disabled = !route
+    this.engineTargets.forEach(input => {
+      input.checked = input.value === this.engine
+      if (input.value === "local") {
+        input.disabled = this.local === "unavailable"
+        input.parentElement.title = input.disabled ? "This browser has no built-in model. Chrome on a desktop offers Gemini Nano." : ""
+      }
+    })
+    if (!this.active) this.statusTarget.textContent = this.hint(route)
+  }
+
+  hint(route) {
+    if (this.downloaded != null) return `Downloading the on-device model… ${Math.round(this.downloaded * 100)}%`
+    if (!route && this.engine === "local") return "The on-device model isn’t ready. Choose On-device again to download it."
+    if (!route) return "Offline. Reconnect to send your draft."
+    if (this.storageFailed) return "Browser storage is unavailable. This chat will last for this visit."
+    if (route === "local") return (this.offline ? "Offline. " : "") + "Replies come from the model in this browser. Nothing leaves the device."
+    return "Replies come from Rails, which may ask a hosted model through RubyLLM."
+  }
+
+  async checkLocalModel() {
+    this.local = await localModel.availability()
+    if (!this.element.isConnected) return
+    if (this.engine === "local" && this.local === "unavailable") this.engine = "auto"
+    this.connection()
+  }
+
+  async chooseEngine(event) {
+    this.engine = event.target.value
+    try { localStorage.setItem(ENGINE_KEY, this.engine) } catch { this.storageFailed = true }
+    this.connection()
+    if (this.engine !== "local" || this.local === "available" || this.downloaded != null) return
+    this.downloaded = 0
+    this.connection()
+    try { await localModel.prepare(loaded => { this.downloaded = loaded; this.connection() }) }
+    catch { /* The availability check below says where the download stands. */ }
+    this.downloaded = null
+    await this.checkLocalModel()
   }
 
   saveDraft() {
@@ -221,10 +275,15 @@ export default class extends Controller {
     const user = node("p", "relay-user", turn.prompt)
     const answer = node("article", "relay-answer", "")
     answer.dataset.turn = turn.id
-    const label = turn.engine === "model" ? "Gemini Nano" : "Demo guide"
-    answer.append(node("h2", "relay-author", label), this.format(turn.reply))
+    answer.append(node("h2", "relay-author", this.author(turn)), this.format(turn.reply))
     if (!turn.reply && this.active?.turn.id !== turn.id) answer.append(node("small", "", "No reply was saved."))
     return [user, answer]
+  }
+
+  author(turn) {
+    // "model" is what a turn from the first on-device version was saved as.
+    if (turn.engine === "local" || turn.engine === "model") return LOCAL_NAME
+    return turn.engine === "ruby_llm" ? `${turn.model || "Model"} · RubyLLM` : "Demo guide"
   }
 
   format(text) {
@@ -286,46 +345,88 @@ export default class extends Controller {
     const prompt = this.inputTarget.value.trim()
     if (!prompt || this.active) return
     this.saveDraft()
-    if (this.offline) return this.connection()
+    let route = this.route
+    if (!route) return this.connection()
+    const clip = text => text.slice(0, HISTORY_TEXT)
+    const history = this.conversation.filter(earlier => earlier.reply).slice(-HISTORY_TURNS)
+      .map(earlier => [clip(earlier.prompt), clip(earlier.reply)])
     const turn = { id: crypto.randomUUID(), thread: this.thread, time: Date.now(), prompt, reply: "", engine: "guide" }
     const controller = new AbortController()
-    this.active = { turn, controller, received: false }
+    this.active = { turn, controller, received: false, route }
     this.inputTarget.readOnly = true
     this.sendTarget.hidden = true
     this.stopTarget.hidden = false
-    this.statusTarget.textContent = "Waiting for Rails…"
+    this.statusTarget.textContent = route === "local" ? "Thinking on this device…" : "Waiting for Rails…"
     this.turns.set(turn.id, turn)
     this.render()
     this.jumpToLatest()
     try {
-      const response = await fetch("/assistant/replies?instant_record_network=1", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt }), signal: controller.signal
-      })
-      if (!response.ok) throw new Error("Server unavailable")
-      const { reply } = await response.json()
-      if (typeof reply !== "string" || !reply) throw new Error("Missing server reply")
-      if (this.active?.turn !== turn || this.offline) return
-      this.active.received = true
-      this.inputTarget.value = ""
-      this.saveDraft()
-      this.statusTarget.textContent = "Replying…"
-      for (const chunk of reply.match(/\S+\s*/g) || []) {
-        if (controller.signal.aborted || this.active?.turn !== turn) return
-        turn.reply += chunk
-        const scroll = this.scrollTarget
-        const pinned = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 65
-        this.transcriptTarget.querySelector(`[data-turn="${turn.id}"] .relay-response`)?.replaceWith(this.format(turn.reply))
-        if (pinned) scroll.scrollTop = scroll.scrollHeight
-        await new Promise(resolve => setTimeout(resolve, 15))
+      if (route === "server") {
+        try { await this.askServer(turn, prompt, history, controller.signal) }
+        catch (error) {
+          // In Auto, a server that can't be reached hands the prompt to the browser's model.
+          const fallback = this.active?.turn === turn && !this.active.received && !controller.signal.aborted &&
+            this.engine === "auto" && this.local === "available"
+          if (!fallback) throw error
+          route = this.active.route = "local"
+          this.statusTarget.textContent = "Couldn’t reach Rails. Thinking on this device…"
+        }
       }
+      if (route === "local") await this.askLocal(turn, prompt, history, controller.signal)
     } catch {
       if (this.active?.turn !== turn) return
       this.stop()
-      this.statusTarget.textContent = "Couldn’t reach the reply service. Your draft is ready to retry."
+      this.statusTarget.textContent = (route === "local" ? "The on-device model couldn’t answer." : "Couldn’t reach the reply service.") + " Your draft is ready to retry."
     } finally {
       if (this.active?.turn === turn) this.finish(turn)
     }
+  }
+
+  async askServer(turn, prompt, history, signal) {
+    const response = await fetch("/assistant/replies?instant_record_network=1", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt, history }), signal
+    })
+    if (!response.ok) throw new Error("Server unavailable")
+    const { reply, engine, model } = await response.json()
+    if (typeof reply !== "string" || !reply) throw new Error("Missing server reply")
+    if (this.active?.turn !== turn || this.offline) return
+    if (engine === "ruby_llm") Object.assign(turn, { engine, model: String(model || "") })
+    this.received(turn, "Replying…")
+    for (const chunk of reply.match(/\S+\s*/g) || []) {
+      if (signal.aborted || this.active?.turn !== turn) return
+      turn.reply += chunk
+      this.show(turn)
+      await new Promise(resolve => setTimeout(resolve, 15))
+    }
+  }
+
+  async askLocal(turn, prompt, history, signal) {
+    turn.engine = "local"
+    const reply = await localModel.reply(prompt, history, { signal, onText: text => {
+      if (signal.aborted || this.active?.turn !== turn) return
+      if (!this.active.received) this.received(turn, "Replying on this device…")
+      turn.reply = text
+      this.show(turn)
+    } })
+    if (!reply) throw new Error("Missing local reply")
+  }
+
+  // The first words of a reply arrived: the draft is spent.
+  received(turn, status) {
+    this.active.received = true
+    this.inputTarget.value = ""
+    this.saveDraft()
+    this.statusTarget.textContent = status
+    const author = this.transcriptTarget.querySelector(`[data-turn="${turn.id}"] .relay-author`)
+    if (author) author.textContent = this.author(turn)
+  }
+
+  show(turn) {
+    const scroll = this.scrollTarget
+    const pinned = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 65
+    this.transcriptTarget.querySelector(`[data-turn="${turn.id}"] .relay-response`)?.replaceWith(this.format(turn.reply))
+    if (pinned) scroll.scrollTop = scroll.scrollHeight
   }
 
   stop() {

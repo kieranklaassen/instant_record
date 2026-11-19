@@ -33,7 +33,12 @@
       <form class="relay-composer" data-action="submit->assistant-chat#send">
         <textarea data-assistant-chat-target="input" aria-label="Message" rows="2" maxlength="8000" placeholder="Ask a question or paste some code…" data-action="keydown->assistant-chat#key input->assistant-chat#saveDraft"></textarea>
         <div class="relay-controls">
-          <span class="relay-engine"><span class="relay-dot" aria-hidden="true"></span> Rails demo guide</span>
+          <fieldset class="relay-engine" data-action="change->assistant-chat#chooseEngine">
+            <legend class="visually-hidden">Answer from</legend>
+            <label><input type="radio" name="engine" value="auto" data-assistant-chat-target="engine" checked>Auto</label>
+            <label><input type="radio" name="engine" value="server" data-assistant-chat-target="engine">Server</label>
+            <label><input type="radio" name="engine" value="local" data-assistant-chat-target="engine" disabled>On-device</label>
+          </fieldset>
           <button class="relay-send" data-assistant-chat-target="send" aria-label="Send message"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
           <button class="relay-stop" type="button" data-assistant-chat-target="stop" data-action="assistant-chat#stop" hidden>Stop</button>
         </div>
