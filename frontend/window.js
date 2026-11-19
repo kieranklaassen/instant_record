@@ -121,10 +121,14 @@ export function useLiveWindow({ prop, window, model, cursor, search = "", pageSi
   const busy = useRef(false)
   const now = useRef({})
   now.current = { window, more, limit, search }
-  // Another search is another list: start it at the first page.
+  // Another search is another list: start it at the first page. The search
+  // the page arrived with keeps the depth its address asked for.
+  const searched = useRef(search)
   useEffect(() => {
+    if (searched.current === search) return
+    searched.current = search
     setExhausted(false)
-    setLimit((limit) => Math.min(limit, pageSize))
+    setLimit(pageSize)
   }, [search, pageSize])
 
   const older = useCallback(async (upTo = 0) => {
