@@ -3,15 +3,20 @@
 
 usage: make_native_entry.py <tree> <staged app>
 
-main_native.rb is main_wasm.rb with two changes. The browser's host is a WASI filesystem, so its
-entry trades strings through files under /host. A native host has no such directory: the same
-strings go through native_shim.c, reached from Ruby as NativeHost. And the app's screens
-(app/screens) get two more entry points, render and action, with the lookup from a screen's name
-to its class written out as a `case`, since nothing can look a constant up at run time.
+main_native.rb is main.rb as the browser build left it, followed by entry_template.py's bridge
+and boot filled for a native host. The browser's host is a WASI directory. A native host has
+none: the same strings go through native_shim.c, reached from Ruby as NativeHost. Three more
+entry points are the phone's own: render and action, for the app's screens (app/screens), and
+open, which closes the database and opens another file. The lookup from a screen's name to its
+class is written out as a `case`, since nothing can look a constant up at run time, from the
+table Ruby prints (native_screens.rb).
 """
 import os
 import re
+import subprocess
 import sys
+
+import entry_template
 
 tree, app = sys.argv[1], sys.argv[2]
 
@@ -23,78 +28,93 @@ module NativeHost
 end
 '''
 
-
-def through_host(source):
-    source = re.sub(r'File\.read\("/host/(\w+)"\)', r'NativeHost.ir_host_take("\1")', source)
-    return re.sub(r'File\.write\("/host/(\w+)", ', r'NativeHost.ir_host_give("\1", ', source)
-
-
-def screens():
-    folder = os.path.join(app, "app/screens")
-    names = sorted(name[:-len("_screen.rb")] for name in os.listdir(folder) if name.endswith("_screen.rb")) if os.path.isdir(folder) else []
-    if not all(re.fullmatch(r"[a-z][a-z0-9_]*", name) for name in names):
-        sys.exit("Name each file in app/screens <name>_screen.rb.")
-    return names
-
-
-def camelize(name):
-    return "".join(part.capitalize() for part in name.split("_"))
-
-
-names = screens()
-cases = "".join(f'    when "{name}" then {camelize(name)}Screen.new(arg)\n' for name in names)
-entry = f'''
-module NativeScreens
-  def self.find(name, arg)
-    case name
-{cases}    else raise ArgumentError, "No screen named " + name
-    end
-  end
-end
-
-module NativeBridge
-  # In: the screen's name, then its argument, one to a line. Out: the screen as JSON.
+ENTRIES = '''
+  # In: {"screen": name, "params": {...}}. Out: the screen as JSON.
   def self.render
-    input = NativeHost.ir_host_take("in").split("\\n")
-    NativeHost.ir_host_give("out", NativeScreens.find(input[0].to_s, input[1].to_s).json)
+    input = JSON.parse(NativeHost.ir_host_take("in"))
+    screen = NativeScreens.find(input["screen"].to_s, InstantRecord::Native::Screen.strings(input["params"]))
+    NativeHost.ir_host_give("out", screen.json)
     0
   end
 
-  # In: the screen's name and argument, then the action and its argument.
+  # In: the same, with "action", the "args" the tapped element carried and
+  # the "values" a form's fields held.
   def self.action
-    input = NativeHost.ir_host_take("in").split("\\n")
-    NativeScreens.find(input[0].to_s, input[1].to_s).perform(input[2].to_s, input[3].to_s)
+    input = JSON.parse(NativeHost.ir_host_take("in"))
+    screen = NativeScreens.find(input["screen"].to_s, InstantRecord::Native::Screen.strings(input["params"]))
+    screen.perform(input["action"].to_s, InstantRecord::Native::Screen.strings(input["args"]), InstantRecord::Native::Screen.strings(input["values"]))
+    0
+  end
+
+  # In: the SQLite file to work in from here on. The one open before is closed.
+  def self.open
+    NativeDatabase.open(NativeHost.ir_host_take("in"))
+    0
+  end
+'''
+
+# A phone's database is a real file that has to survive the app being killed, so it keeps
+# SQLite's own journal and locking: the browser's two pragmas for a database held in memory
+# are left out. The version the database last had is kept in the database, since there is
+# no host file to keep it in and every migration would otherwise run on each launch.
+DATABASE = '''
+module NativeDatabase
+  def self.open(db_path)
+    Db.close if @opened
+    @opened = true
+<<database>>    InstantRecord::Client.forget_database
     0
   end
 end
 '''
 
-source = open(os.path.join(tree, "main_wasm.rb")).read()
+SCREENS = '''
+module NativeScreens
+  def self.find(name, params)
+    case name
+<<cases>>    else raise ArgumentError, "No screen named " + name
+    end
+  end
+end
+'''
 
-# The browser's page holds the event stream and the worker never polls. Here a sync pass
-# pulls through the host, and a host that also holds a stream hands its batches to "stream".
-streaming = "InstantRecord::Client.streaming = true\n"
-if source.count(streaming) != 1:
-    sys.exit("main_wasm.rb does not turn streaming on where expected")
-source = source.replace(streaming, "InstantRecord::Client.streaming = false\n")
-marker = "\nmodule WasmBridge\n"
-if source.count(marker) != 1:
-    sys.exit("main_wasm.rb has no WasmBridge to start from")
-source = through_host(source).replace("WasmBridge", "NativeBridge")
-marker = marker.replace("WasmBridge", "NativeBridge")
-boot = "\ndb_path = Main.default_db_path\n"
-if source.count(boot) != 1:
-    sys.exit("main_wasm.rb does not open its database where expected")
-source = source.replace(marker, HOST + marker).replace(boot, entry + boot)
-# The browser keeps its database in memory and saves snapshots, so it locks the file to one
-# connection and journals in memory. A phone's database is a real file that has to survive the
-# app being killed: it keeps SQLite's own journal, and the runtime's connections share it.
-for pragma in ("locking_mode = EXCLUSIVE", "journal_mode = MEMORY"):
-    line = f'SqliteAdapter.execute_ddl("PRAGMA {pragma}")\n'
-    if source.count(line) != 1:
-        sys.exit(f"main_wasm.rb does not set {pragma} where expected")
-    source = source.replace(line, "")
-open(os.path.join(tree, "main_native.rb"), "w").write(source)
+
+def screens():
+    """[(name, class)] for the app's screens, as InstantRecord::Native names them."""
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "native_screens.rb")
+    done = subprocess.run(["ruby", script, app], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if done.returncode != 0:
+        sys.exit(done.stderr.strip() or "native_screens.rb failed")
+    return [tuple(line.split()) for line in done.stdout.splitlines()]
+
+
+def indent(text, by):
+    return "".join(by + line if line.strip() else line for line in text.splitlines(keepends=True))
+
+
+source = open(os.path.join(tree, "main_wasm.rb")).read()
+if source.count(entry_template.BANNER) != 1:
+    sys.exit("main_wasm.rb has no entry to start from")
+head = source[: source.index(entry_template.BANNER)]
+
+found = screens()
+cases = "".join(f'    when "{name}" then {cls}.new(params)\n' for name, cls in found)
+previous = 'InstantRecord::SyncMetadata.get("schema_version").to_s'
+applied = 'InstantRecord::SyncMetadata.set("schema_version", "<<version>>")'
+database = entry_template.database(["cache_size = -4000"], entry_template.migrations(previous, applied))
+entry = (
+    entry_template.BANNER + " for a native host (see make_native_entry.py) ─────────\n"
+    + entry_template.PRELUDE
+    + HOST
+    + entry_template.fill(SCREENS, {"cases": cases})
+    + entry_template.bridge("NativeBridge", lambda name: f'NativeHost.ir_host_take("{name}")', lambda name: f'NativeHost.ir_host_give("{name}", ', ENTRIES)
+    + entry_template.fill(DATABASE, {"database": indent(database, "    ")})
+    + "\nNativeDatabase.open(Main.default_db_path)\n"
+    # The browser's page holds the event stream and the worker never polls. Here a sync pass
+    # pulls through the host, and a host that also fetches changes hands them to "stream".
+    + entry_template.start(False, "# A sync pass pulls through the host: Client#sync_pass handles bootstrap, outbox drain and the poll.")
+)
+open(os.path.join(tree, "main_native.rb"), "w").write(head + entry)
 
 # The gem's worker transport and notifier speak to the same host.
 seams = 0
@@ -102,7 +122,8 @@ for base, _dirs, files in os.walk(os.path.join(tree, "app/models/instant_record/
     for name in files:
         path = os.path.join(base, name)
         text = open(path).read()
-        changed = through_host(text)
+        changed = re.sub(r'File\.read\("/host/(\w+)"\)', r'NativeHost.ir_host_take("\1")', text)
+        changed = re.sub(r'File\.write\("/host/(\w+)", ', r'NativeHost.ir_host_give("\1", ', changed)
         changed = re.sub(r'File\.write\((?:[\w:]+::)?REQUEST, ', 'NativeHost.ir_host_give("request", ', changed)
         changed = re.sub(r'File\.read\((?:[\w:]+::)?RESPONSE\)', 'NativeHost.ir_host_take("response")', changed)
         if changed != text:
@@ -110,4 +131,4 @@ for base, _dirs, files in os.walk(os.path.join(tree, "app/models/instant_record/
         seams += "NativeHost." in changed
 if seams != 2:
     sys.exit(f"expected the transport and the notifier to reach the host, found {seams} file(s)")
-print("wrote main_native.rb with screens:", ", ".join(names) or "none")
+print("wrote main_native.rb with screens:", ", ".join(name for name, _cls in found) or "none")

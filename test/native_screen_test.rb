@@ -15,10 +15,10 @@ class NativeScreenTest < ActiveSupport::TestCase
         list do
           section "Open" do
             letters.each do |letter|
-              row id: letter.id, link: "letter", arg: letter.id do
+              row id: letter.id, link: "letter", params: { "id" => letter.id }, action: "read", args: { "id" => letter.id } do
                 text letter.from, style: "headline"
                 text letter.subject
-                swipe "Archive", action: "archive", arg: letter.id, role: "destructive"
+                swipe "Archive", action: "archive", args: { "id" => letter.id }, role: "destructive"
               end
             end
           end
@@ -26,9 +26,10 @@ class NativeScreenTest < ActiveSupport::TestCase
       end
     end
 
-    def perform(action, arg)
+    def perform(action, args, values)
       case action
-      when "archive" then self.class.archived << arg
+      when "archive" then self.class.archived << args["id"]
+      when "rename" then self.class.archived << values["id"]
       end
     end
   end
@@ -39,9 +40,9 @@ class NativeScreenTest < ActiveSupport::TestCase
         list refreshable: true
         toolbar do
           button "Boxes", image: "person.crop.circle", position: "leading" do
-            item "Inbox", link: "menu", arg: "inbox", image: "tray", selected: arg == "inbox"
-            item "Sent", link: "menu", arg: "sent", selected: arg == "sent"
-            item "Empty", action: "empty", arg: arg, role: "destructive"
+            item "Inbox", link: "menu", params: { "box" => "inbox" }, image: "tray", selected: param("box") == "inbox"
+            item "Sent", link: "menu", params: { "box" => "sent" }, selected: param("box") == "sent"
+            item "Empty", action: "empty", args: { "box" => param("box") }, role: "destructive"
           end
           button "New", action: "compose", position: "trailing"
         end
@@ -53,7 +54,9 @@ class NativeScreenTest < ActiveSupport::TestCase
     def body
       swift "LetterView" do
         prop "subject", "Night \"shift\""
-        prop "archived", ""
+        flag "archived", false
+        number "unread", 3
+        time "sent", "2026-11-19T06:00:00.000000Z"
         props "replies" do
           LettersScreen::LETTERS.each do |letter|
             record do
@@ -103,17 +106,18 @@ class NativeScreenTest < ActiveSupport::TestCase
     assert_equal %w[text text swipe], section.children.first.children.map(&:kind)
   end
 
-  test "a row names its record, the screen it opens and that screen's argument" do
+  test "a row names its record, the screen it opens and that screen's params" do
     row = rows(LettersScreen.new.render).first
 
     assert_equal "a1", row.id
-    assert_equal ["letter", "a1"], [row.props["link"], row.arg]
+    assert_equal ["letter", { "id" => "a1" }], [row.props["link"], row.params]
+    assert_equal ["read", { "id" => "a1" }], [row.action, row.args]
   end
 
   test "a swipe carries the action the host sends back" do
     swipe = rows(LettersScreen.new.render).first.children.last
 
-    assert_equal ["Archive", "archive", "a1", "destructive"], [swipe.text, swipe.action, swipe.arg, swipe.props["role"]]
+    assert_equal ["Archive", "archive", { "id" => "a1" }, "destructive"], [swipe.text, swipe.action, swipe.args, swipe.props["role"]]
   end
 
   test "the tree is JSON a host can parse" do
@@ -123,8 +127,9 @@ class NativeScreenTest < ActiveSupport::TestCase
     assert_equal "row", row["kind"]
     assert_equal "a1", row["id"]
     assert_equal({ "link" => "letter" }, row["props"])
-    assert_equal "a1", row["arg"]
-    assert_equal({ "kind" => "text", "id" => "", "text" => "Rae", "action" => "", "arg" => "", "props" => { "style" => "headline" }, "children" => [] }, row["children"].first)
+    assert_equal({ "id" => "a1" }, row["params"])
+    assert_equal({ "id" => "a1" }, row["args"])
+    assert_equal({ "kind" => "text", "id" => "", "text" => "Rae", "action" => "", "params" => {}, "args" => {}, "props" => { "style" => "headline" }, "children" => [] }, row["children"].first)
   end
 
   test "quotes, newlines, control characters and non-ASCII text survive" do
@@ -141,7 +146,7 @@ class NativeScreenTest < ActiveSupport::TestCase
   end
 
   test "a toolbar button says which side of the bar it sits on" do
-    menu, plain = toolbar(MenuScreen.new("inbox"))
+    menu, plain = toolbar(MenuScreen.new("box" => "inbox"))
 
     assert_equal ["leading", "person.crop.circle"], [menu.props["position"], menu.props["image"]]
     assert_equal ["trailing", "compose"], [plain.props["position"], plain.action]
@@ -149,19 +154,19 @@ class NativeScreenTest < ActiveSupport::TestCase
   end
 
   test "a button with a block is a menu of items" do
-    inbox, sent, empty = toolbar(MenuScreen.new("sent")).first.children
+    inbox, sent, empty = toolbar(MenuScreen.new("box" => "sent")).first.children
 
     assert_equal %w[item item item], [inbox, sent, empty].map(&:kind)
-    assert_equal ["Inbox", "menu", "inbox", "tray"], [inbox.text, inbox.props["link"], inbox.arg, inbox.props["image"]]
-    assert_equal ["empty", "sent", "destructive"], [empty.action, empty.arg, empty.props["role"]]
+    assert_equal ["Inbox", "menu", { "box" => "inbox" }, "tray"], [inbox.text, inbox.props["link"], inbox.params, inbox.props["image"]]
+    assert_equal ["empty", { "box" => "sent" }, "destructive"], [empty.action, empty.args, empty.props["role"]]
     assert_nil empty.props["link"]
   end
 
   test "only the chosen item is selected" do
-    inbox, sent, empty = toolbar(MenuScreen.new("sent")).first.children
+    inbox, sent, empty = toolbar(MenuScreen.new("box" => "sent")).first.children
 
     assert_equal [nil, "true", nil], [inbox, sent, empty].map { |item| item.props["selected"] }
-    assert_equal({ "link" => "menu", "selected" => "true" }, JSON.parse(MenuScreen.new("sent").json).dig("children", 0, "children", 1, "children", 0, "children", 1, "props"))
+    assert_equal({ "link" => "menu", "selected" => "true" }, JSON.parse(MenuScreen.new("box" => "sent").json).dig("children", 0, "children", 1, "children", 0, "children", 1, "props"))
   end
 
   test "a list can ask to be refreshed by a pull, and does not by default" do
@@ -173,15 +178,23 @@ class NativeScreenTest < ActiveSupport::TestCase
     view = SwiftScreen.new.render.children.sole
 
     assert_equal ["swift", "LetterView"], [view.kind, view.text]
-    assert_equal [%w[prop subject], %w[prop archived], %w[props replies], %w[props nobody]], view.children.map { |node| [node.kind, node.id] }
-    assert_equal ["Night \"shift\"", ""], view.children.first(2).map(&:text)
+    assert_equal [%w[prop subject], %w[prop archived], %w[prop unread], %w[prop sent], %w[props replies], %w[props nobody]], view.children.map { |node| [node.kind, node.props["name"]] }
+    assert_equal ["Night \"shift\"", "false", "3", "2026-11-19T06:00:00.000000Z"], view.children.first(4).map(&:text)
+  end
+
+  test "a prop says what type it is, so the host need not guess" do
+    view = SwiftScreen.new.render.children.sole
+
+    assert_equal %w[string bool int date], view.children.first(4).map { |node| node.props["type"] }
+    assert_equal "true", flagged(true).text
+    assert_empty view.children.first.id
   end
 
   test "a list of props holds records, and a record can hold a list" do
     replies, nobody = SwiftScreen.new.render.children.sole.children.last(2)
 
     assert_equal %w[record record], replies.children.map(&:kind)
-    assert_equal [%w[from Rae], %w[tags]], replies.children.first.children.map { |node| [node.id, node.text].reject(&:empty?) }
+    assert_equal [%w[from Rae], %w[tags]], replies.children.first.children.map { |node| [node.props["name"], node.text].reject(&:empty?) }
     assert_equal "b2", replies.children.last.children.last.children.sole.children.sole.text
     assert_empty nobody.children
   end
@@ -189,39 +202,111 @@ class NativeScreenTest < ActiveSupport::TestCase
   test "the props reach the host as JSON it can read by name" do
     view = JSON.parse(SwiftScreen.new.json).dig("children", 0)
 
-    assert_equal({ "kind" => "prop", "id" => "subject", "text" => "Night \"shift\"", "action" => "", "arg" => "", "props" => {}, "children" => [] }, view["children"].first)
-    assert_equal %w[Rae Sam], view["children"][2]["children"].map { |record| record["children"].first["text"] }
+    assert_equal({ "kind" => "prop", "id" => "", "text" => "Night \"shift\"", "action" => "", "params" => {}, "args" => {}, "props" => { "name" => "subject", "type" => "string" }, "children" => [] }, view["children"].first)
+    assert_equal %w[Rae Sam], view["children"][4]["children"].map { |record| record["children"].first["text"] }
   end
 
   test "a Swift view sits among stock elements, with or without props" do
     banner, row, footer = PartialScreen.new.render.children.sole.children
 
     assert_equal %w[swift row swift], [banner, row, footer].map(&:kind)
-    assert_equal ["Banner", "count", "2"], [banner.text, banner.children.sole.id, banner.children.sole.text]
+    assert_equal ["Banner", "count", "2"], [banner.text, banner.children.sole.props["name"], banner.children.sole.text]
     assert_equal ["Footer", []], [footer.text, footer.children]
   end
 
   test "an action changes what the next render shows" do
-    LettersScreen.new.perform("archive", "a1")
+    LettersScreen.new.perform("archive", { "id" => "a1" }, {})
 
     assert_equal %w[b2], rows(LettersScreen.new.render).map(&:id)
   end
 
+  test "a form's values reach the action beside its args" do
+    LettersScreen.new.perform("rename", {}, { "id" => "b2" })
+
+    assert_equal %w[a1], rows(LettersScreen.new.render).map(&:id)
+  end
+
+  test "a param holds whatever characters it was given, and one not given is empty" do
+    odd = "a\nb/c \"q\" ☕"
+    screen = LettersScreen.new("box" => odd)
+
+    assert_equal [odd, ""], [screen.param("box"), screen.param("missing")]
+  end
+
+  test "params and args cross to the host as objects, whatever they hold" do
+    odd = "a\nb/c \"q\""
+    item = JSON.parse(MenuScreen.new("box" => odd).json).dig("children", 0, "children", 1, "children", 0, "children", 2)
+
+    assert_equal({ "box" => odd }, item["args"])
+  end
+
+  test "what a host sends becomes strings by name" do
+    strings = InstantRecord::Native::Screen.strings(JSON.parse('{"id":"a1","count":3,"gone":null}'))
+
+    assert_equal({ "id" => "a1", "count" => "3", "gone" => "" }, strings)
+    assert_equal({}, InstantRecord::Native::Screen.strings(nil))
+    assert_equal({}, InstantRecord::Native::Screen.strings("maya/support"))
+  end
+
   test "an action the screen does not know does nothing" do
-    assert_nothing_raised { LettersScreen.new.perform("shred", "a1") }
-    assert_nothing_raised { EmptyScreen.new.perform("archive", "a1") }
+    assert_nothing_raised { LettersScreen.new.perform("shred", { "id" => "a1" }, {}) }
+    assert_nothing_raised { EmptyScreen.new.perform("archive", { "id" => "a1" }, {}) }
     assert_equal 2, rows(LettersScreen.new.render).size
   end
 
   test "a screen is found by the name its class gives it" do
-    screen = InstantRecord::Native.screen("letters", "x")
+    screen = InstantRecord::Native.screen("letters", { "box" => "x" })
 
     assert_instance_of LettersScreen, screen
-    assert_equal "x", screen.arg
+    assert_equal "x", screen.param("box")
     assert_raises(ArgumentError) { InstantRecord::Native.screen("nowhere") }
   end
 
+  test "a screen's file names its class, and the class names it back" do
+    assert_equal "TwoWordsScreen", InstantRecord::Native.class_name("two_words")
+    assert_equal "letters", InstantRecord::Native.screen_name(LettersScreen)
+    %w[mailbox two_words inbox2 a1_b].each do |name|
+      assert_equal name, InstantRecord::Native.underscore(InstantRecord::Native.class_name(name).delete_suffix("Screen"))
+    end
+  end
+
+  test "a file name the rule cannot turn back is refused, with the rule" do
+    %w[a_1 Two two__words _x 1st two-words].each do |name|
+      error = assert_raises(ArgumentError) { InstantRecord::Native.class_name(name) }
+      assert_match "<name>_screen.rb", error.message
+    end
+  end
+
+  test "params and args that are not strings reach the host as strings" do
+    screen = Class.new(InstantRecord::Native::Screen) do
+      define_method(:body) { row(id: "a", link: "x", params: { id: 7, "gone" => nil }, args: { "n" => 3 }) { } }
+    end
+    row = screen.new(member: :maya).render.children.sole
+
+    assert_equal [{ "id" => "7", "gone" => "" }, { "n" => "3" }], [row.params, row.args]
+    assert_equal "maya", screen.new(member: :maya).param("member")
+  end
+
+  test "the client forgets what it held in memory about a database that was closed" do
+    client = InstantRecord::Client
+    client.note_change("Letter", "a1")
+    client.unlisted_changes
+
+    client.forget_database
+
+    assert_empty client.changed_records
+    client.note_change("Letter", "b2")
+    assert_equal "records_changed\nLetter:b2", client.changes_notice
+  ensure
+    client.forget_database
+  end
+
   private
+
+  def flagged(value)
+    screen = Class.new(InstantRecord::Native::Screen) { define_method(:body) { flag "on", value } }
+    screen.new.render.children.sole
+  end
 
   def toolbar(screen)
     screen.render.children.first.children.last.children

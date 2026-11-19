@@ -139,18 +139,31 @@ cd demo && INSTANT_RECORD_NATIVE_HOST=../compiled/.build-native/host bin/rails t
 ```
 
 A screen is a Ruby class (`InstantRecord::Native::Screen`) whose `body` describes
-what to draw and whose `perform` answers a tap. The library has five functions,
-declared in `pipeline/native/instant_record_native.h`: `ir_boot` opens the
-SQLite file, and `ir_call` runs `render`, `action`, `sync`, `stream` and the rest the header
-lists, each taking and returning a string. A render
-returns the screen as JSON. The library never opens a connection: when it needs
-the server it calls the host back with one request and the host answers.
+what to draw and whose `perform` answers a tap. The library has six functions,
+declared in `pipeline/native/instant_record_native.h`: `ir_boot` starts the
+app on a SQLite file, once in a process, `ir_open` closes that file and opens
+another, and `ir_call` runs `render`, `action`, `sync`, `stream` and the rest
+the header lists, each taking and returning a string. `render` and `action`
+take one JSON object (the screen's name and its params, and for an action its
+name, args and a form's values) and a render returns the screen as JSON. The
+library never opens a connection: when it needs the server it calls the host
+back with one request and the host answers. A host that must not wait on the
+network inside a call asks `sync_plan` and `cursor` what a pass will request,
+fetches those itself, and answers the pass from what it fetched.
+
+Both builds end with the same entry, written once in
+`pipeline/entry_template.py` and filled by `make_wasm_entry.py` and
+`make_native_entry.py`. The class a screen's file holds is decided in Ruby
+alone (`InstantRecord::Native.class_name`), which the build asks through
+`pipeline/native_screens.rb`.
 
 `pipeline/native/host.c` is that host with no screen, driven over standard
 input. The test starts it, answers its requests from the Rails app, and checks
 that the mailbox renders the same bytes as under CRuby, that an archive made
 with no connection waits in the outbox and reaches the server later, that the
-database survives a restart, and that a rejected write is undone.
+database survives a restart, that a rejected write is undone, that a pass
+answered from replies fetched beforehand asks for nothing else, and that
+opening another inbox's file closes the first.
 
 A screen can also hand props to a view written in SwiftUI (`swift "Name" do
 prop ... end`), as a Rails action hands a React page its props.

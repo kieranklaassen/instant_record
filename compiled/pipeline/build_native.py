@@ -25,7 +25,7 @@ os.environ["INSTANT_RECORD_NATIVE"] = "1"
 import build
 
 # native_shim.c holds one wrapper for each of these.
-ENTRIES = [name.split(".")[1] for name in build.REACTOR_EXPORTS.split(",")] + ["render", "action"]
+ENTRIES = [name.split(".")[1] for name in build.REACTOR_EXPORTS.split(",")] + ["render", "action", "open"]
 CFLAGS = ["-O2", "-Wno-all", "-ffp-contract=off", "-DSP_INT_OVERFLOW_MODE_RAISE"]
 SQLITE_CFLAGS = ["-O2", "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION"]
 PACKAGES = ("json", "stringio", "zlib")
@@ -71,6 +71,25 @@ def cross_runtime(cc, spinel_home, out, runtime, run):
     return packages
 
 
+def certain_type_errors(app_c):
+    """Lines of the app's screens where the compiler already knows a hash is of the wrong type.
+
+    Spinel types a whole program. A hash whose value comes from a record's column is a hash
+    of anything, and where a screen hands one to `params:` or `args:` the compiled call is a
+    TypeError that would only show on the phone. It is found here instead.
+    """
+    found, place = [], ""
+    with open(app_c, errors="replace") as file:
+        for line in file:
+            if line.startswith("#line "):
+                place = line
+            elif "(expected Hash)" in line and "sp_raise_cls(\"TypeError\"" in line:
+                at = re.match(r'#line (\d+) "(?:app-src/)?(app/screens/[^"]+)"', place)
+                if at and f"{at.group(2)}:{at.group(1)}" not in found:
+                    found.append(f"{at.group(2)}:{at.group(1)}")
+    return found
+
+
 def main():
     target = sys.argv[1] if len(sys.argv) > 1 else ""
     if target not in ("", "iphonesimulator"):
@@ -96,6 +115,9 @@ def main():
          "--ext-entry", ",".join("NativeBridge." + entry for entry in ENTRIES),
          *flags, "main_native.rb", "-o", app_c],
         cwd=tree, env={**path_env, "CPATH": T["SQLITE_SRC"]}, log="spinel.log")
+    wrong = certain_type_errors(app_c)
+    if wrong:
+        sys.exit("A hash given to params: or args: must hold strings. Call to_s on a value that comes from a record:\n  " + "\n  ".join(wrong))
 
     includes = ["-I" + os.path.join(spinel_home, "lib"), "-I" + os.path.join(spinel_home, "lib/regexp"),
                 "-I" + T["SQLITE_SRC"], "-I" + out, "-I" + os.path.join(pipeline, "native")]

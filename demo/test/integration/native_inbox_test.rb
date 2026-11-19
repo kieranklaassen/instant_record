@@ -11,15 +11,21 @@ require "tmpdir"
 #   INSTANT_RECORD_NATIVE_HOST=../compiled/.build-native/host bin/rails test test/integration/native_inbox_test.rb
 class NativeInboxTest < ActionDispatch::IntegrationTest
   ENDPOINT = "http://www.example.com/email/sync/maya/support"
+  SUPPORT = { "member" => "maya", "inbox" => "support" }.freeze
+  UNREAD = SUPPORT.merge("filter" => "unread").freeze
+  BILLING = { "member" => "maya", "inbox" => "billing" }.freeze
 
   # compiled/pipeline/native/host.c, with this test as its driver.
   class Phone
     attr_writer :online
+    attr_reader :unanswered
 
-    def initialize(binary, database, session)
+    # `database` is the file to boot on, or nil for a host that has not booted.
+    def initialize(binary, database, session, folder: File.dirname(database))
       @session = session
       @online = true
-      @input, @output, @wait = Open3.popen2(binary, database, chdir: File.dirname(database))
+      @unanswered = []
+      @input, @output, @wait = Open3.popen2(binary, database || "-", chdir: folder)
       @input.binmode
       @output.binmode
       reply
@@ -31,11 +37,36 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
       reply
     end
 
-    def render(screen, arg) = JSON.parse(call("render", "#{screen}\n#{arg}").first)
-    def tap(screen, arg, action, on) = call("action", [screen, arg, action, on].join("\n"))
-    def sync = call("sync", ENDPOINT)
+    def render(screen, params) = JSON.parse(call("render", JSON.generate(screen: screen, params: params)).first)
+    def tap(screen, params, action, args = {}, values = {}) = call("action", JSON.generate(screen: screen, params: params, action: action, args: args, values: values))
+    def sync(endpoint = ENDPOINT) = call("sync", endpoint)
     def pending = call("cursor").first[/pending=(\d+)/, 1].to_i
     def cursor = call("cursor").first[/cursor=(\d+)/, 1].to_i
+    def identity = call("cursor").first[/identity=(\S*)/, 1].to_s
+
+    # ir_boot and ir_open, by the host's own two words.
+    def boot(database) = send_path("boot", database)
+    def open(database) = send_path("open", database)
+
+    # The files the host process holds open, as the kernel lists them.
+    def open_files = Dir.children("/proc/#{@wait.pid}/fd").filter_map { |fd| File.readlink("/proc/#{@wait.pid}/fd/#{fd}") rescue nil }
+
+    # What the phone's own app does: fetch what a pass will ask for while the
+    # library is free, then run the pass answering from those replies alone.
+    # The block runs between the two, where a tap would.
+    def prepared_sync
+      plan = JSON.parse(call("sync_plan").first)
+      who = identity.empty? ? "" : "&identity=#{identity}"
+      wanted = []
+      wanted << ["POST", "#{ENDPOINT}/mutations", plan["push"]] unless plan["push"].empty?
+      wanted << ["GET", "#{ENDPOINT}/bootstrap", ""] if plan["bootstrap"]
+      wanted << ["GET", "#{ENDPOINT}/events?after=#{cursor}&window=0#{who}", ""] unless plan["bootstrap"]
+      @prepared = wanted.to_h { |verb, url, body| [[verb, url, body], fetch(verb, url, body)] }
+      yield if block_given?
+      sync
+    ensure
+      @prepared = nil
+    end
 
     def close
       @input.close
@@ -60,10 +91,24 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
       end
     end
 
+    def send_path(verb, path)
+      @input.write("#{verb} #{path.bytesize}\n#{path}")
+      @input.flush
+      reply
+    end
+
     def exchange(request)
-      return "0\n" unless @online
       line, body = request.split("\n", 2)
       verb, url = line.split(" ", 2)
+      return fetch(verb, url, body) unless @prepared
+      @prepared.fetch([verb, url, body.to_s]) do
+        @unanswered << line
+        "0\n"
+      end
+    end
+
+    def fetch(verb, url, body)
+      return "0\n" unless @online
       path = URI(url).request_uri
       if verb == "GET"
         @session.get path
@@ -98,7 +143,7 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
 
     @phone.sync
 
-    assert_equal JSON.parse(MailboxScreen.new("maya/support").json), @phone.render("mailbox", "maya/support")
+    assert_equal JSON.parse(MailboxScreen.new(SUPPORT).json), @phone.render("mailbox", SUPPORT)
     assert_equal [@newer.id, @older.id], rows.map { |row| row["id"] }
   end
 
@@ -106,35 +151,35 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
     @phone.sync
     row = rows.first
 
-    @phone.tap("mailbox", "maya/support", row["action"], row["arg"])
+    @phone.tap("mailbox", SUPPORT, row["action"], row["args"])
     assert_equal 1, @phone.pending
     @phone.sync
 
     assert_equal 0, @phone.pending
     assert MailEntry.exists?(kind: "read", parent_id: @newer.id, author: "maya")
-    assert_equal JSON.parse(ThreadScreen.new(row["arg"]).json), @phone.render(row["props"]["link"], row["arg"])
-    assert_equal JSON.parse(MailboxScreen.new("maya/support").json), @phone.render("mailbox", "maya/support")
+    assert_equal JSON.parse(ThreadScreen.new(row["params"]).json), @phone.render(row["props"]["link"], row["params"])
+    assert_equal JSON.parse(MailboxScreen.new(SUPPORT).json), @phone.render("mailbox", SUPPORT)
   end
 
   test "the menus, the unread list and mark all read are the server's, on the phone" do
     @phone.sync
 
-    assert_equal JSON.parse(MailboxScreen.new("maya/support/unread").json), @phone.render("mailbox", "maya/support/unread")
-    assert_equal ["InboxSummary", @newer.id], @phone.render("mailbox", "maya/support/unread").dig("children", 0, "children", 0, "children").map { |node| node["id"].presence || node["text"] }
+    assert_equal JSON.parse(MailboxScreen.new(UNREAD).json), @phone.render("mailbox", UNREAD)
+    assert_equal ["InboxSummary", @newer.id], @phone.render("mailbox", UNREAD).dig("children", 0, "children", 0, "children").map { |node| node["id"].presence || node["text"] }
 
-    @phone.tap("mailbox", "maya/support", "read_all", "maya/support")
-    assert_equal %w[swift], @phone.render("mailbox", "maya/support/unread").dig("children", 0, "children", 0, "children").map { |node| node["kind"] }
+    @phone.tap("mailbox", SUPPORT, "read_all")
+    assert_equal %w[swift], @phone.render("mailbox", UNREAD).dig("children", 0, "children", 0, "children").map { |node| node["kind"] }
     @phone.sync
 
     assert MailEntry.exists?(kind: "read", parent_id: @newer.id, author: "maya")
-    assert_equal JSON.parse(MailboxScreen.new("maya/support").json), @phone.render("mailbox", "maya/support")
+    assert_equal JSON.parse(MailboxScreen.new(SUPPORT).json), @phone.render("mailbox", SUPPORT)
   end
 
   test "an archive made offline shows at once and reaches the server on reconnect" do
     @phone.sync
     @phone.online = false
 
-    @phone.tap("mailbox", "maya/support", "archive", "maya/support/#{@newer.id}")
+    @phone.tap("mailbox", SUPPORT, "archive", { "id" => @newer.id })
     @phone.sync
 
     assert_equal [@older.id], rows.map { |row| row["id"] }
@@ -151,7 +196,7 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
   test "mail and a queued write survive the app being closed, with no network" do
     @phone.sync
     @phone.online = false
-    @phone.tap("mailbox", "maya/support", "archive", "maya/support/#{@newer.id}")
+    @phone.tap("mailbox", SUPPORT, "archive", { "id" => @newer.id })
     @phone.close
 
     @phone = Phone.new(@binary, File.join(@folder, "inbox.sqlite3"), self)
@@ -171,8 +216,24 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
     assert_equal [arrived.id, @newer.id, @older.id], rows.map { |row| row["id"] }
   end
 
+  test "a param keeps every character it was sent with" do
+    @phone.sync
+
+    odd = "a\nb/c \"q\" ☕"
+    link = @phone.render("mailbox", SUPPORT.merge("inbox" => odd)).dig("children", 0, "children", 1, "children", 1, "children", 0, "params")
+
+    assert_equal odd, link["inbox"]
+  end
+
+  test "input that is not an object is an error the host can read" do
+    error = assert_raises(RuntimeError) { @phone.call("render", "mailbox\nmaya/support") }
+
+    assert_predicate error.message, :present?
+    assert_equal [@newer.id, @older.id], (@phone.sync && rows).map { |row| row["id"] }
+  end
+
   test "a screen nobody wrote is an error, not an empty screen" do
-    error = assert_raises(RuntimeError) { @phone.render("nowhere", "maya/support") }
+    error = assert_raises(RuntimeError) { @phone.render("nowhere", SUPPORT) }
 
     assert_match "No screen named nowhere", error.message
     assert_equal [@newer.id, @older.id], (@phone.sync && rows).map { |row| row["id"] }
@@ -189,11 +250,84 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
     assert_equal [arrived.id, @newer.id, @older.id], rows.map { |row| row["id"] }
   end
 
+  test "a pass whose replies were fetched beforehand asks the network for nothing more" do
+    @phone.prepared_sync
+    assert_equal [@newer.id, @older.id], rows.map { |row| row["id"] }
+
+    @phone.tap("mailbox", SUPPORT, "archive", { "id" => @newer.id })
+    arrived = write("jo", "Receipt")
+    @phone.prepared_sync
+
+    assert_equal 0, @phone.pending
+    assert_equal [arrived.id, @older.id], rows.map { |row| row["id"] }
+    assert_equal [@older.id, arrived.id].sort, MailEntry.open_messages.where(mailbox_id: "support").pluck(:id).sort
+    assert_empty @phone.unanswered
+  end
+
+  test "a tap made while a pass was fetching is not lost, and goes out with the next pass" do
+    @phone.sync
+    @phone.tap("mailbox", SUPPORT, "archive", { "id" => @older.id })
+
+    @phone.prepared_sync { @phone.tap("mailbox", SUPPORT, "read", { "id" => @newer.id }) }
+
+    assert_equal ["POST #{ENDPOINT}/mutations"], @phone.unanswered
+    assert_equal 2, @phone.pending
+    assert_equal [@newer.id], rows.map { |row| row["id"] }
+
+    @phone.prepared_sync
+
+    assert_equal 0, @phone.pending
+    assert_equal 1, MailEntry.where(kind: "archive", parent_id: @older.id).count
+    assert_equal 1, MailEntry.where(kind: "read", parent_id: @newer.id, author: "maya").count
+  end
+
+  test "another inbox opens in its own file, and the first is closed" do
+    billing = File.join(@folder, "billing.sqlite3")
+    Mailbox.find("billing").append!(id: SecureRandom.uuid, author: "jo", attributes: { kind: "message", address: "jo@example.test", subject: "Receipt", body: "Paid" })
+    @phone.sync
+    @phone.online = false
+    @phone.tap("mailbox", SUPPORT, "archive", { "id" => @newer.id })
+
+    @phone.open(billing)
+    assert_equal 0, @phone.pending
+    assert_empty @phone.render("mailbox", BILLING).dig("children", 0, "children", 0, "children").select { |node| node["kind"] == "row" }
+    if File.directory?("/proc/self/fd")
+      assert_empty @phone.open_files.grep(/inbox\.sqlite3/), "the first database is still open"
+      assert_not_empty @phone.open_files.grep(/billing\.sqlite3/)
+    end
+    @phone.online = true
+    @phone.sync(ENDPOINT.sub("maya/support", "maya/billing"))
+    assert_equal ["Receipt"], @phone.render("mailbox", BILLING).dig("children", 0, "children", 0, "children").select { |node| node["kind"] == "row" }.map { |row| row["children"][1]["text"] }
+    assert_empty rows, "billing's file holds support's mail"
+
+    @phone.open(File.join(@folder, "inbox.sqlite3"))
+    assert_equal 1, @phone.pending
+    assert_equal [@older.id], rows.map { |row| row["id"] }
+    @phone.sync
+    assert_equal 0, @phone.pending
+    assert_equal [@older.id], MailEntry.open_messages.where(mailbox_id: "support").pluck(:id)
+  end
+
+  test "the app boots once, and nothing runs before it has" do
+    again = assert_raises(RuntimeError) { @phone.boot(File.join(@folder, "second.sqlite3")) }
+    assert_match "boots once", again.message
+    assert_equal [], rows
+
+    asleep = Phone.new(@binary, nil, self, folder: @folder)
+    early = assert_raises(RuntimeError) { asleep.render("mailbox", SUPPORT) }
+    assert_match "ir_boot first", early.message
+    assert_raises(RuntimeError) { asleep.open(File.join(@folder, "third.sqlite3")) }
+    asleep.boot(File.join(@folder, "third.sqlite3"))
+    assert_equal "screen", asleep.render("mailbox", SUPPORT)["kind"]
+  ensure
+    asleep&.close
+  end
+
   test "an archive the server rejects is undone on the phone" do
     @phone.sync
     MailEntry.where(id: @newer.id).delete_all
 
-    @phone.tap("mailbox", "maya/support", "archive", "maya/support/#{@newer.id}")
+    @phone.tap("mailbox", SUPPORT, "archive", { "id" => @newer.id })
     assert_equal [@older.id], rows.map { |row| row["id"] }
     @phone.sync
 
@@ -209,6 +343,6 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
   end
 
   def rows
-    @phone.render("mailbox", "maya/support").dig("children", 0, "children", 0, "children").select { |node| node["kind"] == "row" }
+    @phone.render("mailbox", SUPPORT).dig("children", 0, "children", 0, "children").select { |node| node["kind"] == "row" }
   end
 end

@@ -38,26 +38,40 @@ class MailboxScreen < InstantRecord::Native::Screen
     navigation title: inbox.capitalize do
       list refreshable: true do
         messages.each do |entry|
-          row id: entry.id, link: "thread", arg: "#{member}/#{inbox}/#{entry.id}", action: "read" do
+          row id: entry.id, link: "thread", params: place.merge("thread" => entry.id), action: "read", args: { "id" => entry.id } do
             text entry.author, style: "headline"
             text entry.subject.to_s
-            swipe "Archive", action: "archive", arg: "#{member}/#{inbox}/#{entry.id}", role: "destructive"
+            swipe "Archive", action: "archive", args: { "id" => entry.id }, role: "destructive"
           end
         end
       end
       toolbar do
         button "Inboxes", image: "person.crop.circle", position: "leading" do
-          item "Support", link: "mailbox", arg: "maya/support", selected: true
-          item "Billing", link: "mailbox", arg: "maya/billing"
+          item "Support", link: "mailbox", params: { "member" => member, "inbox" => "support" }, selected: true
+          item "Billing", link: "mailbox", params: { "member" => member, "inbox" => "billing" }
         end
         button "View", image: "slider.horizontal.3", position: "trailing" do
-          item "Mark all read", action: "read_all", arg: "maya/support"
+          item "Mark all read", action: "read_all"
         end
       end
     end
   end
+
+  def perform(action, args, values)
+    archive(args["id"]) if action == "archive"
+  end
+
+  def member = param("member")
+  def inbox = param("inbox")
+  def place = { "member" => member, "inbox" => inbox }
 end
 ```
+
+A screen is opened with `params`, strings by name, and reads one with
+`param("inbox")`. A link names the next screen's params. An element that
+names an `action` carries `args`, and a tap brings both back to `perform`
+with what a form's fields held (`values`). Params and args cross to the phone
+and back as JSON objects, so a value may hold any character.
 
 A toolbar button with a block is a menu. An item with an `action` is
 performed by the screen. An item with a `link` puts that screen in the first
@@ -74,8 +88,9 @@ Rails action hands a React page its props with `render inertia:`.
 class ThreadScreen < MailboxScreen
   def body
     swift "ConversationView" do
-      prop "thread", arg
+      prop "thread", param("thread")
       prop "subject", message.subject.to_s
+      flag "archived", archived?
       props "messages" do
         replies.each do |reply|
           record do
@@ -103,16 +118,22 @@ struct ConversationView: View {
         VStack {
             Text(props["subject"])
             ForEach(Array(props.list("messages").enumerated()), id: \.offset) { Text($0.element["body"]) }
-            Button("Archive") { actions.perform("archive", props["thread"]) }
+            if !props.bool("archived") {
+                Button("Archive") { actions.perform("archive", ["id": props["thread"]]) }
+            }
         }
     }
 }
 ```
 
-Props are strings, and lists of records whose props are strings. Write a
-number with `to_s` and a flag as `"true"` or `""`. `actions.perform` reaches
-the screen's `perform(action, arg)` by the same road as a tap on a Ruby-drawn
-button: the write is local, the screens are drawn again, and it syncs.
+A prop says what it is: `prop` hands over a string, `flag` a boolean,
+`number` a whole number and `time` a moment (ISO 8601). Swift reads them as
+`props["subject"]`, `props.bool("archived")`, `props.int("unread")` and
+`props.date("sent")`, and a prop that was not sent reads as empty, false, zero
+or nil. `props.list("messages")` is a list of records. `actions.perform`
+reaches the screen's `perform(action, args, values)` by the same road as a tap
+on a Ruby-drawn button: the write is local, the screens are drawn again, and
+it syncs.
 
 The same element puts one Swift view among stock ones, as a partial would:
 
@@ -120,7 +141,7 @@ The same element puts one Swift view among stock ones, as a partial would:
 list do
   swift "InboxSummary" do
     prop "inbox", inbox.capitalize
-    prop "unread", unread.size.to_s
+    number "unread", unread.size
   end
   messages.each { |entry| row(id: entry.id) { text entry.subject.to_s } }
 end

@@ -1,10 +1,11 @@
 # One conversation. This screen is not drawn from stock elements: it hands
 # its props to ConversationView, which the iPhone app wrote in SwiftUI
 # (native/ios/Inbox), the way Email::MailboxesController hands the React page
-# its props. Opened with "member/inbox/id". Archiving is the mailbox's action,
-# so the view sends "archive" with the `thread` prop back through `perform`.
+# its props. Opened with `member`, `inbox` and `thread`. Archiving is the
+# mailbox's action, so the view sends "archive" with the `thread` prop as its
+# `id` back through `perform`.
 class ThreadScreen < MailboxScreen
-  def thread = arg.split("/")[2].to_s
+  def thread = param("thread")
 
   def body
     message = MailEntry.find_by(id: thread, mailbox_id: inbox, kind: "message") if allowed?
@@ -15,10 +16,10 @@ class ThreadScreen < MailboxScreen
 
     replies = MailEntry.where(mailbox_id: inbox, kind: "reply", parent_id: message.id).order(:created_at).to_a
     swift "ConversationView" do
-      prop "thread", arg
+      prop "thread", thread
       prop "subject", message.subject.to_s
       prop "participants", participants(message, replies)
-      prop "archived", archived?(message) ? "true" : ""
+      flag "archived", archived?(message)
       props "messages" do
         letter message.author, message.address.to_s, message.created_at.utc.iso8601(6), message.body.to_s
         replies.each do |reply|
@@ -34,9 +35,9 @@ class ThreadScreen < MailboxScreen
     record do
       prop "author", author
       prop "address", address
-      prop "date", written
+      time "date", written
       prop "body", words
-      prop "mine", author == member ? "true" : ""
+      flag "mine", author == member
     end
   end
 

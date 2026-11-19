@@ -18,6 +18,8 @@ static char *slots[SLOTS];
 static char error[512];
 static ir_exchange_fn exchange;
 static void *exchange_context;
+/* The app boots once in a process: Spinel's app_boot() may not run twice. */
+static enum { ASLEEP, UP, BROKEN } state;
 
 static void put(int slot, const char *value) {
   char *copy = strdup(value ? value : "");
@@ -52,12 +54,13 @@ static void call_history(void *ctx)   { (void)ctx; sp_NativeBridge_s_history(); 
 static void call_cursor(void *ctx)    { (void)ctx; sp_NativeBridge_s_cursor(); }
 static void call_render(void *ctx)    { (void)ctx; sp_NativeBridge_s_render(); }
 static void call_action(void *ctx)    { (void)ctx; sp_NativeBridge_s_action(); }
+static void call_open(void *ctx)      { (void)ctx; sp_NativeBridge_s_open(); }
 static void call_boot(void *ctx)      { (void)ctx; app_boot(); }
 
 static const struct { const char *name; void (*fn)(void *); } entries[] = {
   { "request", call_request }, { "sync_plan", call_plan }, { "sync", call_sync },
   { "stream", call_stream },   { "history", call_history }, { "cursor", call_cursor },
-  { "render", call_render },   { "action", call_action },
+  { "render", call_render },   { "action", call_action },   { "open", call_open },
 };
 
 static int run_guarded(void (*fn)(void *)) {
@@ -97,13 +100,30 @@ static void fresh_secret(void) {
   setenv("SECRET_KEY_BASE", hex, 1);
 }
 
+static int refuse(const char *why) {
+  snprintf(error, sizeof error, "%s", why);
+  return 1;
+}
+
+static int asleep(void) {
+  if (state == UP) return 0;
+  return refuse(state == BROKEN ? "The app did not boot, and cannot boot again in this process" : "Call ir_boot first");
+}
+
 int ir_boot(const char *database_path) {
+  if (state != ASLEEP) return refuse("The app boots once. Open another database with ir_open");
   setenv("BLOG_DB", database_path, 1);
   fresh_secret();
-  return run_guarded(call_boot);
+  state = run_guarded(call_boot) ? BROKEN : UP;
+  return state != UP;
+}
+
+int ir_open(const char *database_path) {
+  return ir_call("open", database_path) ? 0 : 1;
 }
 
 const char *ir_call(const char *entry, const char *input) {
+  if (asleep()) return NULL;
   for (size_t i = 0; i < sizeof entries / sizeof entries[0]; i++) {
     if (strcmp(entries[i].name, entry) != 0) continue;
     put(IN, input);

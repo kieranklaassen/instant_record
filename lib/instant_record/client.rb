@@ -253,6 +253,18 @@ module InstantRecord
         nil
       end
 
+      # A native host opened another database file: drop what was held in
+      # memory about the one before. Everything else the client knows is read
+      # from the database each time.
+      def forget_database
+        reset_stream
+        history_marks.clear
+        changed_records.clear
+        @unlisted_changes = false
+        @eviction_pending = false
+        nil
+      end
+
       # Applies events delivered from outside — a stream the worker is holding.
       # Idempotent by the same upsert + last-write-wins path a poll uses, so a
       # replayed or overlapping batch is harmless. Returns the number applied.

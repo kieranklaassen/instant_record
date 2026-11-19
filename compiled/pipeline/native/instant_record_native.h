@@ -13,19 +13,28 @@
 typedef const char *(*ir_exchange_fn)(const char *request, void *context);
 void ir_set_exchange(ir_exchange_fn exchange, void *context);
 
-/* Open the SQLite file at `database_path`, creating it and its tables when
-   it is new. Call before anything else. Returns 0 when the app is up. A
-   database syncs with one address, so an app that changes account calls this
-   again with that account's file. The file opened before is not closed. */
+/* Start the app on the SQLite file at `database_path`, creating it and its
+   tables when it is new. Call once, before anything else. Returns 0 when the
+   app is up. A second call is refused, and so is every other call until this
+   one has succeeded (ir_error says which). */
 int ir_boot(const char *database_path);
+
+/* Close the database and work in the file at `database_path` from here on,
+   creating it and its tables when it is new. A database syncs with one
+   address, so an app that changes account opens that account's file. Writes
+   still queued in the file that is closed stay in it and go out when it is
+   opened again and synced. Returns 0 when the file is open. */
+int ir_open(const char *database_path);
 
 /* Run one entry point with `input` and return what it wrote, or NULL when
    Ruby raised (ir_error says what).
 
-     "render"     input "screen\narg"                  the screen as JSON
-     "action"     input "screen\narg\naction\narg"     a tap; render again after
+     "render"     input {"screen":"mailbox","params":{...}}   the screen as JSON
+     "action"     input the same, with "action", "args" and "values"
+                  (each an object of strings); render again after
      "sync"       input the sync endpoint's address    one pass: push, then pull
      "stream"     input a text/event-stream chunk      changes the host fetched
+     "open"       input a database path                 what ir_open calls
      "sync_plan", "cursor", "history", "request"       as the browser host uses them */
 const char *ir_call(const char *entry, const char *input);
 

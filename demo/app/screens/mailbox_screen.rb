@@ -1,12 +1,12 @@
 # The Inbox on a phone: one member's open mail in one inbox, newest first.
-# Opened with "member/inbox", such as "maya/support", or with
-# "member/inbox/unread" to list only what the member has not read.
+# Opened with `member` and `inbox`, and with `filter: "unread"` to list only
+# what the member has not read.
 class MailboxScreen < InstantRecord::Native::Screen
   extend InstantRecord::RuntimeScoped
 
-  def member = arg.split("/")[0].to_s
-  def inbox = arg.split("/")[1].to_s
-  def unread_only? = arg.split("/")[2].to_s == "unread"
+  def member = param("member")
+  def inbox = param("inbox")
+  def unread_only? = param("filter") == "unread"
 
   def body
     navigation title: inbox.capitalize do
@@ -16,13 +16,13 @@ class MailboxScreen < InstantRecord::Native::Screen
         # One view among the rows that the app wrote in SwiftUI.
         swift "InboxSummary" do
           prop "inbox", inbox.capitalize
-          prop "unread", unread.size.to_s
-          prop "showing", shown.size.to_s
+          number "unread", unread.size
+          number "showing", shown.size
           prop "filter", unread_only? ? "unread" : "all"
         end
         shown.each do |entry|
-          thread = "#{member}/#{inbox}/#{entry.id}"
-          row id: entry.id, link: "thread", arg: thread, action: "read" do
+          message = { "id" => entry.id.to_s }
+          row id: entry.id, link: "thread", params: place.merge("thread" => entry.id.to_s), action: "read", args: message do
             stack "horizontal" do
               image "circle.fill", tone: "accent" if unread.key?(entry.id)
               text entry.author, style: "headline"
@@ -30,33 +30,31 @@ class MailboxScreen < InstantRecord::Native::Screen
             end
             text entry.subject.to_s
             text entry.body.to_s, style: "subheadline", tone: "secondary"
-            swipe "Archive", action: "archive", arg: thread, role: "destructive", image: "archivebox"
+            swipe "Archive", action: "archive", args: message, role: "destructive", image: "archivebox"
           end
         end
       end
       toolbar do
         button "Inboxes", image: "person.crop.circle", position: "leading" do
           MailDirectory.inboxes(member).each do |name|
-            item name.capitalize, link: "mailbox", arg: "#{member}/#{name}", image: "tray", selected: name == inbox
+            item name.capitalize, link: "mailbox", params: { "member" => member, "inbox" => name }, image: "tray", selected: name == inbox
           end
         end
         button "View", image: "slider.horizontal.3", position: "trailing" do
-          item "All", link: "mailbox", arg: "#{member}/#{inbox}", selected: !unread_only?
-          item "Unread", link: "mailbox", arg: "#{member}/#{inbox}/unread", selected: unread_only?
-          item "Mark all read", action: "read_all", arg: "#{member}/#{inbox}", image: "envelope.open"
+          item "All", link: "mailbox", params: place, selected: !unread_only?
+          item "Unread", link: "mailbox", params: place.merge("filter" => "unread"), selected: unread_only?
+          item "Mark all read", action: "read_all", image: "envelope.open"
         end
       end
     end
   end
 
-  # "read" and "archive" name a message as "member/inbox/id". "read_all"
-  # names the inbox and marks the listed mail read.
-  def perform(action, arg)
-    parts = arg.split("/")
-    return unless allowed? && parts[0] == member && parts[1] == inbox
+  # "read" and "archive" name a message of this inbox by its `id`.
+  # "read_all" marks the listed mail read.
+  def perform(action, args, values)
+    return unless allowed?
     return read_all if action == "read_all"
-    return unless parts.size == 3
-    message = MailEntry.find_by(id: parts[2], mailbox_id: inbox, kind: "message")
+    message = MailEntry.find_by(id: args.fetch("id", ""), mailbox_id: inbox, kind: "message")
     return unless message
 
     case action
@@ -66,6 +64,9 @@ class MailboxScreen < InstantRecord::Native::Screen
   end
 
   private
+
+  # Where this screen is: what a link to the same inbox starts from.
+  def place = { "member" => member, "inbox" => inbox }
 
   def allowed? = MailDirectory.inboxes(member).include?(inbox)
 

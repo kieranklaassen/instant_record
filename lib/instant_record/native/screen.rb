@@ -7,26 +7,26 @@ module InstantRecord
     #       navigation title: "Support" do
     #         list do
     #           MailEntry.open_messages.each do |entry|
-    #             row id: entry.id, link: "thread", arg: entry.id do
+    #             row id: entry.id, link: "thread", params: { "id" => entry.id } do
     #               text entry.author, style: "headline"
     #               text entry.subject
-    #               swipe "Archive", action: "archive", arg: entry.id, role: "destructive"
+    #               swipe "Archive", action: "archive", args: { "id" => entry.id }, role: "destructive"
     #             end
     #           end
     #         end
     #       end
     #     end
     #
-    #     def perform(action, arg)
+    #     def perform(action, args, values)
     #       case action
-    #       when "archive" then archive(arg)
+    #       when "archive" then archive(args["id"])
     #       end
     #     end
     #   end
     #
     # `body` describes the screen with the words iOS draws. The app's renderer
     # turns the description into native views and knows nothing else about the
-    # app. A tap comes back as `perform` with the action and argument the
+    # app. A tap comes back as `perform` with the action and `args` the
     # element named, and the screen is rendered again afterwards.
     #
     # A screen, or one part of it, can instead be a view the app wrote in
@@ -49,7 +49,8 @@ module InstantRecord
     #   end
     #
     # The app registers the view under that name and reads `props["subject"]`
-    # and `props.list("messages")`. What the view does comes back through
+    # and `props.list("messages")`. `flag`, `number` and `time` hand it a
+    # boolean, a whole number and a moment. What the view does comes back through
     # `perform`, like any tap. Used inside a list or a stack, `swift` puts one
     # hand-written view among the stock ones, as a partial would.
     #
@@ -57,17 +58,33 @@ module InstantRecord
     # file through an ahead-of-time compiler with no `method_missing`, no
     # `instance_eval` and no `send` to a computed name.
     class Screen
-      attr_reader :arg
+      attr_reader :params
 
-      def initialize(arg = "")
-        @arg = arg
+      # `params` are what the screen was opened with, strings by name.
+      def initialize(params = {})
+        @params = Screen.strings(params)
         @open = []
+      end
+
+      # What a host sent as a JSON object, as strings by name. Anything that
+      # is not an object gives an empty hash.
+      def self.strings(parsed)
+        out = {}
+        parsed.each { |name, value| out[name.to_s] = value.to_s } if parsed.is_a?(Hash)
+        out
+      end
+
+      # One of the params, or "" when the screen was opened without it.
+      def param(name)
+        @params.fetch(name, "").to_s
       end
 
       def body
       end
 
-      def perform(action, arg)
+      # A tap. `args` are what the tapped element was given, and `values` are
+      # what a form's fields held, both strings by name.
+      def perform(action, args, values)
       end
 
       def render
@@ -104,13 +121,14 @@ module InstantRecord
 
       # One line of a list. `id` is the record it shows, which is how the list
       # keeps its place when it is drawn again. `link` names the screen a tap
-      # opens and `arg` is handed to that screen. A row with an `action` has it
-      # performed with the same `arg` before the screen opens.
-      def row(id: "", link: "", arg: "", action: "")
+      # opens and `params` are handed to that screen. A row with an `action`
+      # has it performed with `args` before the screen opens.
+      def row(id: "", link: "", params: {}, action: "", args: {})
         node = add("row")
         node.id = id
         node.action = action
-        node.arg = arg
+        node.args = Screen.strings(args)
+        node.params = Screen.strings(params)
         node.set("link", link)
         inside(node) { yield }
       end
@@ -152,9 +170,9 @@ module InstantRecord
 
       # In a toolbar, `position` is "leading" or "trailing". A button given a
       # block is a menu, and the block holds its items.
-      def button(label, action: "", arg: "", role: "", image: "", position: "")
+      def button(label, action: "", args: {}, role: "", image: "", position: "")
         node = add("button")
-        act(node, label, action, arg, role)
+        act(node, label, action, args, role)
         node.set("image", image)
         node.set("position", position)
         inside(node) { yield } if block_given?
@@ -162,11 +180,12 @@ module InstantRecord
       end
 
       # One line of a menu. With an `action` it is performed like a button's.
-      # With a `link` it opens that screen with `arg` in place of the first
+      # With a `link` it opens that screen with `params` in place of the first
       # screen, as choosing another account does. `selected` gives it a tick.
-      def item(title, action: "", arg: "", link: "", image: "", role: "", selected: false)
+      def item(title, action: "", args: {}, link: "", params: {}, image: "", role: "", selected: false)
         node = add("item")
-        act(node, title, action, arg, role)
+        act(node, title, action, args, role)
+        node.params = Screen.strings(params)
         node.set("link", link)
         node.set("image", image)
         node.set("selected", "true") if selected
@@ -174,9 +193,9 @@ module InstantRecord
       end
 
       # A swipe on the row that holds it. `edge` is "trailing" or "leading".
-      def swipe(label, action:, arg: "", role: "", edge: "", image: "")
+      def swipe(label, action:, args: {}, role: "", edge: "", image: "")
         node = add("swipe")
-        act(node, label, action, arg, role)
+        act(node, label, action, args, role)
         node.set("edge", edge)
         node.set("image", image)
         node
@@ -191,19 +210,30 @@ module InstantRecord
         node
       end
 
-      # One string for the Swift view, by name. Props are strings: write a
-      # number with `to_s` and a flag as "true" or "".
+      # A string for the Swift view, by name: `props["subject"]` in Swift.
       def prop(name, value)
-        node = add("prop")
-        node.id = name
-        node.text = value
-        node
+        typed(name, "string", value)
+      end
+
+      # A yes or no for the Swift view: `props.bool("archived")`.
+      def flag(name, value)
+        typed(name, "bool", value ? "true" : "false")
+      end
+
+      # A whole number for the Swift view: `props.int("unread")`.
+      def number(name, value)
+        typed(name, "int", value.to_s)
+      end
+
+      # A moment for the Swift view, as ISO 8601: `props.date("sent")`.
+      def time(name, iso8601)
+        typed(name, "date", iso8601)
       end
 
       # A list for the Swift view, by name. The block holds its records.
       def props(name)
         node = add("props")
-        node.id = name
+        node.set("name", name)
         inside(node) { yield }
       end
 
@@ -232,11 +262,19 @@ module InstantRecord
         node
       end
 
-      def act(node, label, action, arg, role)
+      def act(node, label, action, args, role)
         node.text = label
         node.action = action
-        node.arg = arg
+        node.args = Screen.strings(args)
         node.set("role", role)
+      end
+
+      def typed(name, type, value)
+        node = add("prop")
+        node.set("name", name)
+        node.set("type", type)
+        node.text = value
+        node
       end
     end
   end
