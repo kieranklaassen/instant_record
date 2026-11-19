@@ -24,6 +24,8 @@ COPY = [
     "lib/instant_record/client.rb",
     "lib/instant_record/client/transport.rb",
     "lib/instant_record/client/notifier.rb",
+    "lib/instant_record/native/node.rb",
+    "lib/instant_record/native/screen.rb",
 ]
 shutil.rmtree(os.path.join(lib, "instant_record"), ignore_errors=True)
 for rel in COPY:
@@ -58,6 +60,12 @@ def cut(rel, start, end, replacement):
 # The staged source runs exclusively in the browser.
 edit("lib/instant_record.rb", "def browser? = false", "def browser? = true")
 edit("lib/instant_record.rb", 'require "instant_record/engine" if defined?(Rails::Engine)\n', "")
+
+# Screens are found by name through constant lookup, which has no ahead-of-time counterpart.
+# The native entry spells the lookup out as a `case` (make_native_entry.py).
+os.makedirs(os.path.join(app, "lib/instant_record/native"), exist_ok=True)
+open(os.path.join(app, "lib/instant_record/native.rb"), "w").write(
+    'require "instant_record/native/node"\nrequire "instant_record/native/screen"\n')
 
 # 2. Model discovery. ActiveRecord::Base.descendants has no ahead-of-time counterpart; the gem's own
 #    explicit allowlist (InstantRecord.sync) takes its place, set in wasm_main.rb.
@@ -116,9 +124,10 @@ production:
   <<: *default
 ''')
 
-# 12. Controllers: this is the browser build, so `browser_only do ... end` is unwrapped to its body
+# 12. Controllers and screens: this is the browser build, so `browser_only do ... end` is unwrapped to its body
 #     (skip_forgery_protection) and `server_only do ... end` is removed, as in the models.
-for folder, _dirs, names in os.walk(os.path.join(app, "app/controllers")):
+scoped = list(os.walk(os.path.join(app, "app/controllers"))) + list(os.walk(os.path.join(app, "app/screens")))
+for folder, _dirs, names in scoped:
     for name in names:
         if not name.endswith(".rb"):
             continue

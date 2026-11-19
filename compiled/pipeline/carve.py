@@ -36,6 +36,9 @@ REMOVE = [
     "app/helpers/source_helper.rb",
     "test", "db/v2_migrate", "db/seeds.rb", "config/routes", "script", "lib/tasks",
 ]
+# Screens are the phone's (build_native.py). The browser draws with React.
+if not os.environ.get("INSTANT_RECORD_NATIVE"):
+    REMOVE.append("app/screens")
 for rel in REMOVE:
     path = os.path.join(app, rel)
     if os.path.isdir(path):

@@ -223,19 +223,9 @@ def inject_preloads(dist):
     open(index_path, "w").write(html.replace("  </head>", "\n".join(links) + "\n  </head>", 1))
 
 
-def main():
-    os.makedirs(B, exist_ok=True)
-    os.makedirs(T["CACHE"], exist_ok=True)
-    stamp = os.path.join(B, "stamp")
-    wanted = input_digest()
-    if os.path.exists(stamp) and open(stamp).read() == wanted and os.path.exists(os.path.join(ROOT, "web/dist/index.html")):
-        print("build is current")
-        return
-    if os.path.exists(stamp):
-        os.unlink(stamp)
-    python = sys.executable
-    path_env = {"PATH": os.path.join(T["SPINEL_HOME"], "bin") + os.pathsep + os.environ["PATH"], "WASI_SDK": T["WASI_SDK"]}
-
+def emit_tree(python):
+    """Steps 1 to 3, which the native build (build_native.py) shares: the staged app, the Spinel
+    project Roundhouse emits from it, and the single-threaded copy with its reactor entry."""
     # 1. Stage the Rails app and adapt the gem's sync client to the browser host.
     app = os.path.join(B, "app-src")
     if APP_SOURCE:
@@ -281,6 +271,23 @@ def main():
     run([python, os.path.join(ROOT, "pipeline/make_wasm_entry.py"), emit], env={
         "INSTANT_RECORD_MIGRATION_PLAN": os.path.join(B, "browser-migrations.json") if APP_SOURCE else ""})
     run([python, os.path.join(ROOT, "pipeline/make_wasm_tree.py"), emit, tree])
+    return app, emit, tree, plan
+
+
+def main():
+    os.makedirs(B, exist_ok=True)
+    os.makedirs(T["CACHE"], exist_ok=True)
+    stamp = os.path.join(B, "stamp")
+    wanted = input_digest()
+    if os.path.exists(stamp) and open(stamp).read() == wanted and os.path.exists(os.path.join(ROOT, "web/dist/index.html")):
+        print("build is current")
+        return
+    if os.path.exists(stamp):
+        os.unlink(stamp)
+    python = sys.executable
+    path_env = {"PATH": os.path.join(T["SPINEL_HOME"], "bin") + os.pathsep + os.environ["PATH"], "WASI_SDK": T["WASI_SDK"]}
+
+    app, emit, tree, plan = emit_tree(python)
 
     # 4. Spinel: Ruby -> C -> WASI reactor wasm, with SQLite linked in.
     sqlite = sqlite_library()

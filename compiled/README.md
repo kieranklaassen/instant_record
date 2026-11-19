@@ -128,6 +128,34 @@ Pending changes survive closing every tab and sync when the app reopens online.
 The demo's Ship v2 page runs its teaching migration on demand. Consumer apps
 apply their release migrations at boot. The sync server remains authoritative across clients.
 
+## A native library (experimental)
+
+The same models can run outside a browser. `build_native.py` compiles the demo,
+with the screens in `demo/app/screens`, to a C library and a small host program:
+
+```sh
+python3 compiled/pipeline/build_native.py
+cd demo && INSTANT_RECORD_NATIVE_HOST=../compiled/.build-native/host bin/rails test test/integration/native_inbox_test.rb
+```
+
+A screen is a Ruby class (`InstantRecord::Native::Screen`) whose `body` describes
+what to draw and whose `perform` answers a tap. The library has five functions,
+declared in `pipeline/native/instant_record_native.h`: `ir_boot` opens the
+SQLite file, and `ir_call` runs `render`, `action`, `sync`, `stream` and the rest the header
+lists, each taking and returning a string. A render
+returns the screen as JSON. The library never opens a connection: when it needs
+the server it calls the host back with one request and the host answers.
+
+`pipeline/native/host.c` is that host with no screen, driven over standard
+input. The test starts it, answers its requests from the Rails app, and checks
+that the mailbox renders the same bytes as under CRuby, that an archive made
+with no connection waits in the outbox and reaches the server later, that the
+database survives a restart, and that a rejected write is undone.
+
+This has run on Linux x86_64 only. It has not been linked for iOS, and there is
+no renderer yet: drawing the JSON with SwiftUI is the next piece of work. It
+builds this repository's demo and has no rake task for another app.
+
 ## Deploying it
 
 `deploy/` serves the built folder as a static site: nginx in a container, deployed with Kamal.
