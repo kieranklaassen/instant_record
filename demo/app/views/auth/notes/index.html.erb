@@ -63,7 +63,10 @@
   <%# Every form in here, the Delete buttons and the one that writes a note,
       is sent by the page's script and answered with this page again, which is
       folded into the list by note id. Nothing is reloaded. %>
-  <section class="auth-notes" aria-labelledby="auth-notes-title" data-action="submit->auth#write">
+  <%# data-turbo is said once, here: on a button_to it would be a `form:`
+      option, which the compiler writes onto the button, where it cuts the
+      button off from its form. %>
+  <section class="auth-notes" aria-labelledby="auth-notes-title" data-turbo="false" data-action="submit->auth#write">
     <h2 class="micro-label" id="auth-notes-title">
       Notes in this <%= InstantRecord.browser? ? "browser’s database" : "response" %>
       <span class="auth-count" data-auth-target="held" data-count="<%= @auth_notes.size %>"><%= @auth_notes.size %></span>
@@ -83,7 +86,7 @@
           <p class="auth-note-body"><%= note.body %></p>
           <div class="auth-note-foot">
             <span class="auth-owner">Written by <%= AuthPerson.name_for(note.owner_id) %></span>
-            <%= button_to "Delete", note_href, method: :delete, class: "auth-delete", form: { data: { turbo: false } } %>
+            <%= button_to "Delete", note_href, method: :delete, class: "auth-delete" %>
           </div>
         </li>
       <% end %>

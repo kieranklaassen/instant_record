@@ -39,17 +39,18 @@ try {
     ? page.evaluate(async () => (await (await fetch("/auth")).text()).match(/class="card auth-note/g)?.length || 0)
     : page.locator(".auth-note").count();
 
-  // The page folds every change in: it is loaded once and never again.
-  await page.evaluate(() => { window.__loadedOnce = true; });
-  const loads = [];
-  page.on("framenavigated", frame => { if (frame === page.mainFrame()) loads.push(frame.url()); });
-
   const everyone = ["Welcome"];
   const ben = ["Ben's gift list", "Team lunch is Thursday", "Welcome"];
   const ada = ["Ada's draft", "Payroll runs on the 28th", "Team lunch is Thursday", "Welcome"];
 
   // Signed out: one public note, and the sync server sends nothing else when asked.
   await settle("Signed out.", everyone);
+
+  // From here the page folds every change in: it is never loaded again. (A
+  // compiled page is written into the document once more as it boots.)
+  await page.evaluate(() => { window.__loadedOnce = true; });
+  const loads = [];
+  page.on("framenavigated", frame => { if (frame === page.mainFrame()) loads.push(frame.url()); });
   assert.ok(await page.locator("[data-auth-target=submit]").isDisabled());
   assert.match(await proof("Ask the sync server for everything", "sent this browser"), /sent this browser 1:/);
   assert.match(await proof("Write a note as someone else", "answered"), /rejected, not permitted/);
