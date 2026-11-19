@@ -15,7 +15,9 @@ namespace :instant_record do
 
   desc "Compile this Rails app to a static browser site using Roundhouse, Spinel and SQLite"
   task compile: :environment do
-    output = InstantRecord::Compiler.build(**compiler_options.call)
+    # The options first: asking for them is what loads the compiler.
+    options = compiler_options.call
+    output = InstantRecord::Compiler.build(**options)
     puts "Compiled browser site: #{output}"
   end
 
