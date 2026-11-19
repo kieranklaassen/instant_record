@@ -45,6 +45,24 @@ class SyncIdentityTest < Minitest::Test
     refute Scope.stale?(Scope.key("a-visitor-token"), "a-visitor-token")
   end
 
+  # A phone has no session cookie. Its app sends a token, and the server's own
+  # `scope_from` is what turns the token into a person, or into nobody.
+  def test_a_scope_from_that_reads_a_token_decides_what_a_phone_is_sent
+    create("p", "public")
+    create("a", "ada")
+    request = Struct.new(:authorization)
+    known = { "Bearer ada-token" => @ada }
+    before = InstantRecord.config.scope_from
+    InstantRecord.config.scope_from = ->(asked) { known[asked.authorization] }
+
+    assert_equal %w[a p], Scope.visible(@model, Scope.identity(request.new("Bearer ada-token"))).pluck(:id).sort
+    assert_equal %w[p], Scope.visible(@model, Scope.identity(request.new("Bearer stolen"))).pluck(:id)
+    assert_equal %w[p], Scope.visible(@model, Scope.identity(request.new(nil))).pluck(:id)
+    assert_empty Scope.writable(@model, Scope.identity(request.new("Bearer stolen"))).pluck(:id)
+  ensure
+    InstantRecord.config.scope_from = before
+  end
+
   def test_an_identity_may_name_the_models_its_key_decides
     partial = Struct.new(:id) { def sync_reset_types = ["Other"] }
 

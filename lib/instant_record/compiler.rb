@@ -8,6 +8,28 @@ module InstantRecord
   # writes into an installed gem or replaces the host's public assets.
   class Compiler
     def self.build(root:, models:, toolchain:, endpoint:, baseline: nil, migration_paths: nil)
+      stage(root: root, models: models, toolchain: toolchain, endpoint: endpoint, baseline: baseline, migration_paths: migration_paths) do |workspace, env|
+        ok = system(env, "python3", workspace.join("pipeline/build.py").to_s)
+        raise "InstantRecord compilation failed. Build logs are in #{workspace.join('.build')}." unless ok
+        workspace.join("web/dist")
+      end
+    end
+
+    # The same app as libraries a native host links: for this machine, or
+    # with target "iphonesimulator" or "iphoneos" for the iOS simulator or
+    # an iPhone. Returns the folder
+    # that holds them.
+    def self.build_native(root:, models:, toolchain:, endpoint:, target: nil, baseline: nil, migration_paths: nil)
+      stage(root: root, models: models, toolchain: toolchain, endpoint: endpoint, baseline: baseline, migration_paths: migration_paths) do |workspace, env|
+        ok = system(env, "python3", workspace.join("pipeline/build_native.py").to_s, *[target].compact)
+        raise "InstantRecord native build failed. Build logs are in #{workspace.join('.build-native')}." unless ok
+        workspace.join(*[".build-native", target].compact)
+      end
+    end
+
+    # Copies the compiler under the app's tmp folder and yields it with the
+    # environment a build runs in, holding the workspace's lock.
+    def self.stage(root:, models:, toolchain:, endpoint:, baseline:, migration_paths:)
       root = Pathname(root).realpath
       gem_root = Pathname(__dir__).join("../..").realpath
       toolchain = Pathname(toolchain).expand_path
@@ -27,7 +49,7 @@ module InstantRecord
           FileUtils.cp_r(package.join("web", part), web)
         end
         demo = root == gem_root.join("demo")
-        env = {
+        yield workspace, {
           "GEM_SRC" => gem_root.to_s,
           "INSTANT_RECORD_APP" => demo ? nil : root.to_s,
           "INSTANT_RECORD_MODELS" => JSON.generate(models),
@@ -37,11 +59,9 @@ module InstantRecord
           "SYNC_ENDPOINT" => endpoint,
           "PYTHONDONTWRITEBYTECODE" => "1"
         }
-        ok = system(env, "python3", workspace.join("pipeline/build.py").to_s)
-        raise "InstantRecord compilation failed. Build logs are in #{workspace.join('.build')}." unless ok
       end
-      workspace.join("web/dist")
     end
+    private_class_method :stage
 
     def self.publish(root)
       workspace = Pathname(root).join("tmp/instant_record/compiled")

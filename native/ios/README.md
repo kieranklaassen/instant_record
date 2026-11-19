@@ -1,14 +1,28 @@
-# The Inbox on iPhone
+# Ruby screens on iPhone
 
-The demo's Inbox as an iPhone app whose screens are Ruby. `InstantRecordNative`
-is a Swift package with no dependencies: it runs the compiled app
-(`compiled/pipeline/build_native.py`), decodes each screen's JSON and draws it
-with stock SwiftUI controls. `Inbox` is the app: it names the first screen,
-says where a mailbox keeps its data, and holds two views written by hand.
+A Rails app's screens, written in Ruby, drawn with stock iOS controls. The
+app's models, its sync client and its screens are compiled to a C library
+that runs inside the app. `InstantRecordNative` is a Swift package with no
+dependencies: it runs that library, decodes each screen's JSON and draws it.
+`Inbox` is the demo's app.
 
-## Build and run
+## Your own app
 
-On a Mac with Xcode, and the toolchain `compiled/README.md` describes:
+In a Rails app that uses InstantRecord, with screens in `app/screens` and the
+toolchain file `compiled/README.md` describes:
+
+```sh
+bin/rails generate instant_record:ios Shop --screen catalog
+bin/rails "instant_record:native[iphonesimulator]"
+xcodebuild -project native/ios/Shop/Shop.xcodeproj -scheme Shop -destination 'platform=iOS Simulator,name=iPhone 17' build
+```
+
+The generator writes a thin app in `native/ios/Shop`: the first screen's
+name, the server's address, and the Xcode project. The project file is
+generated from the Swift files in the folder. After adding one, run the
+generator again with `--force`.
+
+## The Inbox demo
 
 ```sh
 python3 compiled/pipeline/build_native.py iphonesimulator
@@ -17,72 +31,106 @@ cd native/ios/Inbox
 xcodebuild -project Inbox.xcodeproj -scheme Inbox -destination 'platform=iOS Simulator,name=iPhone 17' -derivedDataPath build build
 xcrun simctl boot "iPhone 17"
 xcrun simctl install booted build/Build/Products/Debug-iphonesimulator/Inbox.app
-xcrun simctl launch booted dev.instantrecord.Inbox -server http://localhost:3000 -mailbox maya/support
+xcrun simctl launch booted dev.instantrecord.Inbox -server http://localhost:3000
 ```
 
-`swift test` in `InstantRecordNative` runs the package's tests on the Mac
-with no simulator. `xcodebuild test` with the same project and scheme taps
-through the app's flows in the simulator against the running server
-(`Inbox/InboxUITests`).
+`InboxApp.swift` lists the launch arguments: the member and inbox, a token,
+the dev mode, the sync timer and a reset. `ruby native/ios/Inbox/project.rb`
+writes `Inbox.xcodeproj` again.
 
-## Two ways to draw a screen
+## A screen
 
-### Ruby draws it
-
-A screen describes itself with the words iOS draws, and the renderer turns
-each into the stock control. No Swift is written for it.
+A screen is one Ruby class in `app/screens`. `mailbox_screen.rb` is the
+screen named `mailbox`. It is opened with named params, draws itself in
+`body`, and answers taps in `perform`.
 
 ```ruby
 class MailboxScreen < InstantRecord::Native::Screen
   def body
-    navigation title: inbox.capitalize do
+    navigation title: param("inbox").capitalize do
       list refreshable: true do
         messages.each do |entry|
-          row id: entry.id, link: "thread", arg: "#{member}/#{inbox}/#{entry.id}", action: "read" do
-            text entry.author, style: "headline"
-            text entry.subject.to_s
-            swipe "Archive", action: "archive", arg: "#{member}/#{inbox}/#{entry.id}", role: "destructive"
+          row id: entry.id, link: "thread", params: { "inbox" => param("inbox"), "thread" => entry.id.to_s } do
+            stack "horizontal" do
+              text entry.author, style: "headline", lines: 1
+              spacer
+              date entry.created_at.utc.iso8601(6), style: "caption", tone: "secondary"
+            end
+            text entry.subject.to_s, lines: 1
+            swipe "Archive", action: "archive", args: { "id" => entry.id.to_s }, role: "destructive", image: "archive"
           end
         end
+        more "older:#{param("inbox")}", query: below(messages.last) if older?
       end
       toolbar do
-        button "Inboxes", image: "person.crop.circle", position: "leading" do
-          item "Support", link: "mailbox", arg: "maya/support", selected: true
-          item "Billing", link: "mailbox", arg: "maya/billing"
-        end
-        button "View", image: "slider.horizontal.3", position: "trailing" do
-          item "Mark all read", action: "read_all", arg: "maya/support"
+        button "View", image: "filter", position: "trailing" do
+          item "Unread", replace: "mailbox", params: { "inbox" => param("inbox"), "filter" => "unread" }
+          item "Mark as read", action: "read_all"
         end
       end
+    end
+  end
+
+  def perform(action, args, values)
+    case action
+    when "archive" then archive(args.fetch("id", ""))
+    when "read_all" then read_all
     end
   end
 end
 ```
 
-A toolbar button with a block is a menu. An item with an `action` is
-performed by the screen. An item with a `link` puts that screen in the first
-screen's place, as choosing another account does. The app says which
-database and sync address that screen uses (`AppHost.Store` in
-`InboxApp.swift`), because one database syncs with one address.
+- **Values travel by name.** `params:` is what a row or item opens another
+  screen with, and `args:` is what a button or swipe hands `perform`. Names
+  and values are strings, so write `entry.id.to_s`. Nothing is packed into
+  one string and split again.
+- **A pushed screen is told it opened**: `perform("open", {}, {})`. The
+  conversation marks its message read there.
+- **A menu item with `replace:`** puts that screen in the first screen's
+  place, as choosing another account does. With `link:` it opens the screen
+  over this one, as a row does.
+- **Layout is in the Ruby.** `spacer` pushes what follows to the far edge,
+  and `lines:` caps a text. The renderer adds no rules of its own.
+- **Icons are named by meaning** (`archive`, `filter`, `person`, `inbox`,
+  `unread`, `read`, `send`, `compose`), and `Icons.swift` picks the SF
+  Symbol and what it is called aloud. A name it does not know is used as an
+  SF Symbol name.
+- **`more`** stands for the rest of a list that is still on the server. When
+  it scrolls into view the app fetches `records?<query>` from the sync
+  address and hands the page to the library, and the screen leaves it out
+  once nothing more is there.
 
-### Swift draws it, Ruby hands it props
-
-A screen can hand its data to a view written in SwiftUI, by name, the way a
-Rails action hands a React page its props with `render inertia:`.
+### Forms
 
 ```ruby
-class ThreadScreen < MailboxScreen
-  def body
-    swift "ConversationView" do
-      prop "thread", arg
-      prop "subject", message.subject.to_s
-      props "messages" do
-        replies.each do |reply|
-          record do
-            prop "author", reply.author
-            prop "body", reply.body.to_s
-          end
-        end
+bottom do
+  field "body", label: "Reply", multiline: true
+  button "Send", action: "reply", image: "send"
+end
+```
+
+What is typed stays on the phone, by screen, through redraws and a trip back
+and forth. It reaches `perform` as `values["body"]` with the next action from
+that screen and is forgotten once that action has been performed. A button
+beside fields cannot be pressed while they are all blank. `bottom` pins its
+contents under the screen, above the keyboard.
+
+### A view written in SwiftUI
+
+A screen can hand its data to a view the app wrote by hand, the way a Rails
+action hands a React page its props with `render inertia:`.
+
+```ruby
+swift "ConversationView" do
+  prop "subject", entry.subject.to_s
+  flag "archived", archived?(entry)
+  number "replies", replies.size
+  time "sent", entry.created_at.utc.iso8601(6)
+  props "messages" do
+    replies.each do |reply|
+      record do
+        prop "author", reply.author
+        prop "body", reply.body
       end
     end
   end
@@ -90,66 +138,123 @@ end
 ```
 
 ```swift
-// InboxApp.swift, once at launch
-Screens.register("ConversationView") { props, actions in
+// Once at launch, handed to the AppHost
+var views = Screens()
+views.register("ConversationView") { props, actions in
     ConversationView(props: props, actions: actions)
 }
 
-struct ConversationView: View {
-    let props: Props
-    let actions: Actions
-
-    var body: some View {
-        VStack {
-            Text(props["subject"])
-            ForEach(Array(props.list("messages").enumerated()), id: \.offset) { Text($0.element["body"]) }
-            Button("Archive") { actions.perform("archive", props["thread"]) }
-        }
-    }
-}
+// In the view
+props["subject"]                 // String
+props.bool("archived")           // Bool
+props.int("replies")             // Int
+props.date("sent")               // Date?
+props.list("messages")           // [Props]
+actions.perform("archive")       // reaches the screen's perform, like any tap
 ```
 
-Props are strings, and lists of records whose props are strings. Write a
-number with `to_s` and a flag as `"true"` or `""`. `actions.perform` reaches
-the screen's `perform(action, arg)` by the same road as a tap on a Ruby-drawn
-button: the write is local, the screens are drawn again, and it syncs.
+A prop that was not sent, or is read as another kind than it was sent as,
+reads as empty, false, zero or nil. `actions.perform` can carry arguments:
+`actions.perform("archive", ["id": id])`.
 
-The same element puts one Swift view among stock ones, as a partial would:
+Used inside a list, `swift` puts one hand-written view among stock ones, as a
+partial would. A name nobody registered shows a warning in its place.
 
-```ruby
-list do
-  swift "InboxSummary" do
-    prop "inbox", inbox.capitalize
-    prop "unread", unread.size.to_s
-  end
-  messages.each { |entry| row(id: entry.id) { text entry.subject.to_s } }
-end
-```
-
-```swift
-Screens.register("InboxSummary") { props, _ in InboxSummary(props: props) }
-```
-
-A name nobody registered shows a warning on screen in its place.
-
-## What the renderer does with each element
+## What the renderer draws
 
 | Element | Drawn as |
 |---|---|
-| `navigation title:` | the navigation bar's title: large on the first screen, inline on pushed ones |
-| `list`, `section` | `List`, `Section`; `refreshable: true` adds pull to refresh, which syncs |
-| `row` | a list row, kept by its `id`; with `link:` a tap performs its `action` and pushes that screen |
-| `stack` | `VStack`, or `HStack` with the last element at the far edge |
-| `text`, `date`, `image` | `Text` in a system text style, a date in the phone's language, an SF Symbol |
-| `button`, `swipe` | `Button`, a swipe action; `role: "destructive"` is honoured |
-| `toolbar` | bar buttons, on the side `position:` names; a button holding `item`s is a `Menu` |
+| `navigation title:` | the bar's title: large on the first screen, inline on pushed ones |
+| `list`, `section` | `List`, `Section`; `refreshable: true` adds pull to refresh |
+| `row` | a list row kept by its `id` and read aloud as one thing; with `link:` a `NavigationLink` |
+| `stack`, `spacer` | `VStack` or `HStack`, `Spacer` |
+| `text`, `date`, `image` | `Text` in a system style, a date in the phone's language, an icon |
+| `button`, `swipe` | `Button`, a swipe action; a destructive swipe is tinted red |
+| `toolbar` | bar buttons on the side `position:` names; a button with `item`s is a `Menu` |
+| `field`, `bottom` | `TextField` (one that grows with `multiline:`), a bar pinned under the screen |
+| `more` | a spinner at the foot of the list while the next page loads, or a line to tap when it could not |
 | `swift` | the registered SwiftUI view |
 
-The app syncs on launch, when it comes to the front, after each tap and on a
-pull. There is no tab bar yet, and a change made elsewhere arrives on the
-next of those syncs: the app does not hold the event stream open.
+## Sync, and what the app tells you
 
-## What has run
+Every call into the library runs on one thread, and none of them waits for
+the network. A sync pass asks the library what it will want (`sync_plan`,
+`cursor`), fetches that on another queue, and then lets the library sync
+against those answers alone. A tap made meanwhile is performed and drawn
+first, and what it wrote goes out with a pass of its own.
 
-On macOS arm64 with Xcode 27.2, in the iPhone 17 simulator on iOS 26.5. It
-has not been built for a device, signed, or run on a phone.
+The app decides when to sync (`SyncSchedule.swift`). A tap asks for a pass,
+and taps close together share one. A pass that could not reach the server,
+was refused, or left writes waiting is tried again after 5 seconds, then 10,
+up to a minute. The network coming back runs one at once. While the app is
+in front it follows the server's events (`StreamClient.swift`): it asks
+`events?after=<cursor>`, hands what arrives to the library, and asks again a
+second after a clean end, so a change made elsewhere shows without a touch.
+
+One line over the screen says, in this order: what went wrong ("Could not
+sync: POST /mutations answered 401", or what Ruby raised), that the app is
+offline, or how many changes are waiting to send. An error stays until it is
+dismissed or a pass succeeds. A screen that cannot be drawn keeps the last
+one that could.
+
+Each account has its own SQLite file, because one file syncs with one
+address. The app says which (`AppHost.Store`). When the first screen
+changes, the host syncs the database being left once more, closes it and
+opens the other (`ir_open`). Writes that could not go out wait in that file
+until it is opened again.
+
+## Developing: no rebuild after an edit
+
+```sh
+xcrun simctl launch booted dev.instantrecord.Inbox -server http://localhost:3000 -dev YES
+```
+
+In this mode the phone asks Rails for each screen and sends it each tap, so
+an edit to a screen's Ruby shows after a pull. The same screen classes run
+on the server. There is no database on the phone and nothing works offline.
+
+Turn it on in the app's development environment:
+
+```ruby
+config.instant_record.native_dev = true
+```
+
+The endpoints run a screen's actions as whoever the params name. They answer
+404 unless that setting is on, the environment is local, and the request
+comes from this machine with a JSON content type, and they send no CORS
+headers, so a web page open in the developer's browser cannot reach them.
+
+## The token
+
+`Transport` takes a `prepare` closure that sees every request before it
+goes. The Inbox uses it to send `Authorization: Bearer <token>` when it is
+launched with `-token`. `bin/rails 'inbox:token[maya]'` prints one.
+
+In the demo this is not what keeps mail private. Its members are public
+personas, and a request with no token is served, so that the browser demo
+works as before. Started with `INBOX_REQUIRE_TOKEN=1` the demo refuses a
+request without a valid token. The gem's own sync endpoints do not check
+it. An app with private data must require the token and take the member
+from it, not from the address. There is no sign-in screen yet.
+
+## Tests
+
+- `swift test` in `InstantRecordNative` runs the package's tests on the Mac.
+- `native/ios/ui-test.sh` runs the Inbox's flows in the simulator. It
+  recreates a database of its own (`postgres:///instant_record_native_ui`),
+  seeds a fixed inbox, starts the demo with a token required, and stops it
+  afterwards, so it can be run again and again. It covers open and read,
+  reply, archive, switching inbox, unread only, older mail, a message
+  arriving with no touch, pull to refresh, an archive the server refuses,
+  an archive made offline that goes out when the server returns, and the
+  main controls in dark mode at the largest text size. The script refuses
+  to start when something already answers on its port.
+
+## What has run, and what has not
+
+On macOS arm64 with Xcode 27.2, in the iPhone 17 simulator on iOS 26.5:
+everything above, and a fresh `rails new` app with one synced model and one
+screen, generated, built and launched twice.
+
+Not signed or run on a phone. No Android renderer, no tab bar, no sign-in
+screen. In the development mode there is no paging and no event stream.

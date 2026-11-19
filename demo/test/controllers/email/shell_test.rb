@@ -170,7 +170,7 @@ class MailShellTest < ActionDispatch::IntegrationTest
   test "the browser build computes the fingerprint from the same format and model list" do
     pipeline = Rails.root.join("../compiled/pipeline")
     assert_equal MailShell::FORMAT, pipeline.join("build.py").read[/^SHELL_FORMAT = (\d+)$/, 1].to_i
-    compiled = pipeline.join("make_wasm_entry.py").read[/^models = \[(.*)\]$/, 1].scan(/\w+/)
+    compiled = pipeline.join("entry_template.py").read[/^DEMO_MODELS = \[(.*)\]$/, 1].scan(/\w+/)
     assert_equal MailShell::MODELS, compiled.sort
   end
 

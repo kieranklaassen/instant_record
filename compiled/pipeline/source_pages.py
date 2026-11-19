@@ -14,7 +14,7 @@ PAGES = {
     "console": ("console/sessions", "index", ("issue",)),
     "receipts": ("receipts", "index", ()),
 }
-MARKER = re.compile(r"InstantRecord[.:]|\b(?:server_only|browser_only|sync_window|sync_state|pending_count|on_discarded_change)\b")
+MARKER = re.compile(r"InstantRecord[.:]|\b(?:server_only|browser_only|client_only|sync_window|sync_state|pending_count|on_discarded_change)\b")
 
 def write_source_pages(app, dist, version, demo):
     root = Path(app)

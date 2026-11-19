@@ -7,6 +7,8 @@ module InstantRecord
     config.instant_record = ActiveSupport::OrderedOptions.new
     config.instant_record.mount_path = DEFAULT_MOUNT_PATH
     config.instant_record.build_on_precompile = false
+    # Serve a native app's screens over HTTP for development (NativeScreensController).
+    config.instant_record.native_dev = false
 
     # `render inertia: ..., live: { prop: Model }` where the app has inertia_rails.
     config.after_initialize do

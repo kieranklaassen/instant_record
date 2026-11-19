@@ -1,30 +1,52 @@
 # One conversation. This screen is not drawn from stock elements: it hands
 # its props to ConversationView, which the iPhone app wrote in SwiftUI
 # (native/ios/Inbox), the way Email::MailboxesController hands the React page
-# its props. Opened with "member/inbox/id". Archiving is the mailbox's action,
-# so the view sends "archive" with the `thread` prop back through `perform`.
-class ThreadScreen < MailboxScreen
-  def thread = arg.split("/")[2].to_s
+# its props. Under it sits a reply box drawn from Ruby. Opened with `member`,
+# `inbox` and `thread`. Opening it marks the message read.
+class ThreadScreen < InstantRecord::Native::Screen
+  def member = param("member")
+  def inbox = param("inbox")
+  def mail = MailAccess.new(member, inbox)
 
   def body
-    message = MailEntry.find_by(id: thread, mailbox_id: inbox, kind: "message") if allowed?
-    unless message
+    entry = mail.message(param("thread"))
+    if entry.nil?
       navigation(title: "") { text "This conversation is not in #{inbox.capitalize}.", tone: "secondary" }
       return
     end
 
-    replies = MailEntry.where(mailbox_id: inbox, kind: "reply", parent_id: message.id).order(:created_at).to_a
+    replies = MailEntry.where(mailbox_id: inbox, kind: "reply", parent_id: entry.id).order(:created_at).to_a
     swift "ConversationView" do
-      prop "thread", arg
-      prop "subject", message.subject.to_s
-      prop "participants", participants(message, replies)
-      prop "archived", archived?(message) ? "true" : ""
+      prop "subject", entry.subject.to_s
+      prop "participants", participants(entry, replies)
+      flag "archived", archived?(entry)
       props "messages" do
-        letter message.author, message.address.to_s, message.created_at.utc.iso8601(6), message.body.to_s
+        letter entry.author, entry.address.to_s, entry.created_at.utc.iso8601(6), entry.body.to_s
         replies.each do |reply|
           letter reply.author, "", reply.created_at.utc.iso8601(6), reply.body.to_s
         end
       end
+    end
+    bottom do
+      field "body", label: "Reply", multiline: true
+      button "Send", action: "reply", image: "send"
+    end
+  end
+
+  # "open" arrives when the screen is opened over the mailbox. "reply"
+  # carries what was typed as `body`. "archive" comes from the Swift view's
+  # own button.
+  def perform(action, args, values)
+    mail = self.mail
+    entry = mail.message(param("thread"))
+    return if entry.nil?
+
+    case action
+    when "open" then mail.append("read", entry.id) if mail.unread_ids.key?(entry.id)
+    when "archive" then mail.append("archive", entry.id)
+    when "reply"
+      words = values.fetch("body", "").strip
+      mail.reply(entry.id, words) unless words.empty?
     end
   end
 
@@ -34,19 +56,19 @@ class ThreadScreen < MailboxScreen
     record do
       prop "author", author
       prop "address", address
-      prop "date", written
+      time "date", written
       prop "body", words
-      prop "mine", author == member ? "true" : ""
+      flag "mine", author == member
     end
   end
 
-  def participants(message, replies)
-    names = [message.author]
+  def participants(entry, replies)
+    names = [entry.author]
     replies.each { |reply| names << reply.author unless names.include?(reply.author) }
     names.join(", ")
   end
 
-  def archived?(message)
-    MailEntry.exists?(mailbox_id: inbox, kind: "archive", parent_id: message.id)
+  def archived?(entry)
+    MailEntry.exists?(mailbox_id: inbox, kind: "archive", parent_id: entry.id)
   end
 end

@@ -21,11 +21,13 @@ Gem::Specification.new do |spec|
   # migration paths, and those migrations create the tables the sync protocol
   # runs on (changes, outbox, sync_metadata, applied_mutations). Omit them and
   # the gem installs into an app that can never build its own schema.
-  spec.files = Dir["{app,config,db,lib,frontend}/**/*", "CHANGELOG.md", "LICENSE.txt", "README.md"]
+  spec.files = Dir["{app,config,db,lib,frontend,sig}/**/*", "CHANGELOG.md", "LICENSE.txt", "README.md"]
 
   spec.files.concat Dir["compiled/pipeline/**/*.{py,rb,erb,c,h}", "compiled/web/src/**/*.js",
                         "compiled/web/{index.html,vite.config.js,package.json,package-lock.json}",
-                        "compiled/README.md", "compiled/toolchain.env.example"]
+                        "compiled/README.md", "compiled/toolchain.env.example",
+                        "native/ios/README.md", "native/ios/InstantRecordNative/Package.swift",
+                        "native/ios/InstantRecordNative/Sources/**/*.swift"]
 
   spec.add_dependency "rails", ">= 8.0"
   spec.add_dependency "sqlite3", ">= 2.1"

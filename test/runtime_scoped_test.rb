@@ -12,6 +12,10 @@ class RuntimeScopedTest < Minitest::Test
       browser_only do
         def self.browser_rule = "browser"
       end
+
+      client_only do
+        def self.client_rule = "client"
+      end
     end
   end
 
@@ -20,12 +24,13 @@ class RuntimeScopedTest < Minitest::Test
 
     assert_equal "server", klass.server_rule
     refute_respond_to klass, :browser_rule
+    refute_respond_to klass, :client_rule
   end
 
   def test_browser_runtime_gets_only_browser_blocks
     klass = in_browser { build_class }
 
-    assert_equal "browser", klass.browser_rule
+    assert_equal %w[browser client], [klass.browser_rule, klass.client_rule]
     refute_respond_to klass, :server_rule
   end
 

@@ -64,6 +64,9 @@ edit("lib/instant_record.rb", 'require "instant_record/engine" if defined?(Rails
 # Screens are found by name through constant lookup, which has no ahead-of-time counterpart.
 # The native entry spells the lookup out as a `case` (make_native_entry.py).
 os.makedirs(os.path.join(app, "lib/instant_record/native"), exist_ok=True)
+# The types of a screen's parts, which the compilers would otherwise infer from the app's call sites.
+os.makedirs(os.path.join(app, "sig/instant_record"), exist_ok=True)
+shutil.copy(os.path.join(gem, "sig/instant_record/native.rbs"), os.path.join(app, "sig/instant_record/native.rbs"))
 open(os.path.join(app, "lib/instant_record/native.rb"), "w").write(
     'require "instant_record/native/node"\nrequire "instant_record/native/screen"\n')
 
@@ -83,6 +86,10 @@ open(os.path.join(app, "lib/instant_record/runtime_scoped.rb"), "w").write('''mo
     end
 
     def browser_only(&block)
+      nil
+    end
+
+    def client_only(&block)
       nil
     end
   end
@@ -124,7 +131,8 @@ production:
   <<: *default
 ''')
 
-# 12. Controllers and screens: this is the browser build, so `browser_only do ... end` is unwrapped to its body
+# 12. Controllers and screens: this is the browser build, so `browser_only do ... end` (or `client_only`,
+#     the same thing by the name a phone's screens use) is unwrapped to its body
 #     (skip_forgery_protection) and `server_only do ... end` is removed, as in the models.
 scoped = list(os.walk(os.path.join(app, "app/controllers"))) + list(os.walk(os.path.join(app, "app/screens")))
 for folder, _dirs, names in scoped:
@@ -140,7 +148,7 @@ for folder, _dirs, names in scoped:
             body = [line[2:] if line.startswith(indent + "  ") else line for line in match.group(2).split("\n")]
             return "\n" + "\n".join(body) + "\n"
 
-        changed = re.sub(r"\n( *)browser_only do\n(.*?)\n\1end\n", unwrap, changed, flags=re.S)
+        changed = re.sub(r"\n( *)(?:browser|client)_only do\n(.*?)\n\1end\n", unwrap, changed, flags=re.S)
         if changed != source:
             open(target, "w").write(changed)
 

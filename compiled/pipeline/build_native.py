@@ -3,6 +3,7 @@
 
 usage: build_native.py                    (everything lands in <repo>/compiled/.build-native)
        build_native.py iphonesimulator    (libraries for the iOS simulator, in .build-native/iphonesimulator)
+       build_native.py iphoneos           (libraries for an iPhone, arm64, in .build-native/iphoneos)
 
 The first three steps are the browser build's (build.py). From there the app is compiled for
 this machine and linked with native_shim.c into libinstant_record_app.a, which a native host
@@ -10,10 +11,11 @@ calls through native/instant_record_native.h. `host` beside it is the screenless
 tests drive (native/host.c). The toolchain file needs SPINEL_HOME, ROUNDHOUSE_BIN, SQLITE_SRC
 and CACHE.
 
-For the iOS simulator there is no host program. Spinel ships its runtime built for this machine
-only, so its sources and the three packages the app uses are compiled here for the simulator
-into libspinel_rt.a, beside libinstant_record_app.a. The app in native/ios links both. This has
-run on Linux x86_64 and macOS arm64, and for the simulator on arm64. Nothing here builds for a device.
+For the iOS simulator and for a device there is no host program. Spinel ships its runtime built for this machine
+only, so its sources and the three packages the app uses are compiled here for that target
+into libspinel_rt.a, beside libinstant_record_app.a. The app in native/ios links both, from the
+folder named after the SDK Xcode is building for. This has run on Linux x86_64 and macOS arm64,
+and for the simulator on arm64. The device build has not run.
 """
 import os
 import re
@@ -25,7 +27,7 @@ os.environ["INSTANT_RECORD_NATIVE"] = "1"
 import build
 
 # native_shim.c holds one wrapper for each of these.
-ENTRIES = [name.split(".")[1] for name in build.REACTOR_EXPORTS.split(",")] + ["render", "action"]
+ENTRIES = [name.split(".")[1] for name in build.REACTOR_EXPORTS.split(",")] + ["render", "action", "open"]
 CFLAGS = ["-O2", "-Wno-all", "-ffp-contract=off", "-DSP_INT_OVERFLOW_MODE_RAISE"]
 SQLITE_CFLAGS = ["-O2", "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION"]
 PACKAGES = ("json", "stringio", "zlib")
@@ -34,10 +36,14 @@ IOS_MINIMUM = "17.0"
 RUNTIME_CFLAGS = ["-O2", "-Wno-all", "-ffunction-sections", "-fdata-sections", "-ffp-contract=off"]
 
 
-def simulator_cc():
-    """clang for the iOS simulator on this Mac's architecture."""
-    sdk = subprocess.run(["xcrun", "--sdk", "iphonesimulator", "--show-sdk-path"], check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
-    return ["xcrun", "--sdk", "iphonesimulator", "clang", "-target", f"{os.uname().machine}-apple-ios{IOS_MINIMUM}-simulator", "-isysroot", sdk]
+TARGETS = ("iphonesimulator", "iphoneos")
+
+
+def ios_cc(target):
+    """clang for the iOS simulator on this Mac's architecture, or for an iPhone."""
+    sdk = subprocess.run(["xcrun", "--sdk", target, "--show-sdk-path"], check=True, stdout=subprocess.PIPE, text=True).stdout.strip()
+    triple = f"arm64-apple-ios{IOS_MINIMUM}" if target == "iphoneos" else f"{os.uname().machine}-apple-ios{IOS_MINIMUM}-simulator"
+    return ["xcrun", "--sdk", target, "clang", "-target", triple, "-isysroot", sdk]
 
 
 def makefile_list(spinel_home, name):
@@ -71,10 +77,42 @@ def cross_runtime(cc, spinel_home, out, runtime, run):
     return packages
 
 
+def certain_type_errors(generated):
+    """Lines of the app's screens where the compiler already knows a hash is of the wrong type.
+
+    Spinel types a whole program. A hash whose value comes from a record's column is a hash
+    of anything, and where a screen hands one to `params:` or `args:` the compiled call is a
+    TypeError that would only show on the phone. It is found here instead.
+    """
+    found, place = [], ""
+    for line in generated.splitlines():
+        if line.startswith("#line "):
+            place = line
+        elif "(expected Hash)" in line and "sp_raise_cls(\"TypeError\"" in line:
+            at = re.match(r'#line (\d+) "(?:app-src/)?(app/screens/[^"]+)"', place)
+            if at and f"{at.group(2)}:{at.group(1)}" not in found:
+                found.append(f"{at.group(2)}:{at.group(1)}")
+    return found
+
+
+def loose_node_fields(generated):
+    """The fields of a screen's node that the compiler did not type as a hash of strings.
+
+    One hash of another kind handed to `params:` or `args:` anywhere in the app makes the
+    compiler type the node's field loosely, and it then reads every screen's hashes wrongly:
+    the app crashes on its first render. The struct is the place that shows it.
+    """
+    found = re.search(r"^struct sp_InstantRecord__Native__Node_s \{(.*?)^\}", generated, re.S | re.M)
+    if not found:
+        return []
+    fields = re.findall(r"(\w+) \* ?iv_(link_params|args|props);", found.group(1))
+    return [name for kind, name in fields if kind != "sp_StrStrHash"]
+
+
 def main():
     target = sys.argv[1] if len(sys.argv) > 1 else ""
-    if target not in ("", "iphonesimulator"):
-        sys.exit("usage: build_native.py [iphonesimulator]")
+    if target and target not in TARGETS:
+        sys.exit("usage: build_native.py [" + "|".join(TARGETS) + "]")
     build.B = os.path.join(build.ROOT, ".build-native", target) if target else os.path.join(build.ROOT, ".build-native")
     T, B, run = build.T, build.B, build.run
     os.makedirs(B, exist_ok=True)
@@ -83,10 +121,11 @@ def main():
     pipeline = os.path.join(build.ROOT, "pipeline")
     spinel_home = T["SPINEL_HOME"]
     path_env = {"PATH": os.path.join(spinel_home, "bin") + os.pathsep + os.environ["PATH"]}
-    cc = simulator_cc() if target else [os.environ.get("CC", "cc")]
+    cc = ios_cc(target) if target else [os.environ.get("CC", "cc")]
 
     app, _emit, tree, _plan = build.emit_tree(python)
-    print(run([python, os.path.join(pipeline, "make_native_entry.py"), tree, app]).strip())
+    print(run([python, os.path.join(pipeline, "make_native_entry.py"), tree, app],
+              env={"INSTANT_RECORD_MIGRATION_PLAN": os.path.join(B, "browser-migrations.json") if build.APP_SOURCE else ""}).strip())
 
     out = os.path.join(tree, "build")
     os.makedirs(out, exist_ok=True)
@@ -96,6 +135,15 @@ def main():
          "--ext-entry", ",".join("NativeBridge." + entry for entry in ENTRIES),
          *flags, "main_native.rb", "-o", app_c],
         cwd=tree, env={**path_env, "CPATH": T["SQLITE_SRC"]}, log="spinel.log")
+    with open(app_c, errors="replace") as file:
+        generated = file.read()
+    loose = loose_node_fields(generated)
+    if loose:
+        sys.exit("Some screen gives params: or args: a hash that does not hold only strings (the compiler typed a node's "
+                 + ", ".join(loose) + " loosely). Call to_s on a value that comes from a record, and write Node.strings for an empty hash.")
+    wrong = certain_type_errors(generated)
+    if wrong:
+        sys.exit("A hash given to params: or args: must hold strings. Call to_s on a value that comes from a record:\n  " + "\n  ".join(wrong))
 
     includes = ["-I" + os.path.join(spinel_home, "lib"), "-I" + os.path.join(spinel_home, "lib/regexp"),
                 "-I" + T["SQLITE_SRC"], "-I" + out, "-I" + os.path.join(pipeline, "native")]

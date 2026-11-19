@@ -1,0 +1,38 @@
+# The types of a screen's own parts. Ruby does not read this file. The build
+# that compiles screens for a phone does (compiled/pipeline/vendor_gem.py):
+# its compilers type a whole app by inference, and without these lines the
+# hashes a screen hands to `params:` and `args:` take whatever type the app's
+# call sites add up to. Here they are hashes of strings, so a screen that
+# hands over anything else fails the build at that line.
+module InstantRecord
+  module Native
+    class Node
+      attr_reader kind: String
+      attr_reader props: Hash[String, String]
+      attr_reader children: Array[untyped]
+      attr_accessor id: String
+      attr_accessor text: String
+      attr_accessor action: String
+      attr_accessor link_params: Hash[String, String]
+      attr_accessor args: Hash[String, String]
+      def self.strings: () -> Hash[String, String]
+      def set: (String name, String value) -> nil
+      def json: () -> String
+      def write: (String out) -> String
+      def self.quote: (String value) -> String
+    end
+
+    class Screen
+      def open_with: (Hash[String, String] params) -> Hash[String, String]
+      def self.strings: (untyped parsed) -> Hash[String, String]
+      def param: (String name) -> String
+      def row: (?id: String, ?link: String, ?params: Hash[String, String]) -> InstantRecord::Native::Node
+      def button: (String label, ?action: String, ?args: Hash[String, String], ?role: String, ?image: String, ?position: String) -> InstantRecord::Native::Node
+      def item: (String title, ?action: String, ?args: Hash[String, String], ?link: String, ?replace: String, ?params: Hash[String, String], ?image: String, ?role: String, ?selected: bool) -> InstantRecord::Native::Node
+      def swipe: (String label, action: String, ?args: Hash[String, String], ?role: String, ?edge: String, ?image: String) -> InstantRecord::Native::Node
+      def field: (String name, ?label: String, ?value: String, ?multiline: bool) -> InstantRecord::Native::Node
+      def more: (String key, query: String) -> InstantRecord::Native::Node
+      def act: (InstantRecord::Native::Node node, String label, String action, Hash[String, String] args, String role) -> nil
+    end
+  end
+end
