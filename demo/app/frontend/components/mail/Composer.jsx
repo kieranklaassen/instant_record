@@ -1,5 +1,5 @@
 import { useForm } from "@inertiajs/react"
-import { useEffect } from "react"
+import { useEffect, useRef } from "react"
 import Icon from "../ui/Icon"
 import IconButton from "../ui/IconButton"
 
@@ -22,6 +22,7 @@ const kept = (drafts) => {
 //   sender   a ref this fills with its send, so the page's keys can call it
 export default function Composer({ scope, drafts, sender, keys, onSend, onSent, onFail, onClose }) {
   const form = useForm(() => kept(drafts))
+  const fields = useRef(null)
 
   const field = (name) => ({
     name,
@@ -34,8 +35,10 @@ export default function Composer({ scope, drafts, sender, keys, onSend, onSent, 
 
   const ready = form.data.address.trim() && form.data.subject.trim() && form.data.body.trim()
 
+  // A key sends without the browser's own check of the fields, so ask for
+  // it: an empty field or a malformed address is pointed at, not sent.
   const send = () => {
-    if (!ready || form.processing) return
+    if (form.processing || !fields.current?.reportValidity() || !ready) return
     form.transform((data) => ({ ...scope, kind: "message", address: data.address.trim(), subject: data.subject.trim(), body: data.body.trim() }))
     onSend()
     form.post("/email", {
@@ -44,7 +47,11 @@ export default function Composer({ scope, drafts, sender, keys, onSend, onSent, 
         drafts.clear(DRAFT)
         onSent()
       },
-      onHttpException: onFail,
+      // false: the page says it failed, in place of Inertia's own error window.
+      onHttpException: () => {
+        onFail()
+        return false
+      },
       onNetworkError: onFail,
     })
   }
@@ -62,7 +69,7 @@ export default function Composer({ scope, drafts, sender, keys, onSend, onSent, 
         <h2>New conversation</h2>
         <button type="button" className="mail-compose-close" aria-label="Close composer" onClick={onClose}><Icon name="close" size={18} /></button>
       </div>
-      <form className="mail-compose" onSubmit={(event) => { event.preventDefault(); send() }}>
+      <form ref={fields} className="mail-compose" onSubmit={(event) => { event.preventDefault(); send() }}>
         <label>To<input type="email" placeholder="person@example.test" maxLength={254} required autoFocus {...field("address")} /></label>
         <label>Subject<input placeholder="Subject" maxLength={180} required {...field("subject")} /></label>
         <label className="mail-body-field">Message
