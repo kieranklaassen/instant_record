@@ -45,6 +45,12 @@ try {
 
   // Signed out: one public note, and the sync server sends nothing else when asked.
   await settle("Signed out.", everyone);
+
+  // From here the page folds every change in: it is never loaded again. (A
+  // compiled page is written into the document once more as it boots.)
+  await page.evaluate(() => { window.__loadedOnce = true; });
+  const loads = [];
+  page.on("framenavigated", frame => { if (frame === page.mainFrame()) loads.push(frame.url()); });
   assert.ok(await page.locator("[data-auth-target=submit]").isDisabled());
   assert.match(await proof("Ask the sync server for everything", "sent this browser"), /sent this browser 1:/);
   assert.match(await proof("Write a note as someone else", "answered"), /rejected, not permitted/);
@@ -61,22 +67,33 @@ try {
   await page.getByRole("textbox", { name: "Title" }).fill("Ben's new note");
   await page.getByRole("button", { name: "Add note" }).click();
   await settle("Signed in as Ben.", [...ben, "Ben's new note"].sort());
+  assert.equal(await page.getByRole("textbox", { name: "Title" }).inputValue(), "");
+
+  // Ben deletes his new note, and it closes up in place.
+  await page.locator(".auth-note", { hasText: "Ben's new note" }).getByRole("button", { name: "Delete" }).click();
+  await settle("Signed in as Ben.", ben);
 
   // Ben deletes a note that is not his. On the server page there is nothing to
   // press that works; in the browser it goes, is refused, and comes back.
   await page.locator('.auth-note[data-id="auth-welcome"]').getByRole("button", { name: "Delete" }).click();
   await page.waitForTimeout(2500); // long enough for the refusal to come back and the page to be redrawn
-  await settle("Signed in as Ben.", [...ben, "Ben's new note"].sort());
+  await settle("Signed in as Ben.", ben);
 
   // Switch to Ada: Ben's own notes leave this browser, the admins' note arrives.
+  // The notes both of them hold are the same elements afterwards: the list
+  // was never emptied on the way.
+  const kept = ids => page.evaluate(wanted => wanted.map(id => document.querySelector(`.auth-note[data-id="${id}"]`)?.__kept === true), ids);
+  await page.evaluate(() => document.querySelectorAll(".auth-note").forEach(note => { note.__kept = true; }));
   await page.getByRole("button", { name: /Ada/ }).click();
   await settle("Signed in as Ada.", ada);
+  assert.deepEqual(await kept(["auth-welcome", "auth-lunch", "auth-ada"]), [true, true, false]);
   assert.equal(await held(), 4);
   assert.ok(!(await page.content()).includes("gift list"));
 
   // Sign out: everything but the public note is taken out again.
   await page.getByRole("button", { name: "Sign out" }).click();
   await settle("Signed out.", everyone);
+  assert.deepEqual(await kept(["auth-welcome"]), [true]);
   assert.equal(await held(), 1);
   assert.ok(!(await page.content()).includes("Payroll"));
 
@@ -86,6 +103,8 @@ try {
   await stranger.waitForFunction(() => document.querySelector("[data-auth-target=who]")?.textContent.startsWith("Signed out."));
   assert.deepEqual(await stranger.locator(".auth-note h3").allTextContents(), everyone);
 
+  assert.deepEqual(loads, [], "the page was loaded again");
+  assert.equal(await page.evaluate(() => window.__loadedOnce), true);
   assert.deepEqual(errors, []);
   console.log(`auth: passed (${compiled ? "compiled" : "Rails-served"})`);
 } finally {

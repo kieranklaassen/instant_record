@@ -4,8 +4,12 @@
     the session, because the session is on the server and nowhere else, and it
     changes the session there. What it never does is decide who may see a note:
     the list below is whatever this runtime's database holds. %>
+<%# data-instant-refresh: when a sync pass changes this browser's records the
+    page is told, and folds the new list in, instead of being reloaded. %>
 <div class="page auth-page"
+     data-instant-refresh
      data-controller="auth"
+     data-action="instant-record:records-changed@window->auth#refresh"
      data-auth-session-url-value="<%= auth_session_endpoint %>"
      data-auth-sign-out-url-value="<%= auth_sign_out_endpoint %>"
      data-auth-bootstrap-url-value="<%= auth_bootstrap_endpoint %>"
@@ -56,13 +60,19 @@
     </p>
   </section>
 
-  <section class="auth-notes" aria-labelledby="auth-notes-title">
+  <%# Every form in here, the Delete buttons and the one that writes a note,
+      is sent by the page's script and answered with this page again, which is
+      folded into the list by note id. Nothing is reloaded. %>
+  <%# data-turbo is said once, here: on a button_to it would be a `form:`
+      option, which the compiler writes onto the button, where it cuts the
+      button off from its form. %>
+  <section class="auth-notes" aria-labelledby="auth-notes-title" data-turbo="false" data-action="submit->auth#write">
     <h2 class="micro-label" id="auth-notes-title">
       Notes in this <%= InstantRecord.browser? ? "browser’s database" : "response" %>
       <span class="auth-count" data-auth-target="held" data-count="<%= @auth_notes.size %>"><%= @auth_notes.size %></span>
     </h2>
 
-    <ul class="auth-list">
+    <ul class="auth-list" data-auth-target="list">
       <% @auth_notes.each do |note| %>
         <% note_href = auth_note_path(note) %>
         <li class="card auth-note audience-<%= note.audience %>" data-id="<%= note.id %>">
@@ -76,19 +86,17 @@
           <p class="auth-note-body"><%= note.body %></p>
           <div class="auth-note-foot">
             <span class="auth-owner">Written by <%= AuthPerson.name_for(note.owner_id) %></span>
-            <%= button_to "Delete", note_href, method: :delete, class: "auth-delete", form: { data: { turbo: false } } %>
+            <%= button_to "Delete", note_href, method: :delete, class: "auth-delete" %>
           </div>
         </li>
       <% end %>
     </ul>
-    <% if @auth_notes.empty? %>
-      <p class="auth-empty">Nothing here for you yet.</p>
-    <% end %>
+    <p class="auth-empty" data-auth-target="empty" hidden>Nothing here for you yet.</p>
     <% if InstantRecord.browser? %>
       <p class="auth-small">
         Delete is offered on every note on purpose. Delete one that is not
         yours: it goes, the server refuses the write, and it comes back.
-        <span id="pending-count"><%= @pending_count %> waiting to sync.</span>
+        <span id="pending-count" data-auth-target="pending"><%= @pending_count %> waiting to sync.</span>
       </p>
     <% end %>
 

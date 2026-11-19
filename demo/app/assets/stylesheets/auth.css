@@ -95,6 +95,25 @@
 .demo-auth .auth-delete:hover { filter: none; background: var(--danger-bg); color: var(--danger); }
 .demo-auth .auth-empty { margin: 12px 0 0; color: var(--muted); }
 
+/* Notes arrive and leave in place: the page is never reloaded for them. A
+   note that arrives is opened by the page's script (auth_controller.js). */
+.demo-auth .auth-leave {
+  overflow: hidden;
+  padding-top: 0;
+  padding-bottom: 0;
+  margin-bottom: -10px; /* the list's gap, so the rows below close up fully */
+  opacity: 0;
+  pointer-events: none;
+  transition: height 240ms ease, padding 240ms ease, margin 240ms ease, opacity 160ms ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  .demo-auth .auth-leave { transition: none; }
+}
+
+/* Between one person's notes and the next's the list waits, a little dimmed. */
+.demo-auth .auth-list { transition: opacity 160ms ease; }
+.demo-auth .auth-list[aria-busy="true"] { opacity: 0.6; }
+
 .demo-auth .audience-everyone { --note-ink: #3E6B4F; --note-wash: #E7F0E9; }
 .demo-auth .audience-members { --note-ink: #2F6CA3; --note-wash: #E6EFF7; }
 .demo-auth .audience-admins { --note-ink: #9A4A2A; --note-wash: #F6E6DD; }
