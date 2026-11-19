@@ -18,7 +18,7 @@ try {
   // The page names its script after the script's content, and the shell fetched it early
   // under that name: a browser that kept an earlier build's script does not run it here.
   const script = await maya.evaluate(async () => {
-    const { src } = document.querySelector('script[src*="/assets/inbox.js"]');
+    const { src } = document.querySelector('script[src*="/assets/inbox"]');
     const bytes = await (await fetch(src, { cache: "no-store" })).arrayBuffer();
     const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map(byte => byte.toString(16).padStart(2, "0")).join("");
     const address = new URL(src);

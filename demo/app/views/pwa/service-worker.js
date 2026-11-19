@@ -19,8 +19,6 @@ const SHELL = "/"
 const FONT_HOSTS = ["fonts.googleapis.com", "fonts.gstatic.com"]
 const SYNC_PATHS = [/(^|\/)instant_record(\/|$)/, /^\/email\/sync\//]
 const ASSET_PATHS = [/^\/assets\//, /^\/harness\//, /\.wasm$/]
-// Named after its content: by a digest in the name, or by the `?v=` the
-// compiled build gives a script.
 const IMMUTABLE_PATHS = [/^\/harness\//, /\.wasm$/, /-[0-9a-f]{8,}\.\w+$/]
 const MODULES_KEPT = 2
 
@@ -92,8 +90,9 @@ async function page(request) {
   }
 }
 
-// The cache first. A file named after its content is never asked for again;
-// any other is refreshed behind the answer. The refresh asks the server: the
+// The cache first. A file named after its content, by a digest in its name or
+// the `?v=` the compiled build gives a script, is never asked for again; any
+// other is refreshed behind the answer. The refresh asks the server: the
 // browser's own cache may hold the last release's copy for an hour yet, and
 // kept from there the page of a new release would go on running an old script.
 async function asset(request) {
@@ -133,10 +132,11 @@ async function precache(urls, page, shell) {
 }
 
 // Fetches a URL and keeps the answer. Fonts are asked for with CORS, since a
-// font is only usable from an answer the page is allowed to read.
+// font is only usable from an answer the page is allowed to read. `options`
+// are for this site's files: a font's own site says how long its files keep.
 async function keep(url, options = {}) {
   const sameOrigin = new URL(url, self.location.origin).origin === self.location.origin
-  const response = await fetch(url, sameOrigin ? options : { ...options, mode: "cors", credentials: "omit" })
+  const response = await fetch(url, sameOrigin ? options : { mode: "cors", credentials: "omit" })
 
   if (response.ok) {
     const cache = await caches.open(CACHE)

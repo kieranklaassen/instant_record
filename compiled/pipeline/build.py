@@ -270,7 +270,7 @@ def warm_scripts(assets_dir):
             with open(path, "rb") as f:
                 digest = hashlib.sha256(f.read()).hexdigest()[:10]
             seen.update((name + digest).encode())
-            versioned = prefix.endswith("controllers/") or name == "inbox.js"
+            versioned = prefix.endswith("controllers/") or (name == "inbox.js" and not APP_SOURCE)
             urls.append(prefix + name + ("?v=" + digest if versioned else ""))
     if not urls:
         return []

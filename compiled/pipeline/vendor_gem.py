@@ -163,10 +163,8 @@ if not os.environ.get("INSTANT_RECORD_APP"):
         digest = hashlib.sha256(sheet.read_bytes()).hexdigest()[:10]
         sheet.rename(sheet.with_name(f"{sheet.stem}-{digest}.css"))
     # The Inbox's script has one name in every build, and a browser that has opened the demo
-    # keeps it: its own cache for an hour, the service worker until it is refreshed. The page
-    # is the new build's at once, and with the old script it waited four seconds for a signal
-    # only the new one gives. Named after its content, the script is the page's own build's.
-    # build.py fetches it early under the same address (warm_scripts).
+    # keeps it: its own cache for an hour, the service worker until it is refreshed. A page
+    # of this build would run an earlier build's script.
     bundle = Path(app, "app/assets/builds/inbox.js")
     if bundle.is_file():
         edit("app/views/email/mailboxes/index.html.erb", '<%= asset_path("inbox.js") %>',
