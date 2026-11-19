@@ -4,21 +4,27 @@ module InstantRecord
     # whatever it draws: the compiler that builds the phone app infers one type
     # for a whole tree, and the renderer switches on `kind`.
     class Node
-      attr_reader :kind, :props, :children
-      attr_accessor :id, :text, :action, :arg
+      attr_reader :kind, :params, :props, :children
+      attr_accessor :id, :text, :action
 
       def initialize(kind)
         @kind = kind
         @id = ""
         @text = ""
         @action = ""
-        @arg = ""
+        @params = {}
         @props = {}
         @children = []
       end
 
       def set(name, value)
         @props[name] = value if value.length > 0
+      end
+
+      # The named values this element hands on: to the screen it opens, or
+      # to `perform` with its action.
+      def carry(with)
+        with.each { |name, value| @params[name] = value.to_s }
       end
 
       # Written by hand so the compiled app and CRuby produce the same bytes.
@@ -35,15 +41,11 @@ module InstantRecord
         out << ",\"id\":" << Node.quote(@id)
         out << ",\"text\":" << Node.quote(@text)
         out << ",\"action\":" << Node.quote(@action)
-        out << ",\"arg\":" << Node.quote(@arg)
-        out << ",\"props\":{"
-        first = true
-        @props.each do |name, value|
-          out << "," unless first
-          first = false
-          out << Node.quote(name) << ":" << Node.quote(value)
-        end
-        out << "},\"children\":["
+        out << ",\"params\":"
+        Node.write_strings(out, @params)
+        out << ",\"props\":"
+        Node.write_strings(out, @props)
+        out << ",\"children\":["
         first = true
         @children.each do |child|
           out << "," unless first
@@ -51,6 +53,17 @@ module InstantRecord
           child.write(out)
         end
         out << "]}"
+      end
+
+      def self.write_strings(out, strings)
+        out << "{"
+        first = true
+        strings.each do |name, value|
+          out << "," unless first
+          first = false
+          out << Node.quote(name) << ":" << Node.quote(value)
+        end
+        out << "}"
       end
 
       HEX = "0123456789abcdef".freeze

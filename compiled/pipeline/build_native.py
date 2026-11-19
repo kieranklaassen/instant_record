@@ -25,7 +25,7 @@ os.environ["INSTANT_RECORD_NATIVE"] = "1"
 import build
 
 # native_shim.c holds one wrapper for each of these.
-ENTRIES = [name.split(".")[1] for name in build.REACTOR_EXPORTS.split(",")] + ["render", "action"]
+ENTRIES = [name.split(".")[1] for name in build.REACTOR_EXPORTS.split(",")] + ["render", "action", "open_database"]
 CFLAGS = ["-O2", "-Wno-all", "-ffp-contract=off", "-DSP_INT_OVERFLOW_MODE_RAISE"]
 SQLITE_CFLAGS = ["-O2", "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION"]
 PACKAGES = ("json", "stringio", "zlib")
@@ -86,7 +86,7 @@ def main():
     cc = simulator_cc() if target else [os.environ.get("CC", "cc")]
 
     app, _emit, tree, _plan = build.emit_tree(python)
-    print(run([python, os.path.join(pipeline, "make_native_entry.py"), tree, app]).strip())
+    print(run([python, os.path.join(pipeline, "make_native_entry.py"), tree, app, build.GEM_SRC]).strip())
 
     out = os.path.join(tree, "build")
     os.makedirs(out, exist_ok=True)

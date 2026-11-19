@@ -1,0 +1,52 @@
+# What the Inbox's screens share: who is reading which inbox, and the writes
+# both of them make. Every screen is opened with "member" and "inbox".
+module MailAccess
+  extend InstantRecord::RuntimeScoped
+
+  def member = param("member")
+  def inbox = param("inbox")
+
+  # The params another screen of the same inbox is opened with.
+  def here = { "member" => member, "inbox" => inbox }
+  def at(id) = { "member" => member, "inbox" => inbox, "id" => id.to_s }
+
+  def allowed? = MailDirectory.inboxes(member).include?(inbox)
+
+  # A message of this inbox, or nil: one from another inbox is not found.
+  def message(id)
+    return nil unless allowed?
+    MailEntry.find_by(id: id, mailbox_id: inbox, kind: "message")
+  end
+
+  def unread_ids
+    ids = {}
+    MailEntry.open_messages.where(mailbox_id: inbox).where(MailEntry::UNREAD, member: member).each { |entry| ids[entry.id] = true }
+    ids
+  end
+
+  def mark_read(entry)
+    append("read", entry.id) if unread_ids.key?(entry.id)
+  end
+
+  # The same two halves as Email::MailboxesController: the server numbers the
+  # entry itself, and the phone writes locally and lets sync carry it.
+  server_only do
+    def append(kind, parent)
+      Mailbox.open_demo(inbox).append!(id: SecureRandom.uuid, author: member, attributes: { kind: kind, parent_id: parent })
+    end
+
+    def reply(parent, words)
+      Mailbox.open_demo(inbox).append!(id: SecureRandom.uuid, author: member, attributes: { kind: "reply", parent_id: parent, body: words })
+    end
+  end
+
+  browser_only do
+    def append(kind, parent)
+      MailEntry.create!(mailbox_id: inbox, author: member, kind: kind, parent_id: parent)
+    end
+
+    def reply(parent, words)
+      MailEntry.create!(mailbox_id: inbox, author: member, kind: "reply", parent_id: parent, body: words)
+    end
+  end
+end

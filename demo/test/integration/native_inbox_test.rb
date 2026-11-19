@@ -11,6 +11,7 @@ require "tmpdir"
 #   INSTANT_RECORD_NATIVE_HOST=../compiled/.build-native/host bin/rails test test/integration/native_inbox_test.rb
 class NativeInboxTest < ActionDispatch::IntegrationTest
   ENDPOINT = "http://www.example.com/email/sync/maya/support"
+  MAYA = { "member" => "maya", "inbox" => "support" }.freeze
 
   # compiled/pipeline/native/host.c, with this test as its driver.
   class Phone
@@ -31,9 +32,10 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
       reply
     end
 
-    def render(screen, arg) = JSON.parse(call("render", "#{screen}\n#{arg}").first)
-    def tap(screen, arg, action, on) = call("action", [screen, arg, action, on].join("\n"))
-    def sync = call("sync", ENDPOINT)
+    def render(screen, params) = JSON.parse(call("render", JSON.generate(screen: screen, params: params)).first)
+    def tap(screen, params, action, with = {}) = call("action", JSON.generate(screen: screen, params: params, action: action, with: with))
+    def open(database) = call("open", database)
+    def sync(endpoint = ENDPOINT) = call("sync", endpoint)
     def pending = call("cursor").first[/pending=(\d+)/, 1].to_i
     def cursor = call("cursor").first[/cursor=(\d+)/, 1].to_i
 
@@ -98,7 +100,7 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
 
     @phone.sync
 
-    assert_equal JSON.parse(MailboxScreen.new("maya/support").json), @phone.render("mailbox", "maya/support")
+    assert_equal JSON.parse(MailboxScreen.new(MAYA).json), @phone.render("mailbox", MAYA)
     assert_equal [@newer.id, @older.id], rows.map { |row| row["id"] }
   end
 
@@ -106,35 +108,80 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
     @phone.sync
     row = rows.first
 
-    @phone.tap("mailbox", "maya/support", row["action"], row["arg"])
+    @phone.tap(row["props"]["link"], row["params"], "open")
+    assert_equal 1, @phone.pending
+    @phone.tap(row["props"]["link"], row["params"], "open")
     assert_equal 1, @phone.pending
     @phone.sync
 
     assert_equal 0, @phone.pending
     assert MailEntry.exists?(kind: "read", parent_id: @newer.id, author: "maya")
-    assert_equal JSON.parse(ThreadScreen.new(row["arg"]).json), @phone.render(row["props"]["link"], row["arg"])
-    assert_equal JSON.parse(MailboxScreen.new("maya/support").json), @phone.render("mailbox", "maya/support")
+    assert_equal JSON.parse(ThreadScreen.new(row["params"]).json), @phone.render("thread", row["params"])
+    assert_equal JSON.parse(MailboxScreen.new(MAYA).json), @phone.render("mailbox", MAYA)
   end
 
-  test "the menus, the unread list and mark all read are the server's, on the phone" do
+  test "the menus, the unread list and mark read are the server's, on the phone" do
     @phone.sync
+    unread = MAYA.merge("show" => "unread")
 
-    assert_equal JSON.parse(MailboxScreen.new("maya/support/unread").json), @phone.render("mailbox", "maya/support/unread")
-    assert_equal ["InboxSummary", @newer.id], @phone.render("mailbox", "maya/support/unread").dig("children", 0, "children", 0, "children").map { |node| node["id"].presence || node["text"] }
+    assert_equal JSON.parse(MailboxScreen.new(unread).json), @phone.render("mailbox", unread)
+    assert_equal [@newer.id], rows(unread).map { |row| row["id"] }
 
-    @phone.tap("mailbox", "maya/support", "read_all", "maya/support")
-    assert_equal %w[swift], @phone.render("mailbox", "maya/support/unread").dig("children", 0, "children", 0, "children").map { |node| node["kind"] }
+    @phone.tap("mailbox", MAYA, "read_all")
+    assert_empty rows(unread)
     @phone.sync
 
     assert MailEntry.exists?(kind: "read", parent_id: @newer.id, author: "maya")
-    assert_equal JSON.parse(MailboxScreen.new("maya/support").json), @phone.render("mailbox", "maya/support")
+    assert_equal JSON.parse(MailboxScreen.new(MAYA).json), @phone.render("mailbox", MAYA)
+  end
+
+  test "a value reaches the screen as it was sent, whatever it holds" do
+    odd = @support.append!(id: "unread", author: "rae", attributes: { kind: "message", address: "rae@example.test", subject: "Odd id", body: "Hello" })
+    @phone.sync
+    words = "She said \"yes\"\nsee you / at the café ☕"
+
+    @phone.tap("thread", MAYA.merge("id" => odd.id), "reply", { "body" => words })
+    @phone.sync
+
+    assert_equal words, MailEntry.find_by(kind: "reply", parent_id: "unread").body
+    assert_equal [odd.id, @newer.id, @older.id], rows.map { |row| row["id"] }
+    assert_equal JSON.parse(ThreadScreen.new(MAYA.merge("id" => odd.id)).json), @phone.render("thread", MAYA.merge("id" => odd.id))
+  end
+
+  test "input that is not JSON is an error the host can read, and the next call works" do
+    @phone.sync
+
+    error = assert_raises(RuntimeError) { @phone.call("render", "mailbox\nmaya/support") }
+
+    assert_match(/JSON|unexpected|parse/i, error.message)
+    assert_equal [@newer.id, @older.id], rows.map { |row| row["id"] }
+  end
+
+  test "a reply made with no connection shows at once and reaches the server on reconnect" do
+    @phone.sync
+    @phone.online = false
+    there = MAYA.merge("id" => @newer.id)
+
+    @phone.tap("thread", there, "reply", { "body" => "On it." })
+    @phone.tap("thread", there, "reply", { "body" => "   " })
+    @phone.sync
+
+    assert_equal 1, @phone.pending
+    assert_equal ["Hello \"there\"\ncafé", "On it."], bodies(@phone.render("thread", there))
+    assert_not MailEntry.exists?(kind: "reply")
+
+    @phone.online = true
+    @phone.sync
+
+    assert_equal 0, @phone.pending
+    assert_equal "On it.", MailEntry.find_by(kind: "reply", parent_id: @newer.id, author: "maya").body
   end
 
   test "an archive made offline shows at once and reaches the server on reconnect" do
     @phone.sync
     @phone.online = false
 
-    @phone.tap("mailbox", "maya/support", "archive", "maya/support/#{@newer.id}")
+    @phone.tap("mailbox", MAYA, "archive", { "id" => @newer.id })
     @phone.sync
 
     assert_equal [@older.id], rows.map { |row| row["id"] }
@@ -151,7 +198,7 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
   test "mail and a queued write survive the app being closed, with no network" do
     @phone.sync
     @phone.online = false
-    @phone.tap("mailbox", "maya/support", "archive", "maya/support/#{@newer.id}")
+    @phone.tap("mailbox", MAYA, "archive", { "id" => @newer.id })
     @phone.close
 
     @phone = Phone.new(@binary, File.join(@folder, "inbox.sqlite3"), self)
@@ -160,6 +207,66 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
     assert_equal [@older.id], rows.map { |row| row["id"] }
     assert_equal 1, @phone.pending
     assert_empty Dir.children(@folder).reject { |name| name.start_with?("inbox.sqlite3") }, "the app wrote outside its database"
+  end
+
+  test "another inbox is another database, opened without starting the app again" do
+    billing = { "member" => "maya", "inbox" => "billing" }
+    receipt = Mailbox.find("billing").append!(id: SecureRandom.uuid, author: "jo",
+      attributes: { kind: "message", address: "jo@example.test", subject: "Receipt", body: "Hello" })
+    @phone.sync
+    @phone.online = false
+    @phone.tap("mailbox", MAYA, "archive", { "id" => @newer.id })
+    @phone.online = true
+    first, second = File.join(@folder, "inbox.sqlite3"), File.join(@folder, "billing.sqlite3")
+
+    3.times do
+      @phone.open(second)
+      assert_empty rows, "the first inbox's mail is in the second database"
+      assert_equal 0, @phone.pending
+      @phone.sync(ENDPOINT.sub("support", "billing"))
+      assert_equal [receipt.id], rows(billing).map { |row| row["id"] }
+
+      @phone.open(first)
+      assert_equal [@older.id], rows.map { |row| row["id"] }
+      assert_equal 1, @phone.pending
+    end
+
+    @phone.sync
+    assert_equal 0, @phone.pending
+    assert_equal [@older.id], MailEntry.open_messages.where(mailbox_id: "support").pluck(:id)
+  end
+
+  test "a database that cannot be opened is an error, and the one that was open stays open" do
+    @phone.sync
+
+    assert_raises(RuntimeError) { @phone.open(File.join(@folder, "missing-folder", "x.sqlite3")) }
+
+    assert_equal [@newer.id, @older.id], rows.map { |row| row["id"] }, "the database that was open is no longer"
+  end
+
+  test "older mail loads a page at a time until the beginning, and the screen says when it is there" do
+    120.times { |n| travel_to(1.day.ago + n.seconds) { write("rae", "Old #{n}") } }
+    @phone.sync
+
+    assert_equal MailEntry::PAGE_SIZE, rows.size
+    assert_equal ["true", "Load older mail"], [summary("more"), list.last["text"]]
+
+    @phone.online = false
+    @phone.tap("mailbox", MAYA, "older")
+    assert_equal MailEntry::PAGE_SIZE, rows.size
+    @phone.online = true
+
+    newest = rows.first(3).map { |row| row["id"] }
+    @phone.tap("mailbox", MAYA, "older")
+    assert_equal MailEntry::PAGE_SIZE * 2, rows.size
+    assert_equal newest, rows.first(3).map { |row| row["id"] }
+    assert_equal "true", summary("more")
+
+    @phone.tap("mailbox", MAYA, "older")
+    assert_equal 122, rows.size
+    assert_equal MailEntry.open_messages.where(mailbox_id: "support").order(created_at: :desc, id: :desc).pluck(:id), rows.map { |row| row["id"] }
+    assert_equal ["false", "row"], [summary("more"), list.last["kind"]]
+    assert_equal "Mark 121 read", @phone.render("mailbox", MAYA).dig("children", 0, "children", 1, "children", 1, "children", 2, "text")
   end
 
   test "a sync pass alone brings a change from elsewhere" do
@@ -172,7 +279,7 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
   end
 
   test "a screen nobody wrote is an error, not an empty screen" do
-    error = assert_raises(RuntimeError) { @phone.render("nowhere", "maya/support") }
+    error = assert_raises(RuntimeError) { @phone.render("nowhere", MAYA) }
 
     assert_match "No screen named nowhere", error.message
     assert_equal [@newer.id, @older.id], (@phone.sync && rows).map { |row| row["id"] }
@@ -193,7 +300,7 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
     @phone.sync
     MailEntry.where(id: @newer.id).delete_all
 
-    @phone.tap("mailbox", "maya/support", "archive", "maya/support/#{@newer.id}")
+    @phone.tap("mailbox", MAYA, "archive", { "id" => @newer.id })
     assert_equal [@older.id], rows.map { |row| row["id"] }
     @phone.sync
 
@@ -208,7 +315,15 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
       attributes: { kind: "message", address: "#{author}@example.test", subject: subject, body: "Hello \"there\"\ncafé" })
   end
 
-  def rows
-    @phone.render("mailbox", "maya/support").dig("children", 0, "children", 0, "children").select { |node| node["kind"] == "row" }
+  def list(params = MAYA)
+    @phone.render("mailbox", params).dig("children", 0, "children", 0, "children")
+  end
+
+  def rows(params = MAYA) = list(params).select { |node| node["kind"] == "row" }
+
+  def summary(name) = list.first["children"].find { |node| node["id"] == name }["text"]
+
+  def bodies(thread)
+    thread.dig("children", 0, "children").find { |node| node["kind"] == "props" }["children"].map { |record| record["children"].find { |node| node["id"] == "body" }["text"] }
   end
 end

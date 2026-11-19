@@ -17,10 +17,10 @@ class NativeSpinelTest < ActiveSupport::TestCase
     expected, status = Open3.capture2(RbConfig.ruby, SAMPLE, binmode: true)
     assert status.success?
     expected.force_encoding(Encoding::UTF_8)
-    first, second, arg = expected.lines
-    assert_equal 3, JSON.parse(first).dig("children", 0, "children", 0, "children", 0, "children").size
-    assert_equal %w[b2 c3], JSON.parse(second).dig("children", 0, "children", 0, "children", 0, "children").map { |row| row["id"] }
-    assert_equal "inbox\n", arg
+    first, second, box, missing, notes = expected.lines
+    assert_equal %w[a1 b2 c/3], JSON.parse(first).dig("children", 0, "children", 0, "children", 0, "children").map { |row| row["id"] }
+    assert_equal %w[b2 c/3], JSON.parse(second).dig("children", 0, "children", 0, "children", 0, "children").map { |row| row["id"] }
+    assert_equal ["inbox\n", "0\n", "1\n"], [box, missing, notes]
 
     Dir.mktmpdir do |dir|
       binary = File.join(dir, "sample")

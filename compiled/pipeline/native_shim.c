@@ -52,12 +52,13 @@ static void call_history(void *ctx)   { (void)ctx; sp_NativeBridge_s_history(); 
 static void call_cursor(void *ctx)    { (void)ctx; sp_NativeBridge_s_cursor(); }
 static void call_render(void *ctx)    { (void)ctx; sp_NativeBridge_s_render(); }
 static void call_action(void *ctx)    { (void)ctx; sp_NativeBridge_s_action(); }
+static void call_open(void *ctx)      { (void)ctx; sp_NativeBridge_s_open_database(); }
 static void call_boot(void *ctx)      { (void)ctx; app_boot(); }
 
 static const struct { const char *name; void (*fn)(void *); } entries[] = {
   { "request", call_request }, { "sync_plan", call_plan }, { "sync", call_sync },
   { "stream", call_stream },   { "history", call_history }, { "cursor", call_cursor },
-  { "render", call_render },   { "action", call_action },
+  { "render", call_render },   { "action", call_action },   { "open", call_open },
 };
 
 static int run_guarded(void (*fn)(void *)) {
@@ -98,6 +99,12 @@ static void fresh_secret(void) {
 }
 
 int ir_boot(const char *database_path) {
+  static int booted;
+  if (booted) {
+    snprintf(error, sizeof error, "The app is already up. Open another database with ir_call(\"open\", path).");
+    return 1;
+  }
+  booted = 1;
   setenv("BLOG_DB", database_path, 1);
   fresh_secret();
   return run_guarded(call_boot);
