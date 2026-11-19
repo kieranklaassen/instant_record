@@ -1,24 +1,18 @@
-# README
+# InstantRecord demos
 
-This README would normally document whatever steps are necessary to get the
-application up and running.
+```sh
+bin/rails db:prepare
+bin/rails server
+```
 
-Things you may want to cover:
+Every demo is Hotwire with no build step, except the Inbox, which is an
+Inertia page in React (`app/frontend`). Its bundle is built by Vite into
+`app/assets/builds/inbox.js`:
 
-* Ruby version
+```sh
+npm install
+npm run build   # once, or `npm run dev` to rebuild on change
+npm test        # the keyboard hook's unit tests
+```
 
-* System dependencies
-
-* Configuration
-
-* Database creation
-
-* Database initialization
-
-* How to run the test suite
-
-* Services (job queues, cache servers, search engines, etc.)
-
-* Deployment instructions
-
-* ...
+`bin/rails test` and `bin/rails assets:precompile` build it first.

@@ -1,5 +1,7 @@
 class MailEntry < ApplicationRecord
   PAGE_SIZE = 50
+  # The most rows one live query of the list returns.
+  LIVE_LIMIT = 5000
   scope :open_messages, -> { where(kind: "message").where("NOT EXISTS (SELECT 1 FROM mail_entries archived WHERE archived.parent_id = mail_entries.id AND archived.mailbox_id = mail_entries.mailbox_id AND archived.kind = 'archive')") }
 
   ACTIONS = %w[reply archive read unread].freeze

@@ -307,7 +307,9 @@ def main():
     os.makedirs(os.path.join(assets, "controllers"), exist_ok=True)
     # The Rails helpers can emit logical URLs such as /assets/icon.svg even
     # when Roundhouse doesn't generate a digested static asset directory.
+    # app/assets/builds holds the Inbox's React bundle (`npm run build` in the app).
     for asset_dir in (os.path.join(app, "app/assets/stylesheets"), os.path.join(app, "app/assets/images"),
+                      os.path.join(app, "app/assets/builds"),
                       os.path.join(emit, "static/assets"), os.path.join(app, "app/javascript")):
         if os.path.isdir(asset_dir):
             shutil.copytree(asset_dir, assets, dirs_exist_ok=True)

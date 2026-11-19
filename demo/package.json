@@ -1,0 +1,21 @@
+{
+  "name": "instant-record-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite build --watch",
+    "test": "node --test app/frontend/instant_record/*.test.js"
+  },
+  "dependencies": {
+    "@inertiajs/core": "^3.11.0",
+    "@inertiajs/react": "^3.11.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-virtuoso": "^4.18.23"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.3.0",
+    "vite": "^8.3.8"
+  }
+}

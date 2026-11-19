@@ -159,6 +159,8 @@ GEM
       actionpack (>= 6.0.0)
       activesupport (>= 6.0.0)
       railties (>= 6.0.0)
+    inertia_rails (3.23.0)
+      railties (>= 6)
     io-console (0.8.2)
     io-endpoint (0.17.2)
     io-event (1.19.3)
@@ -317,6 +319,7 @@ DEPENDENCIES
   debug
   falcon
   importmap-rails
+  inertia_rails (~> 3.23)
   instant_record!
   json (< 3)
   metrics
