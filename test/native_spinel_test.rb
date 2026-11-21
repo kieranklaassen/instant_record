@@ -1,4 +1,5 @@
 require "test_helper"
+require "instant_record/compiler/toolchain"
 require "open3"
 require "tmpdir"
 
@@ -37,14 +38,9 @@ class NativeSpinelTest < ActiveSupport::TestCase
   def spinel_binary
     file = ENV["INSTANT_RECORD_TOOLCHAIN"]
     return unless file && File.file?(file)
-    values = {}
-    File.foreach(file) do |line|
-      key, value = line.strip.split("=", 2)
-      next if key.nil? || key.start_with?("#") || value.nil?
-      values.each { |known, replacement| value = value.gsub("$#{known}", replacement) }
-      values[key] = value
-    end
-    binary = File.join(values["SPINEL_HOME"].to_s, "bin/spinel")
+
+    toolchain = InstantRecord::Compiler::Toolchain.load(file)
+    binary = File.join(toolchain["SPINEL_HOME"].to_s, "bin/spinel")
     binary if File.executable?(binary)
   end
 end

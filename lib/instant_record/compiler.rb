@@ -2,66 +2,119 @@ require "fileutils"
 require "json"
 require "pathname"
 require "tmpdir"
+require_relative "compiler/runner"
+require_relative "compiler/toolchain"
+require_relative "compiler/path_scrubber"
+require_relative "compiler/browser_migrations"
+require_relative "compiler/app_stage"
+require_relative "compiler/gem_vendor"
+require_relative "compiler/entry_builder"
+require_relative "compiler/wasm_tree"
+require_relative "compiler/source_pages"
+require_relative "compiler/wasm_build"
+require_relative "compiler/native_build"
 
 module InstantRecord
-  # Stage the packaged compiler under the host app's tmp directory. A build never
-  # writes into an installed gem or replaces the host's public assets.
+  # Compiles a Rails app (or this repository's demo) into a static Wasm browser
+  # site or native iOS/macOS static libraries in-process from Ruby. A build never
+  # writes into an installed gem or replaces the host's public assets until publish.
   class Compiler
+    WEB_PARTS = %w[index.html vite.config.js package.json package-lock.json src].freeze
+
+    def self.gem_root
+      Pathname(__dir__).join("../..").realpath
+    end
+
     def self.build(root:, models:, toolchain:, endpoint:, baseline: nil, migration_paths: nil)
-      stage(root: root, models: models, toolchain: toolchain, endpoint: endpoint, baseline: baseline, migration_paths: migration_paths) do |workspace, env|
-        ok = system(env, "python3", workspace.join("pipeline/build.py").to_s)
-        raise "InstantRecord compilation failed. Build logs are in #{workspace.join('.build')}." unless ok
-        workspace.join("web/dist")
+      with_workspace(root: root, toolchain: toolchain, stage_web: true) do |workspace, parsed_toolchain, demo|
+        WasmBuild.new(
+          workspace: workspace,
+          gem_root: gem_root,
+          toolchain: parsed_toolchain,
+          app_source: demo ? nil : Pathname(root).realpath.to_s,
+          models: models,
+          endpoint: endpoint,
+          baseline: baseline,
+          migration_paths: migration_paths || [Pathname(root).realpath.join("db/migrate").to_s]
+        ).run
       end
     end
 
     # The same app as libraries a native host links: for this machine, or
     # with target "iphonesimulator" or "iphoneos" for the iOS simulator or
-    # an iPhone. Returns the folder
-    # that holds them.
+    # an iPhone. Returns the folder that holds them.
     def self.build_native(root:, models:, toolchain:, endpoint:, target: nil, baseline: nil, migration_paths: nil)
-      stage(root: root, models: models, toolchain: toolchain, endpoint: endpoint, baseline: baseline, migration_paths: migration_paths) do |workspace, env|
-        ok = system(env, "python3", workspace.join("pipeline/build_native.py").to_s, *[target].compact)
-        raise "InstantRecord native build failed. Build logs are in #{workspace.join('.build-native')}." unless ok
-        workspace.join(*[".build-native", target].compact)
+      with_workspace(root: root, toolchain: toolchain, stage_web: false) do |workspace, parsed_toolchain, demo|
+        NativeBuild.new(
+          workspace: workspace,
+          gem_root: gem_root,
+          toolchain: parsed_toolchain,
+          app_source: demo ? nil : Pathname(root).realpath.to_s,
+          models: models,
+          endpoint: endpoint,
+          target: target,
+          baseline: baseline,
+          migration_paths: migration_paths || [Pathname(root).realpath.join("db/migrate").to_s]
+        ).run
       end
     end
 
-    # Copies the compiler under the app's tmp folder and yields it with the
-    # environment a build runs in, holding the workspace's lock.
-    def self.stage(root:, models:, toolchain:, endpoint:, baseline:, migration_paths:)
-      root = Pathname(root).realpath
-      gem_root = Pathname(__dir__).join("../..").realpath
-      toolchain = Pathname(toolchain).expand_path
-      raise ArgumentError, "Missing compiler toolchain file: #{toolchain}" unless toolchain.file?
-      workspace = root.join("tmp/instant_record/compiled")
+    # Build the repository's own demo into compiled/web/dist.
+    def self.build_demo(toolchain: nil, endpoint: nil, shell_snapshot: nil)
+      compiled_root = gem_root.join("compiled")
+      toolchain_path = toolchain || ENV.fetch("INSTANT_RECORD_TOOLCHAIN") { compiled_root.join("toolchain.env").to_s }
+      WasmBuild.new(
+        workspace: compiled_root,
+        gem_root: gem_root,
+        toolchain: toolchain_path,
+        endpoint: endpoint,
+        shell_snapshot: shell_snapshot
+      ).run
+    end
+
+    # Build the repository's own demo into compiled/.build-native[/target].
+    def self.build_demo_native(target: nil, toolchain: nil, endpoint: nil)
+      compiled_root = gem_root.join("compiled")
+      toolchain_path = toolchain || ENV.fetch("INSTANT_RECORD_TOOLCHAIN") { compiled_root.join("toolchain.env").to_s }
+      NativeBuild.new(
+        workspace: compiled_root,
+        gem_root: gem_root,
+        toolchain: toolchain_path,
+        endpoint: endpoint,
+        target: target
+      ).run
+    end
+
+    def self.doctor(toolchain:, target: :wasm, web_dir: nil)
+      Toolchain.load(toolchain).doctor(target: target, web_dir: web_dir)
+    end
+
+    def self.scrub_path(path, prefix)
+      PathScrubber.scrub(path, prefix)
+    end
+
+    def self.with_workspace(root:, toolchain:, stage_web:)
+      app_root = Pathname(root).realpath
+      parsed_toolchain = toolchain.is_a?(Toolchain) ? toolchain : Toolchain.load(toolchain)
+      workspace = app_root.join("tmp/instant_record/compiled")
       FileUtils.mkdir_p(workspace)
+
       File.open(workspace.join(".lock"), "a") do |lock|
         lock.flock(File::LOCK_EX)
-        package = gem_root.join("compiled")
-        # Remove prior compiler sources so a removed overlay cannot survive a gem upgrade.
-        FileUtils.rm_rf(workspace.join("pipeline"))
-        FileUtils.cp_r(package.join("pipeline"), workspace)
-        web = workspace.join("web")
-        FileUtils.mkdir_p(web)
-        FileUtils.rm_rf(web.join("src"))
-        %w[index.html vite.config.js package.json package-lock.json src].each do |part|
-          FileUtils.cp_r(package.join("web", part), web)
+        if stage_web
+          package = gem_root.join("compiled/web")
+          web = workspace.join("web")
+          FileUtils.mkdir_p(web)
+          FileUtils.rm_rf(web.join("src"))
+          WEB_PARTS.each do |part|
+            FileUtils.cp_r(package.join(part), web)
+          end
         end
-        demo = root == gem_root.join("demo")
-        yield workspace, {
-          "GEM_SRC" => gem_root.to_s,
-          "INSTANT_RECORD_APP" => demo ? nil : root.to_s,
-          "INSTANT_RECORD_MODELS" => JSON.generate(models),
-          "INSTANT_RECORD_MIGRATION_BASELINE" => baseline&.to_s,
-          "INSTANT_RECORD_MIGRATION_PATHS" => JSON.generate(migration_paths || [root.join("db/migrate").to_s]),
-          "INSTANT_RECORD_TOOLCHAIN" => toolchain.to_s,
-          "SYNC_ENDPOINT" => endpoint,
-          "PYTHONDONTWRITEBYTECODE" => "1"
-        }
+        demo = app_root == gem_root.join("demo")
+        yield workspace, parsed_toolchain, demo
       end
     end
-    private_class_method :stage
+    private_class_method :with_workspace
 
     def self.publish(root)
       workspace = Pathname(root).join("tmp/instant_record/compiled")
@@ -72,6 +125,7 @@ module InstantRecord
         dist = workspace.join("web/dist")
         version = JSON.parse(dist.join("instant-record-release.json").read).fetch("version")
         raise "Invalid compiled release version" unless version.match?(/\A[0-9a-f]{64}\z/)
+
         destination = public_root.join(version)
         unless destination.directory?
           Dir.mktmpdir(".release-", public_root) do |temp|

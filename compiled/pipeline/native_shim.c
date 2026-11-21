@@ -1,7 +1,7 @@
 /* Native reactor bridge for Spinel (--ext-init app_boot): reactor_shim.c for a
    host that links the app as a library. The browser's host trades strings with
    Ruby through a WASI directory. Here they pass through named slots in memory,
-   which Ruby reaches as NativeHost (make_native_entry.py). */
+   which Ruby reaches as NativeHost (EntryBuilder). */
 #include "app.h"
 #include "instant_record_native.h"
 #include <stdio.h>

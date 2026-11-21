@@ -32,6 +32,20 @@ namespace :instant_record do
     output = InstantRecord::Compiler.build_native(**options, target: args[:target])
     puts "Native libraries: #{output}"
   end
+
+  desc "Verify the compiler toolchain configuration (optional target: wasm, native, iphonesimulator, iphoneos)"
+  task :doctor, [:target] => :environment do |_task, args|
+    require "instant_record/compiler"
+    toolchain = ENV.fetch("INSTANT_RECORD_TOOLCHAIN") { Rails.root.join("config/instant_record_toolchain.env") }
+    abort "No toolchain file at #{toolchain}. Run bin/rails generate instant_record:install, or set INSTANT_RECORD_TOOLCHAIN." unless File.file?(toolchain)
+    report = InstantRecord::Compiler.doctor(
+      toolchain: toolchain,
+      target: args[:target] || :wasm,
+      web_dir: Rails.root.join("tmp/instant_record/compiled/web")
+    )
+    puts report
+    abort "Toolchain check failed." unless report.ok?
+  end
 end
 
 Rake::Task.define_task("assets:precompile").enhance do

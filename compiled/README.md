@@ -8,7 +8,7 @@ Rails sync endpoint. This backend uses an experimental compiler toolchain.
 
 ## Install the toolchain
 
-Use Python 3, Node and npm, a C toolchain, and the following build inputs:
+Use Ruby 3.3+, Node and npm, a C toolchain, and the following build inputs:
 
 - [Spinel](https://github.com/matz/spinel) at `7c56323d2`, including its WASI runtime and bundled packages. Build it with `make` and `make wasm-rt`.
 - [Roundhouse](https://github.com/rubys/roundhouse) at `b937108ce`. Build the release binary with `cargo build --release`.
@@ -37,6 +37,7 @@ The Rails sync server keeps its existing database.
 
 ```sh
 bin/rails db:migrate
+bin/rails instant_record:doctor
 bin/rails instant_record:compile
 ```
 
@@ -108,7 +109,7 @@ schemas require an app-specific migration strategy. A fresh app needs no baselin
 From this repository, copy the config to `compiled/toolchain.env` and run:
 
 ```sh
-python3 compiled/pipeline/build.py
+bundle exec rake compile   # or: ruby compiled/pipeline/build.rb
 node compiled/bench/serve.mjs
 ```
 
@@ -130,11 +131,11 @@ apply their release migrations at boot. The sync server remains authoritative ac
 
 ## A native library (experimental)
 
-The same models can run outside a browser. `build_native.py` compiles the demo,
+The same models can run outside a browser. `build_native.rb` (or `bundle exec rake compile:native`) compiles the demo,
 with the screens in `demo/app/screens`, to a C library and a small host program:
 
 ```sh
-python3 compiled/pipeline/build_native.py
+bundle exec rake compile:native   # or: ruby compiled/pipeline/build_native.rb
 cd demo && INSTANT_RECORD_NATIVE_HOST=../compiled/.build-native/host bin/rails test test/integration/native_inbox_test.rb
 ```
 
@@ -151,11 +152,9 @@ back with one request and the host answers. A host that must not wait on the
 network inside a call asks `sync_plan` and `cursor` what a pass will request,
 fetches those itself, and answers the pass from what it fetched.
 
-Both builds end with the same entry, written once in
-`pipeline/entry_template.py` and filled by `make_wasm_entry.py` and
-`make_native_entry.py`. The class a screen's file holds is decided in Ruby
-alone (`InstantRecord::Native.class_name`), which the build asks through
-`pipeline/native_screens.rb`.
+Both builds end with the same entry, built in Ruby by
+`InstantRecord::Compiler::EntryBuilder`. The class a screen's file holds is
+decided in Ruby alone (`InstantRecord::Native.class_name`).
 
 `pipeline/native/host.c` is that host with no screen, driven over standard
 input. The test starts it, answers its requests from the Rails app, and checks
@@ -190,7 +189,7 @@ prop ... end`), as a Rails action hands a React page its props.
 ### On iPhone
 
 ```sh
-python3 compiled/pipeline/build_native.py iphonesimulator
+bundle exec rake "compile:native[iphonesimulator]"   # or: ruby compiled/pipeline/build_native.rb iphonesimulator
 ```
 
 builds the same library for the iOS simulator, with Spinel's runtime and the
@@ -213,7 +212,7 @@ What ran, on macOS arm64 with Xcode 27.2 and the iPhone 17 simulator on iOS
   filter from its bar menus, and archives with the server stopped. The
   archive reached the server on the next launch after it came back.
 
-`build_native.py iphoneos` builds the same two libraries for a device, and the
+`build_native.rb iphoneos` builds the same two libraries for a device, and the
 Inbox builds against them unsigned. What did not run: nothing was signed or
 installed on a phone.
 
@@ -221,9 +220,9 @@ installed on a phone.
 
 `deploy/` serves the built folder as a static site: nginx in a container, deployed with Kamal.
 
-    SYNC_ENDPOINT=https://your-rails-app.example/instant_record python3 pipeline/build.py
+    SYNC_ENDPOINT=https://your-rails-app.example/instant_record ruby pipeline/build.rb
     cp -R web/dist deploy/site
-    python3 deploy/scrub_path.py deploy/site/app-*.wasm "$PWD/.build/wasm-tree"
+    ruby deploy/scrub_path.rb deploy/site/app-*.wasm "$PWD/.build/wasm-tree"
     cd deploy
     cp deploy.env.example .kamal/deploy.env    # fill in, then:
     source .kamal/deploy.env
@@ -233,7 +232,7 @@ installed on a phone.
 - Give it its own hostname, or replace the ruby.wasm build on its host (below). It cannot live
   under a path next to that build: that build's service worker takes over every request on its
   origin.
-- The module contains the absolute path of the folder it was built in; `scrub_path.py` replaces
+- The module contains the absolute path of the folder it was built in; `scrub_path.rb` replaces
   it with a neutral one of the same length.
 - Every path that is not a file serves the shell page, so deep links and reloads work.
 - The build copies the app's `app/views/pwa/service-worker.js` to `/service-worker.js`, and the
