@@ -23,9 +23,8 @@ namespace :compile do
   desc "Verify compiled/toolchain.env for a target (wasm, native, iphonesimulator, iphoneos)"
   task :doctor, [:target] do |_task, args|
     require_relative "lib/instant_record/compiler"
-    toolchain = ENV.fetch("INSTANT_RECORD_TOOLCHAIN") { File.expand_path("compiled/toolchain.env", __dir__) }
     report = InstantRecord::Compiler.doctor(
-      toolchain: toolchain,
+      toolchain: InstantRecord::Compiler.demo_toolchain,
       target: args[:target] || :wasm,
       web_dir: File.expand_path("compiled/web", __dir__)
     )

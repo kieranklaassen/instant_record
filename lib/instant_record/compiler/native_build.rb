@@ -1,6 +1,6 @@
+require "etc"
 require "fileutils"
 require "pathname"
-require "rbconfig"
 require_relative "entry_builder"
 require_relative "runner"
 require_relative "toolchain"
@@ -16,7 +16,7 @@ module InstantRecord
       CFLAGS = %w[-O2 -Wno-all -ffp-contract=off -DSP_INT_OVERFLOW_MODE_RAISE].freeze
       SQLITE_CFLAGS = %w[-O2 -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION].freeze
       RUNTIME_CFLAGS = %w[-O2 -Wno-all -ffunction-sections -fdata-sections -ffp-contract=off].freeze
-      PACKAGES = %w[json stringio zlib].freeze
+      PACKAGES = WasmBuild::SPINEL_PACKAGES
       IOS_MINIMUM = "17.0"
 
       # Fields of a screen's node that Spinel did not type as a hash of strings.
@@ -71,7 +71,7 @@ module InstantRecord
         @workspace = File.expand_path(workspace.to_s)
         @gem_root = File.expand_path(gem_root.to_s)
         @pipeline_dir = File.join(@gem_root, "compiled/pipeline")
-        @toolchain = toolchain.is_a?(Toolchain) ? toolchain : Toolchain.load(toolchain)
+        @toolchain = Toolchain.load(toolchain)
         @app_source = app_source ? File.expand_path(app_source.to_s) : nil
         @demo = @app_source.nil?
         @models = models
@@ -212,7 +212,7 @@ module InstantRecord
 
       def ios_cc(target)
         sdk = @runner.run(["xcrun", "--sdk", target, "--show-sdk-path"]).strip
-        arch = RbConfig::CONFIG["host_cpu"]
+        arch = Etc.uname[:machine]
         triple = target == "iphoneos" ? "arm64-apple-ios#{IOS_MINIMUM}" : "#{arch}-apple-ios#{IOS_MINIMUM}-simulator"
         ["xcrun", "--sdk", target, "clang", "-target", triple, "-isysroot", sdk]
       end

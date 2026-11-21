@@ -20,14 +20,14 @@ module InstantRecord
         opts = {}
         opts[:chdir] = cwd.to_s if cwd
 
-        output, status = Open3.capture2e(merged_env, *cmd, **opts)
+        output, status = Open3.capture2e(merged_env, [cmd.first, cmd.first], *cmd[1..], **opts)
         if log
           FileUtils.mkdir_p(@build_dir)
           File.write(File.join(@build_dir, log), output)
         end
 
         unless status.success?
-          filtered = output.lines.reject { |line| line.include?("--rbs") || line.include?("warning:") }.join
+          filtered = output.scrub.lines.reject { |line| line.include?("--rbs") || line.include?("warning:") }.join
           tail = filtered.length > 1500 ? filtered[-1500..] : filtered
           location = log ? " (see #{File.join(@build_dir, log)})" : ""
           raise BuildError, "build step failed: #{cmd.first(3).join(' ')}#{location}\n#{tail}"

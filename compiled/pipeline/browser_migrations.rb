@@ -7,7 +7,8 @@ BrowserMigrations = InstantRecord::Compiler::BrowserMigrations unless defined?(:
 
 if $PROGRAM_NAME == __FILE__
   root, output = ARGV
-  migration_paths = ENV["INSTANT_RECORD_MIGRATION_PATHS"]&.then { |raw| JSON.parse(raw) }
+  raw_paths = ENV["INSTANT_RECORD_MIGRATION_PATHS"]
+  migration_paths = raw_paths && !raw_paths.empty? ? JSON.parse(raw_paths) : nil
   plan = InstantRecord::Compiler::BrowserMigrations.plan(
     root: root,
     baseline: ENV["INSTANT_RECORD_MIGRATION_BASELINE"],

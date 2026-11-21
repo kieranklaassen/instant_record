@@ -29,6 +29,37 @@ class CompilerTest < ActiveSupport::TestCase
     end
   end
 
+  test "Toolchain expands $VAR without prefix collisions and does not search PATH for missing slash paths" do
+    Dir.mktmpdir do |dir|
+      env_file = File.join(dir, "toolchain.env")
+      File.write(env_file, <<~ENV)
+        TOOLS=/opt/a
+        TOOLS_CACHE=/opt/b
+        BIN=$TOOLS_CACHE/bin
+      ENV
+
+      tc = InstantRecord::Compiler::Toolchain.load(env_file)
+      assert_equal "/opt/b/bin", tc.fetch("BIN")
+      assert_nil InstantRecord::Compiler::Toolchain.which("./definitely-not-a-real-binary")
+    end
+  end
+
+  test "FileCopy.copy_tree dereferences directory symlinks without crashing or looping" do
+    Dir.mktmpdir do |dir|
+      src = File.join(dir, "src")
+      shared = File.join(dir, "shared")
+      dst = File.join(dir, "dst")
+      FileUtils.mkdir_p(src)
+      FileUtils.mkdir_p(shared)
+      File.write(File.join(shared, "helper.rb"), "# shared\n")
+      File.symlink(shared, File.join(src, "linked"))
+      File.symlink(src, File.join(shared, "cycle"))
+
+      InstantRecord::Compiler::FileCopy.copy_tree(src, dst)
+      assert_equal "# shared\n", File.read(File.join(dst, "linked/helper.rb"))
+    end
+  end
+
   test "Toolchain.load raises ArgumentError when file is missing" do
     assert_raises(ArgumentError) do
       InstantRecord::Compiler::Toolchain.load("/nonexistent/instant_record_toolchain.env")
@@ -110,6 +141,18 @@ class CompilerTest < ActiveSupport::TestCase
       assert_equal ["UPDATE tasks SET title = trim(title);"], plan["migrations"]["20261120000002"]
       assert_equal 64, plan["history"]["20261120000001"].length
       assert_equal original_connection_id, ActiveRecord::Base.connection.object_id
+
+      # Leading-zero baseline parses as base 10 (not octal) and stamps schema version cleanly.
+      zero_padded = InstantRecord::Compiler::BrowserMigrations.plan(root: dir, baseline: "00000020261120000002")
+      assert_equal 20261120000002, zero_padded["baseline"]
+      assert_empty zero_padded["migrations"]
+      steps = InstantRecord::Compiler::EntryBuilder.migrations(
+        demo: false,
+        plan: zero_padded,
+        previous: 'InstantRecord::SyncMetadata.get("schema_version").to_s',
+        applied: 'InstantRecord::SyncMetadata.set("schema_version", "<<version>>")'
+      )
+      assert_includes steps, 'InstantRecord::SyncMetadata.set("schema_version", "00000020261120000002")'
     end
   end
 
@@ -166,7 +209,6 @@ class CompilerTest < ActiveSupport::TestCase
           server_only do
             before_action :require_server_secret
           end
-
           browser_only do
             skip_forgery_protection
           end
@@ -353,6 +395,20 @@ class CompilerTest < ActiveSupport::TestCase
         )
       end
       assert_equal calls_before, File.read(fake[:call_log]).lines.count
+
+      # Updating WEB_NODE_MODULES replaces a stale symlink cleanly.
+      new_modules = File.join(dir, "tools/web_node_modules_v2")
+      FileUtils.mkdir_p(new_modules)
+      File.write(fake[:toolchain_file], File.read(fake[:toolchain_file]).sub("web_node_modules", "web_node_modules_v2"))
+      with_path(fake[:bin_dir]) do
+        InstantRecord::Compiler.build(
+          root: app_root,
+          models: ["Task"],
+          toolchain: fake[:toolchain_file],
+          endpoint: "/instant_record"
+        )
+      end
+      assert_equal new_modules, File.readlink(Pathname(app_root).realpath.join("tmp/instant_record/compiled/web/node_modules"))
 
       # Native host build runs end-to-end and outputs libinstant_record_app.a + host.
       native_out = with_path(fake[:bin_dir]) do

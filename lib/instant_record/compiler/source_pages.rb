@@ -24,6 +24,7 @@ module InstantRecord
 
       def write(app_dir:, dist_dir:, version:, demo_dir:, pipeline_dir:)
         root = Pathname(app_dir)
+        demo_root = Pathname(demo_dir)
         dest = Pathname(dist_dir).join("assets", "source", version)
         FileUtils.mkdir_p(dest)
 
@@ -32,28 +33,24 @@ module InstantRecord
           files << ["app/controllers/#{controller}_controller.rb", root.join("app/controllers/#{controller}_controller.rb")]
           files << ["app/views/#{controller}/#{action}.html.erb", root.join("app/views/#{controller}/#{action}.html.erb")]
 
-          if %w[assistant email].include?(key)
-            script = key == "assistant" ? "app/javascript/controllers/assistant_chat_controller.js" : "app/frontend/pages/Email/Inbox.jsx"
-            files << [script, root.join(script)]
-          end
-
-          if key == "assistant"
-            %w[app/views/assistant/turns/_turns.html.erb app/javascript/controllers/assistant_local_model.js].each do |part|
-              files << [part, root.join(part)]
-            end
+          case key
+          when "email"
+            files << ["app/frontend/pages/Email/Inbox.jsx", root.join("app/frontend/pages/Email/Inbox.jsx")]
+          when "assistant"
+            %w[
+              app/javascript/controllers/assistant_chat_controller.js
+              app/views/assistant/turns/_turns.html.erb
+              app/javascript/controllers/assistant_local_model.js
+            ].each { |part| files << [part, root.join(part)] }
             %w[app/jobs/assistant/reply_job.rb app/models/assistant/reply.rb].each do |server|
-              files << [server, Pathname(demo_dir).join(server)]
+              files << [server, demo_root.join(server)]
             end
-          end
-
-          if key == "auth"
+          when "auth"
             files << ["app/javascript/controllers/auth_controller.js", root.join("app/javascript/controllers/auth_controller.js")]
             %w[app/controllers/auth/sessions_controller.rb config/initializers/instant_record.rb].each do |server|
-              files << [server, Pathname(demo_dir).join(server)]
+              files << [server, demo_root.join(server)]
             end
-          end
-
-          if key == "migrate"
+          when "migrate"
             files[1] = ["compiled/pipeline/sqlite_release.rb", Pathname(pipeline_dir).join("sqlite_release.rb")]
           end
 

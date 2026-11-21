@@ -15,12 +15,12 @@ module InstantRecord
   class Compiler
     # Build the compiled browser app: Rails source -> seams -> Roundhouse -> Spinel -> wasm -> web/dist.
     class WasmBuild
-      SPINEL_FLAGS = [].freeze
       WASM_OPT_LEVEL = "-Oz"
       WASM_OPT_PASS = "-Oz"
-      STRIP = true
       SHELL_FORMAT = 1
       DEFAULT_SYNC_ENDPOINT = "http://127.0.0.1:3210/instant_record"
+      SPINEL_PACKAGES = %w[json stringio zlib].freeze
+      HOTWIRE_ASSETS = %w[turbo.min.js stimulus.min.js stimulus-loading.js].freeze
 
       REACTOR_EXPORTS = [
         "WasmBridge.handle_request",
@@ -85,9 +85,10 @@ module InstantRecord
         @gem_root = File.expand_path(gem_root.to_s)
         @pipeline_dir = File.join(@gem_root, "compiled/pipeline")
         @build_dir = File.expand_path((build_dir || File.join(@workspace, ".build")).to_s)
-        @toolchain = toolchain.is_a?(Toolchain) ? toolchain : Toolchain.load(toolchain)
+        @toolchain = Toolchain.load(toolchain)
         @app_source = app_source ? File.expand_path(app_source.to_s) : nil
         @demo = @app_source.nil?
+        @source_root = @app_source || File.join(@gem_root, "demo")
         @models = models
         @endpoint = (endpoint || ENV.fetch("SYNC_ENDPOINT", DEFAULT_SYNC_ENDPOINT)).to_s.sub(%r{/+\z}, "")
         @baseline = baseline
@@ -184,28 +185,27 @@ module InstantRecord
           File.join(@workspace, "web/vite.config.js"),
           File.join(@workspace, "web/package.json"),
           File.join(@workspace, "web/package-lock.json"),
-          File.join(@gem_root, "lib/instant_record.rb")
+          File.join(@gem_root, "lib/instant_record.rb"),
+          File.join(@gem_root, "sig/instant_record/native.rbs")
         ].select { |p| File.file?(p) }
 
         inputs = [
           [@pipeline_dir, ["."]],
           [@workspace, ["web/src"]],
-          [@gem_root, ["lib/instant_record", "app/models/instant_record"]]
+          [@gem_root, ["lib/instant_record", "app/models/instant_record"]],
+          [@source_root, ["app", "config/routes", "config/locales"]]
         ]
 
-        source_root = @app_source || File.join(@gem_root, "demo")
-        inputs << [source_root, ["app", "config/routes", "config/locales"]]
-
         unless @demo
-          inputs << [source_root, ["db/browser_migrate"]]
-          Array(@migration_paths || [File.join(source_root, "db/migrate")]).each do |dir|
+          inputs << [@source_root, ["db/browser_migrate"]]
+          Array(@migration_paths || [File.join(@source_root, "db/migrate")]).each do |dir|
             inputs << [dir, ["."]]
           end
           digest.update(@baseline.to_s)
         end
 
-        %w[config/routes.rb config/application.rb config/importmap.rb db/schema.rb Gemfile].each do |name|
-          candidate = File.join(source_root, name)
+        AppStage::FILES.each do |name|
+          candidate = File.join(@source_root, name)
           paths << candidate if File.file?(candidate)
         end
 
@@ -217,7 +217,8 @@ module InstantRecord
             full = folder == "." ? base_root : File.join(base_root, folder)
             next unless File.directory?(full)
 
-            Dir.glob(File.join(full, "**/*")).each do |entry|
+            Dir.glob("**/*", File::FNM_DOTMATCH, base: full).each do |rel|
+              entry = File.join(full, rel)
               paths << entry if File.file?(entry) && !entry.end_with?(".pyc")
             end
           end
@@ -332,17 +333,19 @@ module InstantRecord
 
           versions[name] = Digest::SHA256.file(file).hexdigest[0, 10]
         end
+        return if versions.empty?
 
         %w[config/importmap.rb config/application.rb].each do |config|
           path = File.join(emit, config)
           next unless File.file?(path)
 
           source = File.read(path)
+          updated = source
           versions.each do |name, version|
             asset = "/assets/controllers/#{name}"
-            source = source.gsub(asset, "#{asset}?v=#{version}")
+            updated = updated.gsub(asset, "#{asset}?v=#{version}")
           end
-          File.write(path, source)
+          File.write(path, updated) if updated != source
         end
       end
 
@@ -385,7 +388,7 @@ module InstantRecord
             "spinel", "--target=wasm32-wasi", "-c",
             "--ext-init", "app_boot",
             "--ext-entry", REACTOR_EXPORTS,
-            *flags, *SPINEL_FLAGS,
+            *flags,
             "main_wasm.rb", "-o", app_c
           ],
           cwd: tree,
@@ -395,12 +398,12 @@ module InstantRecord
 
         spinel_home = @toolchain.fetch("SPINEL_HOME")
         clang = @toolchain.join("WASI_SDK", "bin/clang")
-        pkg_objs = %w[json stringio zlib].map { |pkg| File.join(spinel_home, "packages", pkg, "sp_#{pkg}_wasi.o") }
+        pkg_objs = SPINEL_PACKAGES.map { |pkg| File.join(spinel_home, "packages", pkg, "sp_#{pkg}_wasi.o") }
 
         @runner.run(
           [
             clang, *WASI_CFLAGS, "-mexec-model=reactor", WASM_OPT_LEVEL,
-            "-Wno-all", "-ffunction-sections", "-fdata-sections", "-ffp-contract=off",
+            "-Wno-all", "-ffp-contract=off",
             "-DSP_INT_OVERFLOW_MODE_RAISE",
             "-I#{File.join(spinel_home, 'lib')}",
             "-I#{File.join(spinel_home, 'lib/regexp')}",
@@ -427,19 +430,30 @@ module InstantRecord
       end
 
       def optimize_wasm(tree, wasm)
-        final = wasm
-        if STRIP
-          stripped = File.join(tree, "build/app.stripped.wasm")
-          @runner.run([@toolchain.join("WASI_SDK", "bin/llvm-strip"), "-o", stripped, final])
-          final = stripped
-        end
+        stripped = File.join(tree, "build/app.stripped.wasm")
+        @runner.run([@toolchain.join("WASI_SDK", "bin/llvm-strip"), "-o", stripped, wasm])
+        final = stripped
+
         wasm_opt = Toolchain.which("wasm-opt")
-        if wasm_opt && WASM_OPT_PASS && !WASM_OPT_PASS.empty?
+        if wasm_opt
           opted = File.join(tree, "build/app.opt.wasm")
           @runner.run([wasm_opt, WASM_OPT_PASS, *WASM_OPT_FEATURES, final, "-o", opted], cwd: tree, log: "wasm-opt.log")
           final = opted
         end
         final
+      end
+
+      def ensure_web_node_modules(web)
+        modules = File.join(web, "node_modules")
+        configured = @toolchain["WEB_NODE_MODULES"]
+        if File.symlink?(modules)
+          if configured && !configured.empty? && File.readlink(modules) != configured
+            File.delete(modules)
+            File.symlink(configured, modules)
+          end
+        elsif !File.exist?(modules)
+          File.symlink(@toolchain.fetch("WEB_NODE_MODULES"), modules)
+        end
       end
 
       def build_web_site(emitted, final_wasm, wanted)
@@ -448,19 +462,12 @@ module InstantRecord
         plan = emitted[:plan]
 
         web = File.join(@workspace, "web")
-        modules = File.join(web, "node_modules")
-        unless File.exist?(modules) || File.symlink?(modules)
-          web_node_modules = @toolchain.fetch("WEB_NODE_MODULES")
-          File.symlink(web_node_modules, modules)
-        end
+        ensure_web_node_modules(web)
 
         digest = Digest::SHA256.file(final_wasm).hexdigest[0, 10]
         dist = File.join(@build_dir, "site")
 
-        main_wasm_source = File.read(File.join(emit, "main_wasm.rb"))
-        model_set = main_wasm_source[/model_set = "([^"]*)"/, 1]
-        raise BuildError, "Missing model_set in #{File.join(emit, 'main_wasm.rb')}" unless model_set
-
+        model_set = EntryBuilder.app_models(demo: @demo, models: @models).sort.join(",")
         schema_source = File.read(File.join(app, "db/schema.rb"))
         shell_fingerprint = Digest::SHA256.hexdigest([SHELL_FORMAT.to_s, model_set, schema_source].join("\n"))
         schema_digest = Digest::SHA256.file(File.join(emit, "config/schema.rb")).hexdigest
@@ -505,41 +512,47 @@ module InstantRecord
             app_dir: app,
             dist_dir: dist,
             version: wanted[0, 12],
-            demo_dir: File.join(@gem_root, "demo"),
+            demo_dir: @source_root,
             pipeline_dir: @pipeline_dir
           )
         end
 
-        source_root = @app_source || File.join(@gem_root, "demo")
-        shell_worker = File.join(source_root, "app/views/pwa/service-worker.js")
+        shell_worker = File.join(@source_root, "app/views/pwa/service-worker.js")
         FileUtils.cp(shell_worker, File.join(dist, "service-worker.js")) if File.file?(shell_worker)
 
-        inject_preloads(dist, source_root)
+        inject_preloads(dist, @source_root)
         [dist, digest]
       end
 
       def copy_hotwire_assets(assets)
+        found = {}
+        pattern = "**/{#{HOTWIRE_ASSETS.join(',')}}"
+
         rails_gems = @toolchain["RAILS_GEMS"]
-        %w[turbo.min.js stimulus.min.js stimulus-loading.js].each do |name|
-          found = find_hotwire_asset(name, rails_gems)
-          FileUtils.cp(found, assets) if found
-        end
-      end
-
-      def find_hotwire_asset(name, rails_gems)
         if rails_gems && File.directory?(rails_gems)
-          match = Dir.glob(File.join(rails_gems, "**", name)).sort.first
-          return match if match
+          Dir.glob(pattern, base: rails_gems).sort.each do |rel|
+            name = File.basename(rel)
+            found[name] ||= File.join(rails_gems, rel)
+          end
         end
 
-        %w[turbo-rails stimulus-rails].each do |gem_name|
-          spec = Gem.loaded_specs[gem_name]
-          next unless spec
+        missing = HOTWIRE_ASSETS - found.keys
+        unless missing.empty?
+          missing_pattern = "**/{#{missing.join(',')}}"
+          %w[turbo-rails stimulus-rails].each do |gem_name|
+            spec = Gem.loaded_specs[gem_name]
+            next unless spec && File.directory?(spec.full_gem_path)
 
-          match = Dir.glob(File.join(spec.full_gem_path, "**", name)).sort.first
-          return match if match
+            Dir.glob(missing_pattern, base: spec.full_gem_path).sort.each do |rel|
+              name = File.basename(rel)
+              found[name] ||= File.join(spec.full_gem_path, rel)
+            end
+          end
         end
-        nil
+
+        HOTWIRE_ASSETS.each do |name|
+          FileUtils.cp(found[name], assets) if found[name]
+        end
       end
 
       def swap_dist(dist, output)

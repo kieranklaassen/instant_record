@@ -213,7 +213,7 @@ module InstantRecord
 
         steps = ["if restored", "  previous = #{previous}"]
         migrations_map = plan.fetch("migrations", {})
-        migrations_map.each do |version, statements|
+        migrations_map.sort_by { |version, _| version.to_i }.each do |version, statements|
           steps << %(  if previous < "#{format('%020d', version.to_i)}")
           statements.each do |sql|
             literal = JSON.generate(sql)
@@ -226,7 +226,7 @@ module InstantRecord
         end
         steps << "end"
         unless applied.empty?
-          latest = migrations_map.keys.map(&:to_i).max || 0
+          latest = [plan["version"].to_i, *migrations_map.keys.map(&:to_i)].max
           steps << applied.gsub("<<version>>") { format("%020d", latest) }
         end
         "\n#{steps.join("\n")}\n"
@@ -357,14 +357,17 @@ module InstantRecord
       def rewrite_native_client_host(tree_dir)
         client_dir = File.join(tree_dir, "app/models/instant_record/client")
         seams = 0
-        Dir.glob(File.join(client_dir, "**/*.rb")).sort.each do |path|
-          text = File.read(path)
-          changed = text.gsub(/File\.read\("\/host\/(\w+)"\)/, 'NativeHost.ir_host_take("\1")')
-          changed = changed.gsub(/File\.write\("\/host\/(\w+)", /, 'NativeHost.ir_host_give("\1", ')
-          changed = changed.gsub(/File\.write\((?:[\w:]+::)?REQUEST, /, 'NativeHost.ir_host_give("request", ')
-          changed = changed.gsub(/File\.read\((?:[\w:]+::)?RESPONSE\)/, 'NativeHost.ir_host_take("response")')
-          File.write(path, changed) if changed != text
-          seams += 1 if changed.include?("NativeHost.")
+        if File.directory?(client_dir)
+          Dir.glob("**/*.rb", base: client_dir).sort.each do |rel|
+            path = File.join(client_dir, rel)
+            text = File.read(path)
+            changed = text.gsub(/File\.read\("\/host\/(\w+)"\)/, 'NativeHost.ir_host_take("\1")')
+            changed = changed.gsub(/File\.write\("\/host\/(\w+)", /, 'NativeHost.ir_host_give("\1", ')
+            changed = changed.gsub(/File\.write\((?:[\w:]+::)?REQUEST, /, 'NativeHost.ir_host_give("request", ')
+            changed = changed.gsub(/File\.read\((?:[\w:]+::)?RESPONSE\)/, 'NativeHost.ir_host_take("response")')
+            File.write(path, changed) if changed != text
+            seams += 1 if changed.include?("NativeHost.")
+          end
         end
         unless seams == 2
           raise BuildError, "expected the transport and the notifier to reach the host, found #{seams} file(s)"

@@ -95,20 +95,11 @@ module InstantRecord
 
       def apply_core_seams
         # The staged source runs exclusively in the compiled runtime.
-        edit!("lib/instant_record.rb", "def browser? = false", "def browser? = true")
-        edit!("lib/instant_record.rb", "require \"instant_record/engine\" if defined?(Rails::Engine)\n", "")
-
-        # Screens are found by name through a generated `case` (EntryBuilder), not constant lookup.
-        FileUtils.mkdir_p(File.join(@app, "lib/instant_record/native"))
-        FileUtils.mkdir_p(File.join(@app, "sig/instant_record"))
-        FileUtils.cp(
-          File.join(@gem, "sig/instant_record/native.rbs"),
-          File.join(@app, "sig/instant_record/native.rbs")
-        )
-        File.write(
-          File.join(@app, "lib/instant_record/native.rb"),
-          "require \"instant_record/native/node\"\nrequire \"instant_record/native/screen\"\n"
-        )
+        edit_all!("lib/instant_record.rb", {
+          "def browser? = false" => "def browser? = true",
+          "require \"instant_record/engine\" if defined?(Rails::Engine)\n" => "",
+          "      klass = record_type.to_s.safe_constantize\n      klass if klass.respond_to?(:instant_record_syncable?) && klass.instant_record_syncable?\n" => "      nil\n"
+        })
 
         # Model discovery: ActiveRecord::Base.descendants has no AOT counterpart;
         # the gem's explicit allowlist (InstantRecord.sync) takes its place.
@@ -118,10 +109,16 @@ module InstantRecord
           "    end\n\n    # One record's attributes as they cross the wire",
           "      []\n"
         )
-        edit!(
-          "lib/instant_record.rb",
-          "      klass = record_type.to_s.safe_constantize\n      klass if klass.respond_to?(:instant_record_syncable?) && klass.instant_record_syncable?\n",
-          "      nil\n"
+
+        # Screens are found by name through a generated `case` (EntryBuilder), not constant lookup.
+        FileUtils.mkdir_p(File.join(@app, "sig/instant_record"))
+        FileUtils.cp(
+          File.join(@gem, "sig/instant_record/native.rbs"),
+          File.join(@app, "sig/instant_record/native.rbs")
+        )
+        File.write(
+          File.join(@app, "lib/instant_record/native.rb"),
+          "require \"instant_record/native/node\"\nrequire \"instant_record/native/screen\"\n"
         )
 
         # server_only / browser_only / client_only are unwrapped statically below.
@@ -146,11 +143,15 @@ module InstantRecord
         # The compiled models give a new record an empty-string id, not nil.
         edit!("app/models/concerns/syncable.rb", "self.id ||= SecureRandom.uuid", "self.id = SecureRandom.uuid if id.blank?")
 
-        Dir.glob(File.join(@app, "app/models/**/*.rb")).sort.each do |target|
-          source = File.read(target)
-          adapted = source.gsub("include InstantRecord::Syncable", "include Syncable")
-          adapted = strip_server_only(adapted)
-          File.write(target, adapted) if adapted != source
+        models_dir = File.join(@app, "app/models")
+        if File.directory?(models_dir)
+          Dir.glob("**/*.rb", base: models_dir).sort.each do |rel|
+            target = File.join(models_dir, rel)
+            source = File.read(target)
+            adapted = source.gsub("include InstantRecord::Syncable", "include Syncable")
+            adapted = strip_server_only(adapted)
+            File.write(target, adapted) if adapted != source
+          end
         end
       end
 
@@ -165,7 +166,8 @@ module InstantRecord
           root = File.join(@app, subdir)
           next unless File.directory?(root)
 
-          Dir.glob(File.join(root, "**/*.rb")).sort.each do |target|
+          Dir.glob("**/*.rb", base: root).sort.each do |rel|
+            target = File.join(root, rel)
             source = File.read(target)
             changed = strip_server_only(source)
             changed = unwrap_client_only(changed)
@@ -176,11 +178,15 @@ module InstantRecord
 
       def apply_demo_seams
         # Content-hash stylesheets so returning tabs pick up responsive fixes.
-        Dir.glob(File.join(@app, "app/assets/stylesheets/*.css")).sort.each do |sheet|
-          digest = Digest::SHA256.file(sheet).hexdigest[0, 10]
-          ext = File.extname(sheet)
-          stem = File.basename(sheet, ext)
-          File.rename(sheet, File.join(File.dirname(sheet), "#{stem}-#{digest}#{ext}"))
+        stylesheets_dir = File.join(@app, "app/assets/stylesheets")
+        if File.directory?(stylesheets_dir)
+          Dir.glob("*.css", base: stylesheets_dir).sort.each do |name|
+            sheet = File.join(stylesheets_dir, name)
+            digest = Digest::SHA256.file(sheet).hexdigest[0, 10]
+            ext = File.extname(sheet)
+            stem = File.basename(sheet, ext)
+            File.rename(sheet, File.join(stylesheets_dir, "#{stem}-#{digest}#{ext}"))
+          end
         end
 
         # Version the Inbox React bundle URL by its content digest.
@@ -204,21 +210,24 @@ module InstantRecord
         source = source.gsub('<% demo = controller_path.split("/").first %>', "<% demo = content_for(:demo_scope).to_s %>")
         File.write(layout_path, source)
 
-        views_root = Pathname(File.join(@app, "app/views"))
-        Dir.glob(File.join(@app, "app/views/**/*.html.erb")).sort.each do |view_file|
-          view = Pathname(view_file)
+        views_dir = File.join(@app, "app/views")
+        views_root = Pathname(views_dir)
+        Dir.glob("**/*.html.erb", base: views_dir).sort.each do |rel|
+          view = views_root.join(rel)
           next if view.basename.to_s.start_with?("_") || view.parent.basename.to_s == "layouts"
 
-          scope = view.relative_path_from(views_root).each_filename.first
+          scope = Pathname(rel).each_filename.first
           view.write("<% content_for(:demo_scope, \"#{scope}\") %>\n" + view.read)
         end
 
         # Route server-only actions through the worker's network marker.
         edit!("app/helpers/slack_helper.rb", "InstantRecord.server_url(slack_reset_path)", '"/slack/reset?instant_record_network=1"')
-        edit!("app/helpers/auth_helper.rb", "InstantRecord.server_url(auth_session_path)", '"/auth/session?instant_record_network=1"')
-        edit!("app/helpers/auth_helper.rb", "InstantRecord.server_url(auth_session_sign_out_path)", '"/auth/session/sign_out?instant_record_network=1"')
-        edit!("app/helpers/auth_helper.rb", 'InstantRecord.server_url("/instant_record/bootstrap")', '"/instant_record/bootstrap?instant_record_network=1"')
-        edit!("app/helpers/auth_helper.rb", 'InstantRecord.server_url("/instant_record/mutations")', '"/instant_record/mutations?instant_record_network=1"')
+        edit_all!("app/helpers/auth_helper.rb", {
+          "InstantRecord.server_url(auth_session_path)" => '"/auth/session?instant_record_network=1"',
+          "InstantRecord.server_url(auth_session_sign_out_path)" => '"/auth/session/sign_out?instant_record_network=1"',
+          'InstantRecord.server_url("/instant_record/bootstrap")' => '"/instant_record/bootstrap?instant_record_network=1"',
+          'InstantRecord.server_url("/instant_record/mutations")' => '"/instant_record/mutations?instant_record_network=1"'
+        })
 
         # Compiled code needs a single type across both branches of the ternary.
         edit!(
@@ -229,28 +238,35 @@ module InstantRecord
       end
 
       def strip_server_only(source)
-        source.gsub(/\n( *)server_only do\n.*?\n\1end\n/m, "\n")
+        source.gsub(/(?<=\n|\A)( *)server_only do\n.*?\n\1end\n?/m, "")
       end
 
       def unwrap_client_only(source)
-        source.gsub(/\n( *)(?:browser|client)_only do\n(.*?)\n\1end\n/m) do
+        source.gsub(/(?<=\n|\A)( *)(?:browser|client)_only do\n(.*?)\n\1end(?=\n|\z)/m) do
           indent = Regexp.last_match(1)
-          body = Regexp.last_match(2).split("\n", -1).map do |line|
+          Regexp.last_match(2).split("\n", -1).map do |line|
             line.start_with?("#{indent}  ") ? line[2..] : line
-          end
-          "\n#{body.join("\n")}\n"
+          end.join("\n")
         end
       end
 
       def edit!(rel, old, replacement)
+        edit_all!(rel, { old => replacement })
+      end
+
+      def edit_all!(rel, replacements)
         path = File.join(@app, rel)
         source = File.read(path)
-        unless source.include?(old)
-          return if !replacement.empty? && source.include?(replacement)
+        updated = source
+        replacements.each do |old, replacement|
+          unless updated.include?(old)
+            next if !replacement.empty? && updated.include?(replacement)
 
-          raise BuildError, "seam did not apply: #{rel}: #{old[0, 60].inspect}"
+            raise BuildError, "seam did not apply: #{rel}: #{old[0, 60].inspect}"
+          end
+          updated = updated.sub(old) { replacement }
         end
-        File.write(path, source.sub(old) { replacement })
+        File.write(path, updated) if updated != source
       end
 
       def cut!(rel, start_marker, end_marker, replacement)

@@ -1,5 +1,6 @@
 require "fileutils"
 require "pathname"
+require "set"
 require_relative "runner"
 
 module InstantRecord
@@ -7,8 +8,12 @@ module InstantRecord
     module FileCopy
       module_function
 
-      def copy_tree(source, target, ignore: [])
+      def copy_tree(source, target, ignore: [], visited: Set.new)
         source_path = Pathname(source)
+        real = source_path.realpath
+        return if visited.include?(real)
+
+        next_visited = visited + [real]
         target_path = Pathname(target)
         FileUtils.mkdir_p(target_path)
 
@@ -17,8 +22,8 @@ module InstantRecord
           next if ignore.include?(name)
 
           dest = target_path.join(name)
-          if entry.directory? && !entry.symlink?
-            copy_tree(entry, dest, ignore: ignore)
+          if entry.directory?
+            copy_tree(entry, dest, ignore: ignore, visited: next_visited)
           else
             FileUtils.cp(entry, dest)
           end
@@ -142,10 +147,7 @@ module InstantRecord
         FileCopy.copy_tree(demo_dir, target, ignore: IGNORE_PATTERNS)
 
         remove_list = native ? REMOVE : REMOVE + ["app/screens"]
-        remove_list.each do |rel|
-          path = File.join(target, rel)
-          FileUtils.rm_rf(path) if File.exist?(path) || File.symlink?(path)
-        end
+        remove_list.each { |rel| FileUtils.rm_rf(File.join(target, rel)) }
 
         File.write(File.join(target, "config/routes.rb"), DEMO_ROUTES)
 

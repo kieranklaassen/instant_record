@@ -25,18 +25,13 @@ module InstantRecord
       Pathname(__dir__).join("../..").realpath
     end
 
+    def self.demo_toolchain(toolchain = nil)
+      toolchain || ENV.fetch("INSTANT_RECORD_TOOLCHAIN") { gem_root.join("compiled/toolchain.env").to_s }
+    end
+
     def self.build(root:, models:, toolchain:, endpoint:, baseline: nil, migration_paths: nil)
-      with_workspace(root: root, toolchain: toolchain, stage_web: true) do |workspace, parsed_toolchain, demo|
-        WasmBuild.new(
-          workspace: workspace,
-          gem_root: gem_root,
-          toolchain: parsed_toolchain,
-          app_source: demo ? nil : Pathname(root).realpath.to_s,
-          models: models,
-          endpoint: endpoint,
-          baseline: baseline,
-          migration_paths: migration_paths || [Pathname(root).realpath.join("db/migrate").to_s]
-        ).run
+      with_workspace(root: root, toolchain: toolchain, stage_web: true) do |shared|
+        WasmBuild.new(**shared, models: models, endpoint: endpoint, baseline: baseline, migration_paths: migration_paths || shared[:migration_paths]).run
       end
     end
 
@@ -44,29 +39,17 @@ module InstantRecord
     # with target "iphonesimulator" or "iphoneos" for the iOS simulator or
     # an iPhone. Returns the folder that holds them.
     def self.build_native(root:, models:, toolchain:, endpoint:, target: nil, baseline: nil, migration_paths: nil)
-      with_workspace(root: root, toolchain: toolchain, stage_web: false) do |workspace, parsed_toolchain, demo|
-        NativeBuild.new(
-          workspace: workspace,
-          gem_root: gem_root,
-          toolchain: parsed_toolchain,
-          app_source: demo ? nil : Pathname(root).realpath.to_s,
-          models: models,
-          endpoint: endpoint,
-          target: target,
-          baseline: baseline,
-          migration_paths: migration_paths || [Pathname(root).realpath.join("db/migrate").to_s]
-        ).run
+      with_workspace(root: root, toolchain: toolchain, stage_web: false) do |shared|
+        NativeBuild.new(**shared, models: models, endpoint: endpoint, target: target, baseline: baseline, migration_paths: migration_paths || shared[:migration_paths]).run
       end
     end
 
     # Build the repository's own demo into compiled/web/dist.
     def self.build_demo(toolchain: nil, endpoint: nil, shell_snapshot: nil)
-      compiled_root = gem_root.join("compiled")
-      toolchain_path = toolchain || ENV.fetch("INSTANT_RECORD_TOOLCHAIN") { compiled_root.join("toolchain.env").to_s }
       WasmBuild.new(
-        workspace: compiled_root,
+        workspace: gem_root.join("compiled"),
         gem_root: gem_root,
-        toolchain: toolchain_path,
+        toolchain: demo_toolchain(toolchain),
         endpoint: endpoint,
         shell_snapshot: shell_snapshot
       ).run
@@ -74,12 +57,10 @@ module InstantRecord
 
     # Build the repository's own demo into compiled/.build-native[/target].
     def self.build_demo_native(target: nil, toolchain: nil, endpoint: nil)
-      compiled_root = gem_root.join("compiled")
-      toolchain_path = toolchain || ENV.fetch("INSTANT_RECORD_TOOLCHAIN") { compiled_root.join("toolchain.env").to_s }
       NativeBuild.new(
-        workspace: compiled_root,
+        workspace: gem_root.join("compiled"),
         gem_root: gem_root,
-        toolchain: toolchain_path,
+        toolchain: demo_toolchain(toolchain),
         endpoint: endpoint,
         target: target
       ).run
@@ -95,7 +76,7 @@ module InstantRecord
 
     def self.with_workspace(root:, toolchain:, stage_web:)
       app_root = Pathname(root).realpath
-      parsed_toolchain = toolchain.is_a?(Toolchain) ? toolchain : Toolchain.load(toolchain)
+      parsed_toolchain = Toolchain.load(toolchain)
       workspace = app_root.join("tmp/instant_record/compiled")
       FileUtils.mkdir_p(workspace)
 
@@ -111,7 +92,13 @@ module InstantRecord
           end
         end
         demo = app_root == gem_root.join("demo")
-        yield workspace, parsed_toolchain, demo
+        yield(
+          workspace: workspace,
+          gem_root: gem_root,
+          toolchain: parsed_toolchain,
+          app_source: demo ? nil : app_root.to_s,
+          migration_paths: [app_root.join("db/migrate").to_s]
+        )
       end
     end
     private_class_method :with_workspace

@@ -18,12 +18,14 @@ module InstantRecord
         version_match = schema.match(/\.define\s*\(\s*version:\s*([\d_]+)/)
         raise BuildError, "Missing db/schema.rb version" unless version_match
 
-        version = Integer(version_match[1])
-        baseline_int = baseline.nil? || baseline.to_s.empty? ? nil : Integer(baseline.to_s)
+        version = Integer(version_match[1], 10)
+        baseline_int = baseline.nil? || baseline.to_s.empty? ? nil : Integer(baseline.to_s, 10)
         raise BuildError, "Invalid browser migration baseline" if baseline_int && !(0..version).cover?(baseline_int)
 
         dirs = Array(migration_paths || [File.join(root, "db/migrate")])
-        paths = dirs.flat_map { |dir| Dir[File.join(dir, "[0-9]*_*.rb")] }.uniq.sort_by { |file| File.basename(file).to_i }
+        paths = dirs.flat_map { |dir| File.directory?(dir) ? Dir.glob("[0-9]*_*.rb", base: dir).map { |name| File.join(dir, name) } : [] }
+          .uniq
+          .sort_by { |file| File.basename(file).to_i }
 
         connection = ActiveRecord::ConnectionAdapters::SQLite3Adapter.new({ adapter: "sqlite3", database: ":memory:" })
         compiler = new(connection)

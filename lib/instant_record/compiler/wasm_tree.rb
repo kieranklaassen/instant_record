@@ -9,7 +9,7 @@ module InstantRecord
     class WasmTree
       IGNORE_PATTERNS = %w[build storage node_modules e2e test].freeze
       THREAD_CONSTANTS = %w[Thread Mutex Queue ConditionVariable Fiber].freeze
-      RENAMES = THREAD_CONSTANTS.map { |name| [/\b#{name}\b/, "Wasm#{name}"] }.freeze
+      THREAD_CONSTANT_RE = /\b(?:#{THREAD_CONSTANTS.join('|')})\b/
 
       WASM_THREADS_RB = <<~'RUBY'
         # Hand-written (see WasmTree): single-threaded stand-ins for the threading classes the
@@ -337,8 +337,7 @@ module InstantRecord
         FileCopy.copy_tree(@source, @target, ignore: IGNORE_PATTERNS)
 
         paths = runtime_paths
-        touched = rename_threading_constants(paths)
-        write_wasm_threads_shim(paths)
+        touched = adapt_threading_and_timeout(paths)
         patch_message_digest
         patch_sqlite_shims
         patch_model_datetime_casts
@@ -359,33 +358,22 @@ module InstantRecord
           dir = File.join(@target, folder)
           next unless File.directory?(dir)
 
-          paths.concat(Dir.glob(File.join(dir, "**/*.rb")).sort)
+          paths.concat(Dir.glob("**/*.rb", base: dir).sort.map { |rel| File.join(dir, rel) })
         end
         paths
       end
 
-      def rename_threading_constants(paths)
+      def adapt_threading_and_timeout(paths)
         touched = 0
         paths.each do |path|
           text = File.read(path)
-          renamed = text
-          RENAMES.each { |pattern, replacement| renamed = renamed.gsub(pattern, replacement) }
-          if renamed != text
-            File.write(path, renamed)
-            touched += 1
-          end
+          renamed = text.gsub(THREAD_CONSTANT_RE, 'Wasm\0')
+          touched += 1 if renamed != text
+          updated = renamed.gsub('require "timeout"', '# require "timeout"  (wasm: see runtime/wasm_threads.rb)')
+          File.write(path, updated) if updated != text
         end
-        touched
-      end
-
-      def write_wasm_threads_shim(paths)
         File.write(File.join(@target, "runtime/wasm_threads.rb"), WASM_THREADS_RB)
-        paths.each do |path|
-          text = File.read(path)
-          next unless text.include?('require "timeout"')
-
-          File.write(path, text.gsub('require "timeout"', '# require "timeout"  (wasm: see runtime/wasm_threads.rb)'))
-        end
+        touched
       end
 
       def patch_message_digest
@@ -411,7 +399,8 @@ module InstantRecord
         models_dir = File.join(@target, "app/models")
         return unless File.directory?(models_dir)
 
-        Dir.glob(File.join(models_dir, "**/*.rb")).sort.each do |path|
+        Dir.glob("**/*.rb", base: models_dir).sort.each do |rel|
+          path = File.join(models_dir, rel)
           text = File.read(path)
           fixed = text.gsub(
             /(if name == "(\w+_at)"\n\s+if respond_to\?\(:\2=\)\n\s+self\.\2 = )value\n/,
@@ -435,7 +424,8 @@ module InstantRecord
         return unless File.directory?(views_dir)
 
         bogus = '#{ActionView::ViewHelpers.tag_attr("form", { data: { turbo: false, action: "submit->issues#submit" } })}'
-        Dir.glob(File.join(views_dir, "**/*.rb")).sort.each do |path|
+        Dir.glob("**/*.rb", base: views_dir).sort.each do |rel|
+          path = File.join(views_dir, rel)
           text = File.read(path)
           updated = text
           if updated.include?("each_with_index") && updated.include?("ActionView::ViewHelpers.raw(_cap)")
