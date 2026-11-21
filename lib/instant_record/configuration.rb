@@ -25,14 +25,17 @@ module InstantRecord
     attr_accessor :file_store
 
     # The most bytes the server takes for one file, for a model whose
-    # sync_file names no max_size of its own.
+    # sync_file names no max_size of its own. Left alone it is
+    # InstantRecord::Files::MAX_SIZE. That number is written there and not
+    # here: this file is compiled for the browser, where an integer has 32
+    # bits, and two gigabytes do not fit in one.
     attr_accessor :max_file_size
 
     def initialize
       @endpoint = DEFAULT_MOUNT_PATH
       @sync_interval = 3
       @file_store = nil
-      @max_file_size = 2 * 1024 * 1024 * 1024
+      @max_file_size = nil
       @scope_from = ->(request) { request.params["scope"] }
     end
   end

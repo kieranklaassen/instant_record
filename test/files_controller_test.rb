@@ -1,5 +1,8 @@
 require "test_helper"
 require "tmpdir"
+# All of Rails's own module, not the part of it a controller loads when it
+# first answers: InstantRecord asks `Rails.application` wherever Rails is.
+require "rails"
 require "action_controller"
 require "rack/mock"
 require File.expand_path("../app/controllers/instant_record/files_controller", __dir__)

@@ -11,6 +11,10 @@ module InstantRecord
     # An id that is safe as a file's name is used as it is.
     PLAIN_ID = /\A[\w-]{1,128}\z/
 
+    # The most bytes taken for one file where neither the model nor the
+    # configuration names a number: two gigabytes.
+    MAX_SIZE = 2 * 1024 * 1024 * 1024
+
     class << self
       def store
         InstantRecord.config.file_store ||= FileStore.new(Rails.root.join("storage", "instant_record"))
@@ -36,7 +40,7 @@ module InstantRecord
 
       # The most bytes the server takes for one record of this model.
       def max_size(model)
-        model.instant_record_file_max_size || InstantRecord.config.max_file_size
+        model.instant_record_file_max_size || InstantRecord.config.max_file_size || MAX_SIZE
       end
 
       # What the record says its file is, where the model has the columns.

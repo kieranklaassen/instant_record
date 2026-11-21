@@ -39,7 +39,22 @@ class FilesTest < Minitest::Test
 
   def test_the_most_bytes_is_the_models_or_the_configured_one
     assert_equal 1024, InstantRecord::Files.max_size(@clip)
-    assert_equal InstantRecord.config.max_file_size, InstantRecord::Files.max_size(syncable_model("Other") { sync_file })
+    assert_equal InstantRecord::Files::MAX_SIZE, InstantRecord::Files.max_size(syncable_model("Other") { sync_file })
+    InstantRecord.config.max_file_size = 4096
+    assert_equal 4096, InstantRecord::Files.max_size(syncable_model("Another") { sync_file })
+  ensure
+    InstantRecord.config.max_file_size = nil
+  end
+
+  # configuration.rb and syncable.rb are compiled for the browser, where an
+  # integer has 32 bits: a number past that raised a RangeError in the first
+  # sync of a compiled app and no bootstrap was ever applied.
+  def test_what_the_browser_compiles_holds_no_number_past_32_bits
+    assert_nil InstantRecord::Configuration.new.max_file_size
+    %w[configuration.rb syncable.rb].each do |file|
+      source = File.read(File.expand_path("../lib/instant_record/#{file}", __dir__), encoding: "UTF-8")
+      refute_match(/\d\s*\*\s*\d|\*\*|\d{10,}/, source.gsub(/^\s*#.*$/, ""), "#{file} computes a number the browser may not hold")
+    end
   end
 
   def test_a_key_is_a_path_inside_the_models_folder
