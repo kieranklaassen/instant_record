@@ -68,6 +68,28 @@ module InstantRecord
         column ? where(column => [nil, scope.presence].uniq) : all
       end
 
+      # This record carries a file: bytes too large for a column, kept beside
+      # the record and never inside it. In the browser they are written first
+      # to the origin's private file system (frontend/files.js), so they are
+      # there with no connection. They reach the server in the background, and
+      # another device fetches them when it asks. The record is what syncs,
+      # and its sync rules are the file's: who may be sent the record may read
+      # its bytes, who may write it may send them. A file never changes: new
+      # bytes are a new record. `max_size` is the most bytes the server takes
+      # for one.
+      def sync_file(max_size: nil)
+        @instant_record_sync_file = true
+        @instant_record_file_max_size = max_size
+      end
+
+      def instant_record_sync_file
+        @instant_record_sync_file
+      end
+
+      def instant_record_file_max_size
+        @instant_record_file_max_size
+      end
+
       # Observe a value from the server that last-write-wins threw away. The
       # block runs with the losing attribute hash at the moment it is dropped,
       # which is the only moment it exists in this runtime — the gem assigns

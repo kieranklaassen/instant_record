@@ -142,6 +142,7 @@ Useful helpers:
 - `InstantRecord.browser?` — the underlying runtime check, for anywhere else
 - `InstantRecord::Client.applying_remote?` — whether the write running right now arrived from the server, rather than being made here
 - `InstantRecord.server_url(path)` — the URL that reaches the authoritative server from either runtime, honouring a customised `mount_path`
+- `sync_file` — a record that carries a file, kept in the browser and sent to the server in the background (below)
 
 Convergence is last-write-wins on `updated_at`, and the value that loses is gone from the row. A model can watch for that:
 
@@ -299,6 +300,62 @@ navigator.serviceWorker.controller.postMessage(
 
 The Slack demo's infinite scroll is the reference wiring — IntersectionObserver sentinel, scroll anchoring, in-place DOM updates — in the Stimulus controller `demo/app/javascript/controllers/conversation_controller.js`.
 
+### 7. Carry a file with a record
+
+Some things a record is about are too large for a column: a recording, a render, a scan. A model says its records carry one, and that is the whole opt-in:
+
+```ruby
+class Recording < ApplicationRecord
+  include InstantRecord::Syncable
+  sync_file max_size: 500 * 1024 * 1024   # the most bytes the server takes for one
+end
+```
+
+The model's file is compiled for the browser, where an integer has 32 bits: a `max_size` there stays under two gigabytes, and a larger limit goes in `config.max_file_size`, which only the server reads.
+
+The record is still what syncs, and nothing about that changes. The file is known by the record's type and id, in the browser and on the server, and it never changes: new bytes are a new record. Where the model has the columns an Active Storage blob has, they are used: the server serves the file as its `content_type` and refuses an upload that is not `byte_size` bytes. None is required.
+
+The bytes are never in the local database and never pass through the compiled app. The gem's `frontend/` package keeps them in the origin's private file system (OPFS), from the page:
+
+```js
+import { fileStore, useFile } from "instant_record"
+
+const files = fileStore()   // one for the page; beside the compiled runtime it knows the sync server and the browser's scope
+
+// Written to this browser first, with or without a connection.
+const id = crypto.randomUUID()
+const about = await files.attach("Recording", id, blob)   // { filename, content_type, byte_size }
+router.post("/recordings", { recording: { id, title, ...about } })   // the record, as any other
+
+// Here, or fetched from the server and kept.
+const file = await files.open("Recording", id)
+
+// In React: status is loading, ready, missing, offline or error.
+const { url, status, progress } = useFile(files, "Recording", recording.id)
+```
+
+- **Local first.** `attach` returns when the file is on this device. It is there after a reload and with no connection, and `files.get` reads it without asking the server anything.
+- **Sent in the background.** The file goes to the server in 4 MB pieces, oldest first, one tab at a time. An upload that is cut off goes on from the piece it stopped at, after a reload too. A file whose record has not reached the server yet waits for it: the server answers 404 until the record's create has synced.
+- **Fetched when asked for.** On another device `open` fetches the file a piece at a time and keeps it, and a fetch that is cut off keeps its pieces. A file the server does not hold (its upload has not finished where it was made) is `FileMissing`.
+- **The record's rules are the file's.** Whoever may be sent the record (`sync_scope`, `syncable_to`) may read its bytes, and whoever may write it (`writable_by`) may send them. Anyone else is answered as for a file that does not exist. A model with no rule shares its files as it shares its rows.
+- **A destroyed record takes its file** from the server. In a browser, `files.prune("Recording", ids)` drops the files of records that are gone, given the ids that are left, and `files.clear()` drops everything, for a sign-out. `fileStore({ name: userId })` keeps the files of two accounts in one browser apart.
+
+**Room.** A browser gives an origin a share of the disk and may clear all of it when the disk fills. `attach` asks it not to (`navigator.storage.persist()`; `files.usage()` reports whether it agreed, with how much is held and how much is waiting to be sent). Past `fileStore({ budget: bytes })`, near the browser's own limit, or when a write fails for lack of room, the store drops files the server holds, least recently used first: those can be fetched again. A file the server does not hold yet is never dropped, and neither is one marked with `files.pin`. When nothing more may go, `attach` fails with a `QuotaExceededError` and leaves nothing behind, and `open` reads the file from the server without keeping it. Chromium reports a quota that is not the limit it enforces, so there the write that fails is what makes room.
+
+**On the server** the files are kept under `storage/instant_record`, one per record, and served with ranges:
+
+```ruby
+# config/initializers/instant_record.rb
+InstantRecord.configure do |config|
+  config.file_store = InstantRecord::FileStore.new("/var/lib/my_app/files")   # or anything that answers what it does
+  config.max_file_size = 1024 * 1024 * 1024                                   # for models that name no max_size (two gigabytes when left alone)
+end
+```
+
+`GET <mount>/files/:type/:id` is the file (with `Range`), `GET .../upload` says where an upload stands, and `PUT` takes one piece. A file is served as a download that may run nothing, whatever type its record claims. `bin/rails instant_record:files:sweep` removes uploads that were given up.
+
+Limits, as built: one file to a record; no checksum, so a file is trusted to be what its size and its pieces' order say; a browser must be able to write its private file system from a page (`createWritable`, which Chromium and Firefox have and Safari names from 26), and without it `open` reads from the server and keeps nothing; a file that waits for a record that never arrives is asked about once a minute while the page is open, until it is pruned; the Ruby client and the native build have no file store. What has run: headless Chromium against a Rails server, in `test/browser/files.mjs` (`node test/browser/files.mjs --big` adds a 200 MB file), and once beside a compiled build of the demo with a file on a todo. No other browser has, and no deployed server: a proxy in front of one must let a 4 MB request body through.
+
 ## Compile a Rails app for the browser
 
 The gem includes an experimental ahead-of-time compiler. Roundhouse and Spinel
@@ -405,7 +462,7 @@ class Issue < ApplicationRecord
 end
 ```
 
-Also out of scope for the PoC, on purpose: CRDTs, Postgres logical replication, multi-tab leader election, attachments, a sign-in of the gem's own (it scopes the sync endpoints by whatever your app's session says: `sync_scope`, `syncable_to`), and migration generators. The Inbox demo runs as an Inertia page in React, with its props kept live from the local database: `docs/solutions/2026-11-19-inbox-on-inertia.md` says what held and what the gem would need to offer it properly.
+Also out of scope for the PoC, on purpose: CRDTs, Postgres logical replication, multi-tab leader election, several files to a record or a file that changes (a record carries one file: `sync_file`), a sign-in of the gem's own (it scopes the sync endpoints by whatever your app's session says: `sync_scope`, `syncable_to`), and migration generators. The Inbox demo runs as an Inertia page in React, with its props kept live from the local database: `docs/solutions/2026-11-19-inbox-on-inertia.md` says what held and what the gem would need to offer it properly.
 
 ## History
 
