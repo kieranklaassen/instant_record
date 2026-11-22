@@ -73,6 +73,9 @@ class BranchTest < Minitest::Test
   # shared :memory: connection used by the rest of the test suite.
   def with_file_sqlite
     original_config = ActiveRecord::Base.connection_db_config.configuration_hash.dup
+    original_ddl = ActiveRecord::Base.connection.select_values(
+      "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY type DESC, name ASC"
+    )
     Dir.mktmpdir("ir_branch_test_") do |dir|
       db_path = File.join(dir, "main.sqlite3")
       ActiveRecord::Base.establish_connection(adapter: "sqlite3", database: db_path)
@@ -83,7 +86,8 @@ class BranchTest < Minitest::Test
     InstantRecord::Branch.current&.discard! if InstantRecord::Branch.current&.active?
     ActiveRecord::Base.connection_handler.clear_all_connections!
     ActiveRecord::Base.establish_connection(original_config)
-    migrate_test_schema!
+    raw = ActiveRecord::Base.connection.raw_connection
+    Array(original_ddl).each { |sql| raw.execute(sql) }
   end
 
   def migrate_test_schema!
