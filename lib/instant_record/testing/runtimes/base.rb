@@ -35,11 +35,31 @@ module InstantRecord
           lines = raw.split("\n")[1..].to_a.reject(&:empty?)
           return { notified: true, changes: nil } if lines.empty?
 
-          changes = lines.map do |line|
-            at = line.index(":")
-            { type: line[0...at], id: line[(at + 1)..] }
+          changes = []
+          unlisted = false
+          lines.each do |line|
+            next if line.start_with?("sync_notice:")
+            next if unlisted
+
+            if line.start_with?("{")
+              parsed = JSON.parse(line)
+              if parsed.is_a?(Hash) && parsed["type"] && parsed["id"]
+                changes << { type: parsed["type"].to_s, id: parsed["id"].to_s }
+              else
+                unlisted = true
+              end
+            else
+              at = line.index(":")
+              if at && at > 0
+                changes << { type: line[0...at], id: line[(at + 1)..] }
+              else
+                unlisted = true
+              end
+            end
+          rescue JSON::ParserError
+            unlisted = true
           end
-          { notified: true, changes: changes }
+          { notified: true, changes: (!unlisted && !changes.empty?) ? changes : nil }
         end
 
         def table_name_for(model_name)

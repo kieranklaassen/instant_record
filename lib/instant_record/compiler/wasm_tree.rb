@@ -340,6 +340,7 @@ module InstantRecord
         touched = adapt_threading_and_timeout(paths)
         patch_message_digest
         patch_sqlite_shims
+        patch_read_tracking
         patch_model_datetime_casts
         patch_model_remote_timestamps
         patch_active_record_changed
@@ -394,6 +395,24 @@ module InstantRecord
           text = text.gsub(name, "rh_#{name}")
         end
         File.write(path, text)
+      end
+
+      def patch_read_tracking
+        path = File.join(@target, "runtime/sqlite_adapter.rb")
+        return unless File.file?(path)
+
+        text = File.read(path)
+        hook = "InstantRecord::ReadTracker.record_sql(sql)"
+        return if text.include?(hook)
+
+        updated = text.gsub(
+          /^(\s*def (?:self\.)?(?:each_row|select_all|select_rows|select_value|select_values|query|exec_query)\(sql\b[^\n]*\)\n)/
+        ) do
+          line = Regexp.last_match(1)
+          indent = line[/\A(\s*)/, 1]
+          "#{line}#{indent}  #{hook}\n"
+        end
+        File.write(path, updated) if updated != text
       end
 
       def patch_model_datetime_casts

@@ -4,9 +4,9 @@ require "base64"
 module InstantRecord
   DEFAULT_MOUNT_PATH = "/instant_record".freeze
 
-  # Both engine controllers serve a PWA that may run on another origin in
-  # development (Vite dev server); auth on the sync endpoints is out of scope
-  # for the PoC.
+  # Engine endpoints allow cross-origin reads and JSON writes so a separately
+  # hosted compiled site or Vite dev server can reach Rails. Access control is
+  # enforced per model via `sync_scope`, `syncable_to`, and `writable_by`.
   CORS_HEADERS = {
     "access-control-allow-origin" => "*",
     "access-control-allow-methods" => "GET, POST, OPTIONS",
@@ -29,15 +29,18 @@ end
 
 require "active_support/isolated_execution_state"
 require "instant_record/version"
+require "instant_record/host"
 require "instant_record/configuration"
 require "instant_record/runtime_scoped"
+require "instant_record/read_tracker"
 require "instant_record/native"
-require "instant_record/engine" if defined?(Rails::Engine)
+InstantRecord::Host.load_engine
 
 module InstantRecord
   class << self
-    # The compiler replaces this method in the browser bundle.
-    def browser? = false
+    # Delegated to InstantRecord::Host so AOT builds swap the host adapter
+    # module instead of string-patching this file.
+    def browser? = Host.browser?
 
     def config
       @config ||= Configuration.new
@@ -60,8 +63,7 @@ module InstantRecord
     def synced_model(record_type)
       return synced_models.find { |model| model.name == record_type } if synced_models.any?
 
-      klass = record_type.to_s.safe_constantize
-      klass if klass.respond_to?(:instant_record_syncable?) && klass.instant_record_syncable?
+      Host.resolve_syncable_model(record_type)
     end
 
     # Every model participating in sync: the explicit allowlist when set,
@@ -69,10 +71,7 @@ module InstantRecord
     def syncable_models
       return synced_models if synced_models.any?
 
-      ActiveRecord::Base.descendants.select do |model|
-        !model.abstract_class? && model.name &&
-          model.respond_to?(:instant_record_syncable?) && model.instant_record_syncable?
-      end
+      Host.discover_syncable_models
     end
 
     # One record's attributes as they cross the wire, in either direction and on
@@ -82,7 +81,13 @@ module InstantRecord
     # the (created_at, id) keyset cursor round-trips exactly and both sides of a
     # last-write-wins comparison are measured with the same ruler.
     def wire_attributes(attributes)
-      attributes.except("sync_state").transform_values do |value|
+      snapshot_attributes(attributes.except("sync_state"))
+    end
+
+    # Full local row snapshot for delay-line rollback: keeps sync_state alongside
+    # every other column, with timestamps at TIME_PRECISION so restore is lossless.
+    def snapshot_attributes(attributes)
+      attributes.transform_values do |value|
         # usec, not iso8601: a Date answers to iso8601 but takes no precision
         # argument, and its default JSON form already round-trips exactly.
         value.respond_to?(:usec) ? value.iso8601(TIME_PRECISION) : value
@@ -99,12 +104,16 @@ module InstantRecord
     # endpoints and mirroring Change#as_event: clients apply all three through
     # the same upsert path.
     def record_payload(record)
-      {
+      payload = {
         type: record.class.name,
         id: record.id,
         version: record[:server_version],
         attributes: wire_attributes(record.attributes)
       }
+      if (stamp = HLC.record_hlc(record.class.name, record.id))
+        payload[:hlc] = stamp
+      end
+      payload
     end
 
     # Begin background sync in the browser.
@@ -168,14 +177,49 @@ module InstantRecord
       return JSON.generate(ok: false, busy: true) if result == :busy
       return JSON.generate(ok: false, started: false) if result == :not_started
 
-      JSON.generate(ok: true, pending: pending_count)
+      payload = { ok: true, pending: pending_count }
+      next_ms = next_release_ms
+      payload[:next_release_ms] = next_ms unless next_ms.nil?
+      JSON.generate(payload)
     rescue StandardError => e
       # Never raise across the JS boundary; a failed pass is a retry, not a crash.
       JSON.generate(ok: false, error: e.message, pending: safe_pending_count)
     end
 
     def pending_count = Client.pending_count
+    def held_count = Client.held_count
+    def held_mutations = Client.held_mutations
+    def next_release_at = Client.next_release_at
+    def next_release_ms = Client.next_release_ms
     def cursor = Client.cursor
+    def sync_notices = SyncNotice.active.recent
+    def sync_notices_count = SyncNotice.active.count
+    def resolve_sync_notice(id, action:, overrides: {}) = SyncNotice.resolve(id, action: action, overrides: overrides)
+
+    # Hold local outbox writes created inside the block for `seconds` before they
+    # mature for sync, recording a pre-mutation snapshot so cancel_pending can
+    # restore local SQLite and drop the outbox row before release.
+    def hold_for(seconds, &block)
+      Client.with_hold(seconds, &block)
+    end
+
+    # Cancel a held outbox mutation before its release_at matures, restoring the
+    # local SQLite row from its pre-mutation snapshot and deleting the outbox row.
+    def cancel_pending(mutation_id)
+      Client.cancel_pending(mutation_id)
+    end
+
+    # Copy-on-write local SQLite staging branch. Forks the live local SQLite
+    # workspace into an isolated offline copy for safe bulk edits and visual UI
+    # preview, then either approves (extracting & replaying queued outbox
+    # mutations onto current `main`) or discards with zero server impact.
+    def branch!(name: nil, directory: nil, &block)
+      Branch.open(name: name, directory: directory, &block)
+    end
+
+    def current_branch = Branch.current
+    def branched? = Branch.active?
+    def branch_name = Branch.current_name
 
     # On-demand history page for a windowed model (see Client.fetch_history).
     # Shares the tick's single-flight guard both ways: a fetch during a sync
@@ -213,7 +257,11 @@ module InstantRecord
     # ignored — which is why app code builds this URL without asking which
     # runtime it is in.
     def server_url(path)
-      "#{endpoint.to_s.delete_suffix(mount_path)}#{path}?#{NETWORK_MARKER}"
+      path_str = path.to_s
+      separator = path_str.include?("?") ? "&" : "?"
+      current_mount = mount_path
+      base = (endpoint == DEFAULT_MOUNT_PATH && current_mount != DEFAULT_MOUNT_PATH) ? "" : endpoint.to_s.delete_suffix(current_mount)
+      "#{base}#{path_str}#{separator}#{NETWORK_MARKER}"
     end
 
     # Tell the sync loop a stream is live, so its own catch-up poll stands down.
@@ -289,6 +337,13 @@ module InstantRecord
       JSON.generate(ok: false, error: e.message)
     end
 
+    # Execute a declared sync_action in the active runtime (optimistically inside
+    # a local SQLite savepoint on the client, or in one transaction on the server).
+    def mutate(mutator_name, args = nil, mutation_id: nil, **kwargs)
+      merged = args ? (kwargs.empty? ? args : args.merge(kwargs)) : kwargs
+      SyncActions.mutate(mutator_name, merged, mutation_id: mutation_id)
+    end
+
     # Server-side change logging (Syncable) must not fire while a client
     # mutation is being applied — MutationApplier logs those itself.
     # IsolatedExecutionState is fiber-aware for Falcon's fiber-per-request.
@@ -310,8 +365,9 @@ module InstantRecord
     # that mount, so stripping it leaves the app's own base — read from config
     # rather than assumed, because an app is free to move the mount.
     def mount_path
-      configured = Rails.application.config.instant_record.mount_path if defined?(Rails) && Rails.application
-      configured.is_a?(String) ? configured : DEFAULT_MOUNT_PATH
+      return config.mount_path if config.mount_path.is_a?(String)
+
+      Host.default_mount_path
     end
 
     # The retry decision must survive a database that is itself unhappy:
@@ -340,8 +396,15 @@ end
 
 ActiveSupport.on_load(:active_record) do
   require "instant_record/sync_window"
+  require "instant_record/sync_metadata"
+  require "instant_record/hlc"
+  require "instant_record/sync_actions"
   require "instant_record/syncable"
   require "instant_record/outbox_mutation"
-  require "instant_record/sync_metadata"
+  require "instant_record/sync_notice"
   require "instant_record/client"
+  require "instant_record/branch"
+  InstantRecord::Host.load_branch_store
 end
+
+InstantRecord::Host.install_active_job_guard

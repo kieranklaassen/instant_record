@@ -11,22 +11,49 @@ namespace :instant_record do
   compiler_options = lambda do
     require "instant_record/compiler"
     Rails.application.eager_load!
+    models = InstantRecord.syncable_models
+    mount_path = Rails.application.config.instant_record.mount_path || InstantRecord::DEFAULT_MOUNT_PATH
+    sync_windows = models.each_with_object({}) do |model, map|
+      window = model.instant_record_sync_window
+      next unless window
+
+      map[model.name] = { limit: window.limit, partition_by: window.partition_by }
+    end
     {
       root: Rails.root,
-      models: InstantRecord.syncable_models.map(&:name),
+      models: models.map(&:name),
+      sync_windows: sync_windows,
       toolchain: toolchain_path.call,
-      endpoint: ENV.fetch("SYNC_ENDPOINT") { Rails.application.config.instant_record.mount_path || InstantRecord::DEFAULT_MOUNT_PATH },
+      endpoint: ENV.fetch("SYNC_ENDPOINT") { mount_path },
+      mount_path: mount_path,
       baseline: Rails.application.config.instant_record.compiled_migration_baseline,
-      migration_paths: Rails.application.config.paths["db/migrate"].existent
+      migration_paths: Rails.application.config.paths["db/migrate"].existent,
+      island: ENV["INSTANT_RECORD_ISLAND"].presence || Rails.application.config.instant_record.island,
+      overrides: Rails.application.config.instant_record.include
     }
+  end
+
+  desc "Print the canonical instant_record.manifest.json for this app's local-first island"
+  task :manifest, [:island] => :environment do |_task, args|
+    require "instant_record/compiler"
+    manifest = InstantRecord::Compiler.manifest(
+      root: Rails.root,
+      island: args[:island].presence || ENV["INSTANT_RECORD_ISLAND"].presence || Rails.application.config.instant_record.island,
+      overrides: Rails.application.config.instant_record.include,
+      migration_paths: Rails.application.config.paths["db/migrate"].existent
+    )
+    puts manifest.to_json
   end
 
   desc "Compile this Rails app to a static browser site using Roundhouse, Spinel and SQLite"
   task compile: :environment do
     # The options first: asking for them is what loads the compiler.
     options = compiler_options.call
+    require_toolchain.call(options[:toolchain])
     output = InstantRecord::Compiler.build(**options)
     puts "Compiled browser site: #{output}"
+  rescue InstantRecord::Compiler::BuildError, ArgumentError => e
+    abort e.message
   end
 
   desc "Build the compiled browser site"
@@ -38,11 +65,11 @@ namespace :instant_record do
     require_toolchain.call(options[:toolchain])
     output = InstantRecord::Compiler.build_native(**options, target: args[:target])
     puts "Native libraries: #{output}"
-  rescue ArgumentError => e
+  rescue InstantRecord::Compiler::BuildError, ArgumentError => e
     abort e.message
   end
 
-  desc "Verify the compiler toolchain configuration (optional target: wasm, native, iphonesimulator, iphoneos)"
+  desc "Verify the compiler toolchain configuration and static AOT/32-bit compatibility (optional target: wasm, native, iphonesimulator, iphoneos)"
   task :doctor, [:target] => :environment do |_task, args|
     require "instant_record/compiler"
     toolchain = toolchain_path.call
@@ -50,10 +77,11 @@ namespace :instant_record do
     report = InstantRecord::Compiler.doctor(
       toolchain: toolchain,
       target: args[:target] || :wasm,
-      web_dir: Rails.root.join("tmp/instant_record/compiled/web")
+      web_dir: Rails.root.join("tmp/instant_record/compiled/web"),
+      app_root: Rails.root
     )
     puts report
-    abort "Toolchain check failed." unless report.ok?
+    abort "Doctor check failed." unless report.ok?
   end
 
   namespace :files do

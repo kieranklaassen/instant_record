@@ -115,25 +115,13 @@ ClientState = Struct.new(:id, :db_path, :shard, :stream_parser, :stream_events, 
 clients = {}
 counter = 0
 
+MIGRATIONS_DIR = File.expand_path("../../../db/migrate", __dir__)
+
 def init_schema!(shard)
   ActiveRecord::Base.connected_to(role: :writing, shard: shard) do
     ActiveRecord::Migration.suppress_messages do
+      ActiveRecord::MigrationContext.new(MIGRATIONS_DIR).migrate
       ActiveRecord::Schema.define do
-        create_table :instant_record_outbox, id: :string, force: true do |t|
-          t.string :record_type, null: false
-          t.string :record_id, null: false
-          t.string :operation, null: false
-          t.text :changes_payload
-          t.integer :base_version, null: false, default: 0
-          t.timestamps
-        end
-
-        create_table :instant_record_sync_metadata, id: false, force: true do |t|
-          t.string :key, null: false, primary_key: true
-          t.string :value
-          t.timestamps
-        end
-
         create_table :issues, id: :string, force: true do |t|
           t.string :title, null: false
           t.string :state, null: false, default: "open"

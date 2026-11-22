@@ -15,17 +15,21 @@ Rails.application.routes.draw do
 
   # Each demo app lives under its own namespace: controllers in
   # app/controllers/<demo>/, views in app/views/<demo>/, routes scoped here.
-  namespace :todo do
-    resources :issues, only: [:create, :update, :destroy]
-    root "issues#index" # /todo
+  local_first do
+    namespace :todo do
+      resources :issues, only: [:create, :update, :destroy]
+      root "issues#index" # /todo
+    end
   end
 
   namespace :slack do
-    resources :channels, only: [:show]
-    resources :messages, only: [:create]
+    local_first do
+      resources :channels, only: [:show]
+      resources :messages, only: [:create]
+      root "channels#index" # /slack
+    end
     post "reset", to: "resets#create"
     match "reset", to: "resets#preflight", via: :options
-    root "channels#index" # /slack
   end
 
   # Demos added after the first two keep their routes in config/routes/<demo>.rb
@@ -36,11 +40,14 @@ Rails.application.routes.draw do
   draw(:email)
   draw(:assistant)
   draw(:auth)
+  draw(:compare)
 
   # The deployed PWA's static index.html (boot splash) shadows root when
   # served from public/ (ActionDispatch::Static wins). In the browser runtime
   # all fetches go through Rack, so this root is what visitors see there;
   # /home reaches the same page on the server.
-  get "home", to: "home#index"
-  root "home#index"
+  local_first do
+    get "home", to: "home#index"
+    root "home#index"
+  end
 end

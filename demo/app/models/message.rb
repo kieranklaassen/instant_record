@@ -30,19 +30,21 @@ class Message < ApplicationRecord
   # run, and the reply syncs back to browsers through the change log + SSE.
   server_only do
     after_create_commit :enqueue_fake_reply
+
+    private
+
+    # Only visitor-authored messages draw a reply; bot messages never do, so
+    # replies cannot cascade into a loop.
+    def enqueue_fake_reply
+      return unless from_visitor?
+
+      Slack::FakeReplyJob.set(wait: rand(1.0..3.0).seconds).perform_later(id)
+    end
   end
 
   def from_visitor? = chat_user_id == ChatUser::VISITOR_ID
 
   private
-
-  # Only visitor-authored messages draw a reply; bot messages never do, so
-  # replies cannot cascade into a loop.
-  def enqueue_fake_reply
-    return unless from_visitor?
-
-    Slack::FakeReplyJob.set(wait: rand(1.0..3.0).seconds).perform_later(id)
-  end
 
   def parent_in_same_channel
     return if parent_message_id.blank?
