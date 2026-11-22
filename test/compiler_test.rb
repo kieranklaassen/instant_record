@@ -172,16 +172,23 @@ class CompilerTest < ActiveSupport::TestCase
       assert_includes File.read(File.join(app, "app/models/slack/seeds.rb")), "Browser build: the seeding routines"
 
       count = InstantRecord::Compiler::GemVendor.vendor(gem_src: GEM_ROOT, app_dir: app, demo: true)
-      assert_equal 16, count
+      assert_equal 17, count
       assert_includes File.read(File.join(app, "lib/instant_record.rb")), "def browser? = true"
       refute_includes File.read(File.join(app, "lib/instant_record.rb")), "branch/sqlite_store"
       assert File.file?(File.join(app, "lib/instant_record/branch.rb"))
       refute File.exist?(File.join(app, "lib/instant_record/syncable.rb"))
       assert File.file?(File.join(app, "app/models/concerns/syncable.rb"))
-      assert_includes File.read(File.join(app, "app/models/concerns/syncable.rb")), "self.id = SecureRandom.uuid if id.blank?"
+      assert_includes File.read(File.join(app, "app/models/concerns/syncable.rb")), "id.nil? || id == \"\""
       assert_includes File.read(File.join(app, "app/models/mail_entry.rb")), "include Syncable"
       assert_includes File.read(File.join(app, "app/models/mail_entry.rb")), "sync_partition :mailbox_id"
       refute_includes File.read(File.join(app, "app/models/mail_entry.rb")), "authorize_partition"
+      vendored_actions = File.read(File.join(app, "lib/instant_record/sync_actions.rb"))
+      assert Prism.parse(vendored_actions).success?, "vendored sync_actions.rb must remain valid Ruby"
+      assert_includes vendored_actions, 'Db.exec("SAVEPOINT "'
+      refute_includes vendored_actions, "ActiveJobCommitGuard"
+      refute_includes vendored_actions, "class ServerFrame"
+      vendored_code = vendored_actions.lines.reject { |l| l.lstrip.start_with?("#") }.join
+      refute_match(/\b(?:public_send|send|constantize)\b/, vendored_code)
       assert File.file?(File.join(app, "sig/instant_record/native.rbs"))
       assert_includes File.read(File.join(app, "app/views/todo/issues/index.html.erb")), '<% content_for(:demo_scope, "todo") %>'
 
@@ -469,6 +476,103 @@ class CompilerTest < ActiveSupport::TestCase
       assert_includes transport, 'NativeHost.ir_host_take("response")'
       notifier = File.read(File.join(emit, "app/models/instant_record/client/notifier.rb"))
       assert_includes notifier, 'NativeHost.ir_host_give("notify", message)'
+    end
+  end
+
+  test "EntryBuilder discovers sync_actions and emits static Spinel case dispatch with zero send or constantize" do
+    Dir.mktmpdir do |dir|
+      emit = File.join(dir, "emit")
+      app = File.join(dir, "app")
+      FileUtils.mkdir_p(File.join(emit, "app/models/instant_record/client"))
+      FileUtils.mkdir_p(File.join(app, "app/models/billing"))
+      FileUtils.mkdir_p(File.join(app, "app/screens"))
+
+      File.write(File.join(emit, "main.rb"), <<~RUBY)
+        require_relative "boot"
+        if ARGV.length > 0 && ARGV[0] == "sidekiq"
+          puts "sidekiq"
+        end
+      RUBY
+      File.write(File.join(emit, "app/models/instant_record/client/transport.rb"), "File.write(REQUEST, body)\nFile.read(RESPONSE)\n")
+      File.write(File.join(emit, "app/models/instant_record/client/notifier.rb"), "File.write(\"/host/notify\", message)\n")
+
+      File.write(File.join(app, "app/models/issue.rb"), <<~RUBY)
+        class Issue < ApplicationRecord
+          include InstantRecord::Syncable
+
+          sync_action :close
+          sync_action :reopen
+          sync_action :purge_all
+
+          def self.close(args)
+            find(args["id"]).update!(state: "closed")
+          end
+
+          class << self
+            def reopen(id:, state: "open")
+              find(id).update!(state: state)
+            end
+
+            def purge_all
+              delete_all
+            end
+          end
+        end
+      RUBY
+
+      File.write(File.join(app, "app/models/billing/invoice.rb"), <<~RUBY)
+        module Billing
+          class Invoice < ApplicationRecord
+            include InstantRecord::Syncable
+            sync_action :pay
+            def self.pay(id:, amount:)
+              find(id).update!(paid: amount)
+            end
+          end
+        end
+      RUBY
+
+      plan = { "version" => 1, "baseline" => nil, "migrations" => {} }
+      InstantRecord::Compiler::EntryBuilder.write_wasm_entry(
+        emit_dir: emit,
+        demo: false,
+        models: ["Issue"],
+        migration_plan: plan,
+        pipeline_dir: PIPELINE_DIR,
+        app_dir: app
+      )
+      InstantRecord::Compiler::EntryBuilder.write_native_entry(
+        tree_dir: emit,
+        app_dir: app,
+        demo: false,
+        models: ["Issue"],
+        migration_plan: plan
+      )
+
+      %w[main_wasm.rb main_native.rb].each do |entry_name|
+        generated = File.read(File.join(emit, entry_name))
+        assert Prism.parse(generated).success?, "#{entry_name} must remain valid Ruby"
+        assert_includes generated, 'when "Issue.close" then Issue.close(args)'
+        assert_includes generated, 'when "Issue.reopen" then Issue.reopen(id: args["id"], state: args.key?("state") ? args["state"] : "open")'
+        assert_includes generated, 'when "Issue.purge_all" then Issue.purge_all'
+        assert_includes generated, 'when "Billing::Invoice.pay" then Billing::Invoice.pay(id: args["id"], amount: args["amount"])'
+        generated_code = generated.lines.reject { |l| l.lstrip.start_with?("#") }.join
+        refute_match(/\b(?:public_send|send|constantize)\b/, generated_code)
+      end
+
+      # Block-form sync_action cannot be statically dispatched in Spinel and fails fast at build time.
+      File.write(File.join(app, "app/models/bad.rb"), <<~RUBY)
+        class Bad < ApplicationRecord
+          include InstantRecord::Syncable
+          sync_action :oops do |args|
+            args
+          end
+        end
+      RUBY
+      err = assert_raises(InstantRecord::Compiler::BuildError) do
+        InstantRecord::Compiler::EntryBuilder.discover_sync_actions(app)
+      end
+      assert_match(/cannot use a block in compiled builds/, err.message)
     end
   end
 

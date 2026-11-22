@@ -86,10 +86,34 @@ export class AppHost {
     this.instance = null;
   }
 
+  // The SQLite file's byte length without copying its contents.
+  databaseSize() {
+    const file = this.storage.contents.get("development.sqlite3");
+    if (!file) return 0;
+    if (typeof file.byteLength === "function") return file.byteLength();
+    if (file.data) return file.data.byteLength;
+    if (file.size !== undefined) return Number(file.size);
+    return 0;
+  }
+
   // The SQLite file's bytes, for persisting between page loads (null before the first run).
   databaseBytes() {
     const file = this.storage.contents.get("development.sqlite3");
-    return file ? file.data : null;
+    if (!file) return null;
+    if (typeof file.readAll === "function") return file.readAll();
+    return file.data ?? null;
+  }
+
+  // Flush dirty pages when backed by a page-level OPFS sync handle.
+  flushDatabase() {
+    const file = this.storage.contents.get("development.sqlite3");
+    if (file && typeof file.flush === "function") file.flush();
+  }
+
+  // Mount an existing WASI Inode (such as PagedSyncOPFSFile) at /storage/development.sqlite3.
+  mountDatabase(inode, schemaVersion = 0) {
+    this.storage.contents.set("development.sqlite3", inode);
+    this.hostDir.contents.set("schema_version", new File(encoder.encode(String(schemaVersion).padStart(20, "0"))));
   }
 
   // Independent copy-on-write snapshot of the live SQLite bytes for staging branches.
@@ -99,8 +123,7 @@ export class AppHost {
   }
 
   restoreDatabase(bytes, schemaVersion = 0) {
-    this.storage.contents.set("development.sqlite3", new File(bytes));
-    this.hostDir.contents.set("schema_version", new File(encoder.encode(String(schemaVersion).padStart(20, "0"))));
+    this.mountDatabase(new File(bytes), schemaVersion);
   }
 
   // Lazily instantiate and boot the WASI reactor once (after restoreDatabase has placed any saved

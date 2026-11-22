@@ -28,15 +28,18 @@ module InstantRecord
       # They are not written to the ledger: the client drops them when its next
       # poll tells it to reset.
       stale = SyncScope.stale?(params[:identity], identity, partition: partition) ? SyncScope.reset_types(identity, partition: partition) : []
-      permitted = batch.map { |raw| raw.permit(:id, :record_type, :record_id, :operation, :base_version, changes: {}) }
+      permitted = batch.map { |raw| permit_mutation(raw) }
 
       # Offline creates can share a timestamp; apply parents before children
       # that reference them in the same batch while preserving response order.
       applied = {}
       order_by_dependency(permitted).each do |index, mutation|
+        owner_type = mutation[:record_type].presence ||
+          (mutation[:mutator].present? ? SyncActions.owner_type_of(mutation[:mutator].to_s) : nil)
+        mutation_id = mutation[:mutation_id] || mutation[:id]
         applied[index] =
-          if stale.include?(mutation[:record_type])
-            { mutation_id: mutation[:id], status: "rejected", reason: "identity changed" }
+          if owner_type && stale.include?(owner_type)
+            { mutation_id: mutation_id, status: "rejected", reason: "identity changed" }
           else
             MutationApplier.apply(mutation, identity, partition)
           end
@@ -66,6 +69,31 @@ module InstantRecord
         parent && parent.to_s != mutation[:record_id].to_s && created_ids.key?(parent.to_s)
       end
       roots + dependents
+    end
+
+    def permit_mutation(raw)
+      if raw[:mutator].present? || raw[:operation].to_s == "mutator"
+        base = raw.permit(:id, :mutation_id, :record_type, :record_id, :operation, :mutator).to_h.symbolize_keys
+        base[:args] = sanitize_json_value(raw[:args]) || {}
+        base
+      else
+        raw.permit(:id, :record_type, :record_id, :operation, :base_version, changes: {})
+      end
+    end
+
+    def sanitize_json_value(value)
+      case value
+      when ActionController::Parameters
+        value.to_unsafe_h.each_with_object({}) { |(k, v), out| out[k.to_s] = sanitize_json_value(v) }
+      when Hash
+        value.each_with_object({}) { |(k, v), out| out[k.to_s] = sanitize_json_value(v) }
+      when Array
+        value.map { |item| sanitize_json_value(item) }
+      when String, Integer, Float, TrueClass, FalseClass, NilClass
+        value
+      else
+        value.to_s
+      end
     end
   end
 end
