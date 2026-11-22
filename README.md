@@ -391,7 +391,7 @@ cd demo
 bundle install
 bin/rails db:prepare
 bin/rails test
-SYNC_ENDPOINT=http://localhost:3000/instant_record python3 ../compiled/pipeline/build.py
+SYNC_ENDPOINT=http://localhost:3000/instant_record ruby ../compiled/pipeline/build.rb
 bin/dev
 ```
 

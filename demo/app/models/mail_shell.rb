@@ -12,7 +12,7 @@ require "sqlite3"
 class MailShell
   FORMAT = 1
 
-  # The models the compiled demo syncs (compiled/pipeline/entry_template.py).
+  # The models the compiled demo syncs (InstantRecord::Compiler::EntryBuilder::DEMO_MODELS).
   # The browser rebuilds its schema and forgets its cursor when its own list
   # differs from the one saved in its database, so the list is part of the
   # fingerprint and a build with another list never asks for this file.
@@ -47,7 +47,7 @@ class MailShell
     def root = @root ||= Rails.root.join("storage/mail_shells")
 
     # What a browser build and this server must agree on before a file made
-    # here may stand in for a database made there. compiled/pipeline/build.py
+    # here may stand in for a database made there. InstantRecord::Compiler::WasmBuild
     # computes the same digest into the worker.
     def fingerprint
       @fingerprint ||= Digest::SHA256.hexdigest([FORMAT, MODELS.join(","), Rails.root.join("db/schema.rb").read].join("\n"))

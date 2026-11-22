@@ -27,7 +27,7 @@ folder.
 ## The Inbox demo
 
 ```sh
-python3 compiled/pipeline/build_native.py iphonesimulator
+ruby compiled/pipeline/build_native.rb iphonesimulator
 cd demo && bin/rails db:prepare && bundle exec falcon serve --bind http://localhost:3000
 cd native/ios/Inbox
 xcodebuild -project Inbox.xcodeproj -scheme Inbox -destination 'platform=iOS Simulator,name=iPhone 17' -derivedDataPath build build

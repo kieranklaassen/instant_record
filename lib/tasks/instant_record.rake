@@ -1,4 +1,12 @@
 namespace :instant_record do
+  toolchain_path = lambda do
+    ENV.fetch("INSTANT_RECORD_TOOLCHAIN") { Rails.root.join("config/instant_record_toolchain.env") }
+  end
+
+  require_toolchain = lambda do |path|
+    abort "No toolchain file at #{path}. Run bin/rails generate instant_record:install, or set INSTANT_RECORD_TOOLCHAIN." unless File.file?(path)
+  end
+
   # What both builds are told about this app.
   compiler_options = lambda do
     require "instant_record/compiler"
@@ -6,7 +14,7 @@ namespace :instant_record do
     {
       root: Rails.root,
       models: InstantRecord.syncable_models.map(&:name),
-      toolchain: ENV.fetch("INSTANT_RECORD_TOOLCHAIN") { Rails.root.join("config/instant_record_toolchain.env") },
+      toolchain: toolchain_path.call,
       endpoint: ENV.fetch("SYNC_ENDPOINT") { Rails.application.config.instant_record.mount_path || InstantRecord::DEFAULT_MOUNT_PATH },
       baseline: Rails.application.config.instant_record.compiled_migration_baseline,
       migration_paths: Rails.application.config.paths["db/migrate"].existent
@@ -27,10 +35,25 @@ namespace :instant_record do
   desc "Build this Rails app, with its app/screens, as libraries a native app links: instant_record:native[iphonesimulator] or [iphoneos]"
   task :native, [:target] => :environment do |_task, args|
     options = compiler_options.call
-    abort "No toolchain file at #{options[:toolchain]}. Run bin/rails generate instant_record:install, or set INSTANT_RECORD_TOOLCHAIN." unless File.file?(options[:toolchain])
-    abort "Unknown target #{args[:target]}. Leave it out for this machine, or use iphonesimulator or iphoneos." unless [nil, "iphonesimulator", "iphoneos"].include?(args[:target])
+    require_toolchain.call(options[:toolchain])
     output = InstantRecord::Compiler.build_native(**options, target: args[:target])
     puts "Native libraries: #{output}"
+  rescue ArgumentError => e
+    abort e.message
+  end
+
+  desc "Verify the compiler toolchain configuration (optional target: wasm, native, iphonesimulator, iphoneos)"
+  task :doctor, [:target] => :environment do |_task, args|
+    require "instant_record/compiler"
+    toolchain = toolchain_path.call
+    require_toolchain.call(toolchain)
+    report = InstantRecord::Compiler.doctor(
+      toolchain: toolchain,
+      target: args[:target] || :wasm,
+      web_dir: Rails.root.join("tmp/instant_record/compiled/web")
+    )
+    puts report
+    abort "Toolchain check failed." unless report.ok?
   end
 
   namespace :files do

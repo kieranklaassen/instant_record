@@ -91,7 +91,7 @@ Choosing On-device downloads the model the first time. In a browser without the
 API the option is off.
 
 Only Rails ever calls a provider. The compiled site holds no key and no
-RubyLLM code: `compiled/pipeline/carve.py` leaves the initializer,
+RubyLLM code: `InstantRecord::Compiler::DemoCarver` leaves the initializer,
 `app/models/assistant` and `app/jobs/assistant` out of the build
 (`test/compiled_carve_test.rb` fails if a file that uses RubyLLM is carried in),
 and the browser has no endpoint that returns a reply. It writes a turn, and the

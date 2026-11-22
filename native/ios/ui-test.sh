@@ -7,7 +7,7 @@
 # It recreates a database, seeds a fixed inbox (demo/db/seeds/native_ui.rb),
 # starts the Rails demo with a token required, runs the tests, and stops the
 # server. Nothing it changes outlives it, so it can be run again and again.
-# Build the simulator libraries first: compiled/pipeline/build_native.py iphonesimulator.
+# Build the simulator libraries first: ruby compiled/pipeline/build_native.rb iphonesimulator.
 #
 #   DEVICE        the simulator, by name (iPhone 17)
 #   PORT          where the server listens (3917)
