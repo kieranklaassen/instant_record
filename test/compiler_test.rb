@@ -156,20 +156,39 @@ class CompilerTest < ActiveSupport::TestCase
     end
   end
 
-  test "DemoCarver and GemVendor stage the real demo with all seams intact" do
+  test "AppStage and GemVendor stage the real demo via local_first reachability with all seams intact" do
     Dir.mktmpdir do |dir|
       app = File.join(dir, "app-src")
-      InstantRecord::Compiler::DemoCarver.carve(
-        gem_src: GEM_ROOT,
+      manifest_path = File.join(dir, "instant_record.manifest.json")
+      staged = InstantRecord::Compiler::AppStage.stage(
+        source: File.join(GEM_ROOT, "demo"),
         target: app,
+        native: false,
         overlay_dir: File.join(PIPELINE_DIR, "demo"),
-        native: false
+        manifest_path: manifest_path
       )
 
       refute File.exist?(File.join(app, "config/initializers/ruby_llm.rb"))
       refute File.exist?(File.join(app, "app/screens"))
-      assert_includes File.read(File.join(app, "app/models/mail_entry.rb")), "include InstantRecord::Syncable"
-      assert_includes File.read(File.join(app, "app/models/slack/seeds.rb")), "Browser build: the seeding routines"
+      refute File.exist?(File.join(app, "app/models/mailbox.rb"))
+      refute File.exist?(File.join(app, "app/models/mail_shell.rb"))
+      refute File.exist?(File.join(app, "app/models/assistant/reply.rb"))
+      refute File.exist?(File.join(app, "app/controllers/source_controller.rb"))
+      refute File.exist?(File.join(app, "app/controllers/auth/sessions_controller.rb"))
+      refute File.exist?(File.join(app, "app/controllers/slack/resets_controller.rb"))
+      refute File.exist?(File.join(app, "app/controllers/email/sync_controller.rb"))
+      refute File.exist?(File.join(app, "app/views/inertia.html.erb"))
+      refute File.exist?(File.join(app, "app/views/source"))
+      refute File.exist?(File.join(app, "app/helpers/source_helper.rb"))
+
+      assert File.file?(manifest_path)
+      manifest = InstantRecord::Compiler::Manifest.read(manifest_path)
+      assert_equal "island", manifest.mode
+      assert_equal %w[AssistantChat AssistantTurn AuthNote Channel ChatUser Issue MailEntry Message Note], manifest.synced_model_names
+      assert_equal({ "limit" => 50, "partition_by" => "channel_id" }, manifest.sync_windows["Message"])
+      assert_equal({ "column" => "visitor_id", "policy" => false }, manifest.sync_scopes["AssistantChat"])
+      assert_equal({ "column" => nil, "policy" => true }, manifest.sync_scopes["AuthNote"])
+      assert_equal manifest.to_h, staged.manifest.to_h
 
       count = InstantRecord::Compiler::GemVendor.vendor(gem_src: GEM_ROOT, app_dir: app, demo: true)
       assert_equal 21, count
@@ -187,6 +206,7 @@ class CompilerTest < ActiveSupport::TestCase
       assert File.file?(File.join(app, "app/models/concerns/syncable.rb"))
       assert_includes File.read(File.join(app, "app/models/concerns/syncable.rb")), "InstantRecord::Host.blank_id?(id)"
       assert_includes File.read(File.join(app, "app/models/mail_entry.rb")), "include Syncable"
+      refute_includes File.read(File.join(app, "app/models/slack/seeds.rb")), "apply_backfill"
       vendored_actions = File.read(File.join(app, "lib/instant_record/sync_actions.rb"))
       assert Prism.parse(vendored_actions).success?, "vendored sync_actions.rb must remain valid Ruby"
       assert_includes vendored_actions, "InstantRecord::Host.with_savepoint"
@@ -654,6 +674,7 @@ class CompilerTest < ActiveSupport::TestCase
       assert_equal Pathname(app_root).realpath.join("tmp/instant_record/compiled/web/dist"), output
       assert File.file?(output.join("index.html"))
       assert File.file?(output.join("instant-record-release.json"))
+      assert File.file?(output.join("instant_record.manifest.json"))
       assert File.file?(output.join("service-worker.js"))
       assert File.file?(output.join("assets/turbo.min.js"))
       assert_equal 1, Dir.glob(output.join("app-*.wasm").to_s).size

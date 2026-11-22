@@ -2,17 +2,16 @@ require "fileutils"
 require "json"
 require "prism"
 require_relative "../native"
+require_relative "manifest"
 require_relative "host_adapters"
 require_relative "runner"
 
 module InstantRecord
   class Compiler
     # Builds the reactor entry files (`main_wasm.rb` and `main_native.rb`) from
-    # a shared bridge and boot template.
+    # a shared bridge and boot template, driven by `instant_record.manifest.json`.
     module EntryBuilder
       BANNER = "\n\n# ── persistent reactor entry"
-      DEMO_MODELS = %w[Issue ChatUser Channel Message Note MailEntry AssistantChat AssistantTurn AuthNote].freeze
-      DEMO_SYNC_WINDOWS = { "Message" => { limit: 50, partition_by: :channel_id } }.freeze
       MODEL_NAME_PATTERN = /\A[A-Z]\w*(?:::[A-Z]\w*)*\z/
       COLUMN_NAME_PATTERN = /\A[a-z_][a-z0-9_]*\z/
 
@@ -318,10 +317,25 @@ module InstantRecord
 
       module_function
 
-      def app_models(demo:, models:)
-        return DEMO_MODELS if demo
+      def coerce_manifest(manifest)
+        return nil if manifest.nil?
+        return manifest if manifest.is_a?(Manifest)
+        return Manifest.new(manifest) if manifest.is_a?(Hash)
+        return Manifest.read(manifest.to_s) if manifest.is_a?(String) || manifest.is_a?(Pathname)
 
-        list = Array(models)
+        raise ArgumentError, "Unsupported manifest: #{manifest.inspect}"
+      end
+
+      def app_models(manifest: nil, models: nil)
+        parsed = coerce_manifest(manifest)
+        list =
+          if parsed&.island?
+            parsed.synced_model_names
+          elsif parsed && parsed.synced_model_names.any?
+            parsed.synced_model_names
+          else
+            Array(models)
+          end
         if list.empty? || !list.all? { |name| name.is_a?(String) && MODEL_NAME_PATTERN.match?(name) }
           raise BuildError, "Declare at least one named model that includes InstantRecord::Syncable."
         end
@@ -335,8 +349,16 @@ module InstantRecord
           .gsub('#$', '\\#$')
       end
 
-      def sync_windows_code(demo:, sync_windows:)
-        resolved = sync_windows.nil? ? (demo ? DEMO_SYNC_WINDOWS : {}) : sync_windows
+      def sync_windows_code(demo: false, manifest: nil, sync_windows: nil)
+        parsed = coerce_manifest(manifest)
+        resolved =
+          if sync_windows
+            sync_windows
+          elsif parsed
+            parsed.sync_windows
+          else
+            {}
+          end
         resolved.sort_by { |name, _| name.to_s }.map do |model_name, spec|
           name = model_name.to_s
           unless MODEL_NAME_PATTERN.match?(name)
@@ -358,6 +380,24 @@ module InstantRecord
           else
             "#{name}.sync_window(limit: #{limit})\n"
           end
+        end.join
+      end
+
+      def sync_scopes_code(manifest:)
+        parsed = coerce_manifest(manifest)
+        return "" unless parsed
+
+        parsed.models.filter_map do |entry|
+          name = entry["name"]
+          next unless name.is_a?(String) && MODEL_NAME_PATTERN.match?(name)
+
+          column = entry.dig("sync_scope", "column")
+          next unless column && !column.to_s.empty?
+
+          unless COLUMN_NAME_PATTERN.match?(column.to_s)
+            raise BuildError, "Invalid sync_scope column #{column.inspect} on #{name}"
+          end
+          "#{name}.sync_scope(:#{column})\n"
         end.join
       end
 
@@ -412,14 +452,14 @@ module InstantRecord
         fill(DATABASE, { "pragmas" => lines, "migrations" => steps, "model_set" => models.sort.join(",") })
       end
 
-      def start(streaming:, comment:, demo:, models:, sync_windows: nil, endpoint: nil, mount_path: nil)
+      def start(streaming:, comment:, models:, demo: false, manifest: nil, sync_windows: nil, endpoint: nil, mount_path: nil)
         cfg = config_code(endpoint: endpoint, mount_path: mount_path)
-        windows = sync_windows_code(demo: demo, sync_windows: sync_windows)
+        declarations = sync_windows_code(demo: demo, manifest: manifest, sync_windows: sync_windows) + sync_scopes_code(manifest: manifest)
         flag = "#{comment}\nInstantRecord::Client.streaming = #{streaming ? 'true' : 'false'}"
-        fill(START, { "config" => cfg, "windows" => windows, "models" => models.join(", "), "streaming" => flag })
+        fill(START, { "config" => cfg, "windows" => declarations, "models" => models.join(", "), "streaming" => flag })
       end
 
-      def write_wasm_entry(emit_dir:, demo:, models:, migration_plan:, pipeline_dir:, app_dir: nil, sync_windows: nil, endpoint: nil, mount_path: nil)
+      def write_wasm_entry(emit_dir:, demo: false, manifest: nil, models: nil, migration_plan:, pipeline_dir:, app_dir: nil, sync_windows: nil, endpoint: nil, mount_path: nil)
         if demo
           FileUtils.cp(
             File.join(pipeline_dir, "sqlite_release.rb"),
@@ -433,7 +473,7 @@ module InstantRecord
         raise BuildError, "Expected sidekiq marker in #{File.join(emit_dir, 'main.rb')}" unless cut
 
         head = source[0...cut]
-        resolved_models = app_models(demo: demo, models: models)
+        resolved_models = app_models(manifest: manifest, models: models)
         entry = BANNER + " for wasm32-wasi (see EntryBuilder) ─────────\n" +
           PRELUDE +
           sync_actions_module(app_dir) +
@@ -453,6 +493,7 @@ module InstantRecord
             comment: "# JS worker owns non-blocking inbound polling; Client#sync_pass handles bootstrap + outbox drain.",
             demo: demo,
             models: resolved_models,
+            manifest: manifest,
             sync_windows: sync_windows,
             endpoint: endpoint,
             mount_path: mount_path
@@ -630,7 +671,7 @@ module InstantRecord
         raise BuildError, e.message
       end
 
-      def write_native_entry(tree_dir:, app_dir:, demo:, models:, migration_plan:, sync_windows: nil, endpoint: nil, mount_path: nil)
+      def write_native_entry(tree_dir:, app_dir:, demo: false, manifest: nil, models: nil, migration_plan:, sync_windows: nil, endpoint: nil, mount_path: nil)
         wasm_main = File.read(File.join(tree_dir, "main_wasm.rb"))
         unless wasm_main.scan(BANNER).length == 1
           raise BuildError, "main_wasm.rb has no entry to start from"
@@ -645,7 +686,7 @@ module InstantRecord
             cases = found.map { |name, cls| %(    when "#{name}" then #{cls}.new(params)\n) }.join
             fill(NATIVE_SCREENS, { "cases" => cases })
           end
-        resolved_models = app_models(demo: demo, models: models)
+        resolved_models = app_models(manifest: manifest, models: models)
         previous = 'InstantRecord::SyncMetadata.get("schema_version").to_s'
         applied = 'InstantRecord::SyncMetadata.set("schema_version", "<<version>>")'
         db_body = database(
@@ -672,6 +713,7 @@ module InstantRecord
             comment: "# A sync pass pulls through the host: Client#sync_pass handles bootstrap, outbox drain and the poll.",
             demo: demo,
             models: resolved_models,
+            manifest: manifest,
             sync_windows: sync_windows,
             endpoint: endpoint,
             mount_path: mount_path

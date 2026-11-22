@@ -73,6 +73,8 @@ module InstantRecord
         target: nil,
         baseline: nil,
         migration_paths: nil,
+        island: nil,
+        overrides: nil,
         out: $stdout
       )
         @workspace = File.expand_path(workspace.to_s)
@@ -92,6 +94,8 @@ module InstantRecord
         @build_dir = File.join(@workspace, *[".build-native", @target].compact)
         @baseline = baseline
         @migration_paths = migration_paths
+        @island = island
+        @overrides = overrides
         @runner = Runner.new(build_dir: @build_dir)
         @out = out
       end
@@ -117,6 +121,8 @@ module InstantRecord
           mount_path: @mount_path,
           baseline: @baseline,
           migration_paths: @migration_paths,
+          island: @island,
+          overrides: @overrides,
           build_dir: @build_dir,
           out: @out
         )
@@ -124,11 +130,13 @@ module InstantRecord
         app = emitted[:app]
         tree = emitted[:tree]
         plan = emitted[:plan]
+        manifest = emitted[:manifest]
 
         screens = EntryBuilder.write_native_entry(
           tree_dir: tree,
           app_dir: app,
           demo: @demo,
+          manifest: manifest,
           models: @models,
           sync_windows: @sync_windows,
           endpoint: @endpoint,

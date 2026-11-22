@@ -1,5 +1,7 @@
-get "email", to: "email/mailboxes#index"
-post "email", to: "email/mailboxes#create"
+local_first do
+  get "email", to: "email/mailboxes#index"
+  post "email", to: "email/mailboxes#create"
+end
 scope "email/sync/:member/:inbox", controller: "email/sync" do
   get "records", action: :records
   get "bootstrap", action: :bootstrap

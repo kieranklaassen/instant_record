@@ -44,6 +44,7 @@ export function isLocalUrl(url, origin, syncEndpoint = "/instant_record") {
   if (
     pathname === "/service-worker.js" ||
     pathname === "/instant-record-release.json" ||
+    pathname === "/instant_record.manifest.json" ||
     pathname.startsWith("/assets/") ||
     pathname.startsWith("/harness/") ||
     /^\/app[-.\w]*\.wasm$/.test(pathname)
