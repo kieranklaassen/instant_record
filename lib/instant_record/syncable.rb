@@ -145,9 +145,10 @@ module InstantRecord
       # its bytes, who may write it may send them. A file never changes: new
       # bytes are a new record. `max_size` is the most bytes the server takes
       # for one.
-      def sync_file(max_size: nil)
+      def sync_file(max_size: nil, chunk_size: nil)
         @instant_record_sync_file = true
         @instant_record_file_max_size = max_size
+        @instant_record_file_chunk_size = chunk_size
       end
 
       def instant_record_sync_file
@@ -156,6 +157,10 @@ module InstantRecord
 
       def instant_record_file_max_size
         @instant_record_file_max_size
+      end
+
+      def instant_record_file_chunk_size
+        @instant_record_file_chunk_size
       end
 
       # Observe a value from the server that last-write-wins threw away. The
