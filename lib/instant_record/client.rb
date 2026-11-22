@@ -15,14 +15,48 @@ module InstantRecord
     # More changes than this in one notice are not listed one by one.
     MAX_LISTED_CHANGES = 200
 
+    # Cap next_release_ms to 24 hours so it always fits safely inside a signed
+    # 32-bit integer on wasm32 Spinel builds.
+    MAX_RELEASE_DELAY_MS = 86_400_000
+
     class << self
       # Applying remote state must never enqueue new outbox mutations.
       def applying_remote? = @applying_remote
       def applying_remote(&block)
+        previous = @applying_remote
         @applying_remote = true
         block.call
       ensure
-        @applying_remote = false
+        @applying_remote = previous
+      end
+
+      def current_hold_for = @hold_for
+
+      def enter_hold(seconds)
+        if seconds.nil?
+          normalized = nil
+        else
+          normalized = seconds.to_f
+          raise ArgumentError, "hold_for must be non-negative" if normalized < 0.0
+          normalized = nil if normalized == 0.0
+        end
+
+        previous = @hold_for
+        @hold_for = normalized
+        previous
+      end
+
+      def leave_hold(previous)
+        @hold_for = previous
+      end
+
+      # Hold local outbox writes created inside the block for `seconds` before
+      # they mature for drain. Nested calls restore the outer hold window.
+      def with_hold(seconds)
+        previous = enter_hold(seconds)
+        yield
+      ensure
+        leave_hold(previous)
       end
 
       # Seams: real implementations are worker-backed and browser-only;
@@ -121,12 +155,110 @@ module InstantRecord
         evicted
       end
 
-      def pending_count
-        OutboxMutation.count
+      def pending_count(now = Time.now.utc)
+        return OutboxMutation.matured(now).count unless OutboxMutation.held(now).exists?
+
+        matured_outbox_rows(now).size
       end
 
-      def pending_mutations
-        OutboxMutation.ordered.map(&:as_mutation)
+      # Matured outbox rows ready to drain (release_at IS NULL OR release_at <= now).
+      # Preserves per-record causal order: a later write to a record with an earlier
+      # held mutation waits behind it, while independent records drain immediately.
+      def pending_mutations(now = Time.now.utc)
+        matured_outbox_rows(now).map(&:as_mutation)
+      end
+
+      # Snapshot the exact outgoing mutation batch for a two-phase host sync
+      # (sync_plan -> network fetch -> sync). Pinning the planned IDs prevents
+      # a held mutation that matures mid-fetch from altering the batch body
+      # between sync_plan and drain.
+      def plan_drain(now = Time.now.utc)
+        mutations = pending_mutations(now)
+        @planned_drain_ids = mutations.map { |m| m[:id] }
+        mutations
+      end
+
+      def clear_planned_drain
+        @planned_drain_ids = nil
+      end
+
+      def held_mutations(now = Time.now.utc)
+        OutboxMutation.held(now).ordered
+      end
+
+      def held_count(now = Time.now.utc)
+        OutboxMutation.held(now).count
+      end
+
+      def next_release_at(now = Time.now.utc)
+        OutboxMutation.held(now).order(:release_at, :created_at, :id).first&.release_at
+      end
+
+      def next_release_ms(now = Time.now.utc)
+        release_at = next_release_at(now)
+        return nil unless release_at
+
+        seconds = release_at.to_f - now.to_f
+        return 0 if seconds <= 0.0
+        return MAX_RELEASE_DELAY_MS if seconds >= 86_400.0
+
+        (seconds * 1000.0).ceil
+      end
+
+      # Cancel a held outbox mutation before its release_at matures: restore the
+      # local SQLite row from its pre-mutation snapshot and delete the outbox row
+      # atomically. Returns true when cancelled, false when unknown, already
+      # released/matured, or superseded by a later outbox mutation on the same row.
+      def cancel_pending(mutation_id, now: Time.now.utc)
+        cancelled = nil
+
+        OutboxMutation.transaction do
+          mutation = OutboxMutation.find_by(id: mutation_id)
+          next unless mutation && mutation.held?(now)
+
+          later = OutboxMutation.where(record_type: mutation.record_type, record_id: mutation.record_id)
+            .where("created_at > :at OR (created_at = :at AND id > :id)", at: mutation.created_at, id: mutation.id)
+            .exists?
+          next if later
+
+          model = InstantRecord.synced_model(mutation.record_type)
+          next unless model
+
+          earlier_pending = OutboxMutation.where(record_type: mutation.record_type, record_id: mutation.record_id)
+            .where.not(id: mutation.id)
+            .exists?
+
+          restored = applying_remote do
+            case mutation.operation
+            when "create"
+              model.find_by(id: mutation.record_id)&.destroy!
+              true
+            when "update", "destroy"
+              if mutation.rollback_payload.is_a?(Hash)
+                restore_record(model, mutation, earlier_pending: earlier_pending)
+                true
+              else
+                false
+              end
+            else
+              false
+            end
+          end
+          next unless restored
+
+          mutation.destroy!
+          cancelled = {
+            mutation_id: mutation.id,
+            record_type: mutation.record_type,
+            record_id: mutation.record_id,
+            operation: mutation.operation
+          }
+        end
+
+        return false unless cancelled
+
+        instrument("cancel_pending", cancelled)
+        true
       end
 
       def cursor
@@ -277,6 +409,7 @@ module InstantRecord
         recorded_notices.clear
         @unlisted_changes = false
         @eviction_pending = false
+        @planned_drain_ids = nil
         nil
       end
 
@@ -563,9 +696,14 @@ module InstantRecord
       end
 
       def drain_outbox
-        return [false, false] if InstantRecord.branched?
+        if InstantRecord.branched?
+          @planned_drain_ids = nil
+          return [false, false]
+        end
 
-        mutations = pending_mutations
+        planned_ids = @planned_drain_ids
+        @planned_drain_ids = nil
+        mutations = planned_ids.nil? ? pending_mutations : planned_mutations(planned_ids)
         return [false, false] if mutations.empty?
 
         instrument("drain") do |event|
@@ -588,7 +726,75 @@ module InstantRecord
         record = model&.find_by(id: mutation.record_id)
         return unless record
 
-        record.update_columns(sync_state: "synced", server_version: version || record.server_version)
+        still_pending = OutboxMutation.where(record_type: mutation.record_type, record_id: mutation.record_id)
+          .where.not(id: mutation.id)
+          .exists?
+        next_state = still_pending ? "pending" : "synced"
+        record.update_columns(sync_state: next_state, server_version: version || record.server_version)
+      end
+
+      def matured_outbox_rows(now)
+        return OutboxMutation.matured(now).ordered.to_a unless OutboxMutation.held(now).exists?
+
+        blocked = {}
+        ready = []
+        OutboxMutation.ordered.each do |mutation|
+          key = "#{mutation.record_type}:#{mutation.record_id}"
+          if mutation.held?(now)
+            blocked[key] = true
+          elsif !blocked[key]
+            ready << mutation
+          end
+        end
+        ready
+      end
+
+      def planned_mutations(ids)
+        return [] if ids.empty?
+
+        by_id = {}
+        OutboxMutation.where(id: ids).each { |mutation| by_id[mutation.id] = mutation }
+        ids.filter_map { |id| by_id[id]&.as_mutation }
+      end
+
+      def restore_record(model, mutation, earlier_pending:)
+        snapshot = mutation.rollback_payload
+        attrs = snapshot.slice(*model.column_names)
+        existing = model.find_by(id: mutation.record_id)
+
+        # A remote destroy (or rejected earlier create) already removed this row;
+        # undoing an update must not resurrect it.
+        return if mutation.operation == "update" && existing.nil?
+
+        # mark_synced keeps sync_state == "pending" while this held mutation is
+        # still in the outbox, so a persisted row at sync_state == "synced" means
+        # a newer remote change (or server reconciliation) already replaced it.
+        return if existing && existing.sync_state == "synced"
+
+        record = existing || model.new
+        current_version = existing ? existing.server_version.to_i : 0
+
+        record.assign_attributes(attrs.except("id"))
+        record.id = mutation.record_id
+
+        if earlier_pending
+          record.sync_state = "pending"
+        elsif attrs["sync_state"] == "pending"
+          record.sync_state = "synced"
+          record.server_version = current_version if current_version > record.server_version.to_i
+        end
+
+        if record.respond_to?(:record_timestamps=)
+          previous = record.record_timestamps
+          record.record_timestamps = false
+          begin
+            record.save!(validate: false)
+          ensure
+            record.record_timestamps = previous
+          end
+        else
+          record.save!(validate: false)
+        end
       end
 
       def reconcile_applied_mutator(mutation, result)
