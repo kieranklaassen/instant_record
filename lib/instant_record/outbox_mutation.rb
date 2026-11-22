@@ -11,7 +11,7 @@ module InstantRecord
     scope :ordered, -> { order(:created_at, :id) }
 
     def as_mutation
-      {
+      payload = {
         id: id,
         record_type: record_type,
         record_id: record_id,
@@ -19,6 +19,10 @@ module InstantRecord
         changes: changes_payload,
         base_version: base_version
       }
+      if has_attribute?(:schema_version) && self[:schema_version].present?
+        payload[:schema_version] = self[:schema_version]
+      end
+      payload
     end
   end
 end

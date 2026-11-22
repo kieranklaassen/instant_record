@@ -4,6 +4,7 @@
 import { AppHost } from "./app-host.js";
 import { advance, fresh, held, query } from "./history-fill.js";
 import { mailboxScope } from "./mailbox-scope.js";
+import { openOrRehydrate, reloadOrRehydrateSnapshot } from "./schema-recovery.js";
 import { openSnapshot, withFiles } from "./snapshot-store.js";
 
 const publicEndpoint = import.meta.env.VITE_SYNC_ENDPOINT || "/instant_record";
@@ -98,26 +99,58 @@ let drainDelayMs = DRAIN_RETRY_BASE_MS;
 // Keep each tab's hot reactor until a peer changes the durable revision.
 async function withSnapshot(mode, operation) {
   let wrote = false;
+  let pendingPersist = null;
+  let needsSync = false;
   try {
     const result = await withFiles(mode, async (get, put) => {
       const revision = await get(REVISION);
+      let allowSave = true;
       if (revision !== snapshotRevision) {
-        if ((await get(SCHEMA)) !== targetSchema) {
-          self.postMessage({ type: "release_required" });
-          throw new Error("A newer Rails release migrated this database. Reload to continue.");
-        }
-        const bytes = await get(DATABASE);
+        const [bytes, savedSchema] = await Promise.all([get(DATABASE), get(SCHEMA)]);
         const previous = host;
-        const restored = new AppHost(previous.module, { env: previous.env });
-        restored.cookies = previous.cookies;
-        if (bytes) restored.restoreDatabase(bytes, targetSchema);
-        restored.ensureBooted();
-        host = restored;
-        snapshotRevision = revision;
+        const recovered = reloadOrRehydrateSnapshot({
+          bytes,
+          savedSchema,
+          targetSchema,
+          createHost: () => {
+            const next = new AppHost(previous.module, { env: previous.env });
+            next.cookies = previous.cookies;
+            return next;
+          },
+          onReleaseRequired: () => self.postMessage({ type: "release_required" }),
+          onReport: report,
+        });
+        host = recovered.host;
         localRevision++;
         currentCursor = null;
+        if (recovered.rehydrated) {
+          needsSync = true;
+          if (recovered.persist) {
+            const rebuiltBytes = host.databaseBytes();
+            if (mode === "readwrite") {
+              snapshotRevision = (revision ?? 0) + 1;
+              put(DATABASE, rebuiltBytes);
+              put(REVISION, snapshotRevision);
+              put(SCHEMA, targetSchema);
+              put("migration_history", migrationHistory);
+              put("schema_digest", schemaDigest);
+              put(FILL, null);
+              wrote = true;
+            } else {
+              pendingPersist = { expectedRevision: revision, bytes: rebuiltBytes };
+            }
+          } else {
+            // A peer tab migrated IndexedDB to a newer schema; keep this tab
+            // running in memory until reload without clobbering the newer snapshot.
+            allowSave = false;
+            snapshotRevision = revision;
+          }
+        } else {
+          snapshotRevision = revision;
+        }
       }
       return operation(() => {
+        if (!allowSave) return;
         const bytes = host.databaseBytes();
         if (!bytes) throw new Error("SQLite did not produce a database snapshot");
         snapshotRevision = (revision ?? 0) + 1;
@@ -126,7 +159,26 @@ async function withSnapshot(mode, operation) {
         wrote = true;
       }, put);
     });
+    if (pendingPersist) {
+      const persisted = await withFiles("readwrite", async (get, put) => {
+        const currentRev = await get(REVISION);
+        const currentSchema = await get(SCHEMA);
+        if (currentRev !== pendingPersist.expectedRevision || (currentSchema != null && currentSchema > targetSchema)) {
+          return false;
+        }
+        snapshotRevision = (currentRev ?? 0) + 1;
+        put(DATABASE, pendingPersist.bytes);
+        put(REVISION, snapshotRevision);
+        put(SCHEMA, targetSchema);
+        put("migration_history", migrationHistory);
+        put("schema_digest", schemaDigest);
+        put(FILL, null);
+        return true;
+      });
+      if (persisted) wrote = true;
+    }
     if (wrote) changes.postMessage(snapshotRevision);
+    if (needsSync) kickSync(0);
     return result;
   } catch (error) {
     // Discard uncommitted in-memory changes before the next operation.
@@ -164,7 +216,7 @@ function syncPass() {
 async function drain(initial = false, early = null) {
   const { plan, revision } = await withSnapshot("readonly", () => ({ plan: host.syncPlan(), revision: snapshotRevision }));
   const push = plan.push ? await fetchReply("POST", "/mutations", plan.push) : null;
-  const snapshot = plan.bootstrap ? (early?.status === 200 ? early : await fetchReply("GET", "/bootstrap")) : null;
+  const snapshot = plan.bootstrap ? (!plan.push && early?.status === 200 ? early : await fetchReply("GET", "/bootstrap")) : null;
 
   // An edit made during the network wait takes precedence over an old rejection or
   // snapshot. Retry from SQLite with the original mutation IDs for idempotent replay.
@@ -440,36 +492,24 @@ async function boot(payload = {}) {
       get(DATABASE), get(SCHEMA), get(REVISION), get("secret_key_base"), get("migration_history"), get("schema_digest"),
     ]);
     storageMs = performance.now() - opening;
-    if (bytes && version == null && !legacySchema) throw new Error("Set compiled_migration_baseline to the schema version of the previously deployed browser app.");
-    const previous = version ?? Number(legacySchema);
-    if (bytes && (previous > targetSchema || (legacySchema && previous < Number(legacySchema)))) {
-      throw new Error("This release cannot migrate the saved schema version " + previous + ".");
-    }
-    if (history) {
-      const priorVersions = new Set([...Object.keys(history), ...Object.keys(migrationHistory)]);
-      for (const key of priorVersions) {
-        if (Number(key) <= previous && migrationHistory[key] !== history[key]) {
-          throw new Error("Published migration " + key + " changed. Add a new migration instead.");
-        }
-      }
-    }
-    if (version === targetSchema && previousDigest && previousDigest !== schemaDigest) {
-      throw new Error("The compiled schema changed without a new Rails migration version.");
-    }
-    if (bytes && previous < targetSchema && !(targetSchema in migrationHistory)) {
-      throw new Error("Missing browser migration for schema version " + targetSchema + ".");
-    }
     const secret = savedSecret || [...crypto.getRandomValues(new Uint8Array(64))].map(b => b.toString(16).padStart(2, "0")).join("");
     if (!savedSecret) put("secret_key_base", secret);
-    const candidate = new AppHost(module, { env: { SECRET_KEY_BASE: secret } });
-    // Another tab may have saved a database while the shell downloaded. That one wins.
-    const fromShell = !bytes && !!shell;
-    if (bytes) candidate.restoreDatabase(bytes, previous);
-    if (fromShell) candidate.restoreDatabase(shell.bytes, targetSchema);
-    const initStart = performance.now();
-    candidate.ensureBooted();
-    runtimeMs = performance.now() - initStart;
-    if (fromShell) {
+    const outcome = openOrRehydrate({
+      bytes,
+      version,
+      targetSchema,
+      legacySchema,
+      history,
+      migrationHistory,
+      previousDigest,
+      schemaDigest,
+      shell,
+      createHost: () => new AppHost(module, { env: { SECRET_KEY_BASE: secret } }),
+      onReport: report,
+    });
+    const candidate = outcome.host;
+    runtimeMs = outcome.runtimeMs;
+    if (outcome.fromShell) {
       // The shell's cursor is its last write. One that did not arrive whole has none.
       const state = candidate.syncState();
       if (!state.bootstrapped || state.cursor !== shell.cursor) throw new Error("The shell does not carry its cursor.");
@@ -477,30 +517,32 @@ async function boot(payload = {}) {
       shell = null;
     }
     snapshotRevision = revision;
-    if (fromShell || version !== targetSchema || !previousDigest) {
+    if (outcome.fromShell || outcome.rehydrated || version !== targetSchema || !previousDigest) {
       snapshotRevision = (revision ?? 0) + 1;
       put(DATABASE, candidate.databaseBytes());
       put(REVISION, snapshotRevision);
       put(SCHEMA, targetSchema);
       put("migration_history", migrationHistory);
       put("schema_digest", schemaDigest);
+      if (outcome.rehydrated) put(FILL, null);
     }
     host = candidate;
-    return !!bytes;
+    return { restored: outcome.restored, rehydrated: outcome.rehydrated };
   });
-  let restored;
+  let opened;
   try {
-    restored = await open();
+    opened = await open();
   } catch (error) {
     // A shell this build cannot open costs one attempt. The transaction rolled back, so the
     // second attempt starts from an empty database and bootstraps as it always has.
     if (!shell) throw error;
     report({ kind: "sync", method: "GET", path: "/shell", status: "rejected", ms: Math.round(shell.ms) });
     shell = null;
-    restored = await open();
+    opened = await open();
   }
+  const { restored, rehydrated } = opened;
   const bootstrapStart = performance.now();
-  if (!restored && !shell) await drain(true, await bootstrapFetch);
+  if (!restored && !shell) await drain(true, rehydrated ? null : await bootstrapFetch);
   // The shell is as old as its cursor. Ask for what came after it now, not at the first
   // interval, and do not hold the first page for the answer.
   if (shell) pollChanges();
@@ -522,7 +564,7 @@ async function boot(payload = {}) {
     mailScope = scope;
     scheduleFill(1000);
   }
-  return { compileMs: compiled - started, restored, storageMs, runtimeMs, bootstrapMs, first,
+  return { compileMs: compiled - started, restored, rehydrated, storageMs, runtimeMs, bootstrapMs, first,
     shell: shell ? { ms: shell.ms, bytes: shell.bytes.length, cursor: shell.cursor } : null };
 }
 

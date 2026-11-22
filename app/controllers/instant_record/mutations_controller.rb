@@ -19,7 +19,7 @@ module InstantRecord
       # poll tells it to reset.
       stale = SyncScope.stale?(params[:identity], identity) ? SyncScope.reset_types(identity) : []
       results = Array(params.require(:mutations)).map do |raw|
-        mutation = raw.permit(:id, :record_type, :record_id, :operation, :base_version, changes: {})
+        mutation = raw.permit(:id, :record_type, :record_id, :operation, :base_version, :schema_version, changes: {})
         if stale.include?(mutation[:record_type])
           { mutation_id: mutation[:id], status: "rejected", reason: "identity changed" }
         else

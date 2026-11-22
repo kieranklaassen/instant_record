@@ -1,5 +1,6 @@
 require "instant_record/sync_scope"
 require "instant_record/files"
+require "instant_record/outbox_upcaster"
 
 module InstantRecord
   class Engine < ::Rails::Engine

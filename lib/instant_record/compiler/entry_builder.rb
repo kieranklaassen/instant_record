@@ -95,22 +95,84 @@ module InstantRecord
             <<write:out>>"cursor=" + InstantRecord::Client.cursor.to_s + " pending=" + InstantRecord::Client.pending_count.to_s + " bootstrap=" + (InstantRecord::Client.bootstrapped? ? "ready" : "needed") + " identity=" + (key.nil? ? "" : key))
             0
           end
+
+          # Extract pending outbox rows directly from SQLite so a drifted or
+          # unmigratable database can be rebuilt cleanly without losing offline writes.
+          def self.export_outbox
+            rows = []
+            begin
+              SqliteAdapter.each_row("SELECT id, record_type, record_id, operation, changes_payload, base_version, created_at, updated_at FROM instant_record_outbox ORDER BY created_at, id") do |row|
+                payload = row["changes_payload"]
+                rows << {
+                  "id" => row["id"].to_s,
+                  "record_type" => row["record_type"].to_s,
+                  "record_id" => row["record_id"].to_s,
+                  "operation" => row["operation"].to_s,
+                  "changes_payload" => payload.nil? ? "{}" : payload.to_s,
+                  "base_version" => row["base_version"].to_s.to_i,
+                  "created_at" => row["created_at"].to_s,
+                  "updated_at" => row["updated_at"].to_s
+                }
+              end
+            rescue StandardError
+              rows = []
+            end
+            <<write:out>>JSON.generate(rows))
+            0
+          end
+
+          # Re-insert preserved outbox rows into a freshly rebuilt database in
+          # one atomic SQLite transaction, keeping original ids and order.
+          def self.import_outbox
+            rows = JSON.parse(<<read:in>>)
+            inserted = 0
+            Db.exec("BEGIN IMMEDIATE")
+            begin
+              rows.each do |row|
+                payload = row["changes_payload"]
+                sql = "INSERT OR IGNORE INTO instant_record_outbox " \
+                  "(id, record_type, record_id, operation, changes_payload, base_version, created_at, updated_at) VALUES (" +
+                  Db.escape_string(row["id"].to_s) + ", " +
+                  Db.escape_string(row["record_type"].to_s) + ", " +
+                  Db.escape_string(row["record_id"].to_s) + ", " +
+                  Db.escape_string(row["operation"].to_s) + ", " +
+                  Db.escape_string(payload.nil? ? "{}" : payload.to_s) + ", " +
+                  row["base_version"].to_i.to_s + ", " +
+                  Db.escape_string(row["created_at"].to_s) + ", " +
+                  Db.escape_string(row["updated_at"].to_s) + ")"
+                Db.exec(sql)
+                inserted += 1
+              end
+              Db.exec("COMMIT")
+            rescue StandardError
+              begin
+                Db.exec("ROLLBACK")
+              rescue StandardError
+              end
+              raise
+            end
+            <<write:out>>JSON.generate({ imported: inserted }))
+            0
+          end
         <<entries>>end
       RUBY
 
       DATABASE = <<~'RUBY'
         restored = File.exist?(db_path) && File.size(db_path) > 0
+        recovery = <<recovery>>
         SqliteAdapter.configure(db_path)
         ActiveRecord.adapter = SqliteAdapter
-        <<pragmas>>Schema.statements.each { |sql| SqliteAdapter.execute_ddl(sql) } unless restored
+        <<pragmas>>unless recovery
+          Schema.statements.each { |sql| SqliteAdapter.execute_ddl(sql) } unless restored
         <<migrations>>
-        # Earlier demos saved a cursor before Note was a synced model. Rehydrate once
-        # on a model-set change, preserving all local rows and pending mutations.
-        model_set = "<<model_set>>"
-        if InstantRecord::SyncMetadata.get("compiled_models") != model_set
-          Schema.statements.each { |sql| SqliteAdapter.execute_ddl(sql) } if restored
-          InstantRecord::SyncMetadata.where(key: "cursor").delete_all if restored
-          InstantRecord::SyncMetadata.set("compiled_models", model_set)
+          # Earlier demos saved a cursor before Note was a synced model. Rehydrate once
+          # on a model-set change, preserving all local rows and pending mutations.
+          model_set = "<<model_set>>"
+          if InstantRecord::SyncMetadata.get("compiled_models") != model_set
+            Schema.statements.each { |sql| SqliteAdapter.execute_ddl(sql) } if restored
+            InstantRecord::SyncMetadata.where(key: "cursor").delete_all if restored
+            InstantRecord::SyncMetadata.set("compiled_models", model_set)
+          end
         end
       RUBY
 
@@ -214,13 +276,29 @@ module InstantRecord
         steps = ["if restored", "  previous = #{previous}"]
         migrations_map = plan.fetch("migrations", {})
         migrations_map.sort_by { |version, _| version.to_i }.each do |version, statements|
-          steps << %(  if previous < "#{format('%020d', version.to_i)}")
-          statements.each do |sql|
-            literal = JSON.generate(sql)
-              .gsub('#{', '\\#{')
-              .gsub('#@', '\\#@')
-              .gsub('#$', '\\#$')
-            steps << "    Db.exec(#{literal})"
+          padded = format("%020d", version.to_i)
+          steps << %(  if previous < "#{padded}")
+          if statements.any?
+            steps << '    Db.exec("BEGIN IMMEDIATE")'
+            steps << "    begin"
+            statements.each do |sql|
+              literal = JSON.generate(sql)
+                .gsub('#{', '\\#{')
+                .gsub('#@', '\\#@')
+                .gsub('#$', '\\#$')
+              steps << "      Db.exec(#{literal})"
+            end
+            steps << '      Db.exec("COMMIT")'
+            steps << "    rescue StandardError"
+            steps << "      begin"
+            steps << '        Db.exec("ROLLBACK")'
+            steps << "      rescue StandardError"
+            steps << "      end"
+            steps << "      raise"
+            steps << "    end"
+          end
+          unless applied.empty?
+            steps << "    " + applied.gsub("<<version>>") { padded }
           end
           steps << "  end"
         end
@@ -251,9 +329,10 @@ module InstantRecord
         fill(BRIDGE, { "bridge" => name, "entries" => entries }, read: read, write: write)
       end
 
-      def database(pragmas:, steps:, models:)
+      def database(pragmas:, steps:, models:, recovery: "false")
         lines = pragmas.map { |pragma| %(SqliteAdapter.execute_ddl("PRAGMA #{pragma}")\n) }.join
-        fill(DATABASE, { "pragmas" => lines, "migrations" => steps, "model_set" => models.sort.join(",") })
+        indented_steps = steps.empty? ? "" : indent(steps, "  ")
+        fill(DATABASE, { "pragmas" => lines, "migrations" => indented_steps, "model_set" => models.sort.join(","), "recovery" => recovery })
       end
 
       def start(streaming:, comment:, demo:, models:)
@@ -288,7 +367,8 @@ module InstantRecord
           database(
             pragmas: ["locking_mode = EXCLUSIVE", "journal_mode = MEMORY", "cache_size = -4000"],
             steps: migrations(demo: demo, plan: migration_plan, previous: 'File.read("/host/schema_version")'),
-            models: resolved_models
+            models: resolved_models,
+            recovery: 'File.exist?("/host/recovery") && File.read("/host/recovery") == "extract_outbox"'
           ) +
           start(
             streaming: true,

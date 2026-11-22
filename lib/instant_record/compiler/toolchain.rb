@@ -8,7 +8,7 @@ module InstantRecord
     # validates that the required external tools are present before a build.
     class Toolchain
       Check = Struct.new(:name, :status, :detail, keyword_init: true) do
-        def ok? = status != :missing
+        def ok? = status != :missing && status != :error
       end
 
       Report = Struct.new(:target, :path, :checks, keyword_init: true) do
@@ -20,6 +20,7 @@ module InstantRecord
             badge = case check.status
             when :ok then "OK"
             when :optional then "OPTIONAL"
+            when :error then "ERROR"
             else "MISSING"
             end
             lines << format("  [%-8s] %-18s %s", badge, check.name, check.detail)

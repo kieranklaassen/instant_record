@@ -101,6 +101,23 @@ module InstantRecord
       def instant_record_discarded_change_handler
         @instant_record_discarded_change_handler
       end
+
+      # Transform queued client outbox payloads before MutationApplier writes
+      # them on the server. Handles rolling-deploy schema skew (N-1 -> N
+      # upcasts and N+1 -> N downcasts) without rejecting offline writes.
+      def upcast_outbox(from: nil, to: nil, operation: nil, &block)
+        return nil if InstantRecord.browser?
+        raise ArgumentError, "upcast_outbox requires a block" unless block
+
+        @instant_record_outbox_upcasters ||= []
+        @instant_record_outbox_upcasters << { from: from, to: to, operation: operation, transform: block }
+        nil
+      end
+
+      def instant_record_outbox_upcasters
+        inherited = superclass.respond_to?(:instant_record_outbox_upcasters) ? superclass.instant_record_outbox_upcasters : []
+        inherited + (@instant_record_outbox_upcasters || [])
+      end
     end
 
     private

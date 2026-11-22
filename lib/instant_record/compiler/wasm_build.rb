@@ -7,6 +7,7 @@ require_relative "browser_migrations"
 require_relative "entry_builder"
 require_relative "gem_vendor"
 require_relative "runner"
+require_relative "schema_lock"
 require_relative "source_pages"
 require_relative "toolchain"
 require_relative "wasm_tree"
@@ -28,7 +29,9 @@ module InstantRecord
         "WasmBridge.sync_plan",
         "WasmBridge.handle_stream",
         "WasmBridge.cursor",
-        "WasmBridge.history"
+        "WasmBridge.history",
+        "WasmBridge.export_outbox",
+        "WasmBridge.import_outbox"
       ].join(",").freeze
 
       SQLITE_CFLAGS = %w[
@@ -102,6 +105,14 @@ module InstantRecord
         FileUtils.mkdir_p(@build_dir)
         FileUtils.mkdir_p(@toolchain.fetch("CACHE"))
 
+        if !@demo && !File.file?(SchemaLock.path(@app_source))
+          SchemaLock.write!(
+            root: @app_source,
+            baseline: @baseline,
+            migration_paths: @migration_paths
+          )
+        end
+
         stamp = File.join(@build_dir, "stamp")
         wanted = input_digest
         output = File.join(@workspace, "web/dist")
@@ -145,6 +156,15 @@ module InstantRecord
             native: native
           )
         else
+          if File.file?(SchemaLock.path(@app_source))
+            lock_report = SchemaLock.verify(
+              root: @app_source,
+              baseline: @baseline,
+              migration_paths: @migration_paths,
+              models: @models
+            )
+            raise BuildError, "Schema lockfile verification failed:\n#{lock_report}" unless lock_report.ok?
+          end
           plan = BrowserMigrations.plan(
             root: @app_source,
             baseline: @baseline,
@@ -197,6 +217,8 @@ module InstantRecord
         ]
 
         unless @demo
+          lock_file = SchemaLock.path(@source_root)
+          paths << lock_file if File.file?(lock_file)
           inputs << [@source_root, ["db/browser_migrate"]]
           Array(@migration_paths || [File.join(@source_root, "db/migrate")]).each do |dir|
             inputs << [dir, ["."]]

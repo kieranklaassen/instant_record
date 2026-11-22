@@ -6,6 +6,7 @@ require_relative "compiler/runner"
 require_relative "compiler/toolchain"
 require_relative "compiler/path_scrubber"
 require_relative "compiler/browser_migrations"
+require_relative "compiler/schema_lock"
 require_relative "compiler/app_stage"
 require_relative "compiler/gem_vendor"
 require_relative "compiler/entry_builder"
@@ -66,8 +67,32 @@ module InstantRecord
       ).run
     end
 
-    def self.doctor(toolchain:, target: :wasm, web_dir: nil)
-      Toolchain.load(toolchain).doctor(target: target, web_dir: web_dir)
+    def self.doctor(toolchain:, target: :wasm, web_dir: nil, root: nil, baseline: nil, migration_paths: nil, models: nil)
+      report = Toolchain.load(toolchain).doctor(target: target, web_dir: web_dir)
+      if root && File.file?(File.join(root.to_s, "db/schema.rb"))
+        schema_report = SchemaLock.verify(
+          root: root,
+          baseline: baseline,
+          migration_paths: migration_paths,
+          models: models
+        )
+        schema_report.checks.each do |check|
+          report.checks << Toolchain::Check.new(
+            name: "schema:#{check.name}",
+            status: check.ok? ? :ok : :error,
+            detail: check.detail
+          )
+        end
+      end
+      report
+    end
+
+    def self.lock_schema(root:, baseline: nil, migration_paths: nil, force: false)
+      SchemaLock.write!(root: root, baseline: baseline, migration_paths: migration_paths, force: force)
+    end
+
+    def self.verify_schema(root:, baseline: nil, migration_paths: nil, models: nil)
+      SchemaLock.verify(root: root, baseline: baseline, migration_paths: migration_paths, models: models)
     end
 
     def self.scrub_path(path, prefix)

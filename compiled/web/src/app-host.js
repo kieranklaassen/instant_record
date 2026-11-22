@@ -84,6 +84,31 @@ export class AppHost {
     this.hostDir.contents.set("schema_version", new File(encoder.encode(String(schemaVersion).padStart(20, "0"))));
   }
 
+  restoreForOutboxExtraction(bytes) {
+    this.storage.contents.set("development.sqlite3", new File(bytes));
+    this.hostDir.contents.set("recovery", new File(encoder.encode("extract_outbox")));
+  }
+
+  extractOutbox(bytes) {
+    if (!bytes || !bytes.length) return [];
+    this.restoreForOutboxExtraction(bytes);
+    const result = this.call("wasm_export_outbox", new Uint8Array());
+    if (result.exit !== 0) {
+      throw new Error(result.errors.join("\n") || "Failed to extract outbox mutations");
+    }
+    const parsed = JSON.parse(decoder.decode(result.out) || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  }
+
+  importOutbox(rows) {
+    if (!Array.isArray(rows) || rows.length === 0) return { imported: 0 };
+    const result = this.call("wasm_import_outbox", encoder.encode(JSON.stringify(rows)));
+    if (result.exit !== 0) {
+      throw new Error(result.errors.join("\n") || "Failed to import preserved outbox mutations");
+    }
+    return JSON.parse(decoder.decode(result.out) || '{"imported":0}');
+  }
+
   // Lazily instantiate and boot the WASI reactor once (after restoreDatabase has placed any saved
   // SQLite file into /storage).
   ensureBooted() {

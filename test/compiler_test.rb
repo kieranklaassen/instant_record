@@ -280,6 +280,12 @@ class CompilerTest < ActiveSupport::TestCase
       assert_includes wasm_main, "module WasmBridge"
       assert_includes wasm_main, 'File.read("/host/in")'
       assert_includes wasm_main, 'if previous < "00000020261120000001"'
+      assert_includes wasm_main, 'Db.exec("BEGIN IMMEDIATE")'
+      assert_includes wasm_main, 'Db.exec("COMMIT")'
+      assert_includes wasm_main, 'Db.exec("ROLLBACK")'
+      assert_includes wasm_main, "def self.export_outbox"
+      assert_includes wasm_main, "def self.import_outbox"
+      assert_includes wasm_main, 'File.exist?("/host/recovery") && File.read("/host/recovery") == "extract_outbox"'
       assert_includes wasm_main, '\#{x}\#@y\#$z'
       assert_includes wasm_main, "InstantRecord.sync(Note)"
       assert_includes wasm_main, "InstantRecord::Client.streaming = true"
@@ -296,6 +302,7 @@ class CompilerTest < ActiveSupport::TestCase
       native_main = File.read(File.join(emit, "main_native.rb"))
       assert_includes native_main, "module NativeBridge"
       assert_includes native_main, 'when "inbox_list" then InboxListScreen.new(params)'
+      assert_includes native_main, 'Db.exec("BEGIN IMMEDIATE")'
       assert_includes native_main, 'InstantRecord::SyncMetadata.set("schema_version", "00000020261120000001")'
       assert_includes native_main, "InstantRecord::Client.streaming = false"
 
@@ -305,6 +312,59 @@ class CompilerTest < ActiveSupport::TestCase
       notifier = File.read(File.join(emit, "app/models/instant_record/client/notifier.rb"))
       assert_includes notifier, 'NativeHost.ir_host_give("notify", message)'
     end
+  end
+
+  test "EntryBuilder wraps each migration version in an atomic SQLite transaction that rolls back on mid-step failure" do
+    plan = {
+      "version" => 2,
+      "baseline" => nil,
+      "migrations" => {
+        "1" => [
+          'CREATE TABLE "widgets" ("id" varchar NOT NULL PRIMARY KEY, "name" varchar NOT NULL)',
+          'INSERT INTO "widgets" ("id", "name") VALUES (\'w-1\', \'alpha\')'
+        ],
+        "2" => [
+          'ALTER TABLE "widgets" ADD COLUMN "priority" integer NOT NULL DEFAULT 0',
+          'INSERT INTO "widgets" ("id", "name", "priority") VALUES (\'w-1\', \'duplicate-pk\', 9)'
+        ]
+      }
+    }
+
+    code = InstantRecord::Compiler::EntryBuilder.migrations(
+      demo: false,
+      plan: plan,
+      previous: '"00000000000000000000"',
+      applied: 'applied_versions << "<<version>>"'
+    )
+
+    conn = ActiveRecord::ConnectionAdapters::SQLite3Adapter.new({ adapter: "sqlite3", database: ":memory:" })
+    raw = conn.raw_connection
+    db_mod = Module.new do
+      define_singleton_method(:exec) { |sql| raw.execute_batch(sql) }
+    end
+
+    runner = Module.new
+    runner.const_set(:Db, db_mod)
+    applied_versions = []
+    restored = true
+
+    # Step 1 commits atomically; step 2 fails on its 2nd statement and rolls back its ALTER TABLE.
+    error = assert_raises(SQLite3::ConstraintException) do
+      runner.module_eval(<<~RUBY)
+        restored = #{restored}
+        applied_versions = ObjectSpace._id2ref(#{applied_versions.object_id})
+        #{code}
+      RUBY
+    end
+    assert_match(/UNIQUE constraint failed/, error.message)
+
+    # Step 1 was committed and stamped; step 2's ALTER TABLE was rolled back cleanly.
+    assert_equal ["00000000000000000001"], applied_versions
+    columns = conn.select_all('PRAGMA table_info("widgets")').map { |r| r["name"] }
+    assert_equal %w[id name], columns
+    assert_equal 1, conn.select_value('SELECT COUNT(*) FROM "widgets"')
+  ensure
+    conn&.disconnect!
   end
 
   test "WasmTree renames threading constants, injects shims, and patches emitted runtime" do
@@ -372,6 +432,7 @@ class CompilerTest < ActiveSupport::TestCase
       end
 
       assert_equal Pathname(app_root).realpath.join("tmp/instant_record/compiled/web/dist"), output
+      assert File.file?(File.join(app_root, "db/instant_record_lock.json")), "first compile should emit db/instant_record_lock.json"
       assert File.file?(output.join("index.html"))
       assert File.file?(output.join("instant-record-release.json"))
       assert File.file?(output.join("service-worker.js"))
