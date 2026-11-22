@@ -158,7 +158,16 @@ module InstantRecord
           end
         end
         OutboxMutation.all.each do |mutation|
-          mutation.destroy if types.include?(mutation.record_type)
+          drop = types.include?(mutation.record_type)
+          if !drop && mutation.mutator?
+            mutation.touched_records.each do |entry|
+              if types.include?(entry["type"])
+                drop = true
+                break
+              end
+            end
+          end
+          mutation.destroy if drop
         end
         # The rows that stay were last brought up to date at this cursor. The
         # bootstrap to come only adds and changes rows, so the poll after it
@@ -404,23 +413,32 @@ module InstantRecord
           next unless mutation
 
           applying_remote do
-            case result["status"]
-            when "applied"
-              # `skipped` is the server saying it threw this write away to
-              # last-write-wins. It is resolved (nothing will retry it) but it
-              # never landed, so marking the record synced would badge a
-              # discarded write as delivered — the record does not hold what the
-              # server holds. Reconcile to the winner, which rides along with the
-              # result; the same value also arrives over the change stream, which
-              # is what makes doing nothing here look fine until the stream is
-              # behind.
-              if result["skipped"]
-                reconcile_to_server_state(mutation, result)
-              else
-                mark_synced(mutation, result["version"])
+            if mutation.mutator?
+              case result["status"]
+              when "applied"
+                reconcile_applied_mutator(mutation, result)
+              when "rejected"
+                reconcile_rejected_mutator(mutation, result)
               end
-            when "rejected"
-              reconcile_rejection(mutation, result)
+            else
+              case result["status"]
+              when "applied"
+                # `skipped` is the server saying it threw this write away to
+                # last-write-wins. It is resolved (nothing will retry it) but it
+                # never landed, so marking the record synced would badge a
+                # discarded write as delivered — the record does not hold what the
+                # server holds. Reconcile to the winner, which rides along with the
+                # result; the same value also arrives over the change stream, which
+                # is what makes doing nothing here look fine until the stream is
+                # behind.
+                if result["skipped"]
+                  reconcile_to_server_state(mutation, result)
+                else
+                  mark_synced(mutation, result["version"])
+                end
+              when "rejected"
+                reconcile_rejection(mutation, result)
+              end
             end
             mutation.destroy!
           end
@@ -513,6 +531,69 @@ module InstantRecord
         return unless record
 
         record.update_columns(sync_state: "synced", server_version: version || record.server_version)
+      end
+
+      def reconcile_applied_mutator(mutation, result)
+        seen = {}
+        Array(result["records"]).each do |rec|
+          rec = rec.deep_stringify_keys
+          model = InstantRecord.synced_model(rec["type"])
+          next unless model
+
+          seen["#{rec["type"]}:#{rec["id"]}"] = true
+          if rec["operation"] == "destroy"
+            model.find_by(id: rec["id"])&.destroy!
+          else
+            upsert_from_server(model, rec["attributes"], rec["version"], authoritative: true)
+          end
+        end
+
+        mutation.touched_records.each do |entry|
+          key = "#{entry["type"]}:#{entry["id"]}"
+          next if seen[key]
+
+          model = InstantRecord.synced_model(entry["type"])
+          record = model&.find_by(id: entry["id"])
+          record.update_columns(sync_state: "synced") if record
+        end
+      end
+
+      def reconcile_rejected_mutator(mutation, result)
+        reconciled = {}
+        Array(result["records"]).each do |rec|
+          rec = rec.deep_stringify_keys
+          model = InstantRecord.synced_model(rec["type"])
+          next unless model && rec["attributes"].present?
+
+          upsert_from_server(model, rec["attributes"], rec["version"], authoritative: true)
+          reconciled["#{rec["type"]}:#{rec["id"]}"] = true
+        end
+
+        mutation.touched_records.each do |entry|
+          key = "#{entry["type"]}:#{entry["id"]}"
+          next if reconciled[key]
+
+          model = InstantRecord.synced_model(entry["type"])
+          next unless model
+
+          if entry["op"] == "create"
+            model.find_by(id: entry["id"])&.destroy!
+          elsif entry["before"].is_a?(Hash)
+            restore_local_snapshot(model, entry["before"])
+          end
+        end
+      end
+
+      def restore_local_snapshot(model, attributes)
+        sliced = attributes.slice(*model.column_names)
+        return unless sliced["id"]
+
+        record = model.find_or_initialize_by(id: sliced["id"])
+        record.assign_attributes(sliced.except("id"))
+        record.save!(validate: false)
+        if sliced["updated_at"]
+          record.update_columns(updated_at: Time.parse(sliced["updated_at"].to_s))
+        end
       end
 
       def reconcile_rejection(mutation, result)

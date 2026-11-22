@@ -170,7 +170,8 @@ module InstantRecord
           demo: @demo,
           models: @models,
           migration_plan: plan,
-          pipeline_dir: @pipeline_dir
+          pipeline_dir: @pipeline_dir,
+          app_dir: app
         )
         WasmTree.build(source: emit, target: tree, demo: @demo)
 

@@ -289,6 +289,13 @@ module InstantRecord
       JSON.generate(ok: false, error: e.message)
     end
 
+    # Execute a declared sync_action in the active runtime (optimistically inside
+    # a local SQLite savepoint on the client, or in one transaction on the server).
+    def mutate(mutator_name, args = nil, mutation_id: nil, **kwargs)
+      merged = args ? (kwargs.empty? ? args : args.merge(kwargs)) : kwargs
+      SyncActions.mutate(mutator_name, merged, mutation_id: mutation_id)
+    end
+
     # Server-side change logging (Syncable) must not fire while a client
     # mutation is being applied — MutationApplier logs those itself.
     # IsolatedExecutionState is fiber-aware for Falcon's fiber-per-request.
@@ -340,8 +347,14 @@ end
 
 ActiveSupport.on_load(:active_record) do
   require "instant_record/sync_window"
+  require "instant_record/sync_actions"
   require "instant_record/syncable"
   require "instant_record/outbox_mutation"
   require "instant_record/sync_metadata"
   require "instant_record/client"
+end
+
+ActiveSupport.on_load(:active_job) do
+  require "instant_record/sync_actions"
+  InstantRecord::SyncActions.install_active_job_guard!
 end
