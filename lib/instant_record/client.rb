@@ -37,19 +37,21 @@ module InstantRecord
         @notifier ||= Notifier::Worker.new
       end
 
-      # One full pass: outbox up, changes down, tabs notified when anything
+      # One full pass: outbox up, changes down, tabs notified when visible rows
       # moved. Called under InstantRecord.tick's single-flight guard. A client
       # that has never synced hydrates from the bootstrap snapshot instead of
       # replaying the whole change log from cursor 0.
+      #
+      # Returns whether local SQLite state changed (including pure outbox acks,
+      # so the worker persists the drained outbox), while `notify_changed` only
+      # fires when visible record data changed (evictions, reconciliations,
+      # remote deltas, resets, or bootstrap).
       def sync_pass
-        changed = evict_beyond_windows
-        changed = drain || changed
-        # Evictions and acknowledged writes are not listed one by one, and
-        # neither is a bootstrap: the page is told that anything may have changed.
-        unlisted_changes if changed || !bootstrapped?
-        changed = (bootstrapped? ? poll_changes : bootstrap) || changed
-        notify_changed if changed || recorded_notices.any?
-        changed
+        evicted = evict_beyond_windows
+        drained, reconciled = drain_outbox
+        pulled = bootstrapped? ? poll_changes : bootstrap
+        notify_changed if evicted || reconciled || pulled || recorded_notices.any?
+        evicted || drained || pulled
       end
 
       # Which records changed since the page was last told, as "Type:id"
@@ -112,6 +114,7 @@ module InstantRecord
             evicted = true if window.beyond_window(model.where.not(sync_state: "pending")).delete_all.positive?
           end
         end
+        unlisted_changes if evicted
         evicted
       end
 
@@ -191,7 +194,7 @@ module InstantRecord
         instrument("bootstrap") do |event|
           body = transport.get_json("/bootstrap")
           records = Array(body["records"])
-          records.each { |record| apply_change(record) }
+          records.each { |record| apply_record(record) }
           event[:records] = records.size
 
           # Cursor written last: a crash mid-apply leaves it nil, so the next
@@ -205,6 +208,7 @@ module InstantRecord
             self.cursor = replay.to_i
           end
           SyncMetadata.all.each { |entry| entry.destroy if entry.key == "replay_from" } unless replay.nil?
+          unlisted_changes
           true
         end
       rescue Transport::Error => e
@@ -214,22 +218,7 @@ module InstantRecord
 
       # Outbox up. Returns true when anything was sent and applied.
       def drain
-        mutations = pending_mutations
-        return false if mutations.empty?
-
-        instrument("drain") do |event|
-          body = transport.post_json("/mutations", mutations_payload(mutations))
-          apply_results(body["results"])
-
-          results = Array(body["results"]).map { |r| r.deep_stringify_keys }
-          event[:posted] = mutations.size
-          event[:rejected] = results.count { |r| r["status"] == "rejected" }
-          event[:reasons] = results.filter_map { |r| r["reason"] }.uniq.first(3)
-          true
-        end
-      rescue Transport::Error => e
-        log_failure("drain", e)
-        false
+        drain_outbox.first
       end
 
       # Set while something outside the VM holds a tailing stream and feeds
@@ -390,7 +379,7 @@ module InstantRecord
         instrument("fetch_history") do |event|
           body = transport.get_json(history_path(model, partition, before_at, before_id, limit))
           records = Array(body["records"])
-          records.each { |record| apply_change(record) }
+          records.each { |record| apply_record(record) }
           extend_history_mark(model, partition, records, has_more: !!body["has_more"])
           event[:applied] = records.size
           event[:has_more] = !!body["has_more"]
@@ -404,11 +393,15 @@ module InstantRecord
       # Server results for a posted batch. Every result drops the outbox row —
       # each one is a durable resolution, not a retry — and what happens to the
       # record depends on which resolution it is:
-      # applied           -> mark the record synced
+      # applied           -> mark the record synced (pure bookkeeping, stays quiet)
       # applied + skipped -> the write lost last-write-wins; reconcile to the
       #                      value that won, because it did NOT land here
       # rejected          -> reconcile to server state
+      #
+      # Returns whether any result changed visible local record data (a rollback
+      # or removal), as distinct from pure self-acknowledgements.
       def apply_results(results)
+        reconciled = false
         Array(results).each do |result|
           result = result.deep_stringify_keys
           mutation = OutboxMutation.find_by(id: result["mutation_id"])
@@ -430,7 +423,7 @@ module InstantRecord
                     reason: result["reason"].to_s.presence || "Overwritten by a newer server change",
                     result: result
                   )
-                  reconcile_to_server_state(mutation, result)
+                  reconciled = true if reconcile_to_server_state(mutation, result)
                 else
                   mark_synced(mutation, result["version"])
                 end
@@ -441,32 +434,40 @@ module InstantRecord
                   reason: result["reason"].to_s.presence || "Rejected by server",
                   result: result
                 )
-                reconcile_rejection(mutation, result)
+                reconciled = true if reconcile_rejection(mutation, result)
               end
               mutation.destroy!
             end
           end
           announce_notice(quarantined) if quarantined
         end
-        nil
+        reconciled
       end
 
-      # Apply one remote change event (last-write-wins). Returns whether it
-      # actually changed anything here — see upsert_from_server.
+      # Apply one remote change event (last-write-wins) and note it for the next
+      # records_changed notice. Returns whether it actually changed anything
+      # here — see upsert_from_server.
       def apply_change(event)
+        event = event.deep_stringify_keys
+        applied = apply_record(event)
+        note_change(event["type"], event["id"]) if applied
+        applied
+      end
+
+      # Apply one remote record payload without noting it for records_changed
+      # (used by bootstrap and history pages, which handle notification separately).
+      def apply_record(event)
         event = event.deep_stringify_keys
         model = InstantRecord.synced_model(event["type"])
         return false unless model
 
-        applied = applying_remote do
+        applying_remote do
           if event["operation"] == "destroy"
             !!model.find_by(id: event["id"])&.destroy!
           else
             upsert_from_server(model, event["attributes"], event["version"])
           end
         end
-        note_change(event["type"], event["id"]) if applied
-        applied
       end
 
       private
@@ -530,6 +531,25 @@ module InstantRecord
         "/records?#{URI.encode_www_form(params)}"
       end
 
+      def drain_outbox
+        mutations = pending_mutations
+        return [false, false] if mutations.empty?
+
+        instrument("drain") do |event|
+          body = transport.post_json("/mutations", mutations_payload(mutations))
+          reconciled = apply_results(body["results"])
+
+          results = Array(body["results"]).map { |r| r.deep_stringify_keys }
+          event[:posted] = mutations.size
+          event[:rejected] = results.count { |r| r["status"] == "rejected" }
+          event[:reasons] = results.filter_map { |r| r["reason"] }.uniq.first(3)
+          [true, reconciled]
+        end
+      rescue Transport::Error => e
+        log_failure("drain", e)
+        [false, false]
+      end
+
       def mark_synced(mutation, version)
         model = InstantRecord.synced_model(mutation.record_type)
         record = model&.find_by(id: mutation.record_id)
@@ -539,15 +559,16 @@ module InstantRecord
       end
 
       def reconcile_rejection(mutation, result)
-        return if reconcile_to_server_state(mutation, result)
+        return reconcile_to_server_state(mutation, result) if result["server_attributes"].present?
 
         # The server never accepted this record (rejected create): remove it.
-        InstantRecord.synced_model(mutation.record_type)&.find_by(id: mutation.record_id)&.destroy!
+        destroyed = !!InstantRecord.synced_model(mutation.record_type)&.find_by(id: mutation.record_id)&.destroy!
+        note_change(mutation.record_type, mutation.record_id) if destroyed
+        destroyed
       end
 
       # Roll the local record onto the server's own copy of the row, when the
-      # result carries one. Returns whether it did — the caller distinguishes
-      # "the server has no such row" from "the server has this row".
+      # result carries one. Returns whether visible local row data changed.
       #
       # Authoritative: the server told us what it holds in answer to a write of
       # ours it would not take, so its row wins here regardless of timestamps.
@@ -555,8 +576,9 @@ module InstantRecord
         model = InstantRecord.synced_model(mutation.record_type)
         return false unless model && result["server_attributes"].present?
 
-        upsert_from_server(model, result["server_attributes"], result["version"], authoritative: true)
-        true
+        changed = upsert_from_server(model, result["server_attributes"], result["version"], authoritative: true)
+        note_change(mutation.record_type, mutation.record_id) if changed
+        changed
       end
 
       # Returns whether the row actually moved. Every accepted write comes back
@@ -622,8 +644,9 @@ module InstantRecord
         record.sync_state = "synced"
         return false unless record.changed?
 
+        data_changed = !record.persisted? || (record.changed - BOOKKEEPING_COLUMNS).any?
         quarantined = nil
-        if inbound_conflict
+        if inbound_conflict && data_changed
           OutboxMutation.transaction do
             quarantined = SyncNotice.record!(
               kind: "conflict",
@@ -638,10 +661,12 @@ module InstantRecord
             record.save!(validate: false)
           end
           announce_notice(quarantined) if quarantined
-        else
+        elsif data_changed
           record.save!(validate: false)
+        else
+          record.update_columns(sync_state: record.sync_state, server_version: record.server_version)
         end
-        true
+        data_changed
       end
 
       def quarantine_mutation(mutation, kind:, reason:, result:)

@@ -74,6 +74,7 @@ module InstantRecordTestHelpers
     InstantRecord::SyncNotice.delete_all
     InstantRecord::Change.delete_all
     InstantRecord::AppliedMutation.delete_all
+    InstantRecord::Client.forget_database
   end
 
   # Who is asking, as an app's `scope_from` would hand it to the gem. An id of

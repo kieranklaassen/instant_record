@@ -122,6 +122,15 @@ module InstantRecord
           "      []\n"
         )
 
+        # Roundhouse's Rails.application.config has no instant_record option;
+        # EntryBuilder sets config.mount_path at boot instead.
+        cut!(
+          "lib/instant_record.rb",
+          "      configured =\n        if defined?(Rails)",
+          "    end\n\n    # The retry decision must survive",
+          "      DEFAULT_MOUNT_PATH\n"
+        )
+
         # Screens are found by name through a generated `case` (EntryBuilder), not constant lookup.
         FileUtils.mkdir_p(File.join(@app, "sig/instant_record"))
         FileUtils.cp(
@@ -161,7 +170,6 @@ module InstantRecord
             target = File.join(models_dir, rel)
             source = File.read(target)
             adapted = source.gsub("include InstantRecord::Syncable", "include Syncable")
-            adapted = strip_server_only(adapted)
             File.write(target, adapted) if adapted != source
           end
         end
@@ -174,7 +182,7 @@ module InstantRecord
       end
 
       def rewrite_scoped_blocks
-        %w[app/controllers app/screens].each do |subdir|
+        %w[app/models app/controllers app/helpers app/screens].each do |subdir|
           root = File.join(@app, subdir)
           next unless File.directory?(root)
 
