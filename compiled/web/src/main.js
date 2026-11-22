@@ -268,12 +268,12 @@ async function submitInPlace(event) {
   const target = button?.getAttribute("formtarget") || form.target;
   const url = new URL(button?.getAttribute("formaction") || form.action, location.href);
   const posted = (button?.getAttribute("formmethod") || form.method).toUpperCase();
-  if (posted !== "POST" || !isLocal(url) || url.searchParams.has("instant_record_network") || (target && target !== "_self")) return;
+  if (posted !== "POST" || url.searchParams.has("instant_record_network") || (target && target !== "_self")) return;
   const fields = new FormData(form, button || undefined);
-  if ([...fields.values()].some(value => value instanceof File && value.name)) return;
+  const method = String(fields.get("_method") || posted).toUpperCase();
+  if (!isLocal(url, method) || [...fields.values()].some(value => value instanceof File && value.name)) return;
   event.preventDefault();
 
-  const method = String(fields.get("_method") || posted).toUpperCase();
   // Through the page's fetch, as Turbo's own submission goes: whatever watches that sees this.
   const answer = await window.fetch(url, { method, body: encodeFormData(fields),
     headers: { "Content-Type": "application/x-www-form-urlencoded" } });
