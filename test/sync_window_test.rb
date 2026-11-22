@@ -68,13 +68,136 @@ class SyncWindowTest < Minitest::Test
     assert_match(/nonexistent/, error.message)
   end
 
+  def test_in_window_ranks_strictly_within_base_scope_unpartitioned
+    model = windowed_model(limit: 2)
+    on_server do
+      create_item(model, "ada-1", state: "a", owner: "ada", at: 60.minutes.ago)
+      create_item(model, "ada-2", state: "a", owner: "ada", at: 50.minutes.ago)
+      create_item(model, "ada-3", state: "a", owner: "ada", at: 40.minutes.ago)
+      5.times { |i| create_item(model, "bob-#{i}", state: "a", owner: "bob", at: (10 - i).minutes.ago) }
+    end
+
+    window = model.instant_record_sync_window
+    ada_scope = model.where(owner: "ada")
+
+    assert_equal %w[ada-2 ada-3], window.in_window(ada_scope).order(:id).pluck(:id)
+    assert_equal %w[ada-1], window.beyond_window(ada_scope).pluck(:id)
+  end
+
+  def test_in_window_ranks_strictly_within_base_scope_partitioned
+    model = windowed_model(limit: 2, partition_by: :state)
+    on_server do
+      create_item(model, "ada-open-1", state: "open", owner: "ada", at: 60.minutes.ago)
+      create_item(model, "ada-open-2", state: "open", owner: "ada", at: 50.minutes.ago)
+      create_item(model, "ada-open-3", state: "open", owner: "ada", at: 40.minutes.ago)
+      create_item(model, "ada-closed-1", state: "closed", owner: "ada", at: 70.minutes.ago)
+      4.times { |i| create_item(model, "bob-open-#{i}", state: "open", owner: "bob", at: (10 - i).minutes.ago) }
+    end
+
+    window = model.instant_record_sync_window
+    ada_scope = model.where(owner: "ada")
+
+    assert_equal %w[ada-closed-1 ada-open-2 ada-open-3], window.in_window(ada_scope).order(:id).pluck(:id)
+    assert_equal %w[ada-open-1], window.beyond_window(ada_scope).pluck(:id)
+  end
+
+  def test_in_window_handles_null_relation_and_ordered_selected_scopes
+    model = windowed_model(limit: 2)
+    on_server do
+      create_item(model, "ada-1", state: "a", owner: "ada", at: 30.minutes.ago)
+      create_item(model, "ada-2", state: "a", owner: "ada", at: 20.minutes.ago)
+      create_item(model, "ada-3", state: "a", owner: "ada", at: 10.minutes.ago)
+    end
+
+    window = model.instant_record_sync_window
+
+    assert_empty window.in_window(model.none).pluck(:id)
+    assert window.in_window(model.none).null_relation?
+    assert_empty window.beyond_window(model.none).pluck(:id)
+    assert window.beyond_window(model.none).null_relation?
+
+    custom_scope = model.where(owner: "ada").select(:id, :title).order(:title)
+    assert_equal %w[ada-2 ada-3], window.in_window(custom_scope).order(:id).pluck(:id)
+
+    distinct_limited = model.where(owner: "ada").distinct.order(created_at: :desc).limit(2)
+    assert_equal %w[ada-2 ada-3], window.in_window(distinct_limited).order(:id).pluck(:id)
+    refute_match(/SELECT DISTINCT "items"\."id" FROM "items".*ORDER BY/, window.in_window(distinct_limited).to_sql)
+
+    minimal_scope = Struct.new(:to_sql).new(model.where(owner: "ada").to_sql)
+    assert_equal %w[ada-2 ada-3], window.in_window(minimal_scope).order(:id).pluck(:id)
+  end
+
+  def test_in_window_and_keyset_below_deduplicate_rows_from_joined_base_scope
+    ActiveRecord::Migration.suppress_messages do
+      ActiveRecord::Schema.define do
+        create_table :item_grants, id: :string, force: true do |t|
+          t.string :item_id
+          t.string :grantee
+        end
+      end
+    end
+
+    model = windowed_model(limit: 2)
+    on_server do
+      create_item(model, "ada-1", state: "a", owner: "ada", at: 30.minutes.ago)
+      create_item(model, "ada-2", state: "a", owner: "ada", at: 10.minutes.ago)
+    end
+
+    conn = ActiveRecord::Base.connection
+    conn.execute("INSERT INTO item_grants (id, item_id, grantee) VALUES ('g1', 'ada-2', 'ada'), ('g2', 'ada-2', 'ada'), ('g3', 'ada-1', 'ada')")
+
+    joined_scope = model.joins("INNER JOIN item_grants ON item_grants.item_id = items.id")
+      .where("item_grants.grantee = 'ada'")
+
+    window = model.instant_record_sync_window
+    assert_equal %w[ada-1 ada-2], window.in_window(joined_scope).order(:id).pluck(:id)
+    assert_equal %w[ada-2 ada-1], window.keyset_below(at: Time.current, id: "zzz", scope: joined_scope).pluck(:id)
+  ensure
+    ActiveRecord::Base.connection.drop_table(:item_grants, if_exists: true)
+  end
+
+  def test_in_window_respects_unscoped_when_model_has_default_scope
+    model = syncable_model("ActiveOnlyItem") do
+      default_scope { where(state: "active") }
+      sync_window limit: 2
+    end
+    on_server do
+      create_item(model, "archived-1", state: "archived", at: 30.minutes.ago)
+      create_item(model, "active-1", state: "active", at: 20.minutes.ago)
+      create_item(model, "archived-2", state: "archived", at: 10.minutes.ago)
+    end
+
+    window = model.instant_record_sync_window
+    assert_equal %w[active-1], window.in_window.pluck(:id)
+    assert_equal %w[active-1 archived-2], window.in_window(model.unscoped).order(:id).pluck(:id)
+  end
+
+  def test_keyset_below_combines_partition_and_scope_on_same_column_and_reorders
+    model = windowed_model(limit: 2, partition_by: :state)
+    on_server do
+      create_item(model, "pub-1", state: "public", at: 40.minutes.ago)
+      create_item(model, "pub-2", state: "public", at: 30.minutes.ago)
+      create_item(model, "ada-1", state: "ada", at: 20.minutes.ago)
+      create_item(model, "ben-1", state: "ben", at: 10.minutes.ago)
+    end
+
+    window = model.instant_record_sync_window
+    visible = model.where(state: %w[public ada]).select(:id, :title).order(:id)
+
+    page = window.keyset_below(at: Time.current, id: "zzz", partition: "public", scope: visible).to_a
+    assert_equal %w[pub-2 pub-1], page.map(&:id)
+    assert_equal [1, 1], page.map(&:server_version), "custom select on scope must not strip serialized attributes"
+    assert_empty window.keyset_below(at: Time.current, id: "zzz", partition: "ben", scope: visible).pluck(:id)
+    assert_empty window.keyset_below(at: Time.current, id: "zzz", partition: "public", scope: model.none).pluck(:id)
+  end
+
   private
 
   def windowed_model(limit:, partition_by: nil)
     syncable_model("WindowedItem") { sync_window limit: limit, partition_by: partition_by }
   end
 
-  def create_item(model, id, state:, at:)
-    model.create!(id: id, title: id, state: state, created_at: at, updated_at: at)
+  def create_item(model, id, state:, at:, owner: nil)
+    model.create!(id: id, title: id, state: state, owner: owner, created_at: at, updated_at: at)
   end
 end

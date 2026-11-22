@@ -10,7 +10,9 @@ module InstantRecord
     module EntryBuilder
       BANNER = "\n\n# ── persistent reactor entry"
       DEMO_MODELS = %w[Issue ChatUser Channel Message Note MailEntry AssistantChat AssistantTurn AuthNote].freeze
+      DEMO_SYNC_WINDOWS = { "Message" => { limit: 50, partition_by: :channel_id } }.freeze
       MODEL_NAME_PATTERN = /\A[A-Z]\w*(?:::[A-Z]\w*)*\z/
+      COLUMN_NAME_PATTERN = /\A[a-z_][a-z0-9_]*\z/
 
       PRELUDE = <<~'RUBY'
 
@@ -89,7 +91,7 @@ module InstantRecord
               records = Array(page["records"])
               more = page["has_more"] == true
               InstantRecord::OutboxMutation.transaction do
-                records.each { |record| InstantRecord::Client.apply_change(record) }
+                records.each { |record| InstantRecord::Client.apply_record(record) }
                 InstantRecord::SyncMetadata.set(key, more ? "more" : "end")
               end
               result = { ok: true, applied: records.size, has_more: more }
@@ -104,6 +106,26 @@ module InstantRecord
             out = "cursor=" + InstantRecord::Client.cursor.to_s + " pending=" + InstantRecord::Client.pending_count.to_s + " bootstrap=" + (InstantRecord::Client.bootstrapped? ? "ready" : "needed") + " identity=" + (key.nil? ? "" : key) + " held=" + InstantRecord::Client.held_count.to_s
             out += " next_release_ms=" + next_ms.to_s unless next_ms.nil?
             <<write:out>>out)
+            0
+          end
+
+          # Staging branch diff: OutboxMutations recorded after `exclude_ids`.
+          def self.branch_outbox
+            raw = <<read:in>>.strip
+            input = raw.empty? ? {} : JSON.parse(raw)
+            summary = InstantRecord::Branch.summary(since_ids: Array(input["exclude_ids"]))
+            <<write:out>>JSON.generate(summary))
+            0
+          end
+
+          # Safely replay extracted staging branch OutboxMutations onto current `main`.
+          def self.branch_replay
+            raw = <<read:in>>.strip
+            input = raw.empty? ? {} : JSON.parse(raw)
+            conflict = input["conflict"].to_s
+            conflict = "lww" if conflict.empty?
+            result = InstantRecord::Branch.replay_mutations(Array(input["mutations"]), conflict: conflict)
+            <<write:out>>JSON.generate(result))
             0
           end
         <<entries>>end
@@ -127,7 +149,7 @@ module InstantRecord
 
       START = <<~'RUBY'
         Tep::APP.name = Rails.application.global_id_app
-        <<windows>>InstantRecord.sync(<<models>>)
+        <<config>><<windows>>InstantRecord.sync(<<models>>)
         <<streaming>>
       RUBY
 
@@ -219,6 +241,46 @@ module InstantRecord
         list
       end
 
+      def ruby_string_literal(value)
+        JSON.generate(value.to_s)
+          .gsub('#{', '\\#{')
+          .gsub('#@', '\\#@')
+          .gsub('#$', '\\#$')
+      end
+
+      def sync_windows_code(demo:, sync_windows:)
+        resolved = sync_windows.nil? ? (demo ? DEMO_SYNC_WINDOWS : {}) : sync_windows
+        resolved.sort_by { |name, _| name.to_s }.map do |model_name, spec|
+          name = model_name.to_s
+          unless MODEL_NAME_PATTERN.match?(name)
+            raise BuildError, "Invalid sync_window model name: #{name.inspect}"
+          end
+
+          limit = spec[:limit] || spec["limit"]
+          unless limit.is_a?(Integer) && limit.positive?
+            raise BuildError, "Invalid sync_window limit for #{name}: #{limit.inspect}"
+          end
+
+          partition = spec[:partition_by] || spec["partition_by"]
+          if partition && !partition.to_s.empty?
+            col = partition.to_s
+            unless COLUMN_NAME_PATTERN.match?(col)
+              raise BuildError, "Invalid sync_window partition_by column for #{name}: #{col.inspect}"
+            end
+            "#{name}.sync_window(limit: #{limit}, partition_by: :#{col})\n"
+          else
+            "#{name}.sync_window(limit: #{limit})\n"
+          end
+        end.join
+      end
+
+      def config_code(endpoint:, mount_path:)
+        lines = []
+        lines << "InstantRecord.config.endpoint = #{ruby_string_literal(endpoint)}\n" if endpoint && !endpoint.to_s.empty?
+        lines << "InstantRecord.config.mount_path = #{ruby_string_literal(mount_path)}\n" if mount_path && !mount_path.to_s.empty?
+        lines.join
+      end
+
       def migrations(demo:, plan:, previous:, applied: "")
         return "" if demo
 
@@ -227,11 +289,7 @@ module InstantRecord
         migrations_map.sort_by { |version, _| version.to_i }.each do |version, statements|
           steps << %(  if previous < "#{format('%020d', version.to_i)}")
           statements.each do |sql|
-            literal = JSON.generate(sql)
-              .gsub('#{', '\\#{')
-              .gsub('#@', '\\#@')
-              .gsub('#$', '\\#$')
-            steps << "    Db.exec(#{literal})"
+            steps << "    Db.exec(#{ruby_string_literal(sql)})"
           end
           steps << "  end"
         end
@@ -267,13 +325,14 @@ module InstantRecord
         fill(DATABASE, { "pragmas" => lines, "migrations" => steps, "model_set" => models.sort.join(",") })
       end
 
-      def start(streaming:, comment:, demo:, models:)
-        windows = demo ? "Message.sync_window(limit: 50, partition_by: :channel_id)\n" : ""
+      def start(streaming:, comment:, demo:, models:, sync_windows: nil, endpoint: nil, mount_path: nil)
+        cfg = config_code(endpoint: endpoint, mount_path: mount_path)
+        windows = sync_windows_code(demo: demo, sync_windows: sync_windows)
         flag = "#{comment}\nInstantRecord::Client.streaming = #{streaming ? 'true' : 'false'}"
-        fill(START, { "windows" => windows, "models" => models.join(", "), "streaming" => flag })
+        fill(START, { "config" => cfg, "windows" => windows, "models" => models.join(", "), "streaming" => flag })
       end
 
-      def write_wasm_entry(emit_dir:, demo:, models:, migration_plan:, pipeline_dir:)
+      def write_wasm_entry(emit_dir:, demo:, models:, migration_plan:, pipeline_dir:, sync_windows: nil, endpoint: nil, mount_path: nil)
         if demo
           FileUtils.cp(
             File.join(pipeline_dir, "sqlite_release.rb"),
@@ -305,7 +364,10 @@ module InstantRecord
             streaming: true,
             comment: "# JS worker owns non-blocking inbound polling; Client#sync_pass handles bootstrap + outbox drain.",
             demo: demo,
-            models: resolved_models
+            models: resolved_models,
+            sync_windows: sync_windows,
+            endpoint: endpoint,
+            mount_path: mount_path
           )
 
         File.write(File.join(emit_dir, "main_wasm.rb"), head + entry)
@@ -323,7 +385,7 @@ module InstantRecord
         raise BuildError, e.message
       end
 
-      def write_native_entry(tree_dir:, app_dir:, demo:, models:, migration_plan:)
+      def write_native_entry(tree_dir:, app_dir:, demo:, models:, migration_plan:, sync_windows: nil, endpoint: nil, mount_path: nil)
         wasm_main = File.read(File.join(tree_dir, "main_wasm.rb"))
         unless wasm_main.scan(BANNER).length == 1
           raise BuildError, "main_wasm.rb has no entry to start from"
@@ -357,7 +419,10 @@ module InstantRecord
             streaming: false,
             comment: "# A sync pass pulls through the host: Client#sync_pass handles bootstrap, outbox drain and the poll.",
             demo: demo,
-            models: resolved_models
+            models: resolved_models,
+            sync_windows: sync_windows,
+            endpoint: endpoint,
+            mount_path: mount_path
           )
 
         File.write(File.join(tree_dir, "main_native.rb"), head + entry)
