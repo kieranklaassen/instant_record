@@ -92,6 +92,7 @@ export function createStreamLeader(options) {
   let started = false;
   let stopped = false;
   let suspended = false;
+  let canLead = config.canLead !== false;
   let isLeader = false;
   let lockAbortController = null;
   let releaseLeadership = null;
@@ -112,8 +113,8 @@ export function createStreamLeader(options) {
   // peer tabId -> { visible: boolean, seenAt: number }
   const peers = new Map();
 
-  const canElect = () => started && !stopped && !suspended && !offlineSimulated;
-  const activeLeader = () => isLeader && !stopped && !suspended && !offlineSimulated;
+  const canElect = () => started && !stopped && !suspended && !offlineSimulated && canLead;
+  const activeLeader = () => isLeader && !stopped && !suspended && !offlineSimulated && canLead;
 
   function eventsPathname() {
     try {
@@ -642,7 +643,18 @@ export function createStreamLeader(options) {
       backoffMs = config.backoffBaseMs;
       if (started) {
         postCoord({ type: "hello", tabId, visible: selfVisible });
-        if (!offlineSimulated) requestLeadership();
+        if (canElect()) requestLeadership();
+      }
+    },
+
+    setCanLead(nextCanLead) {
+      const normalized = !!nextCanLead;
+      if (normalized === canLead) return;
+      canLead = normalized;
+      if (canLead) {
+        if (canElect()) requestLeadership();
+      } else {
+        releaseCurrentLeadership();
       }
     },
 
