@@ -48,7 +48,15 @@ try {
           tx.oncomplete = resolve;
           tx.onabort = () => reject(tx.error);
         });
-        const [bytes, revision, savedVersion] = requests.map(request => request.result);
+        const [idbBytes, revision, savedVersion] = requests.map(request => request.result);
+        let bytes = idbBytes;
+        if (!bytes && navigator.storage?.getDirectory) {
+          const root = await navigator.storage.getDirectory();
+          const appDir = await root.getDirectoryHandle("instant-record-spinel");
+          const scopeDir = await appDir.getDirectoryHandle("default");
+          const fileHandle = await scopeDir.getFileHandle("development.sqlite3");
+          bytes = new Uint8Array(await (await fileHandle.getFile()).arrayBuffer());
+        }
         const hash = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))];
         return { hash, revision, version: savedVersion };
       } finally { db.close(); }

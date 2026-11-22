@@ -42,7 +42,7 @@ export function detectSchemaDrift({
   return null;
 }
 
-export function rehydrateFromBytes({ bytes, reason, createHost, onReport }) {
+export function rehydrateFromBytes({ bytes, reason, createHost, prepareFresh, onReport }) {
   const started = performance.now();
   let extracted = [];
   let extractFailed = false;
@@ -58,6 +58,7 @@ export function rehydrateFromBytes({ bytes, reason, createHost, onReport }) {
   }
 
   const fresh = createHost();
+  prepareFresh?.(fresh);
   const initStart = performance.now();
   fresh.ensureBooted();
   if (extracted.length > 0) {
