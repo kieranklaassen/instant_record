@@ -47,6 +47,8 @@ module InstantRecord
       # fires when visible record data changed (evictions, reconciliations,
       # remote deltas, resets, or bootstrap).
       def sync_pass
+        return false if InstantRecord.branched?
+
         evicted = evict_beyond_windows
         drained, reconciled = drain_outbox
         pulled = bootstrapped? ? poll_changes : bootstrap
@@ -182,6 +184,8 @@ module InstantRecord
       # with subsequent events re-applies idempotently. Returns true when the
       # snapshot applied.
       def bootstrap
+        return false if InstantRecord.branched?
+
         instrument("bootstrap") do |event|
           body = transport.get_json("/bootstrap")
           records = Array(body["records"])
@@ -209,6 +213,8 @@ module InstantRecord
 
       # Outbox up. Returns true when anything was sent and applied.
       def drain
+        return false if InstantRecord.branched?
+
         drain_outbox.first
       end
 
@@ -297,7 +303,7 @@ module InstantRecord
       # delivering, and re-polling would only re-fetch what it just applied.
       # Returns true when any remote change was applied.
       def poll_changes
-        return false if streaming?
+        return false if streaming? || InstantRecord.branched?
 
         changed = false
         applied = 0
@@ -510,6 +516,8 @@ module InstantRecord
       end
 
       def drain_outbox
+        return [false, false] if InstantRecord.branched?
+
         mutations = pending_mutations
         return [false, false] if mutations.empty?
 
