@@ -16,6 +16,17 @@ module InstantRecord
       require "instant_record/branch/sqlite_store"
     end
 
+    def install_active_job_guard
+      ActiveSupport.on_load(:active_job) do
+        require "instant_record/sync_actions"
+        InstantRecord::SyncActions.install_active_job_guard!
+      end
+    end
+
+    def with_savepoint(&block)
+      ActiveRecord::Base.transaction(requires_new: true, &block)
+    end
+
     def default_mount_path
       configured =
         if defined?(Rails) && Rails.application && Rails.application.config.respond_to?(:instant_record)
@@ -37,7 +48,7 @@ module InstantRecord
     end
 
     def blank_id?(id)
-      id.nil?
+      id.nil? || id == ""
     end
 
     def read_channel(name)

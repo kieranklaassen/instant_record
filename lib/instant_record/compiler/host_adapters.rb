@@ -38,6 +38,34 @@ module InstantRecord
         require "instant_record/native/screen"
       RUBY
 
+      SPINEL_SYNC_ACTIONS_STUB = <<~'RUBY'
+        def server_frame = nil
+        def enforcing_server_mutator? = false
+        def server_authorize_create!(_record) = nil
+        def server_finalize_create!(_record) = nil
+        def server_authorize_update_before!(_record) = nil
+        def server_finalize_update!(_record) = nil
+        def server_authorize_destroy!(_record) = nil
+        def server_finalize_destroy!(_record) = nil
+        def server_note_read(_record) = nil
+        def execute_on_server(_name, _args, _mutation_id) = nil
+        def register(_klass, _action_name, _block = nil) = nil
+
+        def dispatch(name, _args)
+          raise ArgumentError, "Unknown sync_action: " + name
+        end
+      RUBY
+
+      CRUBY_SYNC_ACTION_METHODS = %i[
+        server_frame enforcing_server_mutator?
+        server_authorize_create! server_finalize_create!
+        server_authorize_update_before! server_finalize_update!
+        server_authorize_destroy! server_finalize_destroy!
+        server_note_read with_server_frame execute_on_server
+        registry reset_registry! register resolve dispatch
+        defer_active_job? install_active_job_guard! invoke_callable
+      ].freeze
+
       # Shared installation logic for compiled host adapters.
       module Base
         def install(gem_src:, app_dir:)
@@ -50,6 +78,129 @@ module InstantRecord
             File.join(gem_src, "sig/instant_record/native.rbs"),
             File.join(app_dir, "sig/instant_record/native.rbs")
           )
+
+          adapt_compiled_mutate_signatures(app_dir)
+          adapt_sync_actions(app_dir)
+        end
+
+        private
+
+        # Spinel does not support `**kwargs` splats; rewrite `InstantRecord.mutate`
+        # via Prism AST to accept a plain `args = {}` hash.
+        def adapt_compiled_mutate_signatures(app_dir)
+          path = File.join(app_dir, "lib/instant_record.rb")
+          return unless File.file?(path)
+
+          source = File.read(path, encoding: Encoding::UTF_8)
+          parsed = Prism.parse(source)
+          return unless parsed.success?
+
+          edits = []
+          walk_ast(parsed.value) do |node|
+            next unless node.is_a?(Prism::DefNode) && node.name == :mutate && node.parameters&.keyword_rest
+
+            indent = AstLowerer.leading_indent(source, node.location.start_offset)
+            replacement = <<~RUBY.chomp
+              def mutate(mutator_name, args = {}, mutation_id: nil)
+              #{indent}  SyncActions.mutate(mutator_name, args, mutation_id: mutation_id)
+              #{indent}end
+            RUBY
+            edits << AstLowerer::Edit.new(
+              start_offset: node.location.start_offset,
+              end_offset: node.location.end_offset,
+              replacement: replacement
+            )
+          end
+          File.write(path, AstLowerer.apply_edits(source, edits)) unless edits.empty?
+        end
+
+        # Strip CRuby-only server frame, ActiveJob guard, and dynamic dispatch from
+        # `lib/instant_record/sync_actions.rb` using Prism's AST; EntryBuilder emits
+        # the static `case` dispatcher in `main_*.rb`.
+        def adapt_sync_actions(app_dir)
+          path = File.join(app_dir, "lib/instant_record/sync_actions.rb")
+          return unless File.file?(path)
+
+          source = File.read(path, encoding: Encoding::UTF_8)
+          parsed = Prism.parse(source)
+          raise BuildError, "Cannot parse lib/instant_record/sync_actions.rb" unless parsed.success?
+
+          edits = []
+          stub_inserted = false
+          walk_ast(parsed.value) do |node|
+            if node.is_a?(Prism::ClassNode) && AstLowerer.constant_name(node.constant_path) == "ServerFrame"
+              edits << delete_lines_edit(source, node)
+              next :skip
+            elsif node.is_a?(Prism::ModuleNode) && AstLowerer.constant_name(node.constant_path) == "ActiveJobCommitGuard"
+              edits << delete_lines_edit(source, node)
+              next :skip
+            elsif node.is_a?(Prism::DefNode) && node.name == :perform_sync_action && node.parameters&.keyword_rest
+              indent = AstLowerer.leading_indent(source, node.location.start_offset)
+              replacement = <<~RUBY.chomp
+                def perform_sync_action(action_name, args = {}, mutation_id: nil)
+                #{indent}  InstantRecord::SyncActions.mutate("\#{name}.\#{action_name}", args, mutation_id: mutation_id)
+                #{indent}end
+              RUBY
+              edits << AstLowerer::Edit.new(start_offset: node.location.start_offset, end_offset: node.location.end_offset, replacement: replacement)
+              next :skip
+            elsif node.is_a?(Prism::DefNode) && node.name == :mutate && node.parameters&.keyword_rest
+              indent = AstLowerer.leading_indent(source, node.location.start_offset)
+              # Rewrite parameter list and remove `merged = ...` line inside body.
+              sig_end = node.rparen_loc ? node.rparen_loc.end_offset : node.parameters.location.end_offset
+              edits << AstLowerer::Edit.new(
+                start_offset: node.location.start_offset,
+                end_offset: sig_end,
+                replacement: "def mutate(mutator_name, args = {}, mutation_id: nil)"
+              )
+              Array(node.body&.body).each do |stmt|
+                if stmt.is_a?(Prism::LocalVariableWriteNode) && stmt.name == :merged
+                  edits << delete_lines_edit(source, stmt)
+                elsif stmt.is_a?(Prism::LocalVariableWriteNode) && stmt.name == :normalized
+                  edits << AstLowerer::Edit.new(
+                    start_offset: stmt.location.start_offset,
+                    end_offset: stmt.location.end_offset,
+                    replacement: "normalized = normalize_args(args)"
+                  )
+                end
+              end
+              next :skip
+            elsif node.is_a?(Prism::DefNode) && CRUBY_SYNC_ACTION_METHODS.include?(node.name)
+              if !stub_inserted
+                stub_inserted = true
+                indent = AstLowerer.leading_indent(source, node.location.start_offset)
+                stub = SPINEL_SYNC_ACTIONS_STUB.lines.map { |l| l.strip.empty? ? "\n" : "#{indent}#{l}" }.join
+                edits << AstLowerer::Edit.new(
+                  start_offset: AstLowerer.line_start_of(source, node.location.start_offset),
+                  end_offset: AstLowerer.line_end_after(source, node.location.end_offset),
+                  replacement: stub
+                )
+              else
+                edits << delete_lines_edit(source, node)
+              end
+              next :skip
+            end
+          end
+
+          adapted = AstLowerer.apply_edits(source, edits)
+          raise BuildError, "Invalid Ruby after adapting sync_actions.rb" unless Prism.parse(adapted).success?
+
+          File.write(path, adapted)
+        end
+
+        def delete_lines_edit(source, node)
+          AstLowerer::Edit.new(
+            start_offset: AstLowerer.line_start_of(source, node.location.start_offset),
+            end_offset: AstLowerer.line_end_after(source, node.location.end_offset),
+            replacement: ""
+          )
+        end
+
+        def walk_ast(node, &block)
+          return if node.nil?
+
+          return if yield(node) == :skip
+
+          node.compact_child_nodes.each { |child| walk_ast(child, &block) }
         end
       end
 
@@ -69,6 +220,23 @@ module InstantRecord
               def load_engine = nil
 
               def load_branch_store = nil
+
+              def install_active_job_guard = nil
+
+              def with_savepoint(&block)
+                @savepoint_seq = (@savepoint_seq || 0) + 1
+                sp = "ir_sp_" + @savepoint_seq.to_s
+                Db.exec("SAVEPOINT " + sp)
+                begin
+                  result = block.call
+                  Db.exec("RELEASE SAVEPOINT " + sp)
+                  result
+                rescue StandardError => error
+                  Db.exec("ROLLBACK TO SAVEPOINT " + sp)
+                  Db.exec("RELEASE SAVEPOINT " + sp)
+                  raise error
+                end
+              end
 
               def default_mount_path = InstantRecord::DEFAULT_MOUNT_PATH
 
@@ -114,6 +282,23 @@ module InstantRecord
               def load_engine = nil
 
               def load_branch_store = nil
+
+              def install_active_job_guard = nil
+
+              def with_savepoint(&block)
+                @savepoint_seq = (@savepoint_seq || 0) + 1
+                sp = "ir_sp_" + @savepoint_seq.to_s
+                Db.exec("SAVEPOINT " + sp)
+                begin
+                  result = block.call
+                  Db.exec("RELEASE SAVEPOINT " + sp)
+                  result
+                rescue StandardError => error
+                  Db.exec("ROLLBACK TO SAVEPOINT " + sp)
+                  Db.exec("RELEASE SAVEPOINT " + sp)
+                  raise error
+                end
+              end
 
               def default_mount_path = InstantRecord::DEFAULT_MOUNT_PATH
 
