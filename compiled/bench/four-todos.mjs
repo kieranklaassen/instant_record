@@ -4,8 +4,8 @@
 //   cd demo && npm run build && RAILS_ENV=test bin/rails server -p 3210
 //   node compiled/bench/four-todos.mjs                 (the three apps Rails serves)
 //
-// The fourth app is only itself in a compiled build. With one served (PORT=4174 node
-// compiled/bench/serve.mjs), name it and it is timed too:
+// The fourth app is only itself in a compiled build. With one served (DIST=<the build's dist>
+// PORT=4174 node compiled/bench/serve.mjs), name it and it is timed too:
 //
 //   INSTANT_URL=http://127.0.0.1:4174 node compiled/bench/four-todos.mjs
 //
@@ -35,8 +35,14 @@ const SERVE = process.argv.includes("--serve");
 // Playwright from wherever this machine keeps it: named, the toolchain's, or installed.
 function playwright() {
   const toolchain = new URL("../toolchain.env", import.meta.url);
-  const named = process.env.PLAYWRIGHT_NODE_MODULES
-    || (existsSync(toolchain) && readFileSync(toolchain, "utf8").match(/^PLAYWRIGHT_NODE_MODULES=(.+)$/m)?.[1]);
+  const tools = {};
+  for (const line of existsSync(toolchain) ? readFileSync(toolchain, "utf8").split("\n") : []) {
+    if (!line || line.startsWith("#") || !line.includes("=")) continue;
+    let value = line.slice(line.indexOf("=") + 1);
+    for (const [name, known] of Object.entries(tools)) value = value.replaceAll("$" + name, known);
+    tools[line.slice(0, line.indexOf("="))] = value;
+  }
+  const named = process.env.PLAYWRIGHT_NODE_MODULES || tools.PLAYWRIGHT_NODE_MODULES;
   for (const [from, name] of [[named && named + "/", "playwright-core"], [import.meta.url, "playwright"], ["/opt/node22/lib/node_modules/", "playwright"]]) {
     try { if (from) return createRequire(from)(name); } catch {}
   }
