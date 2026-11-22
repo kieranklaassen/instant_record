@@ -239,7 +239,7 @@ class BoundedDrainTest < Minitest::Test
     in_browser { @model.create!(id: "bad-json-1", title: "keep") }
     sent_ids = InstantRecord::Client.drain_batch.map { |m| m[:id] }
 
-    outcome = capture_io do
+    capture_io do
       @result = in_browser do
         InstantRecord::Client.apply_prepared_sync(
           push: { status: 200, body: "<html>gateway error</html>", mutation_ids: sent_ids }
