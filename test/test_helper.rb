@@ -2,6 +2,7 @@ require "minitest/autorun"
 require "active_record"
 require "instant_record"
 require "instant_record/sync_scope"
+require "instant_record/files"
 
 ActiveRecord::Base.establish_connection(adapter: "sqlite3", database: ":memory:")
 
@@ -15,6 +16,9 @@ Time.zone = "UTC"
 require File.expand_path("../app/models/instant_record/change", __dir__)
 require File.expand_path("../app/models/instant_record/applied_mutation", __dir__)
 require File.expand_path("../app/models/instant_record/mutation_applier", __dir__)
+
+# Under Rails the engine does this each time the Change model loads.
+InstantRecord::Files.forget_on_destroy
 
 # The gem's own tables come from its real migrations, so tests can't drift
 # from what ships (and every test file works standalone).

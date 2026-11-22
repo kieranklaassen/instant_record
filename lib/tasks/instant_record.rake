@@ -55,6 +55,15 @@ namespace :instant_record do
     puts report
     abort "Toolchain check failed." unless report.ok?
   end
+
+  namespace :files do
+    desc "Remove uploads of sync_file records that were given up: partials no piece has reached for DAYS days (default 2)"
+    task sweep: :environment do
+      days = ENV.fetch("DAYS", 2).to_f
+      removed = InstantRecord::Files.store.sweep(before: days.days.ago)
+      puts "Removed #{removed} given-up #{"upload".pluralize(removed)}"
+    end
+  end
 end
 
 Rake::Task.define_task("assets:precompile").enhance do

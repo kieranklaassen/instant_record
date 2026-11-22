@@ -15,6 +15,10 @@
 // table of key bindings), useSelection (rows picked, with ranges),
 // useUndoable (writes held so they can be taken back) and write (a form post
 // that visits nothing).
+//
+// And fileStore with useFile: the bytes of records that declare `sync_file`,
+// kept in this browser, sent to the server in the background and fetched from
+// it when asked for. It needs neither Inertia nor a local database.
 import { localHttpClient, write } from "./http.js"
 import { liveTransport } from "./live.js"
 import { local } from "./window.js"
@@ -42,3 +46,5 @@ export { useSelection } from "./selection.js"
 export { heldActions } from "./held.js"
 export { useUndoable } from "./undo.js"
 export { default as LiveList } from "./LiveList.js"
+export { FileMissing, FileStore, NoRoom, fileStore } from "./files.js"
+export { useFile } from "./file.js"

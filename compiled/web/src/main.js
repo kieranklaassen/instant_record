@@ -36,7 +36,11 @@ const call = (type, payload) => new Promise((resolve, reject) => {
 
 const initialScope = mailboxScope(location.href);
 const marks = { start: performance.now() };
-window.__spinel = { marks, call, worker, history: historyFill, sourceVersion: import.meta.env.VITE_SOURCE_VERSION };
+// Where the sync server is and who this browser is to it, for a page that asks it for
+// something itself: the bytes of a record that declares sync_file (frontend/files.js).
+const syncEndpoint = import.meta.env.VITE_SYNC_ENDPOINT || "/instant_record";
+window.__spinel = { marks, call, worker, history: historyFill, sourceVersion: import.meta.env.VITE_SOURCE_VERSION,
+  endpoint: syncEndpoint, scope: syncScope() };
 
 // Restore the switches before even the first bootstrap can reach Rails.
 try {
@@ -47,7 +51,12 @@ try {
   });
 } catch { /* Storage may be unavailable. */ }
 
-const isLocal = (url) => url.origin === location.origin &&
+// A record's file is bytes for the sync server. They never pass through the app in the worker,
+// which holds its whole database in memory and takes no upload.
+const filesPath = new URL(syncEndpoint + "/files/", location.href);
+const isFile = (url) => url.origin === filesPath.origin && url.pathname.startsWith(filesPath.pathname);
+
+const isLocal = (url) => url.origin === location.origin && !isFile(url) &&
   !url.pathname.startsWith("/assets/") && !url.pathname.startsWith("/harness/") && !/^\/app[-.\w]*\.wasm$/.test(url.pathname);
 
 // One page request; the worker follows the app's redirects and returns the final answer.
