@@ -251,6 +251,48 @@ function syncScope() {
   }
 }
 
+// A form the app in this browser answers is drawn in the task its answer arrives in. Turbo would
+// visit the page the app redirected to and wait a frame before it drew it, and the app has
+// answered long before that frame. So the answer's page is morphed into this one at once, and
+// the change is on screen at the next paint: the time a page takes to draw a guess, and this
+// is no guess. A form that asks Turbo for something of its own (a frame, a stream, a question
+// first) is left to Turbo, and so is an answer that is another page.
+async function submitInPlace(event) {
+  const turbo = window.Turbo;
+  const form = event.target;
+  const button = event.submitter;
+  if (!turbo?.morphBodyElements || event.defaultPrevented || !(form instanceof HTMLFormElement)) return;
+  const asks = (name) => button?.hasAttribute(name) || form.hasAttribute(name);
+  if (["data-turbo-frame", "data-turbo-stream", "data-turbo-confirm", "data-turbo-action", "data-turbo-method"].some(asks)) return;
+  if (form.closest("turbo-frame, [data-turbo='false']") || button?.dataset.turbo === "false") return;
+  const target = button?.getAttribute("formtarget") || form.target;
+  const url = new URL(button?.getAttribute("formaction") || form.action, location.href);
+  const posted = (button?.getAttribute("formmethod") || form.method).toUpperCase();
+  if (posted !== "POST" || url.searchParams.has("instant_record_network") || (target && target !== "_self")) return;
+  const fields = new FormData(form, button || undefined);
+  const method = String(fields.get("_method") || posted).toUpperCase();
+  if (!isLocal(url, method) || [...fields.values()].some(value => value instanceof File && value.name)) return;
+  event.preventDefault();
+
+  // Through the page's fetch, as Turbo's own submission goes: whatever watches that sees this.
+  const answer = await window.fetch(url, { method, body: encodeFormData(fields),
+    headers: { "Content-Type": "application/x-www-form-urlencoded" } });
+  const type = answer.headers.get("content-type") || "";
+  const body = await answer.text();
+  const path = new URL(answer.url).pathname + new URL(answer.url).search;
+  if (type.includes("turbo-stream")) return turbo.renderStreamMessage(body);
+  if (answer.redirected && path !== location.pathname + location.search) return turbo.visit(path);
+  if (!type.includes("html")) return redraw();
+
+  // The page as the app draws it has the form's fields as new. What the person typed into the
+  // field they are in since the press is theirs, and is put back after the morph.
+  const field = document.activeElement;
+  const sent = field?.form === form ? fields.get(field.name) : null;
+  const typed = typeof sent === "string" ? field.value : null;
+  turbo.morphBodyElements(document.body, new DOMParser().parseFromString(body, "text/html").body);
+  if (typed !== null && typed !== sent && typed.startsWith(sent) && field.isConnected) field.value = typed.slice(sent.length);
+}
+
 // One async function, since the built shell is a classic script (vite.config.js) and cannot
 // await at its top level.
 async function openApp() {
@@ -278,6 +320,7 @@ async function openApp() {
   document.close();
   document.addEventListener("turbo:before-morph-element", keepTyping);
   document.addEventListener("turbo:render", () => { redrawing = false; });
+  document.addEventListener("submit", submitInPlace);
   document.addEventListener("turbo:before-visit", event => {
     const destination = new URL(event.detail.url, location.href);
     if (mailboxScope(event.detail.url) !== initialScope || !isLocal(destination, "GET")) {
