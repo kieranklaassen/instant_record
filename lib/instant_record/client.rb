@@ -377,6 +377,7 @@ module InstantRecord
         SyncMetadata.all.each do |entry|
           if entry.key == "cursor" || entry.key == "identity" || entry.key == DRAIN_BATCH_LIMIT_KEY ||
               entry.key.start_with?("history:") ||
+              types.any? { |type| entry.key.start_with?("#{HLC::ROW_PREFIX}#{type}:") } ||
               (entry.key.start_with?(RETRY_PREFIX) && destroyed_ids.include?(entry.key[RETRY_PREFIX.length..]))
             entry.destroy
           elsif entry.key.start_with?(QUARANTINE_PREFIX)
@@ -442,6 +443,7 @@ module InstantRecord
           if status >= 200 && status < 300
             begin
               body = JSON.parse(push["body"].to_s)
+              observe_server_time(body["server_time"])
               instrument("drain") do |event|
                 results = Array(body["results"]).map { |r| r.deep_stringify_keys }
                 resolved, batch_reconciled = apply_results_with_counts(results)
@@ -503,6 +505,10 @@ module InstantRecord
         { changed: changed, progressed: progressed, failed: failed, quarantined: quarantined }
       end
 
+      def observe_server_time(server_time)
+        HLC.observe_server_time(server_time) if server_time
+      end
+
       # Set while something outside the VM holds a tailing stream and feeds
       # events in through apply_events (the service worker does this). Ruby
       # cannot hold that stream itself: each chunk it awaited would suspend the
@@ -562,6 +568,7 @@ module InstantRecord
           next if was_reset
 
           event = event.deep_stringify_keys
+          observe_server_time(event["server_time"])
           if event["operation"] == "reset"
             was_reset = reset(event)
             applied += 1
@@ -604,6 +611,7 @@ module InstantRecord
           transport.each_event(path) do |event|
             event = event.deep_stringify_keys
             next if was_reset
+            observe_server_time(event["server_time"])
             if event["operation"] == "reset"
               was_reset = reset(event)
               changed = true
@@ -661,6 +669,7 @@ module InstantRecord
 
         instrument("fetch_history") do |event|
           body = transport.get_json(history_path(model, partition, before_at, before_id, limit))
+          observe_server_time(body["server_time"])
           records = Array(body["records"])
           records.each { |record| apply_record(record) }
           extend_history_mark(model, partition, records, has_more: !!body["has_more"])
@@ -684,10 +693,11 @@ module InstantRecord
         apply_results_with_counts(results).last
       end
 
-      # Apply one remote change event and note it for the next records_changed
-      # notice. Clean rows use last-write-wins directly; dirty rows rewind to
-      # their server-confirmed snapshot, apply server truth, and deterministically
-      # replay remaining unacked mutations. Returns whether the visible row moved.
+      # Apply one remote change event (HLC-ordered, with updated_at fallback
+      # for legacy events) and note it for the next records_changed notice.
+      # Clean rows apply directly; dirty rows rewind to their server-confirmed
+      # snapshot, apply server truth, and deterministically replay remaining
+      # unacked mutations. Returns whether the visible row moved.
       def apply_change(event)
         event = event.deep_stringify_keys
         record_id = event["id"] || (event["attributes"].is_a?(Hash) && event["attributes"]["id"])
@@ -711,12 +721,15 @@ module InstantRecord
               record_id,
               operation: event["operation"],
               attributes: event["attributes"],
-              version: event["version"]
+              version: event["version"],
+              hlc: event["hlc"]
             )
           elsif event["operation"] == "destroy"
+            HLC.receive(event["hlc"]) if HLC.valid?(event["hlc"])
+            HLC.delete_row_hlc(event["type"], record_id)
             !!model.find_by(id: record_id)&.destroy!
           else
-            upsert_from_server(model, event["attributes"], event["version"])
+            upsert_from_server(model, event["attributes"], event["version"], hlc: event["hlc"])
           end
         end
       end
@@ -736,6 +749,7 @@ module InstantRecord
             SyncMetadata.delete("#{RETRY_PREFIX}#{mutation.id}")
             if mutation.mutator?
               changed_visible = applying_remote do
+                HLC.receive(result["hlc"]) if HLC.valid?(result["hlc"])
                 moved =
                   case result["status"]
                   when "applied"
@@ -787,6 +801,7 @@ module InstantRecord
       end
 
       def apply_bootstrap_body(body)
+        observe_server_time(body["server_time"])
         records = Array(body["records"])
         records.each { |record| apply_record(record) }
 
@@ -958,6 +973,7 @@ module InstantRecord
 
             begin
               body = transport.post_json("/mutations", mutations_payload(mutations))
+              observe_server_time(body["server_time"])
               results = Array(body["results"]).map { |r| r.deep_stringify_keys }
               resolved, batch_reconciled = apply_results_with_counts(results)
 
@@ -1145,34 +1161,20 @@ module InstantRecord
       # rows; treating those as changes would announce them, and an announcement
       # reloads any page without an in-place refresh.
       #
-      # Client-side last-write-wins, with the tie-break stated on purpose: a
-      # remote value must be strictly NEWER to replace a local one, so equal
-      # stamps leave the row alone. Equal stamps are the ordinary case, not the
-      # exotic one — every write we make comes back with the timestamp we sent —
-      # and applying those echoes would re-save the row, announce a change to
-      # every tab, and fire the host app's after_save callbacks for a value that
-      # never moved. Until both paths carried microseconds, rounding hid this by
-      # making an echo look older than its own row; the rule has to be explicit
-      # instead of an artifact of truncation.
+      # Client-side convergence compares server-anchored string-encoded HLCs
+      # (falling back to microsecond updated_at only for legacy events without
+      # an HLC): a remote value must be strictly NEWER to replace a local one,
+      # so equal stamps (such as echoes of our own writes) leave the row alone.
+      # Because HLC physical time is anchored to authoritative server UTC and
+      # extreme forward skew is clamped on the server, a client whose wall clock
+      # runs ahead no longer wins writes it should lose.
       #
-      # The two sides break ties in opposite directions deliberately:
-      # MutationApplier#stale? is strict too, so the server ACCEPTS an
-      # equal-stamped client mutation. A tie is therefore settled once, on the
-      # server, and never has to be settled again here. (Both sides still compare
-      # two machines' wall clocks with no logical clock. Microsecond stamps make
-      # a coincidental tie far less likely than millisecond ones did, so the
-      # tie-break matters less than it used to — but a client whose clock runs
-      # ahead still wins writes it should lose, and that is unchanged.)
-      # `authoritative` skips the comparison entirely, for the one case where the
-      # server's row is the answer no matter what the clocks say: reconciling a
-      # rejection. A rejected update is the ordinary case here, and the server's
-      # un-updated row is necessarily OLDER than the optimistic local row that it
-      # refused — so last-write-wins would drop it, the outbox row would still be
-      # destroyed, and the record would keep the value the server just refused
-      # and sit at `pending` forever. Nothing was discarded remotely in that
-      # case, so the discard seam does not fire either.
-      def upsert_from_server(model, attributes, version, authoritative: false)
+      # `authoritative` skips the comparison entirely for reconciling rejections,
+      # skipped writes, and 3-way merged rows from the server.
+      def upsert_from_server(model, attributes, version, hlc: nil, authoritative: false)
         return false unless attributes
+
+        HLC.receive(hlc) if HLC.valid?(hlc)
 
         # Schema skew must not raise here either: a client behind the server is
         # sent columns it has not migrated yet. They are the server's to keep;
@@ -1180,6 +1182,8 @@ module InstantRecord
         attributes = attributes.slice(*model.column_names)
         record = model.find_or_initialize_by(id: attributes["id"])
 
+        incoming_hlc = HLC.valid?(hlc) ? hlc : nil
+        local_hlc = record.persisted? ? HLC.row_hlc(model.name, record.id) : nil
         incoming_at = attributes["updated_at"] && Time.parse(attributes["updated_at"].to_s)
         local_at = record.persisted? ? record.updated_at : nil
         prior_pending = !authoritative && record.persisted? && record.sync_state == "pending"
@@ -1187,7 +1191,7 @@ module InstantRecord
 
         record.assign_attributes(attributes.except("id", "server_version"))
 
-        if !authoritative && incoming_at && local_at && incoming_at <= local_at
+        if !authoritative && record.persisted? && stale_remote?(incoming_hlc, local_hlc, incoming_at, local_at)
           # The remote value lost. This is the last moment it exists in this
           # runtime — nothing downstream sees it, which is why models get a seam.
           if (record.changed - BOOKKEEPING_COLUMNS).any?
@@ -1201,6 +1205,7 @@ module InstantRecord
 
         record.server_version = version || attributes["server_version"] || 0
         record.sync_state = "synced"
+        HLC.set_row_hlc(model.name, record.id, incoming_hlc, force: authoritative) if incoming_hlc
         return false unless record.changed?
 
         data_changed = !record.persisted? || (record.changed - BOOKKEEPING_COLUMNS).any?
@@ -1226,6 +1231,19 @@ module InstantRecord
           record.update_columns(sync_state: record.sync_state, server_version: record.server_version)
         end
         data_changed
+      end
+
+      def stale_remote?(incoming_hlc, local_hlc, incoming_at, local_at)
+        if incoming_hlc && HLC.valid?(local_hlc)
+          HLC.compare(incoming_hlc, local_hlc) <= 0
+        elsif incoming_hlc && local_at
+          incoming_pt = HLC.physical_time(incoming_hlc)
+          incoming_pt ? incoming_pt <= local_at : false
+        elsif incoming_at && local_at
+          incoming_at <= local_at
+        else
+          false
+        end
       end
 
       def quarantine_mutation(mutation, kind:, reason:, result:)

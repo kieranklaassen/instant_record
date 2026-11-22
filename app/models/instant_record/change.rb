@@ -20,14 +20,32 @@ module InstantRecord
       end
     end
 
+    def hlc
+      InstantRecord::HLC.change_hlc(id)
+    end
+
+    def effective_hlc
+      stamp = hlc
+      return stamp if InstantRecord::HLC.valid?(stamp)
+
+      InstantRecord::HLC.from_time(
+        attributes_payload.is_a?(Hash) ? (attributes_payload["updated_at"] || created_at) : created_at,
+        node: InstantRecord::HLC::SERVER_NODE
+      )
+    end
+
     def as_event
-      {
+      event = {
         type: record_type,
         id: record_id,
         operation: operation,
         version: version,
         attributes: attributes_payload
       }
+      if (stamp = hlc)
+        event[:hlc] = stamp
+      end
+      event
     end
   end
 end

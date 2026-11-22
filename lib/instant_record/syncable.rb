@@ -227,6 +227,29 @@ module InstantRecord
       def instant_record_replay_mutation_handler
         @instant_record_replay_mutation_handler
       end
+
+      # Declare how same-column concurrent collisions resolve on this column:
+      #   :lww         - last-write-wins by server-anchored HLC (default)
+      #   :union       - 3-way set/collection union (arrays, JSON arrays, CSV, hashes)
+      #   :server_wins - server's already-committed value wins on collision
+      def sync_merge(column, policy)
+        policy = policy.to_sym
+        unless %i[lww union server_wins].include?(policy)
+          raise ArgumentError, "Unknown sync_merge policy #{policy.inspect}; expected :lww, :union, or :server_wins"
+        end
+
+        @instant_record_merge_policies ||= {}
+        @instant_record_merge_policies[column.to_s] = policy
+      end
+
+      def instant_record_merge_policies
+        parent = superclass.respond_to?(:instant_record_merge_policies) ? superclass.instant_record_merge_policies : {}
+        @instant_record_merge_policies ? parent.merge(@instant_record_merge_policies) : parent
+      end
+
+      def instant_record_merge_policy(column)
+        instant_record_merge_policies[column.to_s] || :lww
+      end
     end
 
     private
@@ -262,6 +285,7 @@ module InstantRecord
         when "destroy" then {}
         end
 
+      hlc = InstantRecord::HLC.tick
       hold = consume_hold_for
       release_at = hold ? Time.now.utc + hold : nil
       rollback_payload = release_at ? capture_rollback_payload(operation) : nil
@@ -275,6 +299,12 @@ module InstantRecord
         release_at: release_at,
         rollback_payload: rollback_payload
       )
+      InstantRecord::HLC.set_mutation_hlc(mutation.id, hlc)
+      if operation == "destroy"
+        InstantRecord::HLC.delete_row_hlc(self.class.name, id)
+      else
+        InstantRecord::HLC.set_row_hlc(self.class.name, id, hlc, force: true)
+      end
       @last_outbox_mutation_id = mutation.id
     end
 
@@ -305,7 +335,8 @@ module InstantRecord
 
     # Mirrors MutationApplier's log_change/log_destroy payload shapes.
     def record_server_change(operation)
-      InstantRecord::Change.create!(
+      hlc = InstantRecord::HLC.tick(node: InstantRecord::HLC::SERVER_NODE)
+      change = InstantRecord::Change.create!(
         record_type: self.class.name,
         record_id: id,
         operation: operation,
@@ -313,6 +344,12 @@ module InstantRecord
         attributes_payload: operation == "destroy" ? {} : InstantRecord.wire_attributes(attributes),
         scope: InstantRecord.scope_of(self)
       )
+      InstantRecord::HLC.set_change_hlc(change.id, hlc)
+      if operation == "destroy"
+        InstantRecord::HLC.delete_record_hlc(self.class.name, id)
+      else
+        InstantRecord::HLC.set_record_hlc(self.class.name, id, hlc)
+      end
     end
   end
 end

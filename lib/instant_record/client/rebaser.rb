@@ -8,11 +8,11 @@ module InstantRecord
     # Persists a lightweight server-confirmed snapshot in SyncMetadata STRICTLY
     # for rows that currently have unacked outbox mutations. Clean rows carry
     # zero snapshot rows. When server truth arrives (via SSE/poll delta, ack,
-    # LWW skip, rejection, or poison-pill quarantine), a dirty row is rewound
-    # in memory to its confirmed server state, updated with server truth, and
-    # deterministically replayed through its remaining unacked mutations (or
-    # custom replay mutators). Once a row's last outbox mutation clears, its
-    # confirmed snapshot is immediately deleted.
+    # LWW skip, 3-way column merge, rejection, or poison-pill quarantine), a
+    # dirty row is rewound in memory to its confirmed server state, updated with
+    # server truth, and deterministically replayed through its remaining unacked
+    # mutations (or custom replay mutators). Once a row's last outbox mutation
+    # clears, its confirmed snapshot is immediately deleted.
     module Rebaser
       CONFIRMED_PREFIX = "confirmed_row:".freeze
       SKIP_REPLAY_COLUMNS = %w[id server_version sync_state created_at updated_at].freeze
@@ -64,7 +64,7 @@ module InstantRecord
 
           snapshot =
             if creating
-              { "exists" => false, "version" => 0, "attributes" => nil, "initial_attributes" => nil }
+              { "exists" => false, "version" => 0, "hlc" => nil, "attributes" => nil, "initial_attributes" => nil }
             else
               existing = model.find_by(id: record_id)
               if existing
@@ -72,11 +72,12 @@ module InstantRecord
                 {
                   "exists" => true,
                   "version" => existing[:server_version] || 0,
+                  "hlc" => HLC.row_hlc(record_type, record_id),
                   "attributes" => wire,
                   "initial_attributes" => wire
                 }
               else
-                { "exists" => false, "version" => 0, "attributes" => nil, "initial_attributes" => nil }
+                { "exists" => false, "version" => 0, "hlc" => nil, "attributes" => nil, "initial_attributes" => nil }
               end
             end
 
@@ -91,13 +92,16 @@ module InstantRecord
           model = InstantRecord.synced_model(record_type)
           snapshot = confirmed_snapshot(record_type, record_id)
 
+          HLC.receive(result["hlc"]) if HLC.valid?(result["hlc"])
+          authoritative = result["skipped"] || result["merged"] || result["status"] == "rejected" || result["server_attributes"].present?
+
           updated_snapshot =
             case result["status"]
             when "applied"
-              if result["skipped"]
+              if authoritative
                 authoritative_snapshot(snapshot, result)
               else
-                advance_confirmed_snapshot(snapshot, mutation, result["version"], model)
+                advance_confirmed_snapshot(snapshot, mutation, result["version"], model, hlc: result["hlc"])
               end
             when "rejected"
               authoritative_snapshot(snapshot, result, fallback_missing: true)
@@ -112,30 +116,33 @@ module InstantRecord
             clear_confirmed_snapshot(record_type, record_id)
             return false unless model
 
-            if result["status"] == "applied" && !result["skipped"]
-              if mutation.operation != "destroy"
+            if result["status"] == "applied" && !authoritative
+              if mutation.operation == "destroy"
+                HLC.delete_row_hlc(record_type, record_id)
+              else
                 record = model.find_by(id: record_id)
                 record&.update_columns(sync_state: "synced", server_version: result["version"] || record.server_version)
+                HLC.set_row_hlc(record_type, record_id, result["hlc"]) if HLC.valid?(result["hlc"])
               end
               false
             else
               return false unless updated_snapshot
 
-              !!materialize_state(model, record_id, updated_snapshot, remaining: [])
+              !!materialize_state(model, record_id, updated_snapshot, remaining: [], force_hlc: true)
             end
           else
             write_confirmed_snapshot(record_type, record_id, updated_snapshot) if updated_snapshot
             return false unless model && updated_snapshot
 
             rebased = replay_onto_confirmed(model, record_id, updated_snapshot, remaining)
-            !!materialize_state(model, record_id, rebased, remaining: remaining)
+            !!materialize_state(model, record_id, rebased, remaining: remaining, force_hlc: authoritative)
           end
         end
 
-        # Reconcile a poison-pilled mutation removed from the outbox after
-        # exhausting 5xx retries. Rewinds to the last confirmed snapshot and
-        # replays any remaining unacked mutations on that row. Returns whether
-        # visible local record data changed.
+        # Reconcile a poison-pilled or cancelled mutation removed from the
+        # outbox. Rewinds to the last confirmed snapshot and replays any
+        # remaining unacked mutations on that row. Returns whether visible
+        # local record data changed.
         def reconcile_quarantined_mutation(mutation)
           record_type = mutation.record_type
           record_id = mutation.record_id
@@ -149,12 +156,12 @@ module InstantRecord
             clear_confirmed_snapshot(record_type, record_id)
             return false unless model && snapshot
 
-            !!materialize_state(model, record_id, snapshot, remaining: [])
+            !!materialize_state(model, record_id, snapshot, remaining: [], force_hlc: true)
           else
             return false unless model && snapshot
 
             rebased = replay_onto_confirmed(model, record_id, snapshot, remaining)
-            !!materialize_state(model, record_id, rebased, remaining: remaining)
+            !!materialize_state(model, record_id, rebased, remaining: remaining, force_hlc: true)
           end
         end
 
@@ -163,22 +170,26 @@ module InstantRecord
         # server truth, rewind in memory, and deterministically replay all
         # remaining unacked local mutations. Returns whether the visible local
         # row changed.
-        def apply_server_delta(model, record_id, operation:, attributes:, version:)
+        def apply_server_delta(model, record_id, operation:, attributes:, version:, hlc: nil)
           record_type = model.name
+          HLC.receive(hlc) if HLC.valid?(hlc)
+          incoming_hlc = HLC.valid?(hlc) ? hlc : nil
+
           remaining = pending_for(record_type, record_id)
           snapshot = confirmed_snapshot(record_type, record_id) ||
-            { "exists" => false, "version" => 0, "attributes" => nil, "initial_attributes" => nil }
+            { "exists" => false, "version" => 0, "hlc" => nil, "attributes" => nil, "initial_attributes" => nil }
 
           if operation == "destroy"
             updated_snapshot = {
               "exists" => false,
               "version" => 0,
+              "hlc" => nil,
               "attributes" => nil,
               "initial_attributes" => snapshot["initial_attributes"]
             }
             write_confirmed_snapshot(record_type, record_id, updated_snapshot)
             rebased = replay_onto_confirmed(model, record_id, updated_snapshot, remaining)
-            return materialize_state(model, record_id, rebased, remaining: remaining)
+            return materialize_state(model, record_id, rebased, remaining: remaining, force_hlc: true)
           end
 
           return false unless attributes
@@ -186,8 +197,9 @@ module InstantRecord
           sliced = attributes.deep_stringify_keys.slice(*model.column_names)
           incoming_at = parse_timestamp(sliced["updated_at"])
           confirmed_at = parse_timestamp(snapshot["attributes"] && snapshot["attributes"]["updated_at"])
+          confirmed_hlc = snapshot["hlc"]
 
-          if snapshot["exists"] && incoming_at && confirmed_at && incoming_at <= confirmed_at
+          if snapshot["exists"] && stale_against?(incoming_hlc, confirmed_hlc, incoming_at, confirmed_at)
             notify_discarded_if_different(model, record_id, sliced)
             return false
           end
@@ -195,18 +207,20 @@ module InstantRecord
           updated_snapshot = {
             "exists" => true,
             "version" => version || sliced["server_version"] || snapshot["version"] || 0,
+            "hlc" => incoming_hlc || confirmed_hlc,
             "attributes" => sliced,
             "initial_attributes" => snapshot["initial_attributes"]
           }
           write_confirmed_snapshot(record_type, record_id, updated_snapshot)
 
           rebased = replay_onto_confirmed(model, record_id, updated_snapshot, remaining)
-          changed = materialize_state(model, record_id, rebased, remaining: remaining)
+          changed = materialize_state(model, record_id, rebased, remaining: remaining, force_hlc: true)
 
           # Preserve on_discarded_change semantics when a newer local unacked
           # edit shadowed incoming remote values.
           final_at = parse_timestamp(rebased["attributes"] && rebased["attributes"]["updated_at"])
-          if incoming_at && final_at && incoming_at <= final_at && shadowed_by_local?(sliced, rebased["attributes"])
+          final_hlc = rebased["hlc"]
+          if stale_against?(incoming_hlc, final_hlc, incoming_at, final_at) && shadowed_by_local?(sliced, rebased["attributes"])
             model.instant_record_discarded_change_handler&.call(sliced)
           end
 
@@ -227,10 +241,11 @@ module InstantRecord
 
         private
 
-        def advance_confirmed_snapshot(snapshot, mutation, version, model)
+        def advance_confirmed_snapshot(snapshot, mutation, version, model, hlc: nil)
+          next_hlc = max_valid_hlc(snapshot && snapshot["hlc"], hlc)
           case mutation.operation
           when "destroy"
-            { "exists" => false, "version" => 0, "attributes" => nil, "initial_attributes" => nil }
+            { "exists" => false, "version" => 0, "hlc" => nil, "attributes" => nil, "initial_attributes" => nil }
           when "create"
             attrs = (mutation.changes_payload || {}).deep_stringify_keys.merge("id" => mutation.record_id)
             attrs = attrs.slice(*model.column_names) if model
@@ -238,6 +253,7 @@ module InstantRecord
             {
               "exists" => true,
               "version" => version || 1,
+              "hlc" => next_hlc,
               "attributes" => attrs,
               "initial_attributes" => existing_initial || attrs
             }
@@ -269,6 +285,7 @@ module InstantRecord
             {
               "exists" => true,
               "version" => version || (snapshot && snapshot["version"]) || 0,
+              "hlc" => next_hlc,
               "attributes" => merged,
               "initial_attributes" => initial
             }
@@ -280,9 +297,11 @@ module InstantRecord
         def authoritative_snapshot(snapshot, result, fallback_missing: false)
           if result["server_attributes"].present?
             attrs = result["server_attributes"].deep_stringify_keys
+            hlc = HLC.valid?(result["hlc"]) ? result["hlc"] : (snapshot && snapshot["hlc"])
             {
               "exists" => true,
               "version" => result["version"] || attrs["server_version"] || (snapshot && snapshot["version"]) || 0,
+              "hlc" => hlc,
               "attributes" => attrs,
               "initial_attributes" => snapshot ? snapshot["initial_attributes"] : nil
             }
@@ -290,6 +309,7 @@ module InstantRecord
             {
               "exists" => false,
               "version" => 0,
+              "hlc" => nil,
               "attributes" => nil,
               "initial_attributes" => snapshot ? snapshot["initial_attributes"] : nil
             }
@@ -306,22 +326,27 @@ module InstantRecord
           state_attrs = confirmed_attrs ? confirmed_attrs.dup : nil
           initial_attrs = confirmed["initial_attributes"] ? confirmed["initial_attributes"].deep_stringify_keys.slice(*model.column_names) : nil
           confirmed_version = confirmed["version"].to_i
+          confirmed_hlc = HLC.valid?(confirmed["hlc"]) ? confirmed["hlc"] : nil
+          state_hlc = confirmed_hlc
           confirmed_at = parse_timestamp(confirmed_attrs && confirmed_attrs["updated_at"])
           replay_handler = model.instant_record_replay_mutation_handler
 
           remaining.each do |mutation|
+            mut_hlc = mutation.hlc
             if replay_handler
               record = build_in_memory_record(model, record_id, exists ? state_attrs : nil, confirmed_version)
               handled = replay_handler.call(record, mutation)
               if handled == :destroy
                 exists = false
                 state_attrs = nil
+                state_hlc = nil
                 next
               elsif handled && handled != :default
                 exists = true
                 updated = InstantRecord.wire_attributes(record.attributes).slice(*model.column_names)
                 updated.delete("created_at") if updated["created_at"].nil?
                 state_attrs = (state_attrs || {}).merge(updated)
+                state_hlc = max_valid_hlc(state_hlc, mut_hlc)
                 next
               end
             end
@@ -333,27 +358,36 @@ module InstantRecord
             when "destroy"
               exists = false
               state_attrs = nil
+              state_hlc = nil
             when "create"
               if !exists
                 exists = true
                 state_attrs = changes.merge("id" => record_id)
+                state_hlc = max_valid_hlc(state_hlc, mut_hlc)
               else
-                apply_replayed_columns!(state_attrs, changes, mut_at: mut_at, confirmed_at: confirmed_at,
+                replayed = apply_replayed_columns!(state_attrs, changes,
+                  mut_hlc: mut_hlc, confirmed_hlc: confirmed_hlc,
+                  mut_at: mut_at, confirmed_at: confirmed_at,
                   confirmed_attrs: confirmed_attrs, initial_attrs: initial_attrs)
+                state_hlc = max_valid_hlc(state_hlc, mut_hlc) if replayed
               end
             when "update"
               if exists
-                apply_replayed_columns!(state_attrs, changes, mut_at: mut_at, confirmed_at: confirmed_at,
+                replayed = apply_replayed_columns!(state_attrs, changes,
+                  mut_hlc: mut_hlc, confirmed_hlc: confirmed_hlc,
+                  mut_at: mut_at, confirmed_at: confirmed_at,
                   confirmed_attrs: confirmed_attrs, initial_attrs: initial_attrs)
+                state_hlc = max_valid_hlc(state_hlc, mut_hlc) if replayed
               end
             end
           end
 
-          { "exists" => exists, "version" => confirmed_version, "attributes" => state_attrs }
+          { "exists" => exists, "version" => confirmed_version, "hlc" => state_hlc, "attributes" => state_attrs }
         end
 
-        def apply_replayed_columns!(state_attrs, changes, mut_at:, confirmed_at:, confirmed_attrs:, initial_attrs:)
-          server_newer = confirmed_at && mut_at && confirmed_at > mut_at
+        def apply_replayed_columns!(state_attrs, changes, mut_hlc:, confirmed_hlc:, mut_at:, confirmed_at:, confirmed_attrs:, initial_attrs:)
+          server_newer = strictly_newer?(confirmed_hlc, mut_hlc, confirmed_at, mut_at)
+          applied_any = false
 
           changes.each do |col, val|
             next if SKIP_REPLAY_COLUMNS.include?(col)
@@ -363,11 +397,14 @@ module InstantRecord
             next if server_newer && server_changed_col
 
             state_attrs[col] = val
+            applied_any = true
           end
 
-          if mut_at && (!confirmed_at || mut_at > confirmed_at)
-            state_attrs["updated_at"] = changes["updated_at"]
+          if strictly_newer?(mut_hlc, confirmed_hlc, mut_at, confirmed_at)
+            state_attrs["updated_at"] = changes["updated_at"] if changes["updated_at"]
           end
+
+          applied_any
         end
 
         def build_in_memory_record(model, record_id, attrs, version)
@@ -381,11 +418,12 @@ module InstantRecord
         # Materialize the computed state onto SQLite in a single write (only if
         # needed). Returns true when visible user attributes (or row existence)
         # actually changed.
-        def materialize_state(model, record_id, state, remaining:)
+        def materialize_state(model, record_id, state, remaining:, force_hlc: false)
           existing = model.find_by(id: record_id)
           before_visible = existing ? visible_attributes(existing) : nil
 
           unless state["exists"]
+            HLC.delete_row_hlc(model.name, record_id)
             return false unless existing
 
             existing.destroy!
@@ -421,6 +459,10 @@ module InstantRecord
           elsif record.changed?
             record.update_columns(server_version: record.server_version, sync_state: record.sync_state)
           end
+
+          if HLC.valid?(state["hlc"])
+            HLC.set_row_hlc(model.name, record_id, state["hlc"], force: force_hlc)
+          end
           visible_changed
         end
 
@@ -454,6 +496,44 @@ module InstantRecord
             current[col] != normalized_value(val)
           end
           handler.call(incoming_attrs) if differs
+        end
+
+        def stale_against?(incoming_hlc, reference_hlc, incoming_at, reference_at)
+          if HLC.valid?(incoming_hlc) && HLC.valid?(reference_hlc)
+            HLC.compare(incoming_hlc, reference_hlc) <= 0
+          elsif HLC.valid?(incoming_hlc) && reference_at
+            pt = HLC.physical_time(incoming_hlc)
+            pt ? pt <= reference_at : false
+          elsif incoming_at && reference_at
+            incoming_at <= reference_at
+          else
+            false
+          end
+        end
+
+        def strictly_newer?(candidate_hlc, baseline_hlc, candidate_at, baseline_at)
+          if HLC.valid?(candidate_hlc) && HLC.valid?(baseline_hlc)
+            HLC.compare(candidate_hlc, baseline_hlc) > 0
+          elsif candidate_at && baseline_at
+            candidate_at > baseline_at
+          elsif HLC.valid?(candidate_hlc) && baseline_at
+            pt = HLC.physical_time(candidate_hlc)
+            pt ? pt > baseline_at : false
+          elsif candidate_at && HLC.valid?(baseline_hlc)
+            pt = HLC.physical_time(baseline_hlc)
+            pt ? candidate_at > pt : false
+          else
+            false
+          end
+        end
+
+        def max_valid_hlc(a, b)
+          a_valid = HLC.valid?(a)
+          b_valid = HLC.valid?(b)
+          return b unless a_valid
+          return a unless b_valid
+
+          HLC.compare(a, b) >= 0 ? a : b
         end
 
         def normalized_value(val)
