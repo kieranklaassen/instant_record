@@ -380,9 +380,18 @@ module InstantRecord
             end
           end
 
-          expected = @server.visible_state(identity: identity)
+          # Under extreme forward clock skew (> HLC::DEFAULT_MAX_DRIFT), the server
+          # intentionally clamps updated_at to server UTC while keeping HLC-anchored
+          # ordering, so chaos convergence compares every domain column, created_at,
+          # and server_version bit-for-bit across all clients and the server.
+          expected = @server.visible_state(identity: identity).transform_values do |rows|
+            InstantRecord::Testing.canonical_rows(rows, exclude_columns: %w[sync_state updated_at])
+          end
+          actual = snap[:tables].transform_values do |rows|
+            InstantRecord::Testing.canonical_rows(rows, exclude_columns: %w[sync_state updated_at])
+          end
           expected_json = InstantRecord::Testing.canonical_json(expected)
-          actual_json = InstantRecord::Testing.canonical_json(snap[:tables])
+          actual_json = InstantRecord::Testing.canonical_json(actual)
 
           unless actual_json == expected_json
             raise ConvergenceError,

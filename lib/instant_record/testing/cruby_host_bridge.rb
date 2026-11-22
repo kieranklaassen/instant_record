@@ -330,28 +330,30 @@ while (cmd = read_msg)
       stamp = Time.now.utc + skew
       attrs = (cmd["attributes"] || {}).transform_keys(&:to_s)
       record_id, errors = with_client(client) do
-        klass = model_class(cmd["model"])
-        case cmd["operation"].to_s
-        when "create"
-          attrs["id"] = cmd["id"] if cmd["id"]
-          attrs["created_at"] ||= stamp if skew != 0.0
-          attrs["updated_at"] ||= stamp if skew != 0.0
-          klass.create!(attrs.slice(*klass.column_names)).id
-        when "update"
-          rec = klass.find_by(id: cmd["id"])
-          if rec
+        InstantRecord::HLC.with_clock(-> { Time.now.utc + skew }) do
+          klass = model_class(cmd["model"])
+          case cmd["operation"].to_s
+          when "create"
+            attrs["id"] = cmd["id"] if cmd["id"]
+            attrs["created_at"] ||= stamp if skew != 0.0
             attrs["updated_at"] ||= stamp if skew != 0.0
-            rec.update!(attrs.slice(*klass.column_names))
-            rec.id
+            klass.create!(attrs.slice(*klass.column_names)).id
+          when "update"
+            rec = klass.find_by(id: cmd["id"])
+            if rec
+              attrs["updated_at"] ||= stamp if skew != 0.0
+              rec.update!(attrs.slice(*klass.column_names))
+              rec.id
+            end
+          when "destroy"
+            rec = klass.find_by(id: cmd["id"])
+            if rec
+              rec.destroy!
+              rec.id
+            end
+          else
+            raise ArgumentError, "Unknown local_write operation: #{cmd['operation']}"
           end
-        when "destroy"
-          rec = klass.find_by(id: cmd["id"])
-          if rec
-            rec.destroy!
-            rec.id
-          end
-        else
-          raise ArgumentError, "Unknown local_write operation: #{cmd['operation']}"
         end
       end
       write_msg({ type: "result", record_id: record_id, errors: errors })

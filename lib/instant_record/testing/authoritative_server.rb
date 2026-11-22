@@ -442,12 +442,17 @@ module InstantRecord
           payload = ActiveRecord::Base.transaction do
             cursor = InstantRecord::Change.maximum(:id) || 0
             records = models.flat_map do |model|
+              visible = InstantRecord::SyncScope.visible(model, asker)
               window = model.instant_record_sync_window
-              rows = window ? window.in_window : model.all
-              rows.merge(InstantRecord::SyncScope.visible(model, asker))
-                .map { |record| InstantRecord.record_payload(record) }
+              rows = window ? window.in_window(visible) : visible
+              rows.map { |record| InstantRecord.record_payload(record) }
             end
-            { cursor: cursor, records: records, identity: InstantRecord::SyncScope.key(asker) }
+            {
+              cursor: cursor,
+              records: records,
+              identity: InstantRecord::SyncScope.key(asker),
+              server_time: InstantRecord::HLC.iso_now
+            }
           end
           { status: 200, headers: { "content-type" => "application/json" }, body: JSON.generate(payload) }
         end
@@ -462,6 +467,7 @@ module InstantRecord
               record_id: raw["record_id"],
               operation: raw["operation"],
               base_version: raw["base_version"],
+              hlc: raw["hlc"],
               changes: raw["changes"] || {}
             }
             if stale.include?(mutation[:record_type])
@@ -470,7 +476,7 @@ module InstantRecord
               InstantRecord::MutationApplier.apply(mutation, asker)
             end
           end
-          { status: 200, headers: { "content-type" => "application/json" }, body: JSON.generate(results: results) }
+          { status: 200, headers: { "content-type" => "application/json" }, body: JSON.generate(results: results, server_time: InstantRecord::HLC.iso_now) }
         end
 
         def handle_events(params, asker)
