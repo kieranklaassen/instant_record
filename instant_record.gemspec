@@ -17,11 +17,14 @@ Gem::Specification.new do |spec|
   spec.metadata["source_code_uri"] = spec.homepage
   spec.metadata["changelog_uri"] = "#{spec.homepage}/blob/main/CHANGELOG.md"
 
+  spec.bindir      = "exe"
+  spec.executables = ["instant_record_mcp"]
+
   # db/ is not optional: the engine appends its own db/migrate to the host app's
   # migration paths, and those migrations create the tables the sync protocol
   # runs on (changes, outbox, sync_metadata, applied_mutations). Omit them and
   # the gem installs into an app that can never build its own schema.
-  spec.files = Dir["{app,config,db,lib,frontend,sig}/**/*", "CHANGELOG.md", "LICENSE.txt", "README.md"]
+  spec.files = Dir["{app,config,db,exe,lib,frontend,sig}/**/*", "CHANGELOG.md", "LICENSE.txt", "README.md"]
 
   spec.files.concat Dir["compiled/pipeline/**/*.{rb,erb,c,h}", "compiled/web/src/**/*.js",
                         "compiled/web/{index.html,vite.config.js,package.json,package-lock.json}",
