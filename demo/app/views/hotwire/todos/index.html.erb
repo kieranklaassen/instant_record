@@ -1,0 +1,11 @@
+<% content_for(:title, "Todo") %>
+
+<main class="four">
+  <div class="card">
+    <%= render "form" %>
+
+    <ul class="four-list" id="todos" data-controller="stopwatch">
+      <%= render partial: "todo", collection: @todos %>
+    </ul>
+  </div>
+</main>

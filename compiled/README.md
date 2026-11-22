@@ -15,20 +15,17 @@ Use Ruby 3.3+, Node and npm, a C toolchain, and the following build inputs:
 - [WASI SDK](https://github.com/WebAssembly/wasi-sdk) 34 and the SQLite 3.54.1 [amalgamation](https://www.sqlite.org/download.html).
 - The npm dependencies pinned in the gem’s `compiled/web/package-lock.json`. Binaryen’s `wasm-opt` is optional.
 
-Copy the example configuration and install the JavaScript dependencies in your app:
+Copy the example configuration (or run `bin/rails generate instant_record:install`) and install the JavaScript dependencies in your app:
 
 ```sh
 gem_dir="$(bundle show instant_record)"
 mkdir -p tmp/instant_record/js config
 cp "$gem_dir"/compiled/web/package*.json tmp/instant_record/js/
 npm ci --prefix tmp/instant_record/js
-cp "$gem_dir"/compiled/toolchain.env.example config/instant_record_toolchain.env
+bin/rails generate instant_record:install
 ```
 
-Fill in absolute paths in the config. Set `WEB_NODE_MODULES` to the directory created by
-npm, `RAILS_GEMS` to the directory containing the installed Hotwire gem assets, and
-`CACHE` to a writable build cache. The benchmark’s Playwright setting is optional
-for application builds. Point `INSTANT_RECORD_TOOLCHAIN` at another config if desired.
+Fill in absolute paths in `config/instant_record_toolchain.env`. Set `WEB_NODE_MODULES` to the directory created by `npm ci` (`tmp/instant_record/js/node_modules`) and `CACHE` to a writable build cache. `RAILS_GEMS` is optional in consumer apps using Bundler — `turbo-rails` and `stimulus-rails` assets are resolved from `Gem.loaded_specs` automatically. `PLAYWRIGHT_NODE_MODULES` is only needed for this repository's benchmarks. Point `INSTANT_RECORD_TOOLCHAIN` at another config if desired.
 
 ## Build and serve
 
@@ -120,7 +117,7 @@ and local/server round trips. The source drawer loads the source for the selecte
 page on demand. The Sync inspector shows local and network traffic and simulates
 Offline and Slow connections.
 
-Spinel compiles code ahead of time. Arbitrary Ruby evaluation, file uploads,
+Spinel compiles code ahead of time. Arbitrary Ruby evaluation, multipart form file uploads (use `sync_file` with `frontend/files.js` instead),
 encrypted attributes, and server-only Rails subsystems are outside this browser
 backend. Tabs on the same origin and browser profile share
 one durable SQLite snapshot. Each write picks up the latest revision and saves
@@ -240,8 +237,7 @@ installed on a phone.
   module, the fonts), so a reopened app starts with no connection; it leaves every sync request
   and the change stream alone. It keeps the two newest modules. Pending changes are still sent
   only while the app is open: a service worker cannot drain the outbox, which lives in the
-  app's database. This has not yet been run against a compiled build, only against the
-  Rails-served demo.
+  app's database. When hosting through Rails (`config.instant_record.compiled_host`), `InstantRecord::CompiledSite` serves `/service-worker.js` with `cache-control: no-cache` whenever the compiled build includes one.
 
 ### Replacing the ruby.wasm build on its host
 

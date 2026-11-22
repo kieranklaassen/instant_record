@@ -1,10 +1,10 @@
 PATH
   remote: ..
   specs:
-    instant_record (0.2.0)
-      prism (>= 1.0)
-      rails (>= 8.0)
-      sqlite3 (>= 2.1)
+    instant_record (0.3.0)
+      prism (~> 1.0)
+      rails (~> 8.0)
+      sqlite3 (~> 2.1)
 
 GEM
   remote: https://rubygems.org/
@@ -336,6 +336,7 @@ GEM
 
 PLATFORMS
   arm64-darwin-25
+  arm64-darwin-27
 
 DEPENDENCIES
   async-http
