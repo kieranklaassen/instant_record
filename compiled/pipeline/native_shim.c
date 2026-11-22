@@ -52,6 +52,8 @@ static void call_sync(void *ctx)      { (void)ctx; sp_NativeBridge_s_handle_sync
 static void call_stream(void *ctx)    { (void)ctx; sp_NativeBridge_s_handle_stream(); }
 static void call_history(void *ctx)   { (void)ctx; sp_NativeBridge_s_history(); }
 static void call_cursor(void *ctx)    { (void)ctx; sp_NativeBridge_s_cursor(); }
+static void call_branch_outbox(void *ctx) { (void)ctx; sp_NativeBridge_s_branch_outbox(); }
+static void call_branch_replay(void *ctx) { (void)ctx; sp_NativeBridge_s_branch_replay(); }
 static void call_render(void *ctx)    { (void)ctx; sp_NativeBridge_s_render(); }
 static void call_action(void *ctx)    { (void)ctx; sp_NativeBridge_s_action(); }
 static void call_open(void *ctx)      { (void)ctx; sp_NativeBridge_s_open(); }
@@ -60,6 +62,7 @@ static void call_boot(void *ctx)      { (void)ctx; app_boot(); }
 static const struct { const char *name; void (*fn)(void *); } entries[] = {
   { "request", call_request }, { "sync_plan", call_plan }, { "sync", call_sync },
   { "stream", call_stream },   { "history", call_history }, { "cursor", call_cursor },
+  { "branch_outbox", call_branch_outbox }, { "branch_replay", call_branch_replay },
   { "render", call_render },   { "action", call_action },   { "open", call_open },
 };
 

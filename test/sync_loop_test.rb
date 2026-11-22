@@ -300,14 +300,205 @@ class SyncLoopTest < Minitest::Test
     assert_equal "create", deltas2.first["op"]
   end
 
-  def test_a_pass_that_drained_the_outbox_does_not_list_its_changes
+  def test_a_pure_self_ack_stays_quiet_while_still_marking_the_pass_changed_for_persistence
+    InstantRecord::Client.cursor = 0
+    in_browser do
+      memo = @model.create!(id: "local-1", title: "mine")
+      mutation_id = InstantRecord::OutboxMutation.sole.id
+      @transport.respond_with([{ "mutation_id" => mutation_id, "status" => "applied", "version" => 1 }])
+
+      changed = InstantRecord::Client.sync_pass
+
+      assert changed, "draining the outbox mutates SQLite and must still tell the worker to persist the snapshot"
+      assert_equal 0, InstantRecord.pending_count
+      assert_equal "synced", memo.reload.sync_state
+      assert_equal 1, memo.server_version
+    end
+
+    assert_empty @notifier.notices, "acknowledging our own local write must not trigger a records_changed reload"
+  end
+
+  def test_a_self_ack_with_a_concurrent_remote_delta_lists_only_the_remote_record
+    InstantRecord::Client.cursor = 0
     in_browser do
       @model.create!(id: "local-1", title: "mine")
+      mutation_id = InstantRecord::OutboxMutation.sole.id
+      @transport.respond_with([{ "mutation_id" => mutation_id, "status" => "applied", "version" => 1 }])
+      @transport.events_to_yield = [
+        { "type" => "Memo", "id" => "remote-1", "operation" => "create", "version" => 2, "cursor" => 15,
+          "attributes" => { "id" => "remote-1", "title" => "from peer", "updated_at" => Time.current.iso8601(6) } }
+      ]
+
+      InstantRecord.start
+      InstantRecord.tick
+    end
+
+    assert_equal 1, @notifier.notices.size
+    header, deltas = parse_notice(@notifier.notices.sole)
+    assert_equal "records_changed", header
+    assert_equal [{ "type" => "Memo", "id" => "remote-1", "op" => "create" }], deltas.map { |d| d.slice("type", "id", "op") },
+      "a self-ack must not wipe the concurrent remote delta into an unlisted wildcard reload"
+    assert_equal 15, InstantRecord.cursor
+  end
+
+  def test_a_rejected_write_during_sync_pass_notifies_the_rolled_back_record
+    InstantRecord::Client.cursor = 0
+    in_browser do
+      memo = @model.create!(id: "local-1", title: "server value")
+      server_stamp = memo.updated_at
+      InstantRecord::OutboxMutation.delete_all
+      memo.update!(title: "refused edit")
+      mutation_id = InstantRecord::OutboxMutation.sole.id
+      @transport.respond_with([{
+        "mutation_id" => mutation_id, "status" => "rejected", "reason" => "not permitted",
+        "server_attributes" => { "id" => memo.id, "title" => "server value", "updated_at" => server_stamp.iso8601(6) },
+        "version" => 3
+      }])
+
+      InstantRecord.start
+      InstantRecord.tick
+
+      assert_equal "server value", memo.reload.title
+    end
+
+    header, deltas = parse_notice(@notifier.notices.sole)
+    assert_equal "records_changed", header
+    assert_equal [{ "type" => "Memo", "id" => "local-1", "op" => "update" }], deltas.map { |d| d.slice("type", "id", "op") }
+    assert_equal "server value", deltas.sole.dig("attrs", "title")
+  end
+
+  def test_a_skipped_lww_write_during_sync_pass_notifies_the_winning_record
+    InstantRecord::Client.cursor = 0
+    in_browser do
+      memo = @model.create!(id: "local-1", title: "my losing edit")
+      mutation_id = InstantRecord::OutboxMutation.sole.id
+      @transport.respond_with([{
+        "mutation_id" => mutation_id, "status" => "applied", "version" => 4, "skipped" => true,
+        "server_attributes" => { "id" => memo.id, "title" => "peer winner",
+                                 "updated_at" => (memo.updated_at + 5).utc.iso8601(6) }
+      }])
+
+      InstantRecord.start
+      InstantRecord.tick
+
+      assert_equal "peer winner", memo.reload.title
+    end
+
+    header, deltas = parse_notice(@notifier.notices.sole)
+    assert_equal "records_changed", header
+    assert_equal [{ "type" => "Memo", "id" => "local-1", "op" => "update" }], deltas.map { |d| d.slice("type", "id", "op") }
+    assert_equal "peer winner", deltas.sole.dig("attrs", "title")
+  end
+
+  def test_a_bootstrap_emits_an_unlisted_change_notice
+    in_browser do
       InstantRecord.start
       InstantRecord.tick
     end
 
     assert_equal ["records_changed"], @notifier.notices
+  end
+
+  def test_a_failed_bootstrap_does_not_leak_unlisted_changes_into_later_notices
+    @transport.define_singleton_method(:get_json) { |_path| raise InstantRecord::Client::Transport::Error, "offline" }
+
+    in_browser do
+      InstantRecord.start
+      InstantRecord.tick
+      assert_empty @notifier.notices
+
+      InstantRecord::Client.consume_stream(sse_frame(81, "after-offline"))
+    end
+
+    header, deltas = parse_notice(@notifier.notices.sole)
+    assert_equal "records_changed", header
+    assert_equal [{ "type" => "Memo", "id" => "after-offline", "op" => "create" }], deltas.map { |d| d.slice("type", "id", "op") }
+  end
+
+  def test_an_eviction_emits_an_unlisted_change_notice
+    windowed = syncable_model("Memo") { sync_window limit: 1, partition_by: :state }
+    InstantRecord.sync(windowed)
+    InstantRecord::Client.cursor = 0
+    InstantRecord::Client.applying_remote do
+      windowed.create!(id: "old", state: "a", created_at: 2.hours.ago, updated_at: 2.hours.ago)
+      windowed.create!(id: "new", state: "a", created_at: 1.minute.ago, updated_at: 1.minute.ago)
+    end
+
+    in_browser do
+      InstantRecord.start(cold_boot: true)
+      InstantRecord.tick
+    end
+
+    assert_equal ["records_changed"], @notifier.notices
+    assert_equal %w[new], windowed.pluck(:id)
+  end
+
+  def test_end_to_end_self_ack_echo_rejection_and_concurrent_remote_delta
+    in_browser do
+      # 1. Cold bootstrap emits wildcard notice.
+      @transport.bootstrap_body = {
+        "cursor" => 10,
+        "records" => [
+          { "type" => "Memo", "id" => "m-1", "version" => 1,
+            "attributes" => { "id" => "m-1", "title" => "initial", "updated_at" => 1.minute.ago.utc.iso8601(6) } }
+        ]
+      }
+      InstantRecord.start
+      InstantRecord.tick
+      assert_equal ["records_changed"], @notifier.notices
+
+      # 2. Local edit acknowledged + echoed back in the same pass stays quiet.
+      memo = @model.find("m-1")
+      memo.update!(title: "my edit")
+      mutation_id = InstantRecord::OutboxMutation.sole.id
+      @transport.respond_with([{ "mutation_id" => mutation_id, "status" => "applied", "version" => 2 }])
+      @transport.events_to_yield = [
+        { "type" => "Memo", "id" => "m-1", "operation" => "update", "version" => 2, "cursor" => 11,
+          "attributes" => InstantRecord.wire_attributes(memo.reload.attributes) }
+      ]
+      InstantRecord.tick
+      assert_equal ["records_changed"], @notifier.notices, "self-ack plus own echo must stay completely quiet"
+      assert_equal 11, InstantRecord.cursor
+      assert_equal "synced", memo.reload.sync_state
+
+      # 3. Local edit acked alongside a concurrent remote delta notifies only the remote record.
+      memo.update!(title: "my second edit")
+      mutation_id = InstantRecord::OutboxMutation.sole.id
+      @transport.respond_with([{ "mutation_id" => mutation_id, "status" => "applied", "version" => 3 }])
+      @transport.events_to_yield = [
+        { "type" => "Memo", "id" => "m-1", "operation" => "update", "version" => 3, "cursor" => 12,
+          "attributes" => InstantRecord.wire_attributes(memo.reload.attributes) },
+        { "type" => "Memo", "id" => "m-2", "operation" => "create", "version" => 1, "cursor" => 13,
+          "attributes" => { "id" => "m-2", "title" => "from another user", "updated_at" => Time.current.utc.iso8601(6) } }
+      ]
+      InstantRecord.tick
+      assert_equal 2, @notifier.notices.size
+      _h, d2 = parse_notice(@notifier.notices[1])
+      assert_equal [{ "type" => "Memo", "id" => "m-2", "op" => "create" }], d2.map { |d| d.slice("type", "id", "op") }
+      assert_equal 13, InstantRecord.cursor
+
+      # 4. Rejected local edit + concurrent remote delta lists both records without wildcard fallback.
+      accepted_attrs = InstantRecord.wire_attributes(memo.reload.attributes)
+      memo.update!(title: "forbidden edit")
+      mutation_id = InstantRecord::OutboxMutation.sole.id
+      @transport.respond_with([{
+        "mutation_id" => mutation_id, "status" => "rejected", "reason" => "forbidden",
+        "server_attributes" => accepted_attrs, "version" => 3
+      }])
+      @transport.events_to_yield = [
+        { "type" => "Memo", "id" => "m-3", "operation" => "create", "version" => 1, "cursor" => 14,
+          "attributes" => { "id" => "m-3", "title" => "concurrent peer", "updated_at" => Time.current.utc.iso8601(6) } }
+      ]
+      InstantRecord.tick
+      assert_equal 3, @notifier.notices.size
+      assert_equal "records_changed", @notifier.notices[0]
+      _h3, d3 = parse_notice(@notifier.notices[2])
+      assert_equal [
+        { "type" => "Memo", "id" => "m-1", "op" => "update" },
+        { "type" => "Memo", "id" => "m-3", "op" => "create" }
+      ], d3.map { |d| d.slice("type", "id", "op") }
+      assert_equal "my second edit", memo.reload.title
+    end
   end
 
   def test_more_changes_than_can_be_listed_are_not_listed
@@ -414,7 +605,7 @@ class SyncLoopTest < Minitest::Test
     assert_equal "loc-1", d2.sole["id"]
   end
 
-  def test_bootstrapped_drain_emits_typed_deltas_for_applied_and_rejected_results
+  def test_bootstrapped_drain_emits_typed_deltas_for_rejected_and_keeps_self_ack_quiet
     InstantRecord::Client.cursor = 5
     in_browser do
       kept = @model.create!(id: "kept-1", title: "kept")
@@ -431,11 +622,8 @@ class SyncLoopTest < Minitest::Test
     end
 
     _h, deltas = parse_notice(@notifier.notices.sole)
-    by_id = deltas.index_by { |d| d["id"] }
-    assert_equal "update", by_id["kept-1"]["op"]
-    assert_includes by_id["kept-1"]["changed_columns"], "sync_state"
-    assert_equal "synced", by_id["kept-1"].dig("attrs", "sync_state")
-    assert_equal "destroy", by_id["doomed-1"]["op"]
+    assert_equal [{ "type" => "Memo", "id" => "doomed-1", "op" => "destroy" }], deltas.map { |d| d.slice("type", "id", "op") }
+    assert_equal "synced", @model.find("kept-1").sync_state
   end
 
   def test_notice_exceeding_byte_budget_degrades_to_wildcard
