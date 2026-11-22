@@ -31,10 +31,10 @@ module InstantRecord
     end
 
     def serialize_rows(model, identity)
+      visible = SyncScope.visible(model, identity)
       window = model.instant_record_sync_window
-      rows = window ? window.in_window : model.all
-      rows.merge(SyncScope.visible(model, identity))
-        .map { |record| InstantRecord.record_payload(record) }
+      rows = window ? window.in_window(visible) : visible
+      rows.map { |record| InstantRecord.record_payload(record) }
     end
   end
 end

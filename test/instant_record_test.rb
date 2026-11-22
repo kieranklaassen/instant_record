@@ -115,23 +115,4 @@ class InstantRecordTest < Minitest::Test
     application.define_singleton_method(:config) { config }
     with_rails_application(application, &block)
   end
-
-  def with_rails_application(application)
-    had_rails = Object.const_defined?(:Rails)
-    unless had_rails
-      Object.const_set(:Rails, Module.new)
-    end
-    had_app_method = Rails.respond_to?(:application)
-    previous_app = had_app_method ? Rails.application : nil
-    Rails.define_singleton_method(:application) { application }
-    yield
-  ensure
-    if !had_rails
-      Object.send(:remove_const, :Rails) if Object.const_defined?(:Rails)
-    elsif had_app_method
-      Rails.define_singleton_method(:application) { previous_app }
-    else
-      Rails.singleton_class.send(:remove_method, :application)
-    end
-  end
 end
