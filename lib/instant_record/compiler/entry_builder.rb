@@ -54,24 +54,47 @@ module InstantRecord
             0
           end
 
-          # Capture the exact outgoing batch before the worker yields to browser requests.
+          # Capture the next bounded outgoing batch before the worker yields to browser requests.
           def self.sync_plan
             mutations = InstantRecord::Client.plan_drain
             push = mutations.empty? ? "" : JSON.generate(InstantRecord::Client.mutations_payload(mutations))
             next_ms = InstantRecord::Client.next_release_ms
-            plan = { push: push, bootstrap: !InstantRecord::Client.bootstrapped? }
+            plan = {
+              push: push,
+              mutation_ids: mutations.map { |m| m[:id] },
+              bootstrap: !InstantRecord::Client.bootstrapped?
+            }
             plan[:next_release_ms] = next_ms unless next_ms.nil?
             <<write:out>>JSON.generate(plan))
             0
           end
 
           def self.handle_sync
-            endpoint = <<read:in>>.strip
-            InstantRecord.config.endpoint = endpoint if endpoint.length > 0
-            changed = InstantRecord::Client.sync_pass
+            raw = <<read:in>>.strip
+            if raw.start_with?("{")
+              input = JSON.parse(raw)
+              endpoint = input["endpoint"].to_s.strip
+              InstantRecord.config.endpoint = endpoint if endpoint.length > 0
+              outcome = InstantRecord::Client.apply_prepared_sync(
+                push: input["push"],
+                bootstrap: input["bootstrap"]
+              )
+              changed = outcome[:changed]
+              suffix = " progressed=" + (outcome[:progressed] ? "1" : "0") +
+                " failed=" + (outcome[:failed] ? "1" : "0") +
+                " quarantined=" + outcome[:quarantined].to_s
+            else
+              InstantRecord.config.endpoint = raw if raw.length > 0
+              changed = InstantRecord::Client.sync_pass
+              suffix = ""
+            end
             next_ms = InstantRecord::Client.next_release_ms
-            out = (changed ? "changed" : "unchanged") + " pending=" + InstantRecord::Client.pending_count.to_s + " cursor=" + InstantRecord::Client.cursor.to_s + " held=" + InstantRecord::Client.held_count.to_s
+            out = (changed ? "changed" : "unchanged") +
+              " pending=" + InstantRecord::Client.pending_count.to_s +
+              " cursor=" + InstantRecord::Client.cursor.to_s +
+              " held=" + InstantRecord::Client.held_count.to_s
             out += " next_release_ms=" + next_ms.to_s unless next_ms.nil?
+            out += suffix
             <<write:out>>out)
             0
           ensure

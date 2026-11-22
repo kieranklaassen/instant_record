@@ -26,6 +26,7 @@ module InstantRecord
         lib/instant_record/sync_notice.rb
         lib/instant_record/sync_window.rb
         lib/instant_record/client.rb
+        lib/instant_record/client/rebaser.rb
         lib/instant_record/client/transport.rb
         lib/instant_record/client/notifier.rb
         lib/instant_record/branch.rb

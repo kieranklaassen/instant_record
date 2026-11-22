@@ -248,6 +248,38 @@ export class AppHost {
     };
   }
 
+  // Merge pre-fetched push/bootstrap responses into SQLite by mutation_id
+  // without discarding acks when newer local edits landed during the fetch.
+  applySync(endpoint, { push = null, bootstrap = null } = {}) {
+    this.notifyFile.data = new Uint8Array();
+    this.hostDir.contents.set("notify", this.notifyFile);
+    this.exchanges = [];
+    const payload = JSON.stringify({
+      endpoint: endpoint || "",
+      push,
+      bootstrap,
+    });
+    const result = this.call("wasm_sync", encoder.encode(payload));
+    if (result.exit !== 0) throw new Error(result.errors.join("\n") || "Failed to apply sync responses");
+    const text = decoder.decode(result.out);
+    const notifyEntry = this.hostDir.contents.get("notify") || this.notifyFile;
+    const nextRelease = /next_release_ms=(\d+)/.exec(text);
+    return {
+      changed: text.startsWith("changed"),
+      pending: Number(/pending=(\d+)/.exec(text)?.[1] ?? -1),
+      held: Number(/held=(\d+)/.exec(text)?.[1] ?? 0),
+      nextReleaseMs: nextRelease ? Number(nextRelease[1]) : null,
+      cursor: Number(/cursor=(\d+)/.exec(text)?.[1] ?? 0),
+      progressed: /progressed=1\b/.test(text),
+      failed: /failed=1\b/.test(text),
+      quarantined: Number(/quarantined=(\d+)/.exec(text)?.[1] ?? 0),
+      ...readNotice(decoder.decode(notifyEntry.data)),
+      exchanges: this.exchanges,
+      exit: result.exit,
+      errors: result.errors,
+    };
+  }
+
   // Feed an SSE batch fetched asynchronously by the worker into InstantRecord::Client.consume_stream.
   consumeStream(chunk) {
     this.notifyFile.data = new Uint8Array();

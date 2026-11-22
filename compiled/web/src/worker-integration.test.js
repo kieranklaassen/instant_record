@@ -285,8 +285,9 @@ function createTestEnvironment({ opfsUnavailable = false, seedIdbBytes = null, s
       }
       return { status: 200, headers: [], body: JSON.stringify(this.state.items), notified: false, changes: null, exit: 0, errors: [] };
     }
-    syncPlan() { return { push: "", bootstrap: false }; }
+    syncPlan() { return { push: "", mutation_ids: [], bootstrap: false }; }
     sync() { return { changed: false, pending: 0, cursor: this.state.cursor, notified: false, changes: null }; }
+    applySync() { return { changed: false, pending: 0, cursor: this.state.cursor, progressed: false, failed: false, quarantined: 0, notified: false, changes: null }; }
     syncState() { return { bootstrapped: true, cursor: this.state.cursor, pending: 0, identity: "" }; }
     consumeStream() { return { applied: 0, cursor: this.state.cursor, bootstrapped: true, notified: false, changes: null }; }
     history(_key, response = "") {
