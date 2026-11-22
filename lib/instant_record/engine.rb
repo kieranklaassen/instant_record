@@ -82,6 +82,8 @@ module InstantRecord
       mount_path = app.config.instant_record.mount_path
       next unless mount_path
 
+      InstantRecord.config.endpoint = mount_path if mount_path.is_a?(String) && InstantRecord.config.endpoint == DEFAULT_MOUNT_PATH
+
       app.routes.append do
         mount InstantRecord::Engine => mount_path
       end

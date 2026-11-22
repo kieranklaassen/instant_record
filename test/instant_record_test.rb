@@ -62,6 +62,33 @@ class InstantRecordTest < Minitest::Test
     end
   end
 
+  def test_server_url_drops_default_endpoint_when_only_mount_path_is_customised
+    with_mount_path("/sync") do
+      assert_equal "/sessions?instant_record_network=1", InstantRecord.server_url("/sessions")
+    end
+  end
+
+  def test_server_url_preserves_existing_query_parameters
+    assert_equal "/items?page=2&instant_record_network=1", InstantRecord.server_url("/items?page=2")
+  end
+
+  def test_server_url_uses_config_mount_path_when_rails_config_lacks_instant_record
+    with_config_mount_path("/sync") do
+      with_endpoint("http://localhost:3000/sync") do
+        assert_equal "http://localhost:3000/sessions?instant_record_network=1",
+          InstantRecord.server_url("/sessions")
+      end
+    end
+  end
+
+  def test_server_url_handles_rails_application_without_instant_record_config
+    application = Object.new
+    application.define_singleton_method(:config) { Object.new }
+    with_rails_application(application) do
+      assert_equal "/sessions?instant_record_network=1", InstantRecord.server_url("/sessions")
+    end
+  end
+
   private
 
   def with_endpoint(endpoint)
@@ -72,17 +99,20 @@ class InstantRecordTest < Minitest::Test
     InstantRecord.config.endpoint = was
   end
 
-  # The mount path lives in Rails config, which a plain-AR test process has none
-  # of; the gem falls back to the default without it.
-  def with_mount_path(path)
+  def with_config_mount_path(path)
+    was = InstantRecord.config.mount_path
+    InstantRecord.config.mount_path = path
+    yield
+  ensure
+    InstantRecord.config.mount_path = was
+  end
+
+  # The mount path lives in Rails config, which a plain-AR test process may lack;
+  # temporarily replace Rails.application without clobbering a loaded Rails module.
+  def with_mount_path(path, &block)
     config = Struct.new(:instant_record).new(Struct.new(:mount_path).new(path))
     application = Object.new
     application.define_singleton_method(:config) { config }
-    rails = Module.new
-    rails.define_singleton_method(:application) { application }
-    Object.const_set(:Rails, rails)
-    yield
-  ensure
-    Object.send(:remove_const, :Rails)
+    with_rails_application(application, &block)
   end
 end

@@ -32,12 +32,14 @@ module InstantRecord
       toolchain || ENV.fetch("INSTANT_RECORD_TOOLCHAIN") { gem_root.join("compiled/toolchain.env").to_s }
     end
 
-    def self.build(root:, toolchain:, endpoint:, models: nil, baseline: nil, migration_paths: nil, island: nil, overrides: nil)
+    def self.build(root:, toolchain:, endpoint:, models: nil, sync_windows: nil, mount_path: nil, baseline: nil, migration_paths: nil, island: nil, overrides: nil)
       with_workspace(root: root, toolchain: toolchain, stage_web: true) do |shared|
         WasmBuild.new(
           **shared,
           models: models,
+          sync_windows: sync_windows,
           endpoint: endpoint,
+          mount_path: mount_path,
           baseline: baseline,
           migration_paths: migration_paths || shared[:migration_paths],
           island: island,
@@ -49,12 +51,14 @@ module InstantRecord
     # The same app as libraries a native host links: for this machine, or
     # with target "iphonesimulator" or "iphoneos" for the iOS simulator or
     # an iPhone. Returns the folder that holds them.
-    def self.build_native(root:, toolchain:, endpoint:, models: nil, target: nil, baseline: nil, migration_paths: nil, island: nil, overrides: nil)
+    def self.build_native(root:, toolchain:, endpoint:, models: nil, target: nil, sync_windows: nil, mount_path: nil, baseline: nil, migration_paths: nil, island: nil, overrides: nil)
       with_workspace(root: root, toolchain: toolchain, stage_web: false) do |shared|
         NativeBuild.new(
           **shared,
           models: models,
+          sync_windows: sync_windows,
           endpoint: endpoint,
+          mount_path: mount_path,
           target: target,
           baseline: baseline,
           migration_paths: migration_paths || shared[:migration_paths],

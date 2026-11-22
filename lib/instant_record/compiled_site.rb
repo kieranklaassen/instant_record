@@ -26,7 +26,8 @@ module InstantRecord
       return @app.call(env) unless request.host == @host && (request.get? || request.head?)
       return @app.call(env) if path == "/up" || path == @sync_path || path.start_with?("#{@sync_path}/")
 
-      asset = path.start_with?("/assets/", "/harness/") || path.match?(%r{\A/app-[a-f0-9]+\.wasm\z})
+      asset = path.start_with?("/assets/", "/harness/") || path.match?(%r{\A/app-[a-f0-9]+\.wasm\z}) ||
+        (path == "/service-worker.js" && File.file?(File.join(@root, "service-worker.js")))
       manifest = path == "/instant-record-release.json" || path == "/instant_record.manifest.json"
       html = request.get_header("HTTP_ACCEPT").to_s.include?("text/html")
       return @app.call(env) unless asset || manifest || (html && local_island_path?(path))

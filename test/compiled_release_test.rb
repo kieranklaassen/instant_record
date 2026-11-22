@@ -63,6 +63,15 @@ class CompiledReleaseTest < Minitest::Test
       assert_equal "Rails", app.get("https://browser.test/instant_record/bootstrap", "HTTP_ACCEPT" => "text/html").body
       assert_equal "Rails", app.post("https://browser.test/items").body
       assert_equal 404, app.get("https://browser.test/harness/missing.js").status
+      assert_equal "Rails", app.get("https://browser.test/service-worker.js").body
+
+      dist.join("service-worker.js").write("// sw v2")
+      dist.join("instant-record-release.json").write(JSON.generate(version: "c" * 64))
+      InstantRecord::Compiler.publish(root)
+      sw = app.get("https://browser.test/service-worker.js")
+      assert_equal 200, sw.status
+      assert_equal "// sw v2", sw.body
+      assert_equal "no-cache", sw["cache-control"]
 
       # In island mode, non-island HTML routes pass through to Rails instead of serving index.html.
       island_manifest = {
@@ -71,8 +80,8 @@ class CompiledReleaseTest < Minitest::Test
         local_routes: [{ method: "GET", path: "/items" }, { method: "GET", path: "/items/:id" }]
       }
       dist.join("instant_record.manifest.json").write(JSON.generate(island_manifest))
-      dist.join("instant-record-release.json").write(JSON.generate(version: "c" * 64))
-      dist.join("app-c.wasm").write("module-c")
+      dist.join("instant-record-release.json").write(JSON.generate(version: "d" * 64))
+      dist.join("app-d.wasm").write("module-d")
       InstantRecord::Compiler.publish(root)
       assert_equal "b", app.get("https://browser.test/items", "HTTP_ACCEPT" => "text/html").body
       assert_equal "b", app.get("https://browser.test/items/42", "HTTP_ACCEPT" => "text/html").body

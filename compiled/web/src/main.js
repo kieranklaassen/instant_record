@@ -1,6 +1,8 @@
+import { mountBranchPreview } from "./branch-preview.js";
 import { mailboxScope } from "./mailbox-scope.js";
 import { isLocalRoute, parseManifest } from "./manifest.js";
 import { watchRelease } from "./release-updates.js";
+import { isLocalUrl } from "./server-request.js";
 const manifest = parseManifest(import.meta.env.VITE_MANIFEST);
 let releaseRequired;
 const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
@@ -19,6 +21,11 @@ worker.onmessage = (event) => {
     historyFill = event.data.state;
     if (window.__spinel) window.__spinel.history = historyFill;
     window.dispatchEvent(new CustomEvent("instant-record:history", { detail: historyFill }));
+    return;
+  }
+  if (type === "instant_record.branch") {
+    if (window.__spinel) window.__spinel.branchState = event.data.state;
+    window.dispatchEvent(new CustomEvent("instant-record:branch-changed", { detail: event.data.state }));
     return;
   }
   if (type === "records_changed") {
@@ -41,8 +48,14 @@ const marks = { start: performance.now() };
 // Where the sync server is and who this browser is to it, for a page that asks it for
 // something itself: the bytes of a record that declares sync_file (frontend/files.js).
 const syncEndpoint = import.meta.env.VITE_SYNC_ENDPOINT || "/instant_record";
+const branchApi = {
+  fork: (name) => call("branch.create", { name }),
+  status: () => call("branch.status"),
+  approve: (options = {}) => call("branch.approve", options),
+  discard: () => call("branch.discard"),
+};
 window.__spinel = { marks, call, worker, history: historyFill, sourceVersion: import.meta.env.VITE_SOURCE_VERSION,
-  endpoint: syncEndpoint, scope: syncScope(), manifest };
+  endpoint: syncEndpoint, scope: syncScope(), manifest, branch: branchApi, branchState: { active: false } };
 
 // Restore the switches before even the first bootstrap can reach Rails.
 try {
@@ -53,14 +66,9 @@ try {
   });
 } catch { /* Storage may be unavailable. */ }
 
-// A record's file is bytes for the sync server. They never pass through the app in the worker,
-// which holds its whole database in memory and takes no upload.
-const filesPath = new URL(syncEndpoint + "/files/", location.href);
-const isFile = (url) => url.origin === filesPath.origin && url.pathname.startsWith(filesPath.pathname);
-
-const isLocal = (url, method = null) => url.origin === location.origin && !isFile(url) &&
-  !url.pathname.startsWith("/assets/") && !url.pathname.startsWith("/harness/") && !/^\/app[-.\w]*\.wasm$/.test(url.pathname) &&
-  isLocalRoute(manifest, url.pathname, method);
+// Static assets, service worker, release/island manifests, same-origin sync/file
+// endpoints, and non-island routes go straight to the network rather than Wasm.
+const isLocal = (url, method = null) => isLocalUrl(url, location.origin, syncEndpoint) && isLocalRoute(manifest, url.pathname, method);
 
 // One page request; the worker follows the app's redirects and returns the final answer.
 const appRequest = (method, path, body, contentType) => call("navigate", { method, path, body, contentType });
@@ -83,21 +91,8 @@ const headerValue = (headers, target) => {
   return undefined;
 };
 
-// The same seam a service worker's fetch handler is, from inside the page.
-const networkFetch = window.fetch.bind(window);
-window.fetch = async (input, init) => {
+async function parseFetchInput(input, init, { binary = true } = {}) {
   const isUrlInput = typeof input === "string" || input instanceof URL;
-  const url = isUrlInput ? new URL(input, location.href) : new URL(input.url);
-  if (url.origin === location.origin && url.searchParams.has("instant_record_network")) {
-    const response = await call("serverRequest", { path: url.pathname + url.search, method: init?.method || "GET", body: init?.body });
-    if (!response.status) throw new TypeError("Sync server unreachable");
-    return new Response(response.text || null, { status: response.status });
-  }
-  const requestMethod = isUrlInput
-    ? (init?.method || "GET").toUpperCase()
-    : (init?.method || input.method || "GET").toUpperCase();
-  if (!isLocal(url, requestMethod)) return networkFetch(input, init);
-
   let method;
   let body;
   let contentType;
@@ -118,11 +113,12 @@ window.fetch = async (input, init) => {
       } else if (typeof raw === "string") {
         body = raw;
       } else {
-        body = new Uint8Array(await new Response(raw).arrayBuffer());
+        const res = new Response(raw);
+        body = binary ? new Uint8Array(await res.arrayBuffer()) : await res.text();
       }
     }
   } else {
-    const request = init ? new Request(input, init) : input;
+    const request = init ? new Request(input, init) : input.clone();
     method = request.method.toUpperCase();
     redirect = request.redirect;
     contentType = request.headers.get("content-type") || undefined;
@@ -131,10 +127,31 @@ window.fetch = async (input, init) => {
         body = encodeFormData(await request.formData());
         contentType = "application/x-www-form-urlencoded";
       } else {
-        body = new Uint8Array(await request.arrayBuffer());
+        body = binary ? new Uint8Array(await request.arrayBuffer()) : await request.text();
       }
     }
   }
+  return { method, body, contentType, redirect };
+}
+
+// The same seam a service worker's fetch handler is, from inside the page.
+const networkFetch = window.fetch.bind(window);
+window.fetch = async (input, init) => {
+  const isUrlInput = typeof input === "string" || input instanceof URL;
+  const url = isUrlInput ? new URL(input, location.href) : new URL(input.url);
+  if (url.origin === location.origin && url.searchParams.has("instant_record_network")) {
+    const { method, body, contentType } = await parseFetchInput(input, init, { binary: false });
+    const response = await call("serverRequest", { path: url.pathname + url.search, method, body, contentType });
+    if (!response.status) throw new TypeError("Sync server unreachable");
+    const responseHeaders = response.contentType ? { "Content-Type": response.contentType } : {};
+    return new Response(response.text || null, { status: response.status, headers: responseHeaders });
+  }
+  const requestMethod = isUrlInput
+    ? (init?.method || "GET").toUpperCase()
+    : (init?.method || input.method || "GET").toUpperCase();
+  if (!isLocal(url, requestMethod)) return networkFetch(input, init);
+
+  const { method, body, contentType, redirect } = await parseFetchInput(input, init, { binary: true });
   const path = url.pathname + url.search;
 
   if (redirect === "manual") {
@@ -159,15 +176,36 @@ window.fetch = async (input, init) => {
 };
 
 // The gem's service worker posts records_changed to its clients; the demo's layout turns that
-// into this window event for pages that refresh in place, and reloads the rest.
+// into this window event for pages that refresh in place, and redraws the rest.
 // `changes` lists the records that changed as { type, id }, or is null when
 // the sync pass could not list them: then anything may have changed.
 function recordsChanged(changes) {
   if (document.querySelector("[data-instant-refresh]")) {
     window.dispatchEvent(new CustomEvent("instant-record:records-changed", { detail: { changes: changes || null } }));
   } else {
-    window.location.reload(); // what the demo's layout does for pages without an in-place refresh
+    redraw();
   }
+}
+
+// A page with no refresh of its own is drawn again from the local database. Where Turbo drew
+// the page, Turbo draws it again in place: a visit to the address it is on, answered by the
+// app in this browser. A whole reload would start the app again, after every write the page
+// itself made. Turbo refreshes nothing while a visit is under way, so this waits for its end.
+function redraw() {
+  const turbo = window.Turbo?.session;
+  if (!turbo?.refresh) return window.location.reload();
+  if (turbo.navigator.currentVisit) return document.addEventListener("turbo:load", redraw, { once: true });
+  // Morphed, so the scroll stays where it is, and the field being typed in is left out of the
+  // morph: the page as the app draws it has that field empty, and the letters are the person's.
+  redrawing = true;
+  setTimeout(() => { redrawing = false; }, 2000);
+  turbo.refresh(document.baseURI, { method: "morph", scroll: "preserve" });
+}
+
+let redrawing = false;
+function keepTyping(event) {
+  const field = event.target;
+  if (redrawing && field === document.activeElement && field.matches?.("input, textarea, select, [contenteditable]")) event.preventDefault();
 }
 
 // The shell began compiling the module before this script loaded; pass it on, and ask for the
@@ -201,6 +239,8 @@ if (finalPath !== location.pathname + location.search) history.replaceState(null
 document.open();
 document.write(result.status === 200 ? result.body : `<pre>${result.status}\n${(result.errors || []).join("\n")}</pre>`);
 document.close();
+document.addEventListener("turbo:before-morph-element", keepTyping);
+document.addEventListener("turbo:render", () => { redrawing = false; });
 document.addEventListener("turbo:before-visit", event => {
   const destination = new URL(event.detail.url, location.href);
   if (mailboxScope(event.detail.url) !== initialScope || !isLocal(destination, "GET")) {
@@ -221,7 +261,7 @@ async function submitLocalForm(event) {
   const target = button?.getAttribute("formtarget") || form.target;
   const url = new URL(button?.getAttribute("formaction") || form.action, location.href);
   const method = (button?.getAttribute("formmethod") || form.method).toUpperCase();
-  if (!isLocal(url, method) || method !== "POST" || (target && target !== "_self")) return;
+  if (!isLocal(url, method) || url.searchParams.has("instant_record_network") || method !== "POST" || (target && target !== "_self")) return;
   event.preventDefault();
   const fields = new FormData(form, button || undefined);
   const file = [...fields.values()].find(value => value instanceof File && value.name);
@@ -230,23 +270,20 @@ async function submitLocalForm(event) {
     return;
   }
   const response = await appRequest(method, url.pathname + url.search, encodeFormData(fields), "application/x-www-form-urlencoded");
-  if (response.result.status >= 400) {
-    document.open();
-    document.write(response.result.body || "<p>Request failed</p>");
-    document.close();
-    window.addEventListener("submit", submitLocalForm);
+  if (response.result.status < 400 && response.redirected) {
+    location.assign(response.finalPath);
     return;
   }
-  if (response.redirected) location.assign(response.finalPath);
-  else {
-    document.open();
-    document.write(response.result.body);
-    document.close();
-    window.addEventListener("submit", submitLocalForm);
-  }
+  const html = response.result.status >= 400 ? (response.result.body || "<p>Request failed</p>") : response.result.body;
+  document.open();
+  document.write(html);
+  document.close();
+  window.addEventListener("submit", submitLocalForm);
+  window.dispatchEvent(new Event("instant-record:dom-written"));
 }
 window.addEventListener("submit", submitLocalForm);
-releaseRequired = watchRelease(networkFetch, import.meta.env.VITE_SOURCE_VERSION, () => waiting.size > 0);
+mountBranchPreview(branchApi);
+releaseRequired = watchRelease(networkFetch, import.meta.env.VITE_SOURCE_VERSION, () => waiting.size > 0 || !!window.__spinel?.branchState?.active);
 
 // Resource Timing distinguishes a cached module from a network response and gives
 // compressed and decoded byte counts without downloading the module a second time.
