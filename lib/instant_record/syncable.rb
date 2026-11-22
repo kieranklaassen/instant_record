@@ -62,6 +62,19 @@ module InstantRecord
         @instant_record_sync_scope
       end
 
+      # Partition a model's rows and change feed by a tenant/workspace column
+      # (e.g. `sync_partition :mailbox_id`). Partitioned models never sync on
+      # unpartitioned requests; a client selects a partition via
+      # `X-Instant-Record-Partition` (or `config.partition_from`) and receives
+      # only that partition's rows and events.
+      def sync_partition(column, name: nil)
+        @instant_record_sync_partition = InstantRecord::SyncPartition.new(self, column, name: name)
+      end
+
+      def instant_record_sync_partition
+        @instant_record_sync_partition
+      end
+
       # The rows of this model a client with `scope` may be sent.
       def instant_record_visible_to(scope)
         column = instant_record_sync_scope
@@ -142,7 +155,8 @@ module InstantRecord
         operation: operation,
         version: operation == "destroy" ? 0 : self[:server_version],
         attributes_payload: operation == "destroy" ? {} : InstantRecord.wire_attributes(attributes),
-        scope: InstantRecord.scope_of(self)
+        scope: InstantRecord.scope_of(self),
+        partition: InstantRecord.partition_of(self)
       )
     end
   end

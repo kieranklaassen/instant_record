@@ -1,21 +1,21 @@
 // Dedicated worker: owns the persistent WASI reactor app, a cached IndexedDB handle,
-// retry-only outbox draining, and non-blocking async change polling (window=0, so the
-// worker never blocks on network I/O during user clicks and Puma threads are never held).
+// retry-only outbox draining, non-blocking async change polling (window=0), and
+// server-directed background history-fill.
 import { AppHost } from "./app-host.js";
 import { advance, fresh, held, query } from "./history-fill.js";
-import { mailboxScope } from "./mailbox-scope.js";
 import { openSnapshot, withFiles } from "./snapshot-store.js";
+import { resolveSyncContext } from "./sync-context.js";
 
-const publicEndpoint = import.meta.env.VITE_SYNC_ENDPOINT || "/instant_record";
-let syncEndpoint = publicEndpoint;
+const syncEndpoint = import.meta.env.VITE_SYNC_ENDPOINT || "/instant_record";
 const POLL_EVERY_MS = 1000;
 const QUIET_MS = 30;
 const DRAIN_RETRY_BASE_MS = 500;
 const DRAIN_RETRY_CAP_MS = 10000;
 
-// This browser's sync scope: an unguessable token the page keeps (main.js) and every sync
-// request carries, so the server can keep a scoped model's rows to the browser that owns them.
+// Client-side sync scope & pluggable headers (partition, auth, custom headers).
 let syncScope = "";
+let syncHeaders = {};
+let syncContext = null;
 let simulation = { offline: false, latencyMs: 0, report: false };
 const history = [];
 
@@ -26,7 +26,18 @@ function report(entry) {
   if (simulation.report) self.postMessage({ type: "instant_record.debug", entry: stamped });
 }
 
-async function fetchReply(method, path, body = "", endpoint = syncEndpoint) {
+function buildHeaders(method, extra = {}) {
+  const headers = { ...syncHeaders, ...extra };
+  if (syncScope && !headers["X-Instant-Record-Scope"]) {
+    headers["X-Instant-Record-Scope"] = syncScope;
+  }
+  if (method === "POST" && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
+  }
+  return headers;
+}
+
+async function fetchReply(method, path, body = "", endpoint = syncEndpoint, extraHeaders = {}) {
   const url = endpoint + path;
   const started = performance.now();
   const poll = path.startsWith("/events?");
@@ -41,13 +52,11 @@ async function fetchReply(method, path, body = "", endpoint = syncEndpoint) {
       outcome = "offline";
       return { method, url, body, status, text };
     }
+    const headers = buildHeaders(method, extraHeaders);
     const options = { method, signal: AbortSignal.timeout(30000) };
-    if (method === "POST") {
-      options.headers = { "Content-Type": "application/json" };
-      options.body = body;
-    }
-    const scoped = syncScope ? url + (url.includes("?") ? "&" : "?") + "scope=" + encodeURIComponent(syncScope) : url;
-    const response = await fetch(scoped, options);
+    if (Object.keys(headers).length > 0) options.headers = headers;
+    if (method === "POST") options.body = body;
+    const response = await fetch(url, options);
     text = await response.text();
     outcome = status = response.status;
   } catch {
@@ -63,13 +72,12 @@ async function fetchReply(method, path, body = "", endpoint = syncEndpoint) {
 }
 
 const DATABASE = "development.sqlite3";
-// Where the background fill of an inbox's history has come to (history-fill.js).
+// Where the background fill of a shaped model's history has come to (history-fill.js).
 const FILL = "history_fill";
-const FILL_PAGE = 200;
 const FILL_PAUSE_MS = 300;
 const FILL_RETRY_CAP_MS = 60000;
 // The database is one file, held in memory and saved whole. Past this the fill stops and
-// older mail stays on the server, fetched a page at a time as it always was.
+// older rows stay on the server, fetched a page at a time on demand.
 const FILL_BUDGET_BYTES = 24 * 1024 * 1024;
 const REVISION = "snapshot_revision";
 const SCHEMA = "rails_schema_version";
@@ -77,8 +85,7 @@ const targetSchema = Number(import.meta.env.VITE_SCHEMA_VERSION);
 const legacySchema = import.meta.env.VITE_SCHEMA_BASELINE;
 const migrationHistory = JSON.parse(import.meta.env.VITE_MIGRATION_HISTORY);
 const schemaDigest = import.meta.env.VITE_SCHEMA_DIGEST;
-// A shell is a SQLite file the server built ahead of time for a first sync. It stays off until
-// a build turns it on or the page asks with ?shell=1: no compiled build has opened one yet.
+// A shell is a SQLite file the server built ahead of time for a first sync.
 const shellFingerprint = import.meta.env.VITE_SHELL_FINGERPRINT;
 const shellAlways = import.meta.env.VITE_SHELL_SNAPSHOT === "1";
 let snapshotRevision;
@@ -87,7 +94,7 @@ let changes;
 let host = null;
 let currentCursor = null;
 // Read with the cursor, and sent with each poll so the server can say when the
-// person behind this browser has changed.
+// person behind this browser (or the active partition) has changed.
 let currentIdentity = "";
 let kickTimer = null;
 let pollInFlight = false;
@@ -143,7 +150,7 @@ function kickSync(delay = QUIET_MS) {
 // The connection came back: send what is waiting now, not at the next retry.
 self.addEventListener("online", () => {
   kickSync(0);
-  if (mailScope && fillState && !fillState.done && !fillState.full) scheduleFill(0);
+  if (fillState && !fillState.done && !fillState.full) scheduleFill(0);
 });
 
 function syncPass() {
@@ -163,12 +170,21 @@ function syncPass() {
 // arrive is asked for again here.
 async function drain(initial = false, early = null) {
   const { plan, revision } = await withSnapshot("readonly", () => ({ plan: host.syncPlan(), revision: snapshotRevision }));
-  const push = plan.push ? await fetchReply("POST", "/mutations", plan.push) : null;
-  const snapshot = plan.bootstrap ? (early?.status === 200 ? early : await fetchReply("GET", "/bootstrap")) : null;
+  const extra = plan.headers || {};
+  const push = plan.push ? await fetchReply("POST", "/mutations", plan.push, syncEndpoint, extra) : null;
+  const snapshot = plan.bootstrap ? (early?.status === 200 ? early : await fetchReply("GET", "/bootstrap", "", syncEndpoint, extra)) : null;
+
+  let bootstrapFill = null;
+  if (snapshot?.status === 200) {
+    try {
+      const parsed = JSON.parse(snapshot.text);
+      if (Array.isArray(parsed.fill) && parsed.fill.length > 0) bootstrapFill = parsed.fill[0];
+    } catch { /* ignore malformed JSON; Ruby handles it below */ }
+  }
 
   // An edit made during the network wait takes precedence over an old rejection or
   // snapshot. Retry from SQLite with the original mutation IDs for idempotent replay.
-  const result = await withSnapshot("readwrite", save => {
+  const result = await withSnapshot("readwrite", (save, put) => {
     if (revision !== snapshotRevision) {
       kickSync();
       return { changed: false, retried: true };
@@ -184,7 +200,11 @@ async function drain(initial = false, early = null) {
     if (push || snapshot) report({ kind: "sync-pass", path: `${result.pending} pending` });
     // After a bootstrap the next poll reads the cursor and the identity afresh.
     currentCursor = plan.bootstrap ? null : result.cursor;
-    if (result.changed || result.notified) {
+    if (bootstrapFill) {
+      fillState = fresh(bootstrapFill);
+      put(FILL, fillState);
+    }
+    if (result.changed || result.notified || bootstrapFill) {
       save();
     }
 
@@ -248,12 +268,13 @@ async function pollChanges() {
 // A page of older rows, or the rows matching `search`, brought into the local database.
 // Where the background fill already holds them, nothing is asked of the server.
 async function loadHistory(request) {
-  // The fill's own copy of the state is not touched here: another tab may have finished it.
-  if (mailScope) {
-    const state = fillState?.done ? fillState : await withFiles("readonly", get => get(FILL));
-    if (held(state)) return { ok: true, applied: 0, has_more: false };
+  const state = fillState?.done ? fillState : await withFiles("readonly", get => get(FILL));
+  if (held(state) && (!state.type || !request.type || state.type === request.type)) {
+    return { ok: true, applied: 0, has_more: false };
   }
-  const params = new URLSearchParams(request.search ? { search: request.search } : { type: request.type });
+  const params = new URLSearchParams();
+  if (request.type) params.set("type", request.type);
+  if (request.search) params.set("search", request.search);
   if (request.before) {
     params.set("before_created_at", request.before.created_at);
     params.set("before_id", request.before.id);
@@ -264,7 +285,7 @@ async function loadHistory(request) {
   return loadHistoryQuery(key);
 }
 
-let mailScope = "";
+let fillLockKey = "default";
 let fillState = null;
 let fillTimer = null;
 let fillDelayMs = FILL_PAUSE_MS;
@@ -274,20 +295,22 @@ function scheduleFill(delay = fillDelayMs) {
   fillTimer = setTimeout(runFill, delay);
 }
 
-// The page shows a count as a floor until the whole inbox is here.
+// The page shows a count as a floor until the whole history is here.
 function announceFill() {
+  if (!fillState) return;
   self.postMessage({ type: "instant_record.history", state: { done: fillState.done, full: fillState.full, rows: fillState.rows } });
 }
 
 // One page of the fill. Answers whether there is another to fetch.
 async function fillStep() {
-  fillState = (await withFiles("readonly", get => get(FILL))) || fresh();
+  fillState = await withFiles("readonly", get => get(FILL));
+  if (!fillState || !fillState.type) return false;
   announceFill();
   if (fillState.done || fillState.full) return false;
   // A write waiting to be sent goes first, and offline there is nothing to fetch.
   if (simulation.offline || draining || kickTimer) return true;
 
-  const key = query(fillState, FILL_PAGE);
+  const key = query(fillState, fillState.pageSize);
   const revision = snapshotRevision;
   const reply = await fetchReply("GET", "/records?" + key);
   if (reply.status !== 200) {
@@ -307,7 +330,7 @@ async function fillStep() {
   fillDelayMs = FILL_PAUSE_MS;
   announceFill();
   const more = !(fillState.done || fillState.full);
-  // Counts and "is there more" were answered for part of the inbox. Ask again for all of it.
+  // Counts and "is there more" were answered for part of the history. Ask again for all of it.
   if (!more) self.postMessage({ type: "records_changed" });
   return more;
 }
@@ -318,7 +341,7 @@ async function runFill() {
   try {
     const locks = self.navigator?.locks;
     more = locks
-      ? await locks.request("instant-record-fill/" + mailScope, { ifAvailable: true }, lock => (lock ? fillStep() : true))
+      ? await locks.request("instant-record-fill/" + fillLockKey, { ifAvailable: true }, lock => (lock ? fillStep() : true))
       : await fillStep();
   } catch {
     fillDelayMs = Math.min(Math.max(fillDelayMs, 1000) * 2, FILL_RETRY_CAP_MS);
@@ -384,22 +407,23 @@ function navigate({ method, path, body, contentType }) {
   return { result: { ...result, ms: performance.now() - started }, redirected, finalPath };
 }
 
-// A browser with no database of its own asks for the inbox's shell. Anything short of a whole
-// SQLite file built for this schema is no shell, and the normal bootstrap runs as before.
-async function fetchShell(scope, path) {
+// A browser with no database of its own asks for a prebuilt shell when the route context names one.
+// Anything short of a whole SQLite file built for this schema falls back to the normal bootstrap.
+async function fetchShell(context, path) {
   const asked = new URL(path || "/", self.location.origin).searchParams.get("shell") === "1";
-  if (!scope || !shellFingerprint || !(shellAlways || asked) || simulation.offline) return null;
+  if (!context?.valid || !context.shellPath || !shellFingerprint || !(shellAlways || asked) || simulation.offline) return null;
   const started = performance.now();
   try {
     if (await withFiles("readonly", get => get(DATABASE))) return null;
-    const grant = await fetchReply("GET", "/shell?fingerprint=" + shellFingerprint);
+    const root = syncEndpoint.replace(/\/instant_record\/?$/, "");
+    const grant = await fetchReply("GET", `${context.shellPath}?fingerprint=${encodeURIComponent(shellFingerprint)}`, "", root);
     if (grant.status !== 200) return null;
-    const { path: file, cursor } = JSON.parse(grant.text);
-    const response = await fetch(syncEndpoint + file, { signal: AbortSignal.timeout(30000) });
+    const { path: file, cursor, fill } = JSON.parse(grant.text);
+    const response = await fetch(root + file, { headers: buildHeaders("GET"), signal: AbortSignal.timeout(30000) });
     if (!response.ok) return null;
     const bytes = new Uint8Array(await response.arrayBuffer());
     if (new TextDecoder().decode(bytes.subarray(0, 15)) !== "SQLite format 3") return null;
-    return { bytes, cursor, ms: performance.now() - started };
+    return { bytes, cursor, fill: Array.isArray(fill) ? fill[0] : null, ms: performance.now() - started };
   } catch {
     return null;
   }
@@ -408,9 +432,9 @@ async function fetchShell(scope, path) {
 // A browser with no database of its own will ask for a first sync as soon as the app is up.
 // Nothing in the question depends on the app, so it is asked while the module compiles and the
 // answer is waiting when the app wants it. A build that loads a shell has no use for it.
-async function earlyBootstrap(path) {
+async function earlyBootstrap(context, path) {
   const asked = new URL(path || "/", self.location.origin).searchParams.get("shell") === "1";
-  if (shellFingerprint && (shellAlways || asked)) return null;
+  if (context?.shellPath && shellFingerprint && (shellAlways || asked)) return null;
   try {
     if ((await withFiles("readonly", get => get(SCHEMA))) != null) return null;
     return await fetchReply("GET", "/bootstrap");
@@ -420,24 +444,29 @@ async function earlyBootstrap(path) {
 }
 
 async function boot(payload = {}) {
-  const scope = mailboxScope(payload.path || "/");
+  syncContext = resolveSyncContext(payload.path || "/");
   syncScope = typeof payload.scope === "string" ? payload.scope : "";
-  openSnapshot(scope);
-  changes = new BroadcastChannel("instant-record-spinel-changes" + (scope ? "/" + scope : ""));
+  syncHeaders = {
+    ...(syncContext?.headers || {}),
+    ...(payload.headers && typeof payload.headers === "object" ? payload.headers : {}),
+  };
+  const storageKey = syncContext ? syncContext.storageKey : "";
+  fillLockKey = storageKey || "default";
+  openSnapshot(storageKey);
+  changes = new BroadcastChannel("instant-record-spinel-changes" + (storageKey ? "/" + storageKey : ""));
   changes.onmessage = () => { if (host) self.postMessage({ type: "records_changed" }); };
-  if (scope) syncEndpoint = publicEndpoint.replace(/\/instant_record\/?$/, "") + "/email/sync/" + scope;
   const started = performance.now();
-  // The shell downloads while the module compiles.
-  const shellFetch = fetchShell(scope, payload.path);
-  const bootstrapFetch = earlyBootstrap(payload.path);
+  // The shell or bootstrap downloads while the module compiles.
+  const shellFetch = fetchShell(syncContext, payload.path);
+  const bootstrapFetch = earlyBootstrap(syncContext, payload.path);
   const module = payload.module || await WebAssembly.compileStreaming(fetch(import.meta.env.VITE_WASM_URL || "/app.wasm"));
   const compiled = performance.now();
   let storageMs, runtimeMs;
   let shell = await shellFetch;
   const open = () => withFiles("readwrite", async (get, put) => {
     const opening = performance.now();
-    const [bytes, version, revision, savedSecret, history, previousDigest] = await Promise.all([
-      get(DATABASE), get(SCHEMA), get(REVISION), get("secret_key_base"), get("migration_history"), get("schema_digest"),
+    const [bytes, version, revision, savedSecret, history, previousDigest, savedFill] = await Promise.all([
+      get(DATABASE), get(SCHEMA), get(REVISION), get("secret_key_base"), get("migration_history"), get("schema_digest"), get(FILL),
     ]);
     storageMs = performance.now() - opening;
     if (bytes && version == null && !legacySchema) throw new Error("Set compiled_migration_baseline to the schema version of the previously deployed browser app.");
@@ -470,11 +499,15 @@ async function boot(payload = {}) {
     candidate.ensureBooted();
     runtimeMs = performance.now() - initStart;
     if (fromShell) {
-      // The shell's cursor is its last write. One that did not arrive whole has none.
       const state = candidate.syncState();
       if (!state.bootstrapped || state.cursor !== shell.cursor) throw new Error("The shell does not carry its cursor.");
+      if (shell.fill) {
+        fillState = fresh(shell.fill);
+        put(FILL, fillState);
+      }
     } else {
       shell = null;
+      if (savedFill) fillState = savedFill;
     }
     snapshotRevision = revision;
     if (fromShell || version !== targetSchema || !previousDigest) {
@@ -492,8 +525,6 @@ async function boot(payload = {}) {
   try {
     restored = await open();
   } catch (error) {
-    // A shell this build cannot open costs one attempt. The transaction rolled back, so the
-    // second attempt starts from an empty database and bootstraps as it always has.
     if (!shell) throw error;
     report({ kind: "sync", method: "GET", path: "/shell", status: "rejected", ms: Math.round(shell.ms) });
     shell = null;
@@ -501,26 +532,24 @@ async function boot(payload = {}) {
   }
   const bootstrapStart = performance.now();
   if (!restored && !shell) await drain(true, await bootstrapFetch);
-  // The shell is as old as its cursor. Ask for what came after it now, not at the first
-  // interval, and do not hold the first page for the answer.
   if (shell) pollChanges();
   const bootstrapMs = performance.now() - bootstrapStart;
 
-  if (scope) {
-    const url = new URL(payload.path, self.location.origin);
-    for (const id of new Set([url.searchParams.get("before"), url.searchParams.get("thread")])) {
-      if (id) await loadHistoryQuery(new URLSearchParams({ thread: id }).toString());
+  if (syncContext?.valid) {
+    for (const id of syncContext.lookupIds) {
+      await loadHistoryQuery(new URLSearchParams({ id }).toString());
     }
-    const before = url.searchParams.get("before");
-    const at = url.searchParams.get("at");
-    if (before && at) await loadHistory({ type: "MailEntry", before: { id: before, created_at: at }, limit: 50 });
+    if (syncContext.preloadBefore) {
+      await loadHistory(syncContext.preloadBefore);
+    }
   }
   const first = payload.path ? await runRequest("GET", () => navigate({ method: "GET", path: payload.path })) : null;
   setInterval(pollChanges, POLL_EVERY_MS);
-  // With the first page on screen, bring the rest of the inbox down behind it.
-  if (scope && scope !== "invalid/invalid") {
-    mailScope = scope;
+  // With the first page on screen, bring the rest of any background-filled model down behind it.
+  if (fillState && fillState.type && !fillState.done && !fillState.full) {
     scheduleFill(1000);
+  } else if (fillState) {
+    announceFill();
   }
   return { compileMs: compiled - started, restored, storageMs, runtimeMs, bootstrapMs, first,
     shell: shell ? { ms: shell.ms, bytes: shell.bytes.length, cursor: shell.cursor } : null };
@@ -531,6 +560,10 @@ self.onmessage = async (event) => {
   try {
     if (type === "instant_record.clear_log") {
       history.length = 0;
+      return;
+    }
+    if (type === "instant_record.configure_headers") {
+      syncHeaders = { ...syncHeaders, ...(payload && typeof payload === "object" ? payload : {}) };
       return;
     }
     if (type === "instant_record.simulate") {
@@ -553,16 +586,14 @@ self.onmessage = async (event) => {
     }
     if (type === "serverRequest") {
       const url = new URL(payload.path, self.location.origin);
-      // The Auth page asks Rails who is signed in, and tries the sync server by hand.
+      // Server-only demo endpoints forwarded directly to Rails.
       const auth = payload.method === "GET"
         ? ["/auth/session", "/instant_record/bootstrap"]
         : ["/auth/session", "/auth/session/sign_out", "/instant_record/mutations"];
       const allowed = auth.includes(url.pathname) || (payload.method === "GET" && url.pathname === "/receipts/probe") ||
-        (payload.method === "POST" && (url.pathname === "/slack/reset" ||
-          (import.meta.env.VITE_SHARED_INBOX_DEMO && url.pathname === new URL(syncEndpoint, self.location.origin).pathname + "/incoming" &&
-            url.pathname.startsWith("/email/sync/"))));
+        (payload.method === "POST" && (url.pathname === "/slack/reset" || url.pathname === "/email/incoming"));
       if (!allowed) throw new Error("Unknown demo server action");
-      const root = publicEndpoint.replace(/\/instant_record\/?$/, "");
+      const root = syncEndpoint.replace(/\/instant_record\/?$/, "");
       url.searchParams.delete("instant_record_network");
       const body = typeof payload.body === "string" ? payload.body : "";
       const reply = await fetchReply(payload.method, url.pathname + url.search, body, root);

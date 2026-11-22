@@ -52,12 +52,16 @@ struct InboxApp: App {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
 
         let engine: Engine = defaults.bool(forKey: "dev") ? HTTPEngine(server: server + "/instant_record", transport: transport) : LibraryEngine()
-        // Each member's inbox has its own file, because each syncs with its
-        // own address. Everything else in a screen's params is how to show it.
+        // Each member's inbox has its own SQLite file (via ir_open) and syncs
+        // through the core /instant_record engine using partition & member headers.
         let host = AppHost(engine: engine, root: first, views: views, store: { route in
             let member = route.params["member"] ?? "", inbox = route.params["inbox"] ?? ""
             return AppHost.Store(database: folder.appending(path: "\(member)-\(inbox).sqlite3").path,
-                                 endpoint: "\(server)/email/sync/\(member)/\(inbox)")
+                                 endpoint: "\(server)/instant_record",
+                                 headers: [
+                                    "X-Instant-Record-Partition": "mailbox_id:\(inbox)",
+                                    "X-Instant-Record-Member": member,
+                                 ])
         }, transport: transport, follows: defaults.object(forKey: "follow") == nil || defaults.bool(forKey: "follow"))
         host.start()
         _host = StateObject(wrappedValue: host)

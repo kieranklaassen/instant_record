@@ -20,15 +20,30 @@ public struct Transport {
     }
 
     /// The request as it goes out, or nil when it cannot be read.
+    /// Supports both "METHOD URL\n<body>" and "METHOD URL\nHeader: Value\n\n<body>".
     func request(_ exchange: String) -> URLRequest? {
         let parts = exchange.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
         let line = parts[0].split(separator: " ", maxSplits: 1)
         guard line.count == 2, let url = URL(string: String(line[1])), url.scheme != nil else { return nil }
         var call = URLRequest(url: url)
         call.httpMethod = String(line[0])
+        var rest = parts.count > 1 ? String(parts[1]) : ""
+        if let boundary = rest.range(of: "\n\n") {
+            let candidate = rest[..<boundary.lowerBound].split(separator: "\n")
+            if !candidate.isEmpty, candidate.allSatisfy({ $0.contains(": ") }) {
+                for header in candidate {
+                    if let colon = header.range(of: ": ") {
+                        call.setValue(String(header[colon.upperBound...]), forHTTPHeaderField: String(header[..<colon.lowerBound]))
+                    }
+                }
+                rest = String(rest[boundary.upperBound...])
+            }
+        }
         if call.httpMethod != "GET" {
-            call.httpBody = Data((parts.count > 1 ? parts[1] : "").utf8)
-            call.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            call.httpBody = Data(rest.utf8)
+            if call.value(forHTTPHeaderField: "Content-Type") == nil {
+                call.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            }
         }
         prepare(&call)
         return call

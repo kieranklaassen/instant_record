@@ -172,12 +172,14 @@ class CompilerTest < ActiveSupport::TestCase
       assert_includes File.read(File.join(app, "app/models/slack/seeds.rb")), "Browser build: the seeding routines"
 
       count = InstantRecord::Compiler::GemVendor.vendor(gem_src: GEM_ROOT, app_dir: app, demo: true)
-      assert_equal 14, count
+      assert_equal 15, count
       assert_includes File.read(File.join(app, "lib/instant_record.rb")), "def browser? = true"
       refute File.exist?(File.join(app, "lib/instant_record/syncable.rb"))
       assert File.file?(File.join(app, "app/models/concerns/syncable.rb"))
       assert_includes File.read(File.join(app, "app/models/concerns/syncable.rb")), "self.id = SecureRandom.uuid if id.blank?"
       assert_includes File.read(File.join(app, "app/models/mail_entry.rb")), "include Syncable"
+      assert_includes File.read(File.join(app, "app/models/mail_entry.rb")), "sync_partition :mailbox_id"
+      refute_includes File.read(File.join(app, "app/models/mail_entry.rb")), "authorize_partition"
       assert File.file?(File.join(app, "sig/instant_record/native.rbs"))
       assert_includes File.read(File.join(app, "app/views/todo/issues/index.html.erb")), '<% content_for(:demo_scope, "todo") %>'
 

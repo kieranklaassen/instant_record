@@ -2,9 +2,15 @@ require "test_helper"
 
 class ScopedInboxTest < ActionDispatch::IntegrationTest
   setup do
+    InstantRecord::Change.delete_all
+    InstantRecord::AppliedMutation.delete_all
     MailEntry.delete_all
     Mailbox.delete_all
     %w[support billing].each { |name| Mailbox.create!(id: name) }
+  end
+
+  def inbox_headers(member, inbox)
+    { "X-Instant-Record-Partition" => "mailbox_id:#{inbox}", "X-Instant-Record-Member" => member }
   end
 
   def mutation(inbox, member, fields = {})
@@ -13,7 +19,7 @@ class ScopedInboxTest < ActionDispatch::IntegrationTest
   end
 
   def push(person, box, item)
-    post "/email/sync/#{person}/#{box}/mutations", params: { mutations: [item] }, as: :json
+    post "/instant_record/mutations", params: { mutations: [item] }, as: :json, headers: inbox_headers(person, box)
     assert_response :success
     response.parsed_body.fetch("results").sole
   end
@@ -25,17 +31,22 @@ class ScopedInboxTest < ActionDispatch::IntegrationTest
     assert_equal "applied", result["status"]
     assert_equal result, push("maya", "support", support)
     collision = support.deep_dup
+    collision[:id] = SecureRandom.uuid
     collision[:changes][:body] = "Different message"
     assert_equal "rejected", push("maya", "support", collision)["status"]
     assert_equal "applied", push("jo", "billing", billing)["status"]
-    assert_equal 1, Mailbox.find("support").revision
 
-    get "/email/sync/theo/support/bootstrap"
+    get "/instant_record/bootstrap", headers: inbox_headers("theo", "support")
+    assert_response :success
     assert_equal [support[:record_id]], response.parsed_body["records"].pluck("id")
-    get "/email/sync/maya/billing/events?after=0"
+    assert_equal [{ "type" => "MailEntry", "page_size" => MailEntry::FILL_PAGE_SIZE, "partition" => "support" }], response.parsed_body["fill"]
+
+    get "/instant_record/events?after=0&window=0", headers: inbox_headers("maya", "billing")
     assert_includes response.body, billing[:record_id]
     assert_not_includes response.body, support[:record_id]
-    get "/email/sync/maya/billing/events?after=1"
+
+    head_cursor = InstantRecord::Change.maximum(:id)
+    get "/instant_record/events?after=#{head_cursor}&window=0", headers: inbox_headers("maya", "billing")
     assert_empty response.body
 
     get "/instant_record/bootstrap"
@@ -46,14 +57,14 @@ class ScopedInboxTest < ActionDispatch::IntegrationTest
     assert_equal "rejected", response.parsed_body["results"].sole["status"]
   end
 
-  test "all scoped endpoints require membership and cross-inbox references are rejected" do
-    get "/email/sync/jo/support/bootstrap"
+  test "all partitioned endpoints require membership and cross-inbox references are rejected" do
+    get "/instant_record/bootstrap", headers: inbox_headers("jo", "support")
     assert_response :forbidden
-    get "/email/sync/jo/support/records", params: { thread: "hidden" }
+    get "/instant_record/records", params: { thread: "hidden" }, headers: inbox_headers("jo", "support")
     assert_response :forbidden
-    get "/email/sync/jo/support/events"
+    get "/instant_record/events?window=0", headers: inbox_headers("jo", "support")
     assert_response :forbidden
-    post "/email/sync/jo/support/mutations", params: { mutations: [mutation("support", "jo")] }, as: :json
+    post "/instant_record/mutations", params: { mutations: [mutation("support", "jo")] }, as: :json, headers: inbox_headers("jo", "support")
     assert_response :forbidden
     get "/email?member=jo&inbox=support"
     assert_response :forbidden
@@ -66,12 +77,13 @@ class ScopedInboxTest < ActionDispatch::IntegrationTest
     end
     assert_equal "rejected", push("theo", "support", mutation("billing", "theo"))["status"]
     assert_equal "rejected", push("theo", "support", mutation("support", "maya"))["status"]
-    assert_equal 0, Mailbox.find("support").revision
+    assert_equal 0, MailEntry.where(mailbox_id: "support").count
   end
 
   test "empty installs populate only the requested mailbox and validate recipients" do
     Mailbox.delete_all
-    get "/email/sync/maya/billing/bootstrap"
+    get "/instant_record/bootstrap", headers: inbox_headers("maya", "billing")
+    assert_response :success
     assert_equal ["billing"], Mailbox.pluck(:id)
     assert_equal ["sam@example.test"], response.parsed_body["records"].map { |row| row.dig("attributes", "address") }
     post "/email", params: { member: "jo", inbox: "billing", kind: "message", address: "missing-address", subject: "Hello", body: "Hi" }
@@ -88,33 +100,31 @@ class ScopedInboxTest < ActionDispatch::IntegrationTest
     end
     MailEntry.where(id: ids).update_all(created_at: at)
     mailbox.append!(id: "archive", author: "theo", attributes: { kind: "archive", parent_id: ids.last })
-    get "/email/sync/maya/support/bootstrap"
+    get "/instant_record/bootstrap", headers: inbox_headers("maya", "support")
     page = response.parsed_body.fetch("records").pluck("id")
     assert_equal ids.reverse.drop(1).first(50), page
-    get "/email/sync/maya/support/records", params: { type: "MailEntry", before_id: page.last, before_created_at: at.iso8601 }
+    get "/instant_record/records", params: { type: "MailEntry", before_id: page.last, before_created_at: at.iso8601 }, headers: inbox_headers("maya", "support")
     assert_equal ids.first(2).reverse, response.parsed_body.fetch("records").pluck("id")
     assert_equal false, response.parsed_body.fetch("has_more")
   end
 
   test "generated mail arrives from an external sender only in the selected inbox" do
-    post "/email/sync/jo/support/incoming"
+    post "/email/incoming", params: { member: "jo", inbox: "support" }
     assert_response :forbidden
-    assert_no_difference("Mailbox.find('billing').revision") do
-      assert_difference("MailEntry.count", 1) { post "/email/sync/theo/support/incoming" }
+    assert_no_difference("MailEntry.where(mailbox_id: 'billing').count") do
+      assert_difference("MailEntry.count", 1) { post "/email/incoming", params: { member: "theo", inbox: "support" } }
     end
     assert_response :created
     id = response.parsed_body.fetch("id")
     entry = MailEntry.find(id)
     assert_equal ["message", "support"], [entry.kind, entry.mailbox_id]
     assert_not_includes %w[maya theo jo], entry.author
-    get "/email/sync/maya/support/events?after=0"
+    get "/instant_record/events?after=0&window=0", headers: inbox_headers("maya", "support")
     assert_includes response.body, id
-    get "/email/sync/maya/billing/bootstrap"
+    get "/instant_record/bootstrap", headers: inbox_headers("maya", "billing")
     assert_empty response.parsed_body.fetch("records")
   end
 
-  # What the page is given: its Inertia props on a first visit, and one of
-  # them again on a partial reload, which is how a live prop is refreshed.
   def page_props
     assert_response :success
     JSON.parse(css_select("script[data-page=app]").first.text).fetch("props")
@@ -141,11 +151,8 @@ class ScopedInboxTest < ActionDispatch::IntegrationTest
     assert_equal [entry.id, entry.author, entry.address, entry.subject, entry.body, entry.created_at.utc.iso8601(6), "1", "1"], props.dig("mail", "rows", 0)
     assert_equal entry.id, props.dig("thread", "id")
     assert_equal props["mail"], live("maya", "mail")
-    # Both props are live: Inertia reloads each when InstantRecord says the
-    # local database changed.
     assert_equal %w[mail thread], page["liveProps"].keys
     assert_equal [{ "channel" => { "name" => "instant_record", "type" => "local" }, "events" => ["MailEntry"] }], page.dig("liveProps", "mail", "listeners")
-    # The compiled runtime spells the same hash out by hand.
     assert_equal Email::MailboxesController::LIVE_PROPS.as_json, page["liveProps"]
     assert_equal page["liveProps"], response.parsed_body["liveProps"]
   end
@@ -187,6 +194,7 @@ class ScopedInboxTest < ActionDispatch::IntegrationTest
   test "Rails compose, reply and archive go through the same feed" do
     post "/email", params: { member: "theo", inbox: "support", kind: "message", address: "rae@example.test", subject: "Hello", body: "Hi" }
     thread = MailEntry.sole.id
+    first_cursor = InstantRecord::Change.maximum(:id)
     assert_redirected_to "/email?member=theo&inbox=support&thread=#{thread}"
     follow_redirect!
     assert_equal "Hello", page_props.dig("thread", "message", 3)
@@ -198,8 +206,8 @@ class ScopedInboxTest < ActionDispatch::IntegrationTest
     assert_empty live("theo", "mail")["rows"]
     assert_equal true, live("maya", "thread", thread: thread)["archived"]
     assert_equal "", live("maya", "thread", thread: "missing")["id"]
-    get "/email/sync/theo/support/events?after=1"
-    assert_match(/id: 2.*id: 3/m, response.body)
+    get "/instant_record/events?after=#{first_cursor}&window=0", headers: inbox_headers("theo", "support")
+    assert_equal 2, response.body.scan(/^event: change$/).size
   end
 
   test "each teammate reads mail on their own and can mark it unread again" do
@@ -209,7 +217,6 @@ class ScopedInboxTest < ActionDispatch::IntegrationTest
     assert_equal [second.id, first.id], unread_ids(mail)
     assert_equal 2, mail["unread_count"]
 
-    # Looking does not read: a visit and a live query write nothing.
     assert_no_difference("MailEntry.count") do
       get "/email", params: { member: "maya", inbox: "support", thread: first.id }
       assert_equal "1", page_props.dig("thread", "message", 6)
@@ -229,7 +236,7 @@ class ScopedInboxTest < ActionDispatch::IntegrationTest
     post "/email", params: { member: "theo", inbox: "support", kind: "message", address: "rae@example.test", subject: "Sent", body: "Hi" }
     sent = live("theo", "mail")["rows"].first
     assert_equal ["Sent", "", ""], [sent[3], sent[6], sent[7]]
-    get "/email/sync/theo/support/bootstrap"
+    get "/instant_record/bootstrap", headers: inbox_headers("theo", "support")
     assert_includes response.parsed_body["records"].map { |row| row.dig("attributes", "kind") }, "unread"
   end
 end

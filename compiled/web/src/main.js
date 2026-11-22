@@ -1,4 +1,4 @@
-import { mailboxScope } from "./mailbox-scope.js";
+import { resolveSyncContext } from "./sync-context.js";
 import { watchRelease } from "./release-updates.js";
 let releaseRequired;
 const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
@@ -34,7 +34,8 @@ const call = (type, payload) => new Promise((resolve, reject) => {
   worker.postMessage({ id, type, payload });
 });
 
-const initialScope = mailboxScope(location.href);
+const initialContext = resolveSyncContext(location.href);
+const initialStorageKey = initialContext ? initialContext.storageKey : "";
 const marks = { start: performance.now() };
 // Where the sync server is and who this browser is to it, for a page that asks it for
 // something itself: the bytes of a record that declares sync_file (frontend/files.js).
@@ -196,7 +197,8 @@ document.open();
 document.write(result.status === 200 ? result.body : `<pre>${result.status}\n${(result.errors || []).join("\n")}</pre>`);
 document.close();
 document.addEventListener("turbo:before-visit", event => {
-  if (mailboxScope(event.detail.url) !== initialScope) {
+  const next = resolveSyncContext(event.detail.url);
+  if ((next ? next.storageKey : "") !== initialStorageKey) {
     event.preventDefault();
     location.assign(event.detail.url);
   }

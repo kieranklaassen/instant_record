@@ -12,12 +12,40 @@ module InstantRecord
     attr_accessor :sync_interval
 
     # Reads a sync request's scope: whose rows it may be sent, for models that
-    # declare sync_scope. The default trusts a `scope` parameter, which suits a
-    # demo where an unguessable token stands for a visitor. An app with
-    # sign-in reads it from the session instead:
+    # declare sync_scope. The default reads the `X-Instant-Record-Scope` header
+    # or `scope` parameter. An app with sign-in reads it from the session or an
+    # Authorization header instead:
     #
     #   config.scope_from = ->(request) { request.session[:user_id] }
     attr_accessor :scope_from
+
+    # Reads a sync request's active multi-tenant partition, for models that
+    # declare `sync_partition`. Default reads the `X-Instant-Record-Partition`
+    # header or `sync_partition` parameter (and `partition` on bootstrap, events,
+    # and mutations). May accept `(request)` or `(request, identity)` and may
+    # raise `InstantRecord::Unauthorized` or `InstantRecord::Forbidden`.
+    attr_accessor :partition_from
+
+    # Optional server-side request authenticator invoked before serving any
+    # non-preflight sync endpoint. Raise `InstantRecord::Unauthorized` (401)
+    # or `InstantRecord::Forbidden` (403) to reject the request.
+    attr_accessor :authenticate_request
+
+    # Pluggable client-side headers sent on every outbound sync request
+    # (bootstrap, mutations, events, history). Accepts a Hash or a callable
+    # returning a Hash.
+    attr_accessor :headers
+
+    # Client-side scope token sent as `X-Instant-Record-Scope`.
+    attr_accessor :sync_scope
+
+    # Client-side active partition sent as `X-Instant-Record-Partition`
+    # (String like "support" / "mailbox_id:support", or Hash).
+    attr_accessor :sync_partition
+
+    # Client-side bearer/auth token sent as `Authorization`. Plain tokens are
+    # prefixed with "Bearer "; values containing a space are sent verbatim.
+    attr_accessor :auth_token
 
     # Where the server keeps the bytes of records that declare sync_file:
     # anything that answers as InstantRecord::FileStore does. Left alone, they
@@ -36,7 +64,32 @@ module InstantRecord
       @sync_interval = 3
       @file_store = nil
       @max_file_size = nil
-      @scope_from = ->(request) { request.params["scope"] }
+      @authenticate_request = nil
+      @headers = nil
+      @sync_scope = nil
+      @sync_partition = nil
+      @auth_token = nil
+      @scope_from = lambda do |request|
+        header = request.respond_to?(:headers) ? request.headers["X-Instant-Record-Scope"] : nil
+        value = header && !header.to_s.empty? ? header : request.params["scope"]
+        value && !value.to_s.empty? ? value : nil
+      end
+      @partition_from = lambda do |request|
+        header = request.respond_to?(:headers) ? request.headers["X-Instant-Record-Partition"] : nil
+        return header if header && !header.to_s.empty?
+
+        explicit = request.params["sync_partition"]
+        return explicit if explicit && !explicit.to_s.empty?
+
+        # `/records` uses `partition` for `sync_window(partition_by:)`; only fall
+        # back to `params["partition"]` when the request is not a windowed query.
+        path = request.respond_to?(:path) ? request.path.to_s : ""
+        unless path.end_with?("/records") && request.params["before_id"].present?
+          param = request.params["partition"]
+          return param if param && !param.to_s.empty?
+        end
+        nil
+      end
     end
   end
 end

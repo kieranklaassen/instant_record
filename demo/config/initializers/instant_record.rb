@@ -7,21 +7,51 @@ if (window = ENV["INSTANT_RECORD_SSE_WINDOW_SECONDS"])
   Rails.application.config.instant_record.sse_window_seconds = window.to_f
 end
 
-# Who a sync request comes from, in the two ways the demo knows a browser: the
-# token it keeps for itself (the Assistant's `sync_scope :visitor_id`), and the
-# person its session names (the Auth demo's `syncable_to` and `writable_by`).
-# The key changes when the person does, which is what tells a browser to drop
-# what it was sent as someone else.
-DemoAsker = Struct.new(:token, :person_id) do
+# Who a sync request comes from, in the three ways the demo knows a client:
+# the browser token (Assistant's `sync_scope :visitor_id`), the session person
+# (Auth demo's `syncable_to` / `writable_by`), and the Inbox member
+# (`X-Instant-Record-Member` / Bearer token for `MailEntry`'s `sync_partition`).
+DemoAsker = Struct.new(:token, :person_id, :member) do
   def to_s = token.to_s
-  def sync_identity_key = person_id || "anonymous"
+
+  def sync_identity_key
+    base = person_id || "anonymous"
+    member.present? ? "#{base}:#{member}" : base
+  end
+
   # The token never changes in a browser, so the Assistant's chats stay put
   # when the person does.
   def sync_reset_types = ["AuthNote"]
 end
 
 InstantRecord.configure do |config|
+  # Validate Bearer tokens whenever an Authorization header is sent, or when
+  # INBOX_REQUIRE_TOKEN is set on a partitioned inbox request.
+  config.authenticate_request = lambda do |request|
+    auth = request.authorization.to_s
+    sent = auth[/\ABearer (.+)\z/, 1]
+    partition = request.headers["X-Instant-Record-Partition"].presence || request.params["sync_partition"].presence
+    member = request.headers["X-Instant-Record-Member"].presence || request.params["member"].presence
+
+    if auth.present?
+      raise InstantRecord::Unauthorized if sent.nil?
+
+      verified = MailDirectory.member_for(sent)
+      raise InstantRecord::Unauthorized unless verified
+      raise InstantRecord::Unauthorized if member.present? && verified != member
+    elsif partition.present? && ENV["INBOX_REQUIRE_TOKEN"].present?
+      raise InstantRecord::Unauthorized
+    end
+  end
+
   config.scope_from = lambda do |request|
-    DemoAsker.new(request.params["scope"], AuthPerson.known(request.session[:auth_person_id]))
+    scope_header = request.headers["X-Instant-Record-Scope"].presence
+    visitor = scope_header || request.params["scope"].presence
+    person = AuthPerson.known(request.session[:auth_person_id])
+    sent = request.authorization.to_s[/\ABearer (.+)\z/, 1]
+    member = request.headers["X-Instant-Record-Member"].presence ||
+             request.params["member"].presence ||
+             (sent && MailDirectory.member_for(sent))
+    DemoAsker.new(visitor, person, member)
   end
 end

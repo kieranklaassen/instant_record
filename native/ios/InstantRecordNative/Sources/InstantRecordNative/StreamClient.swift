@@ -41,7 +41,12 @@ final class StreamClient {
         var wait: UInt64 = 5
         while !Task.isCancelled {
             do {
-                guard let (address, store) = await address(), let request = transport.request("GET " + address + "\n") else {
+                guard let (address, store) = await address() else {
+                    try await Task.sleep(nanoseconds: 1_000_000_000)
+                    continue
+                }
+                let headerBlock = store.headers.isEmpty ? "" : store.headers.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }.joined(separator: "\n") + "\n\n"
+                guard let request = transport.request("GET " + address + "\n" + headerBlock) else {
                     try await Task.sleep(nanoseconds: 1_000_000_000)
                     continue
                 }

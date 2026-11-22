@@ -10,20 +10,25 @@ require "tmpdir"
 #   ruby compiled/pipeline/build_native.rb
 #   INSTANT_RECORD_NATIVE_HOST=../compiled/.build-native/host bin/rails test test/integration/native_inbox_test.rb
 class NativeInboxTest < ActionDispatch::IntegrationTest
-  ENDPOINT = "http://www.example.com/email/sync/maya/support"
+  ENDPOINT = "http://www.example.com/instant_record"
   SUPPORT = { "member" => "maya", "inbox" => "support" }.freeze
   UNREAD = SUPPORT.merge("filter" => "unread").freeze
   BILLING = { "member" => "maya", "inbox" => "billing" }.freeze
 
+  def inbox_headers(member = "maya", inbox = "support")
+    { "X-Instant-Record-Partition" => "mailbox_id:#{inbox}", "X-Instant-Record-Member" => member }
+  end
+
   # compiled/pipeline/native/host.c, with this test as its driver.
   class Phone
-    attr_writer :online
+    attr_writer :online, :headers
     attr_reader :unanswered
 
     # `database` is the file to boot on, or nil for a host that has not booted.
-    def initialize(binary, database, session, folder: File.dirname(database))
+    def initialize(binary, database, session, folder: File.dirname(database), headers: {})
       @session = session
       @online = true
+      @headers = headers
       @unanswered = []
       @input, @output, @wait = Open3.popen2(binary, database || "-", chdir: folder)
       @input.binmode
@@ -110,9 +115,9 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
       return "0\n" unless @online
       path = URI(url).request_uri
       if verb == "GET"
-        @session.get path
+        @session.get path, headers: @headers
       else
-        @session.post path, params: body, headers: { "CONTENT_TYPE" => "application/json" }
+        @session.post path, params: body, headers: @headers.merge("CONTENT_TYPE" => "application/json")
       end
       "#{@session.response.status}\n#{@session.response.body}"
     end
@@ -129,7 +134,7 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
     @newer = write("sam", "October invoice")
     @support.append!(id: SecureRandom.uuid, author: "maya", attributes: { kind: "read", parent_id: @older.id })
     @folder = Dir.mktmpdir
-    @phone = Phone.new(@binary, File.join(@folder, "inbox.sqlite3"), self)
+    @phone = Phone.new(@binary, File.join(@folder, "inbox.sqlite3"), self, headers: inbox_headers)
   end
 
   teardown do
@@ -199,7 +204,7 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
     @phone.tap("mailbox", SUPPORT, "archive", { "id" => @newer.id })
     @phone.close
 
-    @phone = Phone.new(@binary, File.join(@folder, "inbox.sqlite3"), self)
+    @phone = Phone.new(@binary, File.join(@folder, "inbox.sqlite3"), self, headers: inbox_headers)
     @phone.online = false
 
     assert_equal [@older.id], rows.map { |row| row["id"] }
@@ -242,7 +247,7 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
   test "a change from elsewhere arrives over the feed and names what changed" do
     @phone.sync
     arrived = write("jo", "Receipt")
-    get "/email/sync/maya/support/events?after=#{@phone.cursor}"
+    get "/instant_record/events?after=#{@phone.cursor}&window=0", headers: inbox_headers
 
     _out, notice = @phone.call("stream", response.body)
 
@@ -291,7 +296,7 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
     assert_equal MailEntry::PAGE_SIZE, rows.size
     assert_equal "true", summary.call["more"]
 
-    get "/email/sync/maya/support/records?#{more["props"]["query"]}"
+    get "/instant_record/records?#{more["props"]["query"]}", headers: inbox_headers
     assert_response :success
     @phone.call("history", JSON.generate(key: more["id"], response: response.body))
 
@@ -332,11 +337,13 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
       assert_not_empty @phone.open_files.grep(/billing\.sqlite3/)
     end
     @phone.online = true
-    @phone.sync(ENDPOINT.sub("maya/support", "maya/billing"))
+    @phone.headers = inbox_headers("maya", "billing")
+    @phone.sync(ENDPOINT)
     assert_equal ["Receipt"], @phone.render("mailbox", BILLING).dig("children", 0, "children", 0, "children").select { |node| node["kind"] == "row" }.map { |row| row["children"][1]["text"] }
     assert_empty rows, "billing's file holds support's mail"
 
     @phone.open(File.join(@folder, "inbox.sqlite3"))
+    @phone.headers = inbox_headers("maya", "support")
     assert_equal 1, @phone.pending
     assert_equal [@older.id], rows.map { |row| row["id"] }
     @phone.sync

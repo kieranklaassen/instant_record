@@ -36,32 +36,49 @@ module InstantRecord
         REQUEST = "/host/request".freeze
         RESPONSE = "/host/response".freeze
 
-        def get_json(path)
-          JSON.parse(exchange("GET", path, ""))
+        def get_json(path, headers: nil)
+          JSON.parse(exchange("GET", path, "", headers: headers))
         end
 
-        def post_json(path, payload)
-          JSON.parse(exchange("POST", path, JSON.generate(payload)))
+        def post_json(path, payload, headers: nil)
+          JSON.parse(exchange("POST", path, JSON.generate(payload), headers: headers))
         end
 
         # The host returns the whole catch-up stream at once (the loop polls with window=0).
-        def each_event(path, &block)
+        def each_event(path, headers: nil, &block)
           parser = SseParser.new(&block)
-          parser.feed(exchange("GET", path, ""))
+          parser.feed(exchange("GET", path, "", headers: headers))
         end
 
         private
 
-        # Request file: first line "METHOD URL", then the body. Response file: first line the
-        # status, then the body. Status 0 is a network failure.
-        def exchange(method, path, body)
-          File.write(REQUEST, "#{method} #{InstantRecord.config.endpoint}#{path}\n#{body}")
+        # Request file:
+        #   Without headers: "METHOD URL\n<body>"
+        #   With headers:    "METHOD URL\nName: Value\n...\n\n<body>"
+        # Response file: first line the status, then the body. Status 0 is a network failure.
+        def exchange(method, path, body, headers: nil)
+          payload = format_request(method, "#{InstantRecord.config.endpoint}#{path}", body, headers)
+          File.write(REQUEST, payload)
           response = File.read(RESPONSE)
           newline = response.index("\n") || response.length
           status = response[0, newline].to_i
           raise Error, "#{method} #{path} -> #{status}" unless status >= 200 && status < 300
 
           response[(newline + 1)..] || ""
+        end
+
+        def format_request(method, url, body, headers)
+          return "#{method} #{url}\n#{body}" if headers.nil? || headers.empty?
+
+          lines = []
+          headers.each do |name, value|
+            k = name.to_s.gsub(/[\r\n]/, "")
+            v = value.to_s.gsub(/[\r\n]/, "")
+            lines << "#{k}: #{v}" unless k.empty? || v.empty?
+          end
+          return "#{method} #{url}\n#{body}" if lines.empty?
+
+          "#{method} #{url}\n#{lines.join("\n")}\n\n#{body}"
         end
       end
     end

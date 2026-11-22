@@ -285,7 +285,7 @@ export default function Inbox({ member, inbox, inboxes, people, mail, thread, co
   const generate = async () => {
     setBusy(true)
     try {
-      const response = await fetch(`/email/sync/${member}/${inbox}/incoming?instant_record_network=1`, { method: "POST" })
+      const response = await fetch(`/email/incoming?member=${encodeURIComponent(member)}&inbox=${encodeURIComponent(inbox)}&instant_record_network=1`, { method: "POST" })
       if (!response.ok) throw new Error()
       router.reload({ only: ["mail"], async: true })
     } catch {

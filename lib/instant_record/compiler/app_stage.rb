@@ -92,7 +92,10 @@ module InstantRecord
         "config/initializers/ruby_llm.rb", "app/models/assistant", "app/jobs/assistant",
         # The session is the server's: the page asks Rails for it over the network.
         "app/controllers/auth/sessions_controller.rb",
-        "app/controllers/slack/resets_controller.rb", "app/controllers/email/sync_controller.rb", "app/models/mailbox.rb",
+        "app/controllers/slack/resets_controller.rb",
+        "app/controllers/email/incoming_controller.rb",
+        "app/controllers/email/shells_controller.rb",
+        "app/models/mailbox.rb",
         # The shell snapshot is built on the server, from the server's Mailbox.
         "app/models/mail_shell.rb", "app/jobs/email/shell_build_job.rb",
         "app/views/source", "app/views/pwa",
@@ -156,7 +159,6 @@ module InstantRecord
 
         adapt_migration_view(target)
         trim_slack_seeds(target)
-        enable_mail_entry_sync(target)
       end
 
       def adapt_migration_view(target)
@@ -187,13 +189,6 @@ module InstantRecord
           "    # Browser build: the seeding routines (apply, backfill) are server-only and left out;\n" \
           "    # the constants above are what the browser-side controller reads.\n  end\nend\n"
         File.write(path, trimmed)
-      end
-
-      def enable_mail_entry_sync(target)
-        path = File.join(target, "app/models/mail_entry.rb")
-        source = File.read(path)
-        adapted = source.gsub("class MailEntry < ApplicationRecord", "class MailEntry < ApplicationRecord\n  include InstantRecord::Syncable")
-        File.write(path, adapted)
       end
     end
   end

@@ -7,26 +7,42 @@ module InstantRecord
     # whatever the write did is rolled back with it.
     NotPermitted = Class.new(StandardError)
 
-    # `identity` is the sender (SyncScope.identity). It only matters to a model
-    # that declares sync_scope, or syncable_to and writable_by.
-    def self.apply(mutation, identity = nil)
-      new(mutation, identity).apply
+    # `identity` is the sender (SyncScope.identity). `partition` is the active
+    # multi-tenant partition (SyncScope.partition), required by models that
+    # declare `sync_partition`.
+    def self.apply(mutation, identity = nil, partition = nil)
+      new(mutation, identity, partition).apply
     end
 
-    def initialize(mutation, identity = nil)
+    def initialize(mutation, identity = nil, partition = nil)
       @mutation = mutation
       @changes = (mutation[:changes] || {}).to_h
       @identity = identity
       @scope = SyncScope.token(identity)
+      @partition = partition
     end
 
     # Replayed mutation ids return their original result without re-applying.
     def apply
+      model = InstantRecord.synced_model(@mutation[:record_type])
+      if model && (part = model.instant_record_sync_partition)
+        part_value = part.extract(@partition)
+        return { mutation_id: @mutation[:id], status: "rejected", reason: "a partition is required" } unless part_value
+
+        col = part.column
+        if @changes.key?(col) && @changes[col].present? && @changes[col].to_s != part_value
+          return { mutation_id: @mutation[:id], status: "rejected", reason: "record not in active partition" }
+        end
+        existing_row = model.find_by(id: @mutation[:record_id])
+        if existing_row && existing_row[col].to_s != part_value
+          return { mutation_id: @mutation[:id], status: "rejected", reason: "record not found" }
+        end
+      end
+
       if (existing = AppliedMutation.find_by(mutation_id: @mutation[:id]))
         return replayed(existing.result_payload.symbolize_keys)
       end
 
-      model = InstantRecord.synced_model(@mutation[:record_type])
       return record_result(status: "rejected", reason: "unknown record type") unless model
 
       # Its own savepoint when a caller holds a transaction open, so a write
@@ -50,14 +66,7 @@ module InstantRecord
     rescue ActiveModel::UnknownAttributeError => e
       # Schema skew: this client is a migration ahead of this server and sent a
       # column that does not exist here. Rejecting is the only outcome that
-      # cannot jam the queue. Raising 500s the entire batch, and because the
-      # client keeps the row on a transport error it would retry the same
-      # poisoned mutation forever, blocking every write queued behind it.
-      # Slicing the unknown column off instead would answer "applied" for a
-      # write the server only partly stored — silent data loss the client has no
-      # way to notice. A surfaced rejection loses the same write loudly, rolls
-      # the local record back to what the server actually holds, and leaves the
-      # queue draining. Deploy order (server first) remains the real defence.
+      # cannot jam the queue.
       record_result(status: "rejected", reason: e.message,
         server_attributes: server_attributes_for(model))
     end
@@ -65,6 +74,18 @@ module InstantRecord
     private
 
     def perform(model)
+      # Partition ownership was verified before replay; stamp the column on
+      # create and prevent moving it on update.
+      if (part = model.instant_record_sync_partition)
+        part_value = part.extract(@partition)
+        col = part.column
+        if @mutation[:operation] == "create"
+          @changes = @changes.merge(col => part_value)
+        else
+          @changes = @changes.except(col)
+        end
+      end
+
       # A scoped model's rows are the sender's own: the scope column is never
       # taken from the client, and another scope's row is as good as absent.
       if (column = model.instant_record_sync_scope)
@@ -73,6 +94,11 @@ module InstantRecord
         @changes[column] = @scope if @mutation[:operation] == "create"
         existing = model.find_by(id: @mutation[:record_id])
         return { status: "rejected", reason: "record not found" } if existing && existing[column] != @scope
+      end
+
+      # Enforce model-declared allowed mutation operations (e.g. append-only models).
+      if (allowed_ops = model.instant_record_writable_operations)
+        raise NotPermitted unless allowed_ops.include?(@mutation[:operation].to_s)
       end
 
       case @mutation[:operation]
@@ -141,7 +167,8 @@ module InstantRecord
         operation: operation,
         version: record.server_version,
         attributes_payload: InstantRecord.wire_attributes(record.attributes),
-        scope: InstantRecord.scope_of(record)
+        scope: InstantRecord.scope_of(record),
+        partition: InstantRecord.partition_of(record)
       )
     end
 
@@ -152,14 +179,15 @@ module InstantRecord
         operation: "destroy",
         version: 0,
         attributes_payload: {},
-        scope: record && InstantRecord.scope_of(record)
+        scope: record && InstantRecord.scope_of(record),
+        partition: record && InstantRecord.partition_of(record)
       )
     end
 
     # The server's row as the sender may see it, for a client to roll back to.
     # Every rejection reads through here, so none carries a hidden record.
     def server_attributes_for(model)
-      record = model && SyncScope.visible(model, @identity).find_by(id: @mutation[:record_id])
+      record = model && SyncScope.visible(model, @identity, partition: @partition).find_by(id: @mutation[:record_id])
       InstantRecord.wire_attributes(record.attributes) if record
     end
 
@@ -176,15 +204,15 @@ module InstantRecord
     # The record exists and a `syncable_to` rule keeps it from the sender.
     def hidden?(model)
       model.instant_record_visibility && model.exists?(id: @mutation[:record_id]) &&
-        !SyncScope.visible(model, @identity).exists?(id: @mutation[:record_id])
+        !SyncScope.visible(model, @identity, partition: @partition).exists?(id: @mutation[:record_id])
     end
 
     # The record, as it stands inside this transaction, is one the sender may
-    # write. A `sync_scope` column is settled before the write (see perform).
+    # write. A `sync_scope` / `sync_partition` column is settled before the write (see perform).
     def permit!(model)
       return unless model.instant_record_writability
 
-      raise NotPermitted unless SyncScope.writable(model, @identity).exists?(id: @mutation[:record_id])
+      raise NotPermitted unless SyncScope.writable(model, @identity, partition: @partition).exists?(id: @mutation[:record_id])
     end
 
     # create_or_find_by leans on the unique index: a concurrent duplicate

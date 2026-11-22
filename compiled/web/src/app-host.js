@@ -25,10 +25,23 @@ class ResponseFile extends File {
     const text = decoder.decode(reqFile.data);
     const newline = text.indexOf("\n");
     const [method, url] = text.slice(0, newline).split(" ");
+    let rest = text.slice(newline + 1);
+    const headers = {};
+    const split = rest.indexOf("\n\n");
+    if (split >= 0) {
+      const candidate = rest.slice(0, split).split("\n");
+      if (candidate.every(line => /^[A-Za-z0-9-]+: /.test(line))) {
+        for (const line of candidate) {
+          const colon = line.indexOf(": ");
+          headers[line.slice(0, colon)] = line.slice(colon + 2);
+        }
+        rest = rest.slice(split + 2);
+      }
+    }
     let status = 0;
     let body = "";
     try {
-      ({ status, body } = this.host.exchange(method, url, text.slice(newline + 1)));
+      ({ status, body } = this.host.exchange(method, url, rest, headers));
     } catch {
       status = 0; // offline: the gem's transport raises Transport::Error and the outbox keeps the write
     }

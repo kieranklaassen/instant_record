@@ -65,7 +65,8 @@ class MailShell
         return latest(mailbox.id) unless lock.flock(File::LOCK_EX | File::LOCK_NB)
 
         current = latest(mailbox.id)
-        return current if current && !current.stale?(mailbox.reload.revision)
+        head_cursor = InstantRecord::Change.maximum(:id) || 0
+        return current if current && !current.stale?(head_cursor)
 
         write(mailbox.id, **snapshot(mailbox))
       end
