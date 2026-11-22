@@ -688,7 +688,8 @@ class CompilerTest < ActiveSupport::TestCase
       refute File.exist?(Pathname(app_root).join("tmp/instant_record/compiled/pipeline")), "pipeline scripts should not be copied into tmp/"
 
       index_html = output.join("index.html").read
-      assert_includes index_html, '<link rel="modulepreload" fetchpriority="high" href="/harness/worker-abc.js">'
+      assert_includes index_html, 'window.__worker = new Worker("/harness/worker-abc.js", { type: "module" })'
+      refute_includes index_html, "modulepreload"
       assert_includes index_html, '<link rel="preload" as="style" href="https://fonts.example.test/font.css">'
       assert_includes index_html, "instant_record.warmed"
 
@@ -775,7 +776,7 @@ class CompilerTest < ActiveSupport::TestCase
       build.inject_preloads(dist, nil)
 
       html = File.read(File.join(dist, "index.html"))
-      assert_includes html, '<link rel="modulepreload" fetchpriority="high" href="/harness/worker-123.js">'
+      assert_includes html, 'window.__worker = new Worker("/harness/worker-123.js", { type: "module" })'
       assert_includes html, '<link rel="preload" as="style" fetchpriority="low" href="/assets/base.css">'
       assert_includes html, '<link rel="preload" as="style" fetchpriority="low" href="/assets/ui-deadbeef01.css">'
       assert_includes html, '<link rel="preload" as="style" fetchpriority="low" href="/assets/mail.css">'
