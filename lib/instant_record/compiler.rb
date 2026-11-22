@@ -13,6 +13,7 @@ require_relative "compiler/wasm_tree"
 require_relative "compiler/source_pages"
 require_relative "compiler/wasm_build"
 require_relative "compiler/native_build"
+require_relative "compiler/fts5_smoke"
 
 module InstantRecord
   # Compiles a Rails app (or this repository's demo) into a static Wasm browser
@@ -89,6 +90,10 @@ module InstantRecord
 
     def self.scrub_path(path, prefix)
       PathScrubber.scrub(path, prefix)
+    end
+
+    def self.verify_fts5(toolchain: nil, target: :native)
+      Fts5Smoke.run(toolchain: demo_toolchain(toolchain), target: target)
     end
 
     def self.with_workspace(root:, toolchain:, stage_web:)

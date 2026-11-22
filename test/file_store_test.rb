@@ -92,4 +92,38 @@ class FileStoreTest < Minitest::Test
     assert_raises(ArgumentError) { append("x", at: 0, upload: "../../etc/passwd") }
     assert_raises(ArgumentError) { @store.offset("clip/one", "") }
   end
+
+  def test_default_chunk_size_is_proxy_safe_and_configurable
+    assert_equal 512 * 1024, InstantRecord::FileStore::DEFAULT_CHUNK_SIZE
+    assert_operator InstantRecord::FileStore::DEFAULT_CHUNK_SIZE, :<, 1024 * 1024
+    assert_equal InstantRecord::FileStore::DEFAULT_CHUNK_SIZE, @store.chunk_size
+
+    small = InstantRecord::FileStore.new(@root, chunk_size: 4)
+    assert_equal 4, small.chunk_size
+    assert_equal 4, small.append("clip/small", "u1", StringIO.new("abcd"), at: 0, length: 4)
+
+    too_big = assert_raises(InstantRecord::FileStore::ChunkTooLarge) do
+      small.append("clip/big", "u1", StringIO.new("abcde"), at: 0, length: 5)
+    end
+    assert_equal 4, too_big.limit
+    assert_equal 0, small.offset("clip/big", "u1"), "an oversized piece wrote nothing"
+
+    assert_raises(ArgumentError) { InstantRecord::FileStore.new(@root, chunk_size: 0) }
+    assert_raises(ArgumentError) { InstantRecord::FileStore.new(@root, chunk_size: -1) }
+  end
+
+  def test_store_uses_configured_file_chunk_size_unless_overridden
+    previous = InstantRecord.config.file_chunk_size
+    InstantRecord.config.file_chunk_size = 8
+
+    assert_equal 8, @store.chunk_size
+    assert_raises(InstantRecord::FileStore::ChunkTooLarge) do
+      @store.append("clip/over", "u1", StringIO.new("012345678"), at: 0, length: 9)
+    end
+
+    explicit = InstantRecord::FileStore.new(@root, chunk_size: 16)
+    assert_equal 16, explicit.chunk_size
+  ensure
+    InstantRecord.config.file_chunk_size = previous
+  end
 end
