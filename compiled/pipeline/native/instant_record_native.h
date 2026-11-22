@@ -35,13 +35,15 @@ int ir_open(const char *database_path);
      "sync"       input the sync endpoint's address    one pass: push, then pull
      "stream"     input a text/event-stream chunk      changes the host fetched
      "open"       input a database path                 what ir_open calls
+     "notices"    input {"action":"list"|"retry"|"fork"|"dismiss",...}  quarantined sync notices
      "branch_outbox"  input {"exclude_ids":[...]}       staged OutboxMutations summary
      "branch_replay"  input {"mutations":[...],"conflict":"lww"}  replay onto active DB
      "sync_plan", "cursor", "history", "request"       as the browser host uses them */
 const char *ir_call(const char *entry, const char *input);
 
 /* What changed during the last call: empty, or "records_changed" and then
-   one "Type:id" line for each record when the app could list them. */
+   one "Type:id" line for each record when the app could list them, followed by
+   any "sync_notice:<json>" lines for quarantined rejections or conflicts. */
 const char *ir_notice(void);
 
 const char *ir_error(void);
