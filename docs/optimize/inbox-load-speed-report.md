@@ -1,9 +1,9 @@
 # Inbox Load Speed Optimization Report
 
 **Target:** Compiled browser Inbox load times (`/email?member=maya&inbox=support`, 600 seeded conversations, simulated 60 ms RTT / 20 Mbit/s link via `compiled/bench/inbox-load-harness.mjs`)  
-**Branch:** `optimize/inbox-load-speed` (`90562bd` -> `3a4283b`)  
-**Date:** 2026-11-21  
-**Stopping Criterion:** `plateau_iterations: 3` (6 of 8 iterations run; 3 consecutive non-keeps: Exp #4, Exp #5, Exp #6)
+**Branch:** `optimize/inbox-load-speed` (`90562bd` -> `bac8dae`, confirmed best `3a4283b` + non-functional `serve.mjs` lazy-prewarm fix `bac8dae`)  
+**Date:** 2026-11-22  
+**Stopping Criterion:** `max_wall_hours: 10` wall-clock backstop reached during overnight continuation (`2026-11-21 21:29` -> `2026-11-22 07:17 PST`). Host CPU remained saturated at `load averages 485–674` (`343–524` runnable processes from external `clang`/QEMU jobs) throughout the overnight window, preventing valid browser timing runs for Batch 7. 6 measured iterations completed; 4 file-disjoint Batch 7 candidates (`exp-007`–`exp-010`) are compiled and cached on disk ready for measurement once host load clears.
 
 ---
 
@@ -60,23 +60,27 @@ No target threshold was set in `spec.yaml` (open-ended minimization). No holdout
 
 ---
 
-## Remaining Opportunities
+## Remaining Opportunities (Batch 7 Already Built & Ready to Measure)
 
-1. **H7 — Refined in-place Inbox hydration (`frontend-hydration`, high confidence — fresh evidence from Exp #6 CDP profile):** Fix Exp #6's two scheduling bugs: start `import(inbox.js)` only *after* posting `boot` to the worker (so `window.__wasm` is never blocked on the main thread), keep `earlyBootstrap` after `app.wasm` completes on cold visits, and exclude `inbox.js` from `warm_scripts` on `/email`. Projected: **`return_visit_ms` ~175–187 ms (-10% to -15%)** and **`first_visit_ms` ~810–821 ms (-3% to -5%)**.
-2. **H5 — Trim `inbox.js` initial React/Virtuoso mount (`frontend-bundle`, medium confidence — post-Exp-6 profile shows ~32 ms remaining in React/Virtuoso mount):** Measure and trim initial render cost (`LiveList` `FIRST_DRAW`, lazy modals).
-3. **H6 — Wasm runtime / `wasm_boot` + `wasm_request` (`wasm-runtime`, low/unknown):** `wasm_boot` (26 ms return / 58 ms cold) and Ruby row serialization in `wasm_request` (24–32 ms) remain the dominant worker-side costs; `wasm-opt --converge --merge-similar-functions` was probed and saved only 3 KB Brotli (`<2 ms`), and remaining unpruned runtime modules account for only 1.8% of `app.c`.
+During the overnight continuation, 4 file-disjoint candidates were implemented and compiled into cached worktrees under `.worktrees/optimize-inbox-load-speed-exp-007..010` (synced with `bac8dae`), awaiting clean host CPU (`load avg < 40`) to measure:
+
+1. **H7 / `exp-007` — Refined in-place Inbox hydration (`frontend-hydration`, high confidence — fresh evidence from Exp #6 CDP profile):** Fix Exp #6's two scheduling bugs: start `import(inbox.js)` only *after* posting `boot` to the worker (so `window.__wasm` is never blocked on the main thread), keep `prepare()` local-IDB-only with a read-only return boot path (leaving `earlyBootstrap` after `app.wasm` completes on cold visits), and exclude `inbox.js` from `warm_scripts` on `/email`. Projected: **`return_visit_ms` -20 to -32 ms (-10% to -15%)** and **`first_visit_ms` -18 to -30 ms (-2% to -3.5%)**.
+2. **H8 / `exp-008` — Trim initial React/Virtuoso first-draw (`frontend-bundle`, medium-high confidence):** Reduce `LiveList` `FIRST_DRAW` from `20` to `14` and defer `increaseViewportBy: 600` until `requestAnimationFrame`. Projected: **`return_visit_ms` -6 to -15 ms (-3% to -7%)**, **`first_visit_ms` -6 to -15 ms**.
+3. **H9 / `exp-009` — Batch cold-boot SQLite DDL (`wasm-startup`, high confidence):** Combine 3 boot `PRAGMA`s into 1 `Db.exec`, wrap cold-boot `Schema.statements` (25 DDL statements) in a single `BEGIN`/`COMMIT` transaction, and use a direct `Db.prepare` check for `compiled_models` on return boot (`compiled/pipeline/entry_template.py`). Projected: **`first_visit_ms` -20 to -32 ms (-2.4% to -3.8%)**, **`return_visit_ms` -2 to -6 ms**.
+4. **H10 / `exp-010` — Bypass AR hydration in `browser_only` `MailboxesController#index` (`controller-render`, high confidence):** Replace ActiveRecord `MailEntry` model hydration and `Time#iso8601` round-trips with direct `MailEntry.connection.select_rows`/`select_value`/`quote` queries in a `browser_only` fast path (keeping original AR code in `server_only`). Verified build artifact: `app-e2d3994c32.wasm` shrank by **-36.8 KB** (`10,148,575 -> 10,111,801 B`). Projected: **`return_visit_ms` -15 to -24 ms (-7% to -11%)**, **`first_visit_ms` -12 to -20 ms (-1.4% to -2.4%)**.
 
 ---
 
 ## Run Accounting
 
-- **Stopping reason:** `plateau_iterations: 3` (consecutive non-keeps: Exp #4, #5, #6)
-- **Active duration:** ~68 minutes (`4,080 s` active inside Phase 3 + confirmation)
-- **Outcome counts (6 iterations):**
+- **Stopping reason:** `max_wall_hours: 10` backstop reached during overnight continuation (host CPU saturated at `load averages 485–674` by external `clang`/QEMU processes; no invalid measurements recorded)
+- **Active duration:** ~86 minutes (`5,160 s` active across Phase 3, confirmation, and Batch 7 builds; ~9h48m wall-clock overnight window)
+- **Outcome counts (6 measured iterations + 4 built/unmeasured in Batch 7):**
   - Kept: 2 (`Exp #1`, `Exp #3`)
   - Runner-up kept: 0
   - Reverted: 3 (`Exp #4`, `Exp #5`, `Exp #6`)
   - Degenerate: 1 (`Exp #2`)
+  - Pending measurement on Continue: 4 (`exp-007`, `exp-008`, `exp-009`, `exp-010`, built & cached on disk)
   - Not selected: 0 · Inconclusive (standalone): 0 · Censored: 0 · Deferred: 0 · Errors: 0 · Timeouts: 0
 - **Scoring / run cost:** `$0` judge spend (hard metric); host model spend is not metered by this environment.
 - **Experiment log:** `.context/compound-engineering/ce-optimize/inbox-load-speed/experiment-log.yaml`
