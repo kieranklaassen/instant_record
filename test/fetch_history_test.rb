@@ -56,6 +56,7 @@ class FetchHistoryTest < Minitest::Test
     assert result[:has_more]
     assert_equal %w[m-1 m-2], @model.order(:id).pluck(:id)
     assert_equal 0, InstantRecord::OutboxMutation.count
+    assert_empty InstantRecord::Client.changed_records
     assert_includes @transport.history_requests.sole, "type=Memo"
     assert_includes @transport.history_requests.sole, "partition=a"
   end
