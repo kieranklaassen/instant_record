@@ -181,6 +181,22 @@ class CompilerTest < ActiveSupport::TestCase
       refute File.exist?(File.join(app, "app/views/source"))
       refute File.exist?(File.join(app, "app/helpers/source_helper.rb"))
 
+      # The overlay's console controller renders no partial, so the one the
+      # server's controller renders is not staged for the compiler to choke on.
+      assert File.file?(File.join(app, "app/views/console/sessions/index.html.erb"))
+      refute File.exist?(File.join(app, "app/views/console/sessions/_result.html.erb"))
+
+      # Of the four todo apps only /instant is local_first; the Rails-served
+      # three and /compare stay out of the browser build.
+      assert File.file?(File.join(app, "app/controllers/instant/todos_controller.rb"))
+      %w[plain hotwire inertia].each do |way|
+        refute File.exist?(File.join(app, "app/controllers", way))
+        refute File.exist?(File.join(app, "app/models", way))
+        refute File.exist?(File.join(app, "app/views", way))
+      end
+      refute File.exist?(File.join(app, "app/controllers/compare_controller.rb"))
+      refute File.exist?(File.join(app, "app/views/compare"))
+
       assert File.file?(manifest_path)
       manifest = InstantRecord::Compiler::Manifest.read(manifest_path)
       assert_equal "island", manifest.mode

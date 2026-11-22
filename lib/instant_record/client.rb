@@ -1010,6 +1010,9 @@ module InstantRecord
       end
 
       def isolate_poison_pill(mutation, status:, error:, attempts:)
+        # Interpolated, not `error.to_s`: the browser's compiler writes C that
+        # does not build for `to_s` on a String among keyword arguments.
+        reason = "#{error}"
         payload = {
           "mutation_id" => mutation.id,
           "record_type" => mutation.record_type,
@@ -1018,7 +1021,7 @@ module InstantRecord
           "changes" => mutation.changes_payload,
           "base_version" => mutation.base_version,
           "status" => status,
-          "error" => error.to_s,
+          "error" => reason,
           "attempts" => attempts,
           "quarantined_at" => Time.now.utc.iso8601(InstantRecord::TIME_PRECISION)
         }
@@ -1039,7 +1042,7 @@ module InstantRecord
           operation: mutation.operation,
           status: status,
           attempts: attempts,
-          error: error.to_s)
+          error: reason)
         changed_visible
       end
 
