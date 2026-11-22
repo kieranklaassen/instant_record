@@ -40,6 +40,11 @@ module InstantRecord
     # clamping its HLC physical time to authoritative server UTC.
     attr_accessor :max_clock_drift
 
+    # Maximum bytes accepted in a single sync_file upload chunk (and advertised
+    # to browser and native clients so requests stay below reverse-proxy body
+    # limits). Left alone it is InstantRecord::Files::DEFAULT_CHUNK_SIZE.
+    attr_accessor :file_chunk_size
+
     def initialize
       @endpoint = DEFAULT_MOUNT_PATH
       @mount_path = nil
@@ -47,6 +52,7 @@ module InstantRecord
       @file_store = nil
       @max_file_size = nil
       @max_clock_drift = 5
+      @file_chunk_size = nil
       @scope_from = ->(request) { request.params["scope"] }
     end
   end

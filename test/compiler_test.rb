@@ -689,6 +689,13 @@ class CompilerTest < ActiveSupport::TestCase
       assert File.file?(native_out.join("libinstant_record_app.a"))
       assert File.file?(native_out.join("host"))
 
+      # Both WasmBuild and NativeBuild compile sqlite3.c with FTS5 enabled.
+      calls = File.read(fake[:call_log]).lines
+      wasm_sqlite_call = calls.find { |line| line.start_with?("clang ") && line.include?("sqlite3.c") }
+      native_sqlite_call = calls.find { |line| line.start_with?("cc ") && line.include?("sqlite3.c") }
+      assert_includes wasm_sqlite_call, "-DSQLITE_ENABLE_FTS5"
+      assert_includes native_sqlite_call, "-DSQLITE_ENABLE_FTS5"
+
       # Native iOS simulator build cross-compiles Spinel runtime into libspinel_rt.a.
       ios_out = with_path(fake[:bin_dir]) do
         InstantRecord::Compiler.build_native(
