@@ -12,9 +12,6 @@ module InstantRecord
       extend InstantRecord::RuntimeScoped
       extend InstantRecord::SyncActions::ClassMethods
 
-      attr_accessor :hold_for
-      attr_reader :last_outbox_mutation_id
-
       before_create :assign_instant_record_uuid
 
       # Guarded at call time, not include time, so the same class works in
@@ -112,6 +109,20 @@ module InstantRecord
           InstantRecord::SyncActions.server_note_read(self) if instant_record_server_mutator_write?
         end
       end
+    end
+
+    # Plain methods, not attr_accessor inside `included`: the compiler that carries a model
+    # into the browser reads these, and cannot read an accessor declared in that block.
+    def hold_for
+      @hold_for
+    end
+
+    def hold_for=(seconds)
+      @hold_for = seconds
+    end
+
+    def last_outbox_mutation_id
+      @last_outbox_mutation_id
     end
 
     def destroy(hold_for: nil)
