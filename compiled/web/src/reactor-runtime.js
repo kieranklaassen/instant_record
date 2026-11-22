@@ -577,8 +577,10 @@ export function createWorkerRuntime({
       return rendered;
     });
     if (writing) {
-      // Peer tabs need to refresh when another tab mutates local SQLite.
-      emitRecordsChanged(null, { excludeTabId: tabId });
+      // Peer tabs receive typed row deltas when the write recorded them,
+      // degrading cleanly to null (wildcard) when unlisted.
+      const deltaChanges = result?.notified ? result.changes : null;
+      emitRecordsChanged(deltaChanges, { excludeTabId: tabId });
     }
     return result;
   }
@@ -599,6 +601,8 @@ export function createWorkerRuntime({
   function navigate({ method, path, body, contentType }, targetHost = host) {
     const started = now();
     let result = localRequest(method, path, { body: body ?? "", contentType: contentType || "application/x-www-form-urlencoded" }, targetHost);
+    const notified = result.notified;
+    const writeChanges = result.changes;
     let redirected = false;
     let finalPath = path;
     for (let hops = 0; hops < 5 && result.status >= 300 && result.status < 400; hops++) {
@@ -609,7 +613,7 @@ export function createWorkerRuntime({
       redirected = true;
       result = localRequest("GET", finalPath, undefined, targetHost);
     }
-    return { result: { ...result, ms: now() - started }, redirected, finalPath };
+    return { result: { ...result, ms: now() - started }, redirected, finalPath, notified, changes: writeChanges };
   }
 
   async function fetchShell(scope, path, hasExistingDb) {

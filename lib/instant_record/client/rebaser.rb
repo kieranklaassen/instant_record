@@ -86,7 +86,7 @@ module InstantRecord
 
         # Reconcile one resolved outbox mutation against its row without
         # clobbering newer unacked local edits on the same row.
-        def reconcile_mutation_result(mutation, result)
+        def reconcile_mutation_result(mutation, result, record_delta: false)
           record_type = mutation.record_type
           record_id = mutation.record_id
           model = InstantRecord.synced_model(record_type)
@@ -128,14 +128,14 @@ module InstantRecord
             else
               return false unless updated_snapshot
 
-              !!materialize_state(model, record_id, updated_snapshot, remaining: [], force_hlc: true)
+              !!materialize_state(model, record_id, updated_snapshot, remaining: [], force_hlc: true, record_delta: record_delta)
             end
           else
             write_confirmed_snapshot(record_type, record_id, updated_snapshot) if updated_snapshot
             return false unless model && updated_snapshot
 
             rebased = replay_onto_confirmed(model, record_id, updated_snapshot, remaining)
-            !!materialize_state(model, record_id, rebased, remaining: remaining, force_hlc: authoritative)
+            !!materialize_state(model, record_id, rebased, remaining: remaining, force_hlc: authoritative, record_delta: record_delta)
           end
         end
 
@@ -143,7 +143,7 @@ module InstantRecord
         # outbox. Rewinds to the last confirmed snapshot and replays any
         # remaining unacked mutations on that row. Returns whether visible
         # local record data changed.
-        def reconcile_quarantined_mutation(mutation)
+        def reconcile_quarantined_mutation(mutation, record_delta: false)
           record_type = mutation.record_type
           record_id = mutation.record_id
           model = InstantRecord.synced_model(record_type)
@@ -156,12 +156,12 @@ module InstantRecord
             clear_confirmed_snapshot(record_type, record_id)
             return false unless model && snapshot
 
-            !!materialize_state(model, record_id, snapshot, remaining: [], force_hlc: true)
+            !!materialize_state(model, record_id, snapshot, remaining: [], force_hlc: true, record_delta: record_delta)
           else
             return false unless model && snapshot
 
             rebased = replay_onto_confirmed(model, record_id, snapshot, remaining)
-            !!materialize_state(model, record_id, rebased, remaining: remaining, force_hlc: true)
+            !!materialize_state(model, record_id, rebased, remaining: remaining, force_hlc: true, record_delta: record_delta)
           end
         end
 
@@ -170,7 +170,7 @@ module InstantRecord
         # server truth, rewind in memory, and deterministically replay all
         # remaining unacked local mutations. Returns whether the visible local
         # row changed.
-        def apply_server_delta(model, record_id, operation:, attributes:, version:, hlc: nil)
+        def apply_server_delta(model, record_id, operation:, attributes:, version:, hlc: nil, record_delta: false)
           record_type = model.name
           HLC.receive(hlc) if HLC.valid?(hlc)
           incoming_hlc = HLC.valid?(hlc) ? hlc : nil
@@ -189,7 +189,7 @@ module InstantRecord
             }
             write_confirmed_snapshot(record_type, record_id, updated_snapshot)
             rebased = replay_onto_confirmed(model, record_id, updated_snapshot, remaining)
-            return materialize_state(model, record_id, rebased, remaining: remaining, force_hlc: true)
+            return materialize_state(model, record_id, rebased, remaining: remaining, force_hlc: true, record_delta: record_delta)
           end
 
           return false unless attributes
@@ -214,7 +214,7 @@ module InstantRecord
           write_confirmed_snapshot(record_type, record_id, updated_snapshot)
 
           rebased = replay_onto_confirmed(model, record_id, updated_snapshot, remaining)
-          changed = materialize_state(model, record_id, rebased, remaining: remaining, force_hlc: true)
+          changed = materialize_state(model, record_id, rebased, remaining: remaining, force_hlc: true, record_delta: record_delta)
 
           # Preserve on_discarded_change semantics when a newer local unacked
           # edit shadowed incoming remote values.
@@ -418,7 +418,7 @@ module InstantRecord
         # Materialize the computed state onto SQLite in a single write (only if
         # needed). Returns true when visible user attributes (or row existence)
         # actually changed.
-        def materialize_state(model, record_id, state, remaining:, force_hlc: false)
+        def materialize_state(model, record_id, state, remaining:, force_hlc: false, record_delta: false)
           existing = model.find_by(id: record_id)
           before_visible = existing ? visible_attributes(existing) : nil
 
@@ -426,6 +426,7 @@ module InstantRecord
             HLC.delete_row_hlc(model.name, record_id)
             return false unless existing
 
+            Client.note_record_change(existing, "destroy") if record_delta
             existing.destroy!
             return true
           end
@@ -440,11 +441,13 @@ module InstantRecord
 
           after_visible = visible_attributes(record)
           visible_changed = (before_visible != after_visible)
+          was_new = record.new_record?
+          changed_cols = record.changed.map(&:to_s)
 
-          if record.new_record? || visible_changed
+          if was_new || visible_changed
             preserve_timestamps = record.respond_to?(:record_timestamps=) &&
               assignable["updated_at"].present? &&
-              (!record.new_record? || !model.column_names.include?("created_at") || assignable["created_at"].present?)
+              (!was_new || !model.column_names.include?("created_at") || assignable["created_at"].present?)
             if preserve_timestamps
               previous = record.record_timestamps
               record.record_timestamps = false
@@ -456,6 +459,7 @@ module InstantRecord
             else
               record.save!(validate: false)
             end
+            Client.note_record_change(record, was_new ? "create" : "update", changed_columns: changed_cols) if record_delta
           elsif record.changed?
             record.update_columns(server_version: record.server_version, sync_state: record.sync_state)
           end
