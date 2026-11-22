@@ -223,25 +223,36 @@ def outside_stylesheets(app):
     return links
 
 
-def inject_preloads(dist, app=None):
-    """Preload the worker bundle and app stylesheets while wasm compiles.
+CORE_PRELOAD_STYLES = ("base", "ui", "mail")
 
-    JS libraries are intentionally not preloaded here so main-thread script parsing does not
-    compete with WebAssembly.compileStreaming or resolve bare importmap specifiers prematurely.
-    They are fetched instead (warm_scripts): the bytes are in the HTTP cache when the page asks.
+
+def inject_preloads(dist, app=None):
+    """Preload outside font stylesheets, worker bundle, and core CSS without starving /app-*.wasm.
+
+    Chrome's HTTP/1.1 connection pool has 6 sockets per origin. Preloading all 11 demo stylesheets
+    as Highest-priority <link rel="preload" as="style"> saturates all 6 sockets for 2 RTT waves
+    (~127 ms) before /app-*.wasm starts downloading. Keeping at most 3 core stylesheets (base, ui,
+    mail — which carries the one-paint visibility rule) as fetchpriority="low" preloads leaves 3
+    Wave-1 sockets free for index.js, worker.js, and app.wasm, while warming the remaining demo
+    stylesheets via low-priority fetch() in warm_scripts.
     """
     links = outside_stylesheets(app) if app else []
     harness_dir = os.path.join(dist, "harness")
     if os.path.isdir(harness_dir):
         for name in sorted(os.listdir(harness_dir)):
             if name.startswith("worker-") and name.endswith(".js"):
-                links.append(f'    <link rel="modulepreload" href="/harness/{name}">')
+                links.append(f'    <link rel="modulepreload" fetchpriority="high" href="/harness/{name}">')
     assets_dir = os.path.join(dist, "assets")
+    deferred_css = []
     if os.path.isdir(assets_dir):
-        for name in sorted(os.listdir(assets_dir)):
-            if name.endswith(".css"):
-                links.append(f'    <link rel="preload" as="style" href="/assets/{name}">')
-    links += warm_scripts(assets_dir)
+        css_files = [name for name in sorted(os.listdir(assets_dir)) if name.endswith(".css")]
+        for name in css_files:
+            stem = name.rsplit("-", 1)[0] if "-" in name else name[:-4]
+            if len(css_files) <= 3 or stem in CORE_PRELOAD_STYLES:
+                links.append(f'    <link rel="preload" as="style" fetchpriority="low" href="/assets/{name}">')
+            else:
+                deferred_css.append(name)
+    links += warm_scripts(assets_dir, deferred_css)
     if not links:
         return
     index_path = os.path.join(dist, "index.html")
@@ -249,8 +260,8 @@ def inject_preloads(dist, app=None):
     open(index_path, "w").write(html.replace("  </head>", "\n".join(links) + "\n  </head>", 1))
 
 
-def warm_scripts(assets_dir):
-    """The app's scripts, fetched while wasm compiles.
+def warm_scripts(assets_dir, deferred_css=()):
+    """The app's scripts (and non-core stylesheets), fetched at low priority while wasm compiles.
 
     The page the app writes names its scripts only once the app is up, and they import one
     another several levels deep: a round trip a level, all of it after the boot. A plain fetch
@@ -260,6 +271,14 @@ def warm_scripts(assets_dir):
     """
     urls = []
     seen = hashlib.sha256()
+    for name in deferred_css:
+        path = os.path.join(assets_dir, name)
+        if not os.path.isfile(path):
+            continue
+        with open(path, "rb") as f:
+            digest = hashlib.sha256(f.read()).hexdigest()[:10]
+        seen.update((name + digest).encode())
+        urls.append("/assets/" + name)
     for folder, prefix in ((assets_dir, "/assets/"), (os.path.join(assets_dir, "controllers"), "/assets/controllers/")):
         if not os.path.isdir(folder):
             continue
@@ -274,7 +293,7 @@ def warm_scripts(assets_dir):
             urls.append(prefix + name + ("?v=" + digest if versioned else ""))
     if not urls:
         return []
-    # Once a browser, for these scripts: on a later visit they are cached already, and asking
+    # Once a browser, for these assets: on a later visit they are cached already, and asking
     # again only takes time from the boot (50 ms of a 220 ms return visit, measured).
     return ["    <script>try { if (localStorage.getItem(\"instant_record.warmed\") !== \"" + seen.hexdigest()[:12] + "\") {"
             " localStorage.setItem(\"instant_record.warmed\", \"" + seen.hexdigest()[:12] + "\");"
