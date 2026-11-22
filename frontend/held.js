@@ -88,3 +88,105 @@ export function heldActions({ ms = 5000, onChange = () => {} } = {}) {
     },
   }
 }
+
+// Durable undo state backed by local SQLite OutboxMutation rows (`hold_for:`).
+// Unlike `heldActions` (which keeps writes in JS memory for non-compiled
+// server-rendered pages), the write is already in SQLite with a `release_at`
+// timestamp: this tracks unexpired rows across reloads, clears each toast when
+// its `release_at` passes, and delegates `undo()` to `onCancel(entry)` (which
+// calls `InstantRecord.cancel_pending(mutation_id)`).
+const MAX_TIMEOUT_MS = 2_147_483_647
+
+export function durableHeldActions({ onChange = () => {}, onCancel = () => {}, now = Date.now } = {}) {
+  let pending = []
+  let timer = null
+
+  const parseRelease = (entry) => {
+    const raw = entry.releaseAt ?? entry.release_at
+    if (typeof raw === "number") return raw
+    if (raw instanceof Date) return raw.getTime()
+    const parsed = Date.parse(raw)
+    return Number.isNaN(parsed) ? 0 : parsed
+  }
+
+  const samePending = (a, b) =>
+    a.length === b.length &&
+    a.every((entry, i) =>
+      entry.key === b[i].key &&
+      entry.id === b[i].id &&
+      entry.label === b[i].label &&
+      entry._releaseMs === b[i]._releaseMs,
+    )
+
+  const snapshot = () => ({
+    pending: pending.map(({ _releaseMs, ...entry }) => entry),
+    held: new Set(),
+  })
+
+  const clearTimer = () => {
+    if (timer !== null) {
+      clearTimeout(timer)
+      timer = null
+    }
+  }
+
+  const schedule = () => {
+    clearTimer()
+    if (!pending.length) return
+    const nextMs = Math.min(...pending.map((entry) => entry._releaseMs))
+    const delay = Math.min(Math.max(0, nextMs - now()), MAX_TIMEOUT_MS)
+    timer = setTimeout(prune, delay)
+  }
+
+  const prune = () => {
+    const current = now()
+    const remaining = pending.filter((entry) => entry._releaseMs > current)
+    if (remaining.length !== pending.length) {
+      pending = remaining
+      onChange(snapshot())
+    }
+    schedule()
+  }
+
+  return {
+    snapshot,
+
+    sync(entries = []) {
+      const current = now()
+      const next = entries
+        .map((entry) => {
+          const releaseMs = parseRelease(entry)
+          return { ...entry, key: entry.key ?? entry.id, _releaseMs: releaseMs }
+        })
+        .filter((entry) => entry._releaseMs > current)
+      const changed = !samePending(pending, next)
+      pending = next
+      schedule()
+      if (changed) onChange(snapshot())
+    },
+
+    undo() {
+      const current = now()
+      const before = pending.length
+      pending = pending.filter((entry) => entry._releaseMs > current)
+      const entry = pending.pop()
+      if (!entry) {
+        schedule()
+        if (pending.length !== before) onChange(snapshot())
+        return null
+      }
+      schedule()
+      const { _releaseMs, ...plain } = entry
+      onChange(snapshot())
+      onCancel(plain)
+      return plain
+    },
+
+    // Durable writes are already persisted in SQLite; leaving the page needs no flush.
+    flush() {},
+
+    dispose() {
+      clearTimer()
+    },
+  }
+}

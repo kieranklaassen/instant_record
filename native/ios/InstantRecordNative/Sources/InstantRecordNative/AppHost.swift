@@ -51,6 +51,8 @@ public final class AppHost: ObservableObject {
     /// The screens on show, as the app last described them.
     @Published public private(set) var screens: [Route: Node] = [:]
     @Published public private(set) var status = Status()
+    /// Quarantined offline writes the server rejected or LWW overwrote.
+    @Published public private(set) var notices: [SyncNotice] = []
     /// True from launch until the first sync of a database that has never
     /// synced has ended: there is nothing to show yet, and that is not "empty".
     @Published public private(set) var fetchingFirst = false
@@ -143,8 +145,10 @@ public final class AppHost: ObservableObject {
                 return Transport.offline
             }
             if self.engine.boot(database: store.database) { self.open = store } else { self.report() }
-            let first = self.engine.syncs && self.position()["bootstrap"] == "needed"
+            let pos = self.engine.syncs ? self.position() : [:]
+            let first = self.engine.syncs && pos["bootstrap"] == "needed"
             DispatchQueue.main.async { self.fetchingFirst = first }
+            self.loadNoticesIfNeeded(from: pos)
             self.draw()
         }
         schedule.request()
@@ -255,6 +259,21 @@ public final class AppHost: ObservableObject {
         undrawn = false
     }
 
+    /// Re-apply a quarantined local write so it queues a fresh outbox mutation.
+    public func retryNotice(_ id: String, overrides: [String: String] = [:]) {
+        resolveNotice("retry", id: id, overrides: overrides)
+    }
+
+    /// Fork a quarantined local write into a new record with a fresh UUID.
+    public func forkNotice(_ id: String, overrides: [String: String] = [:]) {
+        resolveNotice("fork", id: id, overrides: overrides)
+    }
+
+    /// Dismiss a quarantined sync notice without deleting its audit row.
+    public func dismissNotice(_ id: String) {
+        resolveNotice("dismiss", id: id, overrides: [:])
+    }
+
     // Follow the server's events while in front, from the database now open.
     // Called again when another database opens, which drops the request
     // held for the one that was left.
@@ -292,10 +311,10 @@ public final class AppHost: ObservableObject {
             guard let store = self.open, self.engine.syncs else {
                 // Nothing can sync. Say the pass ended, or the schedule
                 // would wait for it and never start another.
-                return self.ended(ok: self.engine.syncs == false, pending: 0, offline: false, error: nil)
+                return self.ended(ok: self.engine.syncs == false, pending: 0, offline: false, error: nil, nextRelease: nil)
             }
             self.run(store) { outcome in
-                self.ended(ok: outcome.ok, pending: outcome.pending, offline: outcome.offline, error: outcome.error)
+                self.ended(ok: outcome.ok, pending: outcome.pending, offline: outcome.offline, error: outcome.error, nextRelease: outcome.nextRelease)
                 // A tap between the fetch and the hand-over changed what the
                 // app wanted to send. It goes out with a pass of its own.
                 if outcome.outdated { DispatchQueue.main.async { self.schedule.request() } }
@@ -324,7 +343,9 @@ public final class AppHost: ObservableObject {
             thread.run {
                 guard self.open == store else { return done.resume() }
                 if self.engine.call("stream", event) == nil { self.report() }
-                if self.engine.notice().hasPrefix("records_changed") { self.draw() }
+                let signal = NoticeSignal.parse(self.engine.notice())
+                if !signal.syncNotices.isEmpty { self.mergeNotices(signal.syncNotices) }
+                if signal.recordsChanged { self.draw() }
                 done.resume()
             }
         }
@@ -338,6 +359,7 @@ public final class AppHost: ObservableObject {
         var offline = false
         var outdated = false
         var error: String?
+        var nextRelease: TimeInterval?
     }
 
     /// One sync pass for `store`: ask the app what it will want, fetch that
@@ -345,7 +367,7 @@ public final class AppHost: ObservableObject {
     /// `then` runs on this thread when the pass has ended.
     private func run(_ store: Store, then: @escaping (Outcome) -> Void) {
         guard let plan = engine.call("sync_plan", "").flatMap(Self.object) else {
-            return then(Outcome(pending: pending(), error: engine.error()))
+            return then(Outcome(pending: pending(), error: engine.error(), nextRelease: nextRelease()))
         }
         let position = position()
         var wanted: [String] = []
@@ -380,8 +402,12 @@ public final class AppHost: ObservableObject {
                 let synced = self.engine.call("sync", store.endpoint)
                 self.prepared = nil
                 if synced == nil { outcome.error = self.engine.error() }
-                if self.engine.notice().hasPrefix("records_changed") { self.draw() }
-                outcome.pending = self.pending()
+                let signal = NoticeSignal.parse(self.engine.notice())
+                if !signal.syncNotices.isEmpty { self.mergeNotices(signal.syncNotices) }
+                if signal.recordsChanged { self.draw() }
+                let state = self.position()
+                outcome.pending = Int(state["pending"] ?? "") ?? 0
+                outcome.nextRelease = Self.releaseDelay(from: state)
                 outcome.outdated = self.unanswered && !outcome.offline
                 outcome.ok = synced != nil && !outcome.offline && outcome.error == nil
                 then(outcome)
@@ -389,14 +415,14 @@ public final class AppHost: ObservableObject {
         }
     }
 
-    private func ended(ok: Bool, pending: Int, offline: Bool, error: String?) {
+    private func ended(ok: Bool, pending: Int, offline: Bool, error: String?, nextRelease: TimeInterval?) {
         draw()
         DispatchQueue.main.async {
             self.fetchingFirst = false
             self.status.pending = pending
             self.status.offline = offline
             if let error { self.status.syncError = error } else if ok { self.status.syncError = "" }
-            self.schedule.finished(ok: ok, pending: pending)
+            self.schedule.finished(ok: ok, pending: pending, nextRelease: nextRelease)
             let waiting = self.refreshing
             self.refreshing = []
             waiting.forEach { $0() }
@@ -409,7 +435,9 @@ public final class AppHost: ObservableObject {
     // that has never synced has nothing to show yet.
     private func arrive(at route: Route) {
         let drawn = engine.call("render", route.input()).flatMap { try? Node(json: $0) }
-        let first = engine.syncs && position()["bootstrap"] == "needed"
+        let pos = engine.syncs ? position() : [:]
+        let first = engine.syncs && pos["bootstrap"] == "needed"
+        loadNoticesIfNeeded(from: pos)
         DispatchQueue.main.async {
             self.root = route
             if let drawn { self.screens[route] = drawn }
@@ -446,6 +474,15 @@ public final class AppHost: ObservableObject {
         Int(position()["pending"] ?? "") ?? 0
     }
 
+    private func nextRelease() -> TimeInterval? {
+        Self.releaseDelay(from: position())
+    }
+
+    private static func releaseDelay(from state: [String: String]) -> TimeInterval? {
+        guard let raw = state["next_release_ms"], let ms = Double(raw) else { return nil }
+        return max(0, ms / 1000.0)
+    }
+
     // A screen that cannot be drawn keeps the last one that could, and the
     // reason is shown.
     private func draw() {
@@ -479,6 +516,53 @@ public final class AppHost: ObservableObject {
         DispatchQueue.main.async {
             self.status.error = message
             self.undrawn = false
+        }
+    }
+
+    private func resolveNotice(_ action: String, id: String, overrides: [String: String]) {
+        let payload: [String: Any] = ["action": action, "id": id, "overrides": overrides]
+        let input = (try? JSONSerialization.data(withJSONObject: payload)).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+        thread.run {
+            guard let raw = self.engine.call("notices", input) else {
+                self.report()
+                return
+            }
+            if let response = try? JSONDecoder().decode(SyncNoticesResponse.self, from: Data(raw.utf8)) {
+                DispatchQueue.main.async {
+                    if let list = response.notices { self.notices = list }
+                    if !response.ok, let message = response.error {
+                        self.status.error = message
+                        self.undrawn = false
+                    }
+                }
+            }
+            self.draw()
+        }
+        if action == "retry" || action == "fork" {
+            schedule.request()
+        }
+    }
+
+    private func loadNoticesIfNeeded(from position: [String: String]) {
+        let count = Int(position["notices"] ?? "") ?? 0
+        guard count > 0 else {
+            DispatchQueue.main.async { self.notices = [] }
+            return
+        }
+        guard let raw = engine.call("notices", "{\"action\":\"list\"}"),
+              let response = try? JSONDecoder().decode(SyncNoticesResponse.self, from: Data(raw.utf8)),
+              let list = response.notices else { return }
+        DispatchQueue.main.async { self.notices = list }
+    }
+
+    private func mergeNotices(_ incoming: [SyncNotice]) {
+        DispatchQueue.main.async {
+            var merged = incoming
+            let incomingIds = Set(incoming.map(\.id))
+            for existing in self.notices where !incomingIds.contains(existing.id) {
+                merged.append(existing)
+            }
+            self.notices = merged
         }
     }
 

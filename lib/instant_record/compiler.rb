@@ -6,6 +6,9 @@ require_relative "compiler/runner"
 require_relative "compiler/toolchain"
 require_relative "compiler/path_scrubber"
 require_relative "compiler/browser_migrations"
+require_relative "compiler/ast_lowerer"
+require_relative "compiler/host_adapters"
+require_relative "compiler/static_linter"
 require_relative "compiler/app_stage"
 require_relative "compiler/gem_vendor"
 require_relative "compiler/entry_builder"
@@ -13,6 +16,7 @@ require_relative "compiler/wasm_tree"
 require_relative "compiler/source_pages"
 require_relative "compiler/wasm_build"
 require_relative "compiler/native_build"
+require_relative "compiler/fts5_smoke"
 
 module InstantRecord
   # Compiles a Rails app (or this repository's demo) into a static Wasm browser
@@ -29,18 +33,36 @@ module InstantRecord
       toolchain || ENV.fetch("INSTANT_RECORD_TOOLCHAIN") { gem_root.join("compiled/toolchain.env").to_s }
     end
 
-    def self.build(root:, models:, toolchain:, endpoint:, baseline: nil, migration_paths: nil)
+    def self.build(root:, models:, toolchain:, endpoint:, sync_windows: nil, mount_path: nil, baseline: nil, migration_paths: nil)
       with_workspace(root: root, toolchain: toolchain, stage_web: true) do |shared|
-        WasmBuild.new(**shared, models: models, endpoint: endpoint, baseline: baseline, migration_paths: migration_paths || shared[:migration_paths]).run
+        WasmBuild.new(
+          **shared,
+          models: models,
+          sync_windows: sync_windows,
+          endpoint: endpoint,
+          mount_path: mount_path,
+          baseline: baseline,
+          migration_paths: migration_paths || shared[:migration_paths]
+        ).run
       end
     end
 
     # The same app as libraries a native host links: for this machine, or
     # with target "iphonesimulator" or "iphoneos" for the iOS simulator or
     # an iPhone. Returns the folder that holds them.
-    def self.build_native(root:, models:, toolchain:, endpoint:, target: nil, baseline: nil, migration_paths: nil, out: $stdout)
+    def self.build_native(root:, models:, toolchain:, endpoint:, target: nil, sync_windows: nil, mount_path: nil, baseline: nil, migration_paths: nil, out: $stdout)
       with_workspace(root: root, toolchain: toolchain, stage_web: false) do |shared|
-        NativeBuild.new(**shared, models: models, endpoint: endpoint, target: target, baseline: baseline, migration_paths: migration_paths || shared[:migration_paths], out: out).run
+        NativeBuild.new(
+          **shared,
+          models: models,
+          sync_windows: sync_windows,
+          endpoint: endpoint,
+          mount_path: mount_path,
+          target: target,
+          baseline: baseline,
+          migration_paths: migration_paths || shared[:migration_paths],
+          out: out
+        ).run
       end
     end
 
@@ -67,12 +89,32 @@ module InstantRecord
       ).run
     end
 
-    def self.doctor(toolchain:, target: :wasm, web_dir: nil)
-      Toolchain.load(toolchain).doctor(target: target, web_dir: web_dir)
+    def self.doctor(toolchain:, target: :wasm, web_dir: nil, app_root: nil)
+      report = Toolchain.load(toolchain).doctor(target: target, web_dir: web_dir)
+      return report unless app_root
+
+      report.with_lint(lint(app_root, staged: false))
+    end
+
+    def self.lint(root, staged: false, exclude: nil)
+      resolved = Pathname(root)
+      effective_exclude =
+        if exclude
+          exclude
+        elsif !staged && resolved.exist? && resolved.realpath == gem_root.join("demo")
+          DemoCarver::REMOVE
+        else
+          []
+        end
+      StaticLinter.lint(root, staged: staged, exclude: effective_exclude)
     end
 
     def self.scrub_path(path, prefix)
       PathScrubber.scrub(path, prefix)
+    end
+
+    def self.verify_fts5(toolchain: nil, target: :native)
+      Fts5Smoke.run(toolchain: demo_toolchain(toolchain), target: target)
     end
 
     def self.with_workspace(root:, toolchain:, stage_web:)

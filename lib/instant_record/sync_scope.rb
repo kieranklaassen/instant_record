@@ -132,7 +132,7 @@ module InstantRecord
         return rows unless block
 
         ruled = model.instance_exec(identity, &block)
-        model.instant_record_sync_scope ? rows.where(model.primary_key => ruled.select(model.primary_key)) : ruled
+        model.instant_record_sync_scope ? rows.where(model.primary_key => ruled.select(model.arel_table[model.primary_key])) : ruled
       end
 
       # The model behind a logged type, when it has a `syncable_to` rule. Asked

@@ -12,8 +12,8 @@
 #include <sys/random.h>
 #endif
 
-enum { IN, OUT, NOTIFY, REQUEST, RESPONSE, SLOTS };
-static const char *const names[SLOTS] = { "in", "out", "notify", "request", "response" };
+enum { IN, OUT, NOTIFY, READS, REQUEST, RESPONSE, SLOTS };
+static const char *const names[SLOTS] = { "in", "out", "notify", "reads", "request", "response" };
 static char *slots[SLOTS];
 static char error[512];
 static ir_exchange_fn exchange;
@@ -52,6 +52,9 @@ static void call_sync(void *ctx)      { (void)ctx; sp_NativeBridge_s_handle_sync
 static void call_stream(void *ctx)    { (void)ctx; sp_NativeBridge_s_handle_stream(); }
 static void call_history(void *ctx)   { (void)ctx; sp_NativeBridge_s_history(); }
 static void call_cursor(void *ctx)    { (void)ctx; sp_NativeBridge_s_cursor(); }
+static void call_notices(void *ctx)   { (void)ctx; sp_NativeBridge_s_notices(); }
+static void call_branch_outbox(void *ctx) { (void)ctx; sp_NativeBridge_s_branch_outbox(); }
+static void call_branch_replay(void *ctx) { (void)ctx; sp_NativeBridge_s_branch_replay(); }
 static void call_render(void *ctx)    { (void)ctx; sp_NativeBridge_s_render(); }
 static void call_action(void *ctx)    { (void)ctx; sp_NativeBridge_s_action(); }
 static void call_open(void *ctx)      { (void)ctx; sp_NativeBridge_s_open(); }
@@ -60,6 +63,8 @@ static void call_boot(void *ctx)      { (void)ctx; app_boot(); }
 static const struct { const char *name; void (*fn)(void *); } entries[] = {
   { "request", call_request }, { "sync_plan", call_plan }, { "sync", call_sync },
   { "stream", call_stream },   { "history", call_history }, { "cursor", call_cursor },
+  { "notices", call_notices },
+  { "branch_outbox", call_branch_outbox }, { "branch_replay", call_branch_replay },
   { "render", call_render },   { "action", call_action },   { "open", call_open },
 };
 
@@ -129,6 +134,7 @@ const char *ir_call(const char *entry, const char *input) {
     put(IN, input);
     put(OUT, "");
     put(NOTIFY, "");
+    put(READS, "");
     return run_guarded(entries[i].fn) ? NULL : slots[OUT];
   }
   snprintf(error, sizeof error, "No entry named %s", entry);
@@ -136,4 +142,5 @@ const char *ir_call(const char *entry, const char *input) {
 }
 
 const char *ir_notice(void) { return slots[NOTIFY] ? slots[NOTIFY] : ""; }
+const char *ir_reads(void) { return slots[READS] ? slots[READS] : ""; }
 const char *ir_error(void) { return error; }

@@ -97,6 +97,12 @@ module InstantRecord
         "app/models/mail_shell.rb", "app/jobs/email/shell_build_job.rb",
         "app/views/source", "app/views/pwa",
         "app/helpers/source_helper.rb",
+        # Of the four todo apps at /compare, three are served by Rails and are the
+        # comparison for that reason. Only /instant is compiled.
+        "app/controllers/plain", "app/controllers/hotwire", "app/controllers/inertia",
+        "app/models/plain", "app/models/hotwire", "app/models/inertia",
+        "app/controllers/compare_controller.rb",
+        "app/views/plain", "app/views/hotwire", "app/views/compare", "app/assets/builds/todos.js",
         "test", "db/v2_migrate", "db/seeds.rb", "config/routes", "script", "lib/tasks"
       ].freeze
 
@@ -111,6 +117,11 @@ module InstantRecord
             resources :channels, only: [:show]
             resources :messages, only: [:create]
             root "channels#index" # /slack
+          end
+
+          namespace :instant do
+            resources :todos, only: [:create, :update, :destroy]
+            root "todos#index" # /instant
           end
 
           namespace :migrate do

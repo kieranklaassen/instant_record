@@ -109,7 +109,8 @@ public final class SyncSchedule {
     }
 
     /// A pass ended. `ok` is false when the server could not be reached.
-    public func finished(ok: Bool, pending: Int) {
+    /// `nextRelease` is seconds until the earliest held outbox mutation matures, if any.
+    public func finished(ok: Bool, pending: Int, nextRelease: TimeInterval? = nil) {
         running = false
         // The wait starts over only when nothing is left to send. A server
         // that answers but keeps refusing the writes is asked less and less often.
@@ -120,8 +121,14 @@ public final class SyncSchedule {
         } else if !ok || pending > 0 {
             plan(wait)
             wait = min(wait * 2, pace.ceiling)
-        } else if inFront, pace.poll > 0 {
-            plan(pace.poll)
+        } else {
+            var next = nextRelease.map { max(0, $0) }
+            if inFront, pace.poll > 0 {
+                next = next.map { min($0, pace.poll) } ?? pace.poll
+            }
+            if let next {
+                plan(next)
+            }
         }
     }
 

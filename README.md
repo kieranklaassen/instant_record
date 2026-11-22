@@ -64,7 +64,18 @@ class Issue < ApplicationRecord
 end
 ```
 
-Syncable models need three columns — a string/uuid primary key, `server_version:integer`, and `sync_state:string`. The gem's own tables (outbox, sync metadata, change log, idempotency ledger) install automatically as engine migrations — just run `bin/rails db:migrate`.
+Syncable models need three columns — a string/UUID primary key, `server_version`, and `sync_state`:
+
+```ruby
+create_table :issues, id: :string do |t|
+  t.string  :title, null: false
+  t.integer :server_version, default: 0, null: false
+  t.string  :sync_state, default: "synced", null: false
+  t.timestamps
+end
+```
+
+The gem's own tables (outbox, sync metadata, change log, idempotency ledger) install automatically as engine migrations — just run `bin/rails db:migrate`.
 
 Rules that should only run on the server (authorization, quotas, anything the client shouldn't decide) stay in the same file, scoped with a block:
 
@@ -96,16 +107,16 @@ InstantRecord.sync(Issue, Todo)
 
 ### 3. Build the browser bundle
 
-Install the compiler configuration and set the paths for your build machine:
+Generate the toolchain config and starter initializer, fill in the tool paths in `config/instant_record_toolchain.env`, verify them with `instant_record:doctor`, and compile:
 
 ```sh
 bin/rails generate instant_record:install
 bin/rails db:migrate
+bin/rails instant_record:doctor
 bin/rails instant_record:compile
 ```
 
-Serve the generated site from `tmp/instant_record/compiled/web/dist`. See
-[building and deploying](compiled/README.md) for the toolchain and Rails hosting settings.
+Serve the generated site from `tmp/instant_record/compiled/web/dist`, or publish it directly from Rails with `config.instant_record.compiled_host` and `config.instant_record.build_on_precompile = :compiled`. See [building and deploying](compiled/README.md) for the toolchain and hosting settings.
 
 ### 4. Write your app like it's normal Rails
 
@@ -144,13 +155,16 @@ Useful helpers:
 - `InstantRecord.server_url(path)` — the URL that reaches the authoritative server from either runtime, honouring a customised `mount_path`
 - `sync_file` — a record that carries a file, kept in the browser and sent to the server in the background (below)
 
-Convergence is last-write-wins on `updated_at`, and the value that loses is gone from the row. A model can watch for that:
+Convergence uses server-anchored string-encoded Hybrid Logical Clocks (HLCs) and 3-way column-level merging via `base_version`: disjoint concurrent column edits merge cleanly, while same-column collisions honor declarative `sync_merge` policies (`:lww` default, `:union`, or `:server_wins`). A model can also observe remote values dropped on the client:
 
 ```ruby
 class Issue < ApplicationRecord
   include InstantRecord::Syncable
 
-  # A value from the server that last-write-wins threw away. The block runs with
+  sync_merge :state, :server_wins
+  sync_merge :tags, :union
+
+  # A value from the server that HLC ordering threw away. The block runs with
   # the losing attribute hash at the only moment it exists here — nothing is
   # assigned, no callback fires, and the gem keeps no copy.
   on_discarded_change { |attributes| Rails.logger.info("dropped #{attributes["title"].inspect}") }
@@ -283,17 +297,33 @@ InstantRecord.fetch_history(Message,
 # => { ok: true, applied: 50, has_more: true }    — or :busy while a sync pass runs
 ```
 
-In the browser this serves repeat scrolls and offline scrollback from the local database and only hits `GET /instant_record/records` for pages it doesn't hold. Page JavaScript reaches it through a service-worker message (never from inside a request — the wasm VM can't re-enter itself):
+In the browser this serves repeat scrolls and offline scrollback from the local database and only hits `GET /instant_record/records` for pages it doesn't hold. Page JavaScript reaches it through the dedicated worker (`widenWindow` in the `frontend/` package, or directly via `window.__spinel.worker` — never from inside a local request, since the Wasm VM cannot re-enter itself):
 
 ```js
-const channel = new MessageChannel();
-channel.port1.onmessage = (event) => { /* {ok, has_more, error} */ };
-navigator.serviceWorker.controller.postMessage(
-  { type: "instant_record.fetch_history",
-    request: { type: "Message", partition: channelId,
-               before: { created_at: oldestAt, id: oldestId }, limit: 50 } },
+// With the gem's frontend/ package:
+import { widenWindow } from "instant_record"
+const reply = await widenWindow({
+  type: "Message",
+  partition: channelId,
+  before: { created_at: oldestAt, id: oldestId },
+  limit: 50,
+})
+
+// Or directly against the compiled worker:
+const channel = new MessageChannel()
+channel.port1.onmessage = (event) => { /* { ok, applied, has_more, error } */ }
+window.__spinel.worker.postMessage(
+  {
+    type: "instant_record.fetch_history",
+    request: {
+      type: "Message",
+      partition: channelId,
+      before: { created_at: oldestAt, id: oldestId },
+      limit: 50,
+    },
+  },
   [channel.port2],
-);
+)
 ```
 
 **Render the top of the scrollback server-side.** A windowed view needs a slot above its oldest row — a scroll-up sentinel, or a "beginning of history" marker once there's nothing left. Render that slot in the initial HTML even when you don't yet know which it is, and let JavaScript fill it in place. Injecting it after a probe shifts every row below it by its height on each load.
@@ -315,7 +345,7 @@ The model's file is compiled for the browser, where an integer has 32 bits: a `m
 
 The record is still what syncs, and nothing about that changes. The file is known by the record's type and id, in the browser and on the server, and it never changes: new bytes are a new record. Where the model has the columns an Active Storage blob has, they are used: the server serves the file as its `content_type` and refuses an upload that is not `byte_size` bytes. None is required.
 
-The bytes are never in the local database and never pass through the compiled app. The gem's `frontend/` package keeps them in the origin's private file system (OPFS), from the page:
+The bytes are never in the local database and never pass through the compiled app. Install the gem's `frontend/` package (`npm install "$(bundle show instant_record)/frontend"`) to keep them in the origin's private file system (OPFS), from the page:
 
 ```js
 import { fileStore, useFile } from "instant_record"
@@ -335,7 +365,7 @@ const { url, status, progress } = useFile(files, "Recording", recording.id)
 ```
 
 - **Local first.** `attach` returns when the file is on this device. It is there after a reload and with no connection, and `files.get` reads it without asking the server anything.
-- **Sent in the background.** The file goes to the server in 4 MB pieces, oldest first, one tab at a time. An upload that is cut off goes on from the piece it stopped at, after a reload too. A file whose record has not reached the server yet waits for it: the server answers 404 until the record's create has synced.
+- **Sent in the background.** The file goes to the server in configurable pieces (512 KB by default, safely below common 1–2 MB reverse-proxy ceilings, and automatically capped to whatever `chunk_size` the server advertises), oldest first, one tab at a time. An upload that is cut off goes on from the piece it stopped at, after a reload too. A file whose record has not reached the server yet waits for it: the server answers 404 until the record's create has synced.
 - **Fetched when asked for.** On another device `open` fetches the file a piece at a time and keeps it, and a fetch that is cut off keeps its pieces. A file the server does not hold (its upload has not finished where it was made) is `FileMissing`.
 - **The record's rules are the file's.** Whoever may be sent the record (`sync_scope`, `syncable_to`) may read its bytes, and whoever may write it (`writable_by`) may send them. Anyone else is answered as for a file that does not exist. A model with no rule shares its files as it shares its rows.
 - **A destroyed record takes its file** from the server. In a browser, `files.prune("Recording", ids)` drops the files of records that are gone, given the ids that are left, and `files.clear()` drops everything, for a sign-out. `fileStore({ name: userId })` keeps the files of two accounts in one browser apart.
@@ -349,12 +379,47 @@ const { url, status, progress } = useFile(files, "Recording", recording.id)
 InstantRecord.configure do |config|
   config.file_store = InstantRecord::FileStore.new("/var/lib/my_app/files")   # or anything that answers what it does
   config.max_file_size = 1024 * 1024 * 1024                                   # for models that name no max_size (two gigabytes when left alone)
+  config.file_chunk_size = 512 * 1024                                         # max bytes per upload piece (512 KB when left alone)
 end
 ```
 
-`GET <mount>/files/:type/:id` is the file (with `Range`), `GET .../upload` says where an upload stands, and `PUT` takes one piece. A file is served as a download that may run nothing, whatever type its record claims. `bin/rails instant_record:files:sweep` removes uploads that were given up.
+`GET <mount>/files/:type/:id` is the file (with `Range` and `X-Instant-Record-Chunk-Size`), `GET .../upload` says where an upload stands (and advertises `chunk_size`), and `PUT` takes one piece. A file is served as a download that may run nothing, whatever type its record claims. `bin/rails instant_record:files:sweep` removes uploads that were given up.
 
-Limits, as built: one file to a record; no checksum, so a file is trusted to be what its size and its pieces' order say; a browser must be able to write its private file system from a page (`createWritable`, which Chromium and Firefox have and Safari names from 26), and without it `open` reads from the server and keeps nothing; a file that waits for a record that never arrives is asked about once a minute while the page is open, until it is pruned; the Ruby client and the native build have no file store. What has run: headless Chromium against a Rails server, in `test/browser/files.mjs` (`node test/browser/files.mjs --big` adds a 200 MB file), and once beside a compiled build of the demo with a file on a todo. No other browser has, and no deployed server: a proxy in front of one must let a 4 MB request body through.
+On Native iOS, `InstantRecordNative` provides a matching disk-backed chunked `FileStore` actor with resumable uploads/downloads, server `chunk_size` negotiation, and LRU cache eviction.
+
+Limits, as built: one file to a record; no checksum, so a file is trusted to be what its size and its pieces' order say; a browser must be able to write its private file system from a page (`createWritable`, which Chromium and Firefox have and Safari names from 26), and without it `open` reads from the server and keeps nothing; a file that waits for a record that never arrives is asked about once a minute while the page is open, until it is pruned; the Ruby `InstantRecord::Client` has no file store. What has run: headless Chromium against a Rails server, in `test/browser/files.mjs` (`node test/browser/files.mjs --big` adds a 200 MB file), once beside a compiled build of the demo with a file on a todo, and `swift test` in `native/ios/InstantRecordNative`.
+
+### 8. Using with Inertia & React
+
+If your app uses `inertia_rails`, pass `live:` to `render inertia:` to bind props to synced models:
+
+```ruby
+render inertia: "Email/Inbox",
+  live: { mail: MailEntry, thread: MailEntry },
+  props: { mail: -> { ... }, thread: -> { ... } }
+```
+
+Install the gem's `frontend/` package (`npm install "$(bundle show instant_record)/frontend"`) and spread `instantRecord()` into `createInertiaApp`:
+
+```js
+import { createInertiaApp } from "@inertiajs/react"
+import { instantRecord } from "instant_record"
+
+createInertiaApp({ ...instantRecord(), resolve, setup })
+```
+
+In the compiled runtime, Inertia visits execute against the local SQLite database and reload only the props whose synced models changed. The package also exports `LiveList`, `useLiveWindow`, `useLiveParam`, `useLiveSearch`, `useHistory`, `useStableRows`, `useKeyboardNavigation`, `useShortcuts`, `useSelection`, `useUndoable`, and `write`.
+
+### 9. Native iOS screens (experimental)
+
+Write iOS screens in Ruby under `app/screens` subclassing `InstantRecord::Native::Screen`, compile your app's models and screens to static libraries, and generate a thin SwiftUI Xcode project:
+
+```sh
+bin/rails generate instant_record:ios Shop --screen catalog
+bin/rails "instant_record:native[iphonesimulator]"
+```
+
+Enable `config.instant_record.native_dev = true` in development to iterate on Ruby screens over HTTP without rebuilding the native library. See [native/ios/README.md](native/ios/README.md) for the screen DSL, custom SwiftUI views, theming, and simulator tests.
 
 ## Compile a Rails app for the browser
 
@@ -366,6 +431,7 @@ After installing the toolchain and filling in `config/instant_record_toolchain.e
 
 ```sh
 bin/rails db:migrate
+bin/rails instant_record:doctor
 bin/rails instant_record:compile
 ```
 
@@ -466,9 +532,9 @@ config.active_support.isolation_level = :fiber if defined?(Falcon)
 bundle exec falcon serve --bind http://localhost:3000
 ```
 
-Browser clients receive changes over that held stream — measured at **130ms** from a server-side write to the row appearing, bounded by the server's 0.5s change-log poll rather than by any client interval. Reopening with `?after=<cursor>` replays whatever a dropped connection missed, so nothing polls for changes. The tail window is configurable via `config.instant_record.sse_window_seconds`.
+Clients that hold an open SSE stream (such as the native iOS `StreamClient` or custom `EventSource` consumers) receive changes as they are logged — measured at **130ms** from a server-side write, bounded by the server's 0.5s change-log poll. Reopening with `?after=<cursor>` (or `Last-Event-ID`) replays anything a dropped connection missed. The tail window is configurable via `config.instant_record.sse_window_seconds` (25s default for Puma; raise under Falcon) and `config.instant_record.sse_heartbeat_seconds` (15s default) emits `: hb` keepalives so proxies do not reap idle streams.
 
-There is no heartbeat in the browser: a sync pass runs on a local write, at boot, and when the network returns, then retries with backoff only while the outbox still has something in it. An idle tab issues no requests at all beyond holding its stream. Reproduce the numbers with `demo/script/sse_load_spike.rb`.
+By contrast, the compiled browser worker uses non-blocking `window=0` catch-up polls every second (returning immediately without holding a server thread, and skipping Wasm completely when empty), while draining the outbox on local writes, at boot, and on reconnect with exponential backoff. Reproduce the SSE load numbers with `demo/script/sse_load_spike.rb`.
 
 ## What's proven
 
