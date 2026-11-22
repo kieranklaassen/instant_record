@@ -164,7 +164,16 @@ module InstantRecord
           end
         end
         OutboxMutation.all.each do |mutation|
-          mutation.destroy if types.include?(mutation.record_type)
+          drop = types.include?(mutation.record_type)
+          if !drop && mutation.mutator?
+            mutation.touched_records.each do |entry|
+              if types.include?(entry["type"])
+                drop = true
+                break
+              end
+            end
+          end
+          mutation.destroy if drop
         end
         # The rows that stay were last brought up to date at this cursor. The
         # bootstrap to come only adds and changes rows, so the poll after it
@@ -414,19 +423,28 @@ module InstantRecord
 
           applying_remote do
             HLC.receive(result["hlc"]) if HLC.valid?(result["hlc"])
-            case result["status"]
-            when "applied"
-              # `skipped` means our write lost resolution; `merged` means a
-              # 3-way column merge produced a combined row on the server. Either
-              # way, the local row does not yet hold what the server holds, so
-              # reconcile authoritatively to `server_attributes`.
-              if result["skipped"] || result["merged"] || result["server_attributes"].present?
-                reconciled = true if reconcile_to_server_state(mutation, result)
-              else
-                mark_synced(mutation, result["version"], hlc: result["hlc"])
+            if mutation.mutator?
+              case result["status"]
+              when "applied"
+                reconciled = true if reconcile_applied_mutator(mutation, result)
+              when "rejected"
+                reconciled = true if reconcile_rejected_mutator(mutation, result)
               end
-            when "rejected"
-              reconciled = true if reconcile_rejection(mutation, result)
+            else
+              case result["status"]
+              when "applied"
+                # `skipped` means our write lost resolution; `merged` means a
+                # 3-way column merge produced a combined row on the server. Either
+                # way, the local row does not yet hold what the server holds, so
+                # reconcile authoritatively to `server_attributes`.
+                if result["skipped"] || result["merged"] || result["server_attributes"].present?
+                  reconciled = true if reconcile_to_server_state(mutation, result)
+                else
+                  mark_synced(mutation, result["version"], hlc: result["hlc"])
+                end
+              when "rejected"
+                reconciled = true if reconcile_rejection(mutation, result)
+              end
             end
             mutation.destroy!
           end
@@ -552,6 +570,89 @@ module InstantRecord
 
         record.update_columns(sync_state: "synced", server_version: version || record.server_version)
         HLC.set_row_hlc(mutation.record_type, mutation.record_id, hlc) if HLC.valid?(hlc)
+      end
+
+      def reconcile_applied_mutator(mutation, result)
+        seen = {}
+        changed = false
+        Array(result["records"]).each do |rec|
+          rec = rec.deep_stringify_keys
+          model = InstantRecord.synced_model(rec["type"])
+          next unless model
+
+          seen["#{rec["type"]}:#{rec["id"]}"] = true
+          moved =
+            if rec["operation"] == "destroy"
+              !!model.find_by(id: rec["id"])&.destroy!
+            else
+              upsert_from_server(model, rec["attributes"], rec["version"], authoritative: true)
+            end
+          if moved
+            note_change(rec["type"], rec["id"])
+            changed = true
+          end
+        end
+
+        mutation.touched_records.each do |entry|
+          key = "#{entry["type"]}:#{entry["id"]}"
+          next if seen[key]
+
+          model = InstantRecord.synced_model(entry["type"])
+          record = model&.find_by(id: entry["id"])
+          record.update_columns(sync_state: "synced") if record
+        end
+        changed
+      end
+
+      def reconcile_rejected_mutator(mutation, result)
+        reconciled = {}
+        changed = false
+        Array(result["records"]).each do |rec|
+          rec = rec.deep_stringify_keys
+          model = InstantRecord.synced_model(rec["type"])
+          next unless model && rec["attributes"].present?
+
+          if upsert_from_server(model, rec["attributes"], rec["version"], authoritative: true)
+            note_change(rec["type"], rec["id"])
+            changed = true
+          end
+          reconciled["#{rec["type"]}:#{rec["id"]}"] = true
+        end
+
+        mutation.touched_records.each do |entry|
+          key = "#{entry["type"]}:#{entry["id"]}"
+          next if reconciled[key]
+
+          model = InstantRecord.synced_model(entry["type"])
+          next unless model
+
+          moved =
+            if entry["op"] == "create"
+              !!model.find_by(id: entry["id"])&.destroy!
+            elsif entry["before"].is_a?(Hash)
+              restore_local_snapshot(model, entry["before"])
+            else
+              false
+            end
+          if moved
+            note_change(entry["type"], entry["id"])
+            changed = true
+          end
+        end
+        changed
+      end
+
+      def restore_local_snapshot(model, attributes)
+        sliced = attributes.slice(*model.column_names)
+        return false unless sliced["id"]
+
+        record = model.find_or_initialize_by(id: sliced["id"])
+        record.assign_attributes(sliced.except("id"))
+        record.save!(validate: false)
+        if sliced["updated_at"]
+          record.update_columns(updated_at: Time.parse(sliced["updated_at"].to_s))
+        end
+        true
       end
 
       def reconcile_rejection(mutation, result)
