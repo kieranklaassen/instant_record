@@ -31,7 +31,9 @@ module InstantRecord
         "WasmBridge.cursor",
         "WasmBridge.history",
         "WasmBridge.export_outbox",
-        "WasmBridge.import_outbox"
+        "WasmBridge.import_outbox",
+        "WasmBridge.branch_outbox",
+        "WasmBridge.branch_replay"
       ].join(",").freeze
 
       SQLITE_CFLAGS = %w[
