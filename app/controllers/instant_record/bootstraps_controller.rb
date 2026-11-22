@@ -47,13 +47,13 @@ module InstantRecord
     end
 
     def serialize_rows(model, identity, partition)
-      base = SyncScope.visible(model, identity, partition: partition)
+      visible = SyncScope.visible(model, identity, partition: partition)
       if (shape = model.instant_record_sync_shape)
-        shape.bootstrap_records(base).map { |record| InstantRecord.record_payload(record) }
+        shape.bootstrap_records(visible).map { |record| InstantRecord.record_payload(record) }
       elsif (window = model.instant_record_sync_window)
-        window.in_window.merge(base).map { |record| InstantRecord.record_payload(record) }
+        window.in_window(visible).map { |record| InstantRecord.record_payload(record) }
       else
-        base.map { |record| InstantRecord.record_payload(record) }
+        visible.map { |record| InstantRecord.record_payload(record) }
       end
     end
   end

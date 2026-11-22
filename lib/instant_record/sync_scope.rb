@@ -264,7 +264,7 @@ module InstantRecord
 
         ruled = model.instance_exec(identity, &block)
         if model.instant_record_sync_scope || model.instant_record_sync_partition
-          rows.where(model.primary_key => ruled.select(model.primary_key))
+          rows.where(model.primary_key => ruled.select(model.arel_table[model.primary_key]))
         else
           ruled
         end

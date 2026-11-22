@@ -28,7 +28,9 @@ module InstantRecord
         "WasmBridge.sync_plan",
         "WasmBridge.handle_stream",
         "WasmBridge.cursor",
-        "WasmBridge.history"
+        "WasmBridge.history",
+        "WasmBridge.branch_outbox",
+        "WasmBridge.branch_replay"
       ].join(",").freeze
 
       SQLITE_CFLAGS = %w[
@@ -90,7 +92,9 @@ module InstantRecord
         toolchain:,
         app_source: nil,
         models: [],
+        sync_windows: nil,
         endpoint: nil,
+        mount_path: nil,
         baseline: nil,
         migration_paths: nil,
         shell_snapshot: nil,
@@ -106,7 +110,9 @@ module InstantRecord
         @demo = @app_source.nil?
         @source_root = @app_source || File.join(@gem_root, "demo")
         @models = models
+        @sync_windows = sync_windows
         @endpoint = (endpoint || ENV.fetch("SYNC_ENDPOINT", DEFAULT_SYNC_ENDPOINT)).to_s.sub(%r{/+\z}, "")
+        @mount_path = (mount_path && !mount_path.to_s.empty?) ? mount_path.to_s.sub(%r{/+\z}, "") : "/instant_record"
         @baseline = baseline
         @migration_paths = migration_paths
         @shell_snapshot = shell_snapshot.nil? ? ENV.fetch("INSTANT_RECORD_SHELL_SNAPSHOT", "") : shell_snapshot.to_s
@@ -185,6 +191,9 @@ module InstantRecord
           emit_dir: emit,
           demo: @demo,
           models: @models,
+          sync_windows: @sync_windows,
+          endpoint: @endpoint,
+          mount_path: @mount_path,
           migration_plan: plan,
           pipeline_dir: @pipeline_dir
         )
@@ -226,6 +235,8 @@ module InstantRecord
         end
 
         digest.update(@demo ? "" : JSON.generate(@models))
+        digest.update(JSON.generate(@sync_windows || {}))
+        digest.update(@mount_path)
         digest.update(@shell_snapshot)
 
         inputs.each do |base_root, folders|
@@ -464,11 +475,20 @@ module InstantRecord
         configured = @toolchain["WEB_NODE_MODULES"]
         if File.symlink?(modules)
           if configured && !configured.empty? && File.readlink(modules) != configured
+            unless File.directory?(configured)
+              raise BuildError, "WEB_NODE_MODULES does not exist at #{configured}. Install the web dependencies with `npm ci` and run `bin/rails instant_record:doctor`."
+            end
             File.delete(modules)
             File.symlink(configured, modules)
           end
+          unless File.directory?(modules)
+            raise BuildError, "WEB_NODE_MODULES symlink target does not exist (#{File.readlink(modules)}). Install the web dependencies with `npm ci` and run `bin/rails instant_record:doctor`."
+          end
         elsif !File.exist?(modules)
-          File.symlink(@toolchain.fetch("WEB_NODE_MODULES"), modules)
+          if configured.nil? || configured.empty? || !File.directory?(configured)
+            raise BuildError, "WEB_NODE_MODULES is missing (#{configured || 'unset'}). Install the web dependencies from compiled/web/package.json with `npm ci` and set WEB_NODE_MODULES in #{@toolchain.path}."
+          end
+          File.symlink(configured, modules)
         end
       end
 
@@ -497,6 +517,7 @@ module InstantRecord
             "VITE_SHELL_SNAPSHOT" => @shell_snapshot,
             "VITE_SYNC_PARTITIONS" => @demo ? JSON.generate(DEMO_SYNC_PARTITIONS) : "[]",
             "VITE_SYNC_ENDPOINT" => @endpoint,
+            "VITE_MOUNT_PATH" => @mount_path,
             "VITE_SOURCE_VERSION" => wanted[0, 12],
             "VITE_SCHEMA_VERSION" => plan["version"].to_s,
             "VITE_SCHEMA_BASELINE" => plan["baseline"].nil? ? "" : plan["baseline"].to_s,

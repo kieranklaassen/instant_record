@@ -22,6 +22,7 @@ module InstantRecord
         lib/instant_record/client.rb
         lib/instant_record/client/transport.rb
         lib/instant_record/client/notifier.rb
+        lib/instant_record/branch.rb
         lib/instant_record/native/node.rb
         lib/instant_record/native/screen.rb
       ].freeze
@@ -99,6 +100,7 @@ module InstantRecord
         edit_all!("lib/instant_record.rb", {
           "def browser? = false" => "def browser? = true",
           "require \"instant_record/engine\" if defined?(Rails::Engine)\n" => "",
+          "  require \"instant_record/branch/sqlite_store\"\n" => "",
           "      klass = record_type.to_s.safe_constantize\n      klass if klass.respond_to?(:instant_record_syncable?) && klass.instant_record_syncable?\n" => "      nil\n"
         })
 
@@ -109,6 +111,15 @@ module InstantRecord
           "      ActiveRecord::Base.descendants.select do |model|",
           "    end\n\n    # One record's attributes as they cross the wire",
           "      []\n"
+        )
+
+        # Roundhouse's Rails.application.config has no instant_record option;
+        # EntryBuilder sets config.mount_path at boot instead.
+        cut!(
+          "lib/instant_record.rb",
+          "      configured =\n        if defined?(Rails)",
+          "    end\n\n    # The retry decision must survive",
+          "      DEFAULT_MOUNT_PATH\n"
         )
 
         # Screens are found by name through a generated `case` (EntryBuilder), not constant lookup.
@@ -150,7 +161,6 @@ module InstantRecord
             target = File.join(models_dir, rel)
             source = File.read(target)
             adapted = source.gsub("include InstantRecord::Syncable", "include Syncable")
-            adapted = strip_server_only(adapted)
             File.write(target, adapted) if adapted != source
           end
         end
@@ -163,7 +173,7 @@ module InstantRecord
       end
 
       def rewrite_scoped_blocks
-        %w[app/controllers app/screens].each do |subdir|
+        %w[app/models app/controllers app/helpers app/screens].each do |subdir|
           root = File.join(@app, subdir)
           next unless File.directory?(root)
 
