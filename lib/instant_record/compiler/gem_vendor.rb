@@ -14,6 +14,7 @@ module InstantRecord
         lib/instant_record/version.rb
         lib/instant_record/configuration.rb
         lib/instant_record/runtime_scoped.rb
+        lib/instant_record/sync_actions.rb
         lib/instant_record/syncable.rb
         lib/instant_record/outbox_mutation.rb
         lib/instant_record/sync_metadata.rb
@@ -26,6 +27,42 @@ module InstantRecord
         lib/instant_record/native/node.rb
         lib/instant_record/native/screen.rb
       ].freeze
+
+      SPINEL_SYNC_ACTIONS_STUB = <<~'RUBY'
+        def server_frame = nil
+        def enforcing_server_mutator? = false
+        def server_authorize_create!(_record) = nil
+        def server_finalize_create!(_record) = nil
+        def server_authorize_update_before!(_record) = nil
+        def server_finalize_update!(_record) = nil
+        def server_authorize_destroy!(_record) = nil
+        def server_finalize_destroy!(_record) = nil
+        def server_note_read(_record) = nil
+        def execute_on_server(_name, _args, _mutation_id) = nil
+        def register(_klass, _action_name, _block = nil) = nil
+
+        def dispatch(name, _args)
+          raise ArgumentError, "Unknown sync_action: " + name
+        end
+      RUBY
+
+      SPINEL_SAVEPOINT_SEAM = <<~'RUBY'
+        # Host seam (see GemVendor): native SQLite SAVEPOINT for compiled builds.
+        def with_savepoint(&block)
+          @savepoint_seq = (@savepoint_seq || 0) + 1
+          sp = "ir_sp_" + @savepoint_seq.to_s
+          Db.exec("SAVEPOINT " + sp)
+          begin
+            result = block.call
+            Db.exec("RELEASE SAVEPOINT " + sp)
+            result
+          rescue StandardError => error
+            Db.exec("ROLLBACK TO SAVEPOINT " + sp)
+            Db.exec("RELEASE SAVEPOINT " + sp)
+            raise error
+          end
+        end
+      RUBY
 
       RUNTIME_SCOPED_SEAM = <<~RUBY
         module InstantRecord
@@ -112,7 +149,9 @@ module InstantRecord
           "def browser? = false" => "def browser? = true",
           "require \"instant_record/engine\" if defined?(Rails::Engine)\n" => "",
           "  require \"instant_record/branch/sqlite_store\"\n" => "",
-          "      klass = record_type.to_s.safe_constantize\n      klass if klass.respond_to?(:instant_record_syncable?) && klass.instant_record_syncable?\n" => "      nil\n"
+          "      klass = record_type.to_s.safe_constantize\n      klass if klass.respond_to?(:instant_record_syncable?) && klass.instant_record_syncable?\n" => "      nil\n",
+          "    def mutate(mutator_name, args = nil, mutation_id: nil, **kwargs)\n      merged = args ? (kwargs.empty? ? args : args.merge(kwargs)) : kwargs\n      SyncActions.mutate(mutator_name, merged, mutation_id: mutation_id)\n    end\n" => "    def mutate(mutator_name, args = {}, mutation_id: nil)\n      SyncActions.mutate(mutator_name, args, mutation_id: mutation_id)\n    end\n",
+          "\nActiveSupport.on_load(:active_job) do\n  require \"instant_record/sync_actions\"\n  InstantRecord::SyncActions.install_active_job_guard!\nend\n" => "\n"
         })
 
         # Model discovery: ActiveRecord::Base.descendants has no AOT counterpart;
@@ -132,6 +171,28 @@ module InstantRecord
           "    end\n\n    # The retry decision must survive",
           "      DEFAULT_MOUNT_PATH\n"
         )
+
+        # sync_actions: strip CRuby server-only frame, ActiveJob guard, and dynamic
+        # dispatch; EntryBuilder emits the static `case` dispatcher in main_*.rb.
+        cut!(
+          "lib/instant_record/sync_actions.rb",
+          "    # --- cruby-server-frame:start ---\n",
+          "    # --- cruby-server-frame:end ---\n",
+          ""
+        )
+        edit!("lib/instant_record/sync_actions.rb", "    # --- cruby-server-frame:end ---\n", "")
+        cut!(
+          "lib/instant_record/sync_actions.rb",
+          "      # --- cruby-only:start ---\n",
+          "      # --- cruby-only:end ---\n",
+          SPINEL_SYNC_ACTIONS_STUB.lines.map { |l| l.strip.empty? ? "\n" : "      #{l}" }.join
+        )
+        edit!("lib/instant_record/sync_actions.rb", "      # --- cruby-only:end ---\n", "")
+        edit_all!("lib/instant_record/sync_actions.rb", {
+          "      def perform_sync_action(action_name, args = nil, mutation_id: nil, **kwargs)\n        merged = args ? (kwargs.empty? ? args : args.merge(kwargs)) : kwargs\n        InstantRecord::SyncActions.mutate(\"\#{name}.\#{action_name}\", merged, mutation_id: mutation_id)\n      end\n" => "      def perform_sync_action(action_name, args = {}, mutation_id: nil)\n        InstantRecord::SyncActions.mutate(\"\#{name}.\#{action_name}\", args, mutation_id: mutation_id)\n      end\n",
+          "      def mutate(mutator_name, args = nil, mutation_id: nil, **kwargs)\n        name = mutator_name.to_s\n        merged = args ? (kwargs.empty? ? args : args.merge(kwargs)) : kwargs\n        normalized = normalize_args(merged)\n" => "      def mutate(mutator_name, args = {}, mutation_id: nil)\n        name = mutator_name.to_s\n        normalized = normalize_args(args)\n",
+          "      # GemVendor replaces this method in compiled builds with native SQLite SAVEPOINT.\n      def with_savepoint(&block)\n        ActiveRecord::Base.transaction(requires_new: true, &block)\n      end\n" => SPINEL_SAVEPOINT_SEAM.lines.map { |l| l.strip.empty? ? "\n" : "      #{l}" }.join
+        })
 
         # Screens are found by name through a generated `case` (EntryBuilder), not constant lookup.
         FileUtils.mkdir_p(File.join(@app, "sig/instant_record"))
@@ -162,9 +223,6 @@ module InstantRecord
         FileUtils.rm_rf(File.join(concerns_dir, "instant_record"))
         File.write(File.join(concerns_dir, "syncable.rb"), body.join("\n") + "\n")
         File.delete(path)
-
-        # The compiled models give a new record an empty-string id, not nil.
-        edit!("app/models/concerns/syncable.rb", "self.id ||= SecureRandom.uuid", "self.id = SecureRandom.uuid if id.blank?")
 
         models_dir = File.join(@app, "app/models")
         if File.directory?(models_dir)
