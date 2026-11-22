@@ -35,6 +35,7 @@ end
 
 class SyncActionsTest < Minitest::Test
   def setup
+    ensure_mutator_tables!
     reset_instant_record_tables!
     ActiveRecord::Base.connection.execute("DELETE FROM mutator_accounts")
     ActiveRecord::Base.connection.execute("DELETE FROM mutator_entries")
@@ -766,6 +767,34 @@ class SyncActionsTest < Minitest::Test
   end
 
   private
+
+  def ensure_mutator_tables!
+    conn = ActiveRecord::Base.connection
+    return if conn.table_exists?(:mutator_accounts) && conn.table_exists?(:mutator_entries)
+
+    ActiveRecord::Migration.suppress_messages do
+      ActiveRecord::Schema.define do
+        create_table :mutator_accounts, id: :string, force: true do |t|
+          t.string :owner
+          t.integer :balance, null: false, default: 0
+          t.integer :server_version, null: false, default: 0
+          t.string :sync_state, null: false, default: "synced"
+          t.timestamps
+        end
+
+        create_table :mutator_entries, id: :string, force: true do |t|
+          t.string :from_id
+          t.string :to_id
+          t.integer :amount, null: false, default: 0
+          t.string :note
+          t.string :owner
+          t.integer :server_version, null: false, default: 0
+          t.string :sync_state, null: false, default: "synced"
+          t.timestamps
+        end
+      end
+    end
+  end
 
   def post_mutations(body, scope: nil)
     query = scope ? "?scope=#{scope}" : ""
