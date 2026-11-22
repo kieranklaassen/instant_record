@@ -119,8 +119,9 @@ module InstantRecord
 
       # Trim every windowed model back to its declared window. delete_all
       # under applying_remote: no callbacks, no outbox rows. Pending rows are
-      # excluded in the WHERE — an unsynced write is never evicted. Returns
-      # true when anything was deleted.
+      # excluded before ranking — unsynced writes are never evicted and never
+      # push synced rows out of the window. Returns true when anything was
+      # deleted.
       def evict_beyond_windows
         return false unless @eviction_pending
 
