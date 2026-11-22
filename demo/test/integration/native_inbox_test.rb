@@ -7,7 +7,7 @@ require "tmpdir"
 # renderer and its network would be. It asks the library for screens, sends it
 # taps, and answers its sync requests from this Rails app.
 #
-#   python3 compiled/pipeline/build_native.py
+#   ruby compiled/pipeline/build_native.rb
 #   INSTANT_RECORD_NATIVE_HOST=../compiled/.build-native/host bin/rails test test/integration/native_inbox_test.rb
 class NativeInboxTest < ActionDispatch::IntegrationTest
   ENDPOINT = "http://www.example.com/email/sync/maya/support"
@@ -120,7 +120,7 @@ class NativeInboxTest < ActionDispatch::IntegrationTest
 
   setup do
     @binary = ENV["INSTANT_RECORD_NATIVE_HOST"]&.then { |path| File.expand_path(path) }
-    skip "Build the native host (compiled/pipeline/build_native.py) and set INSTANT_RECORD_NATIVE_HOST to run this." unless @binary && File.executable?(@binary)
+    skip "Build the native host (ruby compiled/pipeline/build_native.rb) and set INSTANT_RECORD_NATIVE_HOST to run this." unless @binary && File.executable?(@binary)
     MailEntry.delete_all
     Mailbox.delete_all
     @support = Mailbox.create!(id: "support")

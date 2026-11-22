@@ -23,7 +23,7 @@ module InstantRecord
 
     # The class a screen's file holds: two_words_screen.rb holds
     # TwoWordsScreen. The compiled build asks this for each file in
-    # app/screens (compiled/pipeline/native_screens.rb), so the rule that
+    # app/screens (InstantRecord::Compiler::EntryBuilder), so the rule that
     # names a screen is written in this file alone.
     def self.class_name(name)
       camel = name.split("_").map(&:capitalize).join

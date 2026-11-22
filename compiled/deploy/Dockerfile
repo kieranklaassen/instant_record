@@ -1,5 +1,5 @@
 # Static host for the compiled browser build: the files in site/ behind nginx.
-# site/ is the output of pipeline/build.py (web/dist), built for the sync server you want.
+# site/ is the output of pipeline/build.rb (web/dist), built for the sync server you want.
 FROM nginx:stable-alpine
 
 RUN apk add --no-cache nginx-mod-http-brotli brotli && \

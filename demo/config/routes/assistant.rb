@@ -1,4 +1,6 @@
-namespace :assistant do
-  resources :turns, only: [:create, :update]
-  root "turns#index" # /assistant
+local_first do
+  namespace :assistant do
+    resources :turns, only: [:create, :update]
+    root "turns#index" # /assistant
+  end
 end

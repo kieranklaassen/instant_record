@@ -168,10 +168,10 @@ class MailShellTest < ActionDispatch::IntegrationTest
   end
 
   test "the browser build computes the fingerprint from the same format and model list" do
-    pipeline = Rails.root.join("../compiled/pipeline")
-    assert_equal MailShell::FORMAT, pipeline.join("build.py").read[/^SHELL_FORMAT = (\d+)$/, 1].to_i
-    compiled = pipeline.join("entry_template.py").read[/^DEMO_MODELS = \[(.*)\]$/, 1].scan(/\w+/)
-    assert_equal MailShell::MODELS, compiled.sort
+    require "instant_record/compiler"
+    manifest = InstantRecord::Compiler.manifest(root: Rails.root)
+    assert_equal MailShell::FORMAT, InstantRecord::Compiler::WasmBuild::SHELL_FORMAT
+    assert_equal MailShell::MODELS, manifest.synced_model_names.sort
   end
 
   test "a rebuild replaces the file once its addresses have run out" do

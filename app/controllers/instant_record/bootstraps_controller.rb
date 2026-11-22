@@ -16,6 +16,7 @@ module InstantRecord
       # The key a client keeps and sends back, so the server notices when the
       # person behind the browser changes.
       payload[:identity] = SyncScope.key(identity)
+      payload[:server_time] = InstantRecord::HLC.iso_now
       headers["cache-control"] = "no-store"
       render json: payload
     end
@@ -31,10 +32,10 @@ module InstantRecord
     end
 
     def serialize_rows(model, identity)
+      visible = SyncScope.visible(model, identity)
       window = model.instant_record_sync_window
-      rows = window ? window.in_window : model.all
-      rows.merge(SyncScope.visible(model, identity))
-        .map { |record| InstantRecord.record_payload(record) }
+      rows = window ? window.in_window(visible) : visible
+      rows.map { |record| InstantRecord.record_payload(record) }
     end
   end
 end

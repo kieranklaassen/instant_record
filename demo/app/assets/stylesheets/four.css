@@ -1,0 +1,133 @@
+/* The four todo apps (/plain, /hotwire, /inertia, /instant) share this sheet,
+   so that what differs between them on screen is only how fast they answer. */
+
+.four {
+  --accent: #3E6B4F;
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 40px 20px 72px;
+}
+
+.four .card { overflow: hidden; }
+
+.four-form {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 10px 10px 18px;
+  border-bottom: 1px solid var(--hairline-soft);
+}
+
+.four-form input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  height: 40px;
+  padding: 0;
+  box-shadow: none;
+  background: transparent;
+  font-size: 16px;
+}
+
+.four-list { list-style: none; margin: 0; padding: 6px; }
+
+.four-list:not(:has(li))::before {
+  content: "Nothing here yet.";
+  display: block;
+  padding: 18px 12px;
+  color: var(--muted);
+}
+
+.four-list li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 6px 6px 12px;
+  border-radius: 10px;
+}
+
+.four-list li:hover { background: var(--paper); }
+
+/* A row the server has not answered for yet (the Inertia app's own drawing). */
+.four-list li.pending { opacity: 0.55; }
+
+.four-toggle {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  min-height: 36px;
+}
+
+.four-list input[type="checkbox"] {
+  flex: none;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  border-radius: 7px;
+  background: var(--card);
+  box-shadow: inset 0 0 0 1.5px #C4B8A6;
+  cursor: pointer;
+  display: grid;
+  place-content: center;
+}
+
+.four-list input[type="checkbox"]:checked { background: var(--accent); box-shadow: none; }
+
+.four-list input[type="checkbox"]:checked::after {
+  content: "";
+  width: 10px;
+  height: 6px;
+  margin-top: -3px;
+  border: solid #fff;
+  border-width: 0 0 2.5px 2.5px;
+  transform: rotate(-45deg);
+}
+
+.four-list label { flex: 1; min-width: 0; cursor: pointer; font-size: 16px; overflow-wrap: anywhere; }
+
+.four-list li.done label {
+  color: var(--faint);
+  text-decoration: line-through;
+  text-decoration-color: #C4B8A6;
+}
+
+.four-list li > form:last-child { flex: none; }
+
+.four-list button {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 8px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--faint);
+  font-size: 18px;
+  font-weight: 400;
+}
+
+.four-list button:hover { background: var(--danger-bg); color: var(--danger); filter: none; }
+
+/* The stopwatch's reading (stopwatch_controller.js adds the element). */
+.four-clock {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--paper);
+  font: 500 12px/1.4 var(--mono);
+  white-space: nowrap;
+}
+
+/* Inside the side-by-side page a pane is the app and nothing else. */
+html.framed .site-bar,
+html.framed #inspector,
+html.framed #source-drawer,
+html.framed .four-clock { display: none; }
+
+html.framed .four { padding: 16px 12px; }

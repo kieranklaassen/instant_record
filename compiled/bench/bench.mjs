@@ -25,7 +25,7 @@ const finish = (code = 0) => { console.log(JSON.stringify(result, null, 1)); pro
 let dist = process.env.BENCH_DIST;
 if (!dist) {
   const started = Date.now();
-  const build = spawnSync("python3", [join(root, "pipeline/build.py")], { encoding: "utf8" });
+  const build = spawnSync("ruby", [join(root, "pipeline/build.rb")], { encoding: "utf8" });
   result.build_seconds = Math.round((Date.now() - started) / 100) / 10;
   if (build.status !== 0) {
     result.build_error = (build.stdout + build.stderr).slice(-800);

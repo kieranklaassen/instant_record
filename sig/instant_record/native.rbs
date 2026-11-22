@@ -1,5 +1,5 @@
 # The types of a screen's own parts. Ruby does not read this file. The build
-# that compiles screens for a phone does (compiled/pipeline/vendor_gem.py):
+# that compiles screens for a phone does (lib/instant_record/compiler/gem_vendor.rb):
 # its compilers type a whole app by inference, and without these lines the
 # hashes a screen hands to `params:` and `args:` take whatever type the app's
 # call sites add up to. Here they are hashes of strings, so a screen that

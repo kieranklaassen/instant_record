@@ -62,9 +62,8 @@ if (!existsSync(join(compiledDir, "toolchain.env")) && existsSync(defaultToolcha
 }
 const demoNodeModules = join(demoDir, "node_modules");
 if (!existsSync(demoNodeModules)) {
-  const fallbackDemoModules = process.env.DEMO_NODE_MODULES
-    || "/Users/kieranklaassen/.t3/worktrees/instant_record/optimize-inbox-load-spe-f1f2eb94e282ea8c/demo/node_modules";
-  if (existsSync(fallbackDemoModules)) {
+  const fallbackDemoModules = process.env.DEMO_NODE_MODULES;
+  if (fallbackDemoModules && existsSync(fallbackDemoModules)) {
     symlinkSync(fallbackDemoModules, demoNodeModules);
   } else {
     const install = spawnSync("npm", ["ci"], { cwd: demoDir, encoding: "utf8" });
@@ -84,14 +83,14 @@ if (!dist) {
     result.build_error = "vite build failed: " + (vite.stdout + vite.stderr).slice(-600);
     finish();
   }
-  const build = spawnSync("python3", [join(compiledDir, "pipeline/build.py")], {
+  const build = spawnSync("ruby", [join(compiledDir, "pipeline/build.rb")], {
     cwd: repoRoot,
     env: { ...process.env, INSTANT_RECORD_TOOLCHAIN: existsSync(toolchainPath) ? toolchainPath : defaultToolchain },
     encoding: "utf8",
   });
   result.build_seconds = Math.round((Date.now() - started) / 100) / 10;
   if (build.status !== 0) {
-    result.build_error = "build.py failed: " + (build.stdout + build.stderr).slice(-800);
+    result.build_error = "build.rb failed: " + (build.stdout + build.stderr).slice(-800);
     finish();
   }
   dist = join(compiledDir, "web/dist");

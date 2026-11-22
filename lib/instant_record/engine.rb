@@ -1,4 +1,6 @@
+require "instant_record/routing"
 require "instant_record/sync_scope"
+require "instant_record/files"
 
 module InstantRecord
   class Engine < ::Rails::Engine
@@ -9,12 +11,32 @@ module InstantRecord
     config.instant_record.build_on_precompile = false
     # Serve a native app's screens over HTTP for development (NativeScreensController).
     config.instant_record.native_dev = false
+    # Optional island name (for monoliths declaring multiple local_first(:name) blocks)
+    # and explicit manifest include overrides for dynamic Ruby patterns.
+    config.instant_record.island = nil
+    config.instant_record.include = nil
+
+    initializer "instant_record.routing", before: :add_routing_paths do
+      require "action_dispatch/routing/mapper"
+      unless ::ActionDispatch::Routing::Mapper.include?(InstantRecord::Routing)
+        ::ActionDispatch::Routing::Mapper.include(InstantRecord::Routing)
+      end
+    end
 
     # `render inertia: ..., live: { prop: Model }` where the app has inertia_rails.
     config.after_initialize do
       if defined?(::InertiaRails::Renderer)
         require "instant_record/inertia"
         ::InertiaRails::Renderer.prepend(InstantRecord::Inertia::Renderer)
+      end
+    end
+
+    # A record that declares sync_file takes its file with it when it goes.
+    config.to_prepare { InstantRecord::Files.forget_on_destroy }
+
+    initializer "instant_record.helpers" do
+      ActiveSupport.on_load(:action_view) do
+        include InstantRecord::SyncNoticesHelper
       end
     end
 
@@ -65,6 +87,8 @@ module InstantRecord
 
       mount_path = app.config.instant_record.mount_path
       next unless mount_path
+
+      InstantRecord.config.endpoint = mount_path if mount_path.is_a?(String) && InstantRecord.config.endpoint == DEFAULT_MOUNT_PATH
 
       app.routes.append do
         mount InstantRecord::Engine => mount_path
