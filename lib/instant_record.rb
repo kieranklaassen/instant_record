@@ -174,6 +174,9 @@ module InstantRecord
 
     def pending_count = Client.pending_count
     def cursor = Client.cursor
+    def sync_notices = SyncNotice.active.recent
+    def sync_notices_count = SyncNotice.active.count
+    def resolve_sync_notice(id, action:, overrides: {}) = SyncNotice.resolve(id, action: action, overrides: overrides)
 
     # Copy-on-write local SQLite staging branch. Forks the live local SQLite
     # workspace into an isolated offline copy for safe bulk edits and visual UI
@@ -366,6 +369,7 @@ ActiveSupport.on_load(:active_record) do
   require "instant_record/syncable"
   require "instant_record/outbox_mutation"
   require "instant_record/sync_metadata"
+  require "instant_record/sync_notice"
   require "instant_record/client"
   require "instant_record/branch"
   InstantRecord::Host.load_branch_store
