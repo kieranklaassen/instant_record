@@ -144,13 +144,16 @@ Useful helpers:
 - `InstantRecord.server_url(path)` — the URL that reaches the authoritative server from either runtime, honouring a customised `mount_path`
 - `sync_file` — a record that carries a file, kept in the browser and sent to the server in the background (below)
 
-Convergence is last-write-wins on `updated_at`, and the value that loses is gone from the row. A model can watch for that:
+Convergence uses server-anchored string-encoded Hybrid Logical Clocks (HLCs) and 3-way column-level merging via `base_version`: disjoint concurrent column edits merge cleanly, while same-column collisions honor declarative `sync_merge` policies (`:lww` default, `:union`, or `:server_wins`). A model can also observe remote values dropped on the client:
 
 ```ruby
 class Issue < ApplicationRecord
   include InstantRecord::Syncable
 
-  # A value from the server that last-write-wins threw away. The block runs with
+  sync_merge :state, :server_wins
+  sync_merge :tags, :union
+
+  # A value from the server that HLC ordering threw away. The block runs with
   # the losing attribute hash at the only moment it exists here — nothing is
   # assigned, no callback fires, and the gem keeps no copy.
   on_discarded_change { |attributes| Rails.logger.info("dropped #{attributes["title"].inspect}") }

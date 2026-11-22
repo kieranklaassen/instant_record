@@ -16,6 +16,7 @@ module InstantRecord
       # The key a client keeps and sends back, so the server notices when the
       # person behind the browser changes.
       payload[:identity] = SyncScope.key(identity)
+      payload[:server_time] = InstantRecord::HLC.iso_now
       headers["cache-control"] = "no-store"
       render json: payload
     end

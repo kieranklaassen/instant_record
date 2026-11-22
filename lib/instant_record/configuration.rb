@@ -31,11 +31,16 @@ module InstantRecord
     # bits, and two gigabytes do not fit in one.
     attr_accessor :max_file_size
 
+    # Maximum forward clock drift (in seconds) tolerated from a client before
+    # clamping its HLC physical time to authoritative server UTC.
+    attr_accessor :max_clock_drift
+
     def initialize
       @endpoint = DEFAULT_MOUNT_PATH
       @sync_interval = 3
       @file_store = nil
       @max_file_size = nil
+      @max_clock_drift = 5
       @scope_from = ->(request) { request.params["scope"] }
     end
   end
