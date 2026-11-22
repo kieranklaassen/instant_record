@@ -14,6 +14,10 @@ worker.onmessage = (event) => {
     document.body.textContent = "Close or reload other tabs running the previous version of this app. Your saved changes will be kept.";
     return;
   }
+  if (type === "instant_record.role") {
+    if (window.__spinel) window.__spinel.role = event.data.role;
+    return;
+  }
   if (type === "instant_record.history") {
     // How much of the model's history the local database holds: { done, full, rows }.
     historyFill = event.data.state;
@@ -223,6 +227,13 @@ function syncScope() {
 const boot = await call("boot", { module: await window.__wasm, path: location.pathname + location.search, scope: syncScope() }).catch(error => {
   document.body.textContent = "The app could not open this release. Your saved database was kept. " + error.message;
   throw error;
+});
+if (window.__spinel) {
+  window.__spinel.role = boot.role;
+  window.__spinel.storage = boot.storageMode;
+}
+window.addEventListener("pagehide", () => {
+  try { worker.postMessage({ type: "instant_record.bye" }); } catch {}
 });
 marks.booted = performance.now();
 marks.compileMs = window.__wasmMs ?? boot.compileMs;
