@@ -172,7 +172,7 @@ class CompilerTest < ActiveSupport::TestCase
       assert_includes File.read(File.join(app, "app/models/slack/seeds.rb")), "Browser build: the seeding routines"
 
       count = InstantRecord::Compiler::GemVendor.vendor(gem_src: GEM_ROOT, app_dir: app, demo: true)
-      assert_equal 17, count
+      assert_equal 18, count
       assert_includes File.read(File.join(app, "lib/instant_record.rb")), "def browser? = true"
       refute_includes File.read(File.join(app, "lib/instant_record.rb")), "branch/sqlite_store"
       assert File.file?(File.join(app, "lib/instant_record/branch.rb"))
@@ -451,6 +451,8 @@ class CompilerTest < ActiveSupport::TestCase
       assert_includes wasm_main, '\#{x}\#@y\#$z'
       assert_includes wasm_main, "InstantRecord.sync(Note)"
       assert_includes wasm_main, "InstantRecord::Client.streaming = true"
+      assert_includes wasm_main, "def self.notices"
+      assert_includes wasm_main, "notices="
       assert_includes wasm_main, "def self.branch_outbox"
       assert_includes wasm_main, "def self.branch_replay"
 
@@ -690,6 +692,13 @@ class CompilerTest < ActiveSupport::TestCase
       end
       assert File.file?(native_out.join("libinstant_record_app.a"))
       assert File.file?(native_out.join("host"))
+
+      # Both WasmBuild and NativeBuild compile sqlite3.c with FTS5 enabled.
+      calls = File.read(fake[:call_log]).lines
+      wasm_sqlite_call = calls.find { |line| line.start_with?("clang ") && line.include?("sqlite3.c") }
+      native_sqlite_call = calls.find { |line| line.start_with?("cc ") && line.include?("sqlite3.c") }
+      assert_includes wasm_sqlite_call, "-DSQLITE_ENABLE_FTS5"
+      assert_includes native_sqlite_call, "-DSQLITE_ENABLE_FTS5"
 
       # Native iOS simulator build cross-compiles Spinel runtime into libspinel_rt.a.
       ios_out = with_path(fake[:bin_dir]) do

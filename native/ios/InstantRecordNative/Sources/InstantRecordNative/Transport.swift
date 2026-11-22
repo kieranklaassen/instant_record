@@ -19,6 +19,12 @@ public struct Transport {
         self.prepare = prepare
     }
 
+    /// Apply this transport's request preparation (for example Authorization
+    /// headers) to an outgoing request.
+    public func prepareRequest(_ request: inout URLRequest) {
+        prepare(&request)
+    }
+
     /// The request as it goes out, or nil when it cannot be read.
     /// Supports both "METHOD URL\n<body>" and "METHOD URL\nHeader: Value\n\n<body>".
     func request(_ exchange: String) -> URLRequest? {

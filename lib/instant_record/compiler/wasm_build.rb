@@ -29,6 +29,7 @@ module InstantRecord
         "WasmBridge.handle_stream",
         "WasmBridge.cursor",
         "WasmBridge.history",
+        "WasmBridge.notices",
         "WasmBridge.branch_outbox",
         "WasmBridge.branch_replay"
       ].join(",").freeze
@@ -40,6 +41,7 @@ module InstantRecord
         -DSQLITE_OMIT_UTF16 -DSQLITE_OMIT_AUTHORIZATION -DSQLITE_OMIT_COMPLETE
         -DSQLITE_OMIT_TRACE -DSQLITE_OMIT_TCL_VARIABLE -DSQLITE_OMIT_COMPILEOPTION_DIAGS
         -DSQLITE_OMIT_AUTOVACUUM -DSQLITE_OMIT_BLOB_LITERAL
+        -DSQLITE_ENABLE_FTS5
       ].freeze
 
       WASI_CFLAGS = %w[

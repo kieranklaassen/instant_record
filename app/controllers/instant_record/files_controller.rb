@@ -12,7 +12,7 @@ module InstantRecord
     CORS = InstantRecord::CORS_HEADERS.merge(
       "access-control-allow-methods" => "GET, HEAD, PUT, OPTIONS",
       "access-control-allow-headers" => "content-type, range, authorization, x-instant-record-scope, x-instant-record-partition, x-instant-record-member",
-      "access-control-expose-headers" => "accept-ranges, content-length, content-range"
+      "access-control-expose-headers" => "accept-ranges, content-length, content-range, x-instant-record-chunk-size"
     ).freeze
 
     # What a file is said to be comes from whoever sent it, so a browser is
@@ -43,6 +43,7 @@ module InstantRecord
       status, file_headers, body = store.serve(key, request)
       headers.merge!(file_headers).merge!(INERT)
       headers["content-type"] = Files.content_type(record)
+      headers["x-instant-record-chunk-size"] = chunk_size.to_s
       self.status = status
       self.response_body = body
     end
@@ -50,10 +51,10 @@ module InstantRecord
     # Where an upload stands, so one that was cut off goes on from there.
     def progress
       return head :not_found unless (key = writable_key)
-      return render json: { complete: true, offset: store.size(key) } if store.exist?(key)
+      return render json: { complete: true, offset: store.size(key), chunk_size: chunk_size } if store.exist?(key)
       return head :bad_request unless upload?
 
-      render json: { complete: false, offset: store.offset(key, params[:upload]) }
+      render json: { complete: false, offset: store.offset(key, params[:upload]), chunk_size: chunk_size }
     end
 
     # One piece of an upload: `size` bytes in all, this piece starting at
@@ -62,28 +63,33 @@ module InstantRecord
     def update
       return head :unsupported_media_type unless request.media_type == "application/octet-stream"
       return head :not_found unless (key = writable_key)
-      return render json: { complete: true, offset: store.size(key) } if store.exist?(key)
+      return render json: { complete: true, offset: store.size(key), chunk_size: chunk_size } if store.exist?(key)
       return head :bad_request unless upload?
       length = request.content_length
       return head :length_required unless length.positive?
 
       size = params[:size].to_i
       at = params[:offset].to_i
+      limit = chunk_size
       return refuse("a file needs a size") unless size.positive?
       return refuse("larger than this server takes", 413) if size > Files.max_size(@model)
       return refuse("not the size the record gives") if @declared && @declared != size
       return refuse("past the end of the file") if at.negative? || at + length > size
+      return render json: { error: "piece larger than this server takes", chunk_size: limit }, status: 413 if length > limit
 
       reached = store.append(key, params[:upload], request.body, at: at, length: length)
       store.finish(key, params[:upload]) if reached == size
-      render json: { complete: reached == size, offset: reached }
+      render json: { complete: reached == size, offset: reached, chunk_size: limit }
     rescue FileStore::Misplaced => e
-      render json: { complete: false, offset: e.offset }, status: :conflict
+      render json: { complete: false, offset: e.offset, chunk_size: chunk_size }, status: :conflict
+    rescue FileStore::ChunkTooLarge => e
+      render json: { error: "piece larger than this server takes", chunk_size: e.limit }, status: 413
     end
 
     private
 
     def store = Files.store
+    def chunk_size = Files.chunk_size(@model)
     def identity = @identity ||= SyncScope.identity(request)
     def partition = @partition ||= SyncScope.partition(request, identity)
     def upload? = FileStore::UPLOAD.match?(params[:upload].to_s)

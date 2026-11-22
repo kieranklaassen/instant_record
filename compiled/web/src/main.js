@@ -7,6 +7,7 @@ const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "modu
 const waiting = new Map();
 let nextId = 1;
 let historyFill = null;
+let syncNotices = [];
 worker.onmessage = (event) => {
   const { id, result, error, type } = event.data;
   if (type === "release_required") return releaseRequired?.();
@@ -23,6 +24,12 @@ worker.onmessage = (event) => {
     historyFill = event.data.state;
     if (window.__spinel) window.__spinel.history = historyFill;
     window.dispatchEvent(new CustomEvent("instant-record:history", { detail: historyFill }));
+    return;
+  }
+  if (type === "instant_record.sync_notices") {
+    syncNotices = Array.isArray(event.data.notices) ? event.data.notices : [];
+    if (window.__spinel) window.__spinel.notices = syncNotices;
+    window.dispatchEvent(new CustomEvent("instant-record:sync-notices", { detail: { notices: syncNotices } }));
     return;
   }
   if (type === "instant_record.branch") {
@@ -57,7 +64,7 @@ const branchApi = {
   approve: (options = {}) => call("branch.approve", options),
   discard: () => call("branch.discard"),
 };
-window.__spinel = { marks, call, worker, history: historyFill, sourceVersion: import.meta.env.VITE_SOURCE_VERSION,
+window.__spinel = { marks, call, worker, history: historyFill, notices: syncNotices, sourceVersion: import.meta.env.VITE_SOURCE_VERSION,
   endpoint: syncEndpoint, scope: syncScope(), branch: branchApi, branchState: { active: false } };
 
 // Restore the switches before even the first bootstrap can reach Rails.

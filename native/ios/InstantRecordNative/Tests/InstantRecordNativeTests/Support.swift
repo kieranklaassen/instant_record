@@ -66,6 +66,8 @@ final class FakeEngine: Engine {
         set { lock.withLock { kept.rows = newValue } }
     }
     var noticeAfter: [String: String] = [:]
+    var noticesCount = 0
+    var noticesResponses: [String: String] = [:]
     var raises: Set<String> = []
     var unreadable = false
     var bootstrapped = true
@@ -111,7 +113,14 @@ final class FakeEngine: Engine {
             if raises.contains(entry) { return nil }
             return "{\"push\":\(FakeEngine.quoted(push)),\"bootstrap\":\(!bootstrapped)}"
         case "cursor":
-            return "cursor=7 pending=\(push.isEmpty ? 0 : 1) bootstrap=\(bootstrapped ? "ready" : "needed") identity="
+            return "cursor=7 pending=\(push.isEmpty ? 0 : 1) bootstrap=\(bootstrapped ? "ready" : "needed") identity= notices=\(noticesCount)"
+        case "notices":
+            let object = (try? JSONSerialization.jsonObject(with: Data(input.utf8))) as? [String: Any] ?? [:]
+            let action = object["action"] as? String ?? "list"
+            let id = object["id"] as? String ?? ""
+            note(id.isEmpty ? "notices \(action)" : "notices \(action) \(id)")
+            if raises.contains(entry) { return nil }
+            return noticesResponses[action] ?? "{\"ok\":true,\"notices\":[]}"
         case "sync":
             note("sync " + input)
             if raises.contains(entry) { return nil }

@@ -129,6 +129,94 @@ export function createWorkerRuntime({
     }
   }
 
+  function emitSyncNotices(notices) {
+    const msg = { type: "instant_record.sync_notices", notices: Array.isArray(notices) ? notices : [] };
+    if (coordinator && coordinator.role === "leader") {
+      coordinator.broadcast(msg);
+    } else {
+      postMessage(msg);
+    }
+  }
+
+  async function runNoticeAction(payload = { action: "list" }) {
+    const action = payload.action || "list";
+    if (action === "list") {
+      return withDb("readonly", () => host.notices({ action: "list" }));
+    }
+    const result = await withDb("readwrite", save => {
+      const resolved = host.notices(payload);
+      if (resolved.ok) {
+        localRevision++;
+        save();
+        if (action === "retry" || action === "fork") {
+          drainDelayMs = DRAIN_RETRY_BASE_MS;
+          kickSync();
+        }
+      }
+      return resolved;
+    });
+    if (Array.isArray(result.notices)) emitSyncNotices(result.notices);
+    if (result.notified) emitRecordsChanged(result.changes);
+    return result;
+  }
+
+  function matchSyncNoticeRoute(method, path, body = "", contentType = "") {
+    const url = new URL(path, origin);
+    const base = new URL(publicEndpoint, origin).pathname.replace(/\/+$/, "") + "/sync_notices";
+    const pathname = url.pathname.replace(/\.json$/, "");
+    let verb = method.toUpperCase();
+    if (verb === "POST" && (!contentType || contentType.startsWith("application/x-www-form-urlencoded"))) {
+      const text = typeof body === "string" ? body : new TextDecoder().decode(body || new Uint8Array());
+      const override = new URLSearchParams(text).get("_method");
+      if (override && /^delete$/i.test(override)) verb = "DELETE";
+    }
+    if (pathname === base && verb === "GET") return { action: "list", json: url.pathname.endsWith(".json") };
+    if (!pathname.startsWith(base + "/")) return null;
+    const parts = pathname.slice(base.length + 1).split("/");
+    const id = decodeURIComponent(parts[0] || "");
+    if (!id) return null;
+    if (parts.length === 1 && verb === "DELETE") return { action: "dismiss", id, json: url.pathname.endsWith(".json") };
+    if (parts.length === 2 && verb === "POST" && ["retry", "fork", "dismiss"].includes(parts[1])) {
+      return { action: parts[1], id, json: url.pathname.endsWith(".json") };
+    }
+    return null;
+  }
+
+  function parseNoticeForm(body, contentType) {
+    const text = typeof body === "string" ? body : new TextDecoder().decode(body || new Uint8Array());
+    if (contentType && contentType.includes("application/json")) {
+      try {
+        const parsed = JSON.parse(text || "{}");
+        return { overrides: parsed.overrides || {}, returnTo: parsed.return_to || "" };
+      } catch {
+        return { overrides: {}, returnTo: "" };
+      }
+    }
+    const params = new URLSearchParams(text);
+    const overrides = {};
+    for (const [key, value] of params.entries()) {
+      const match = /^overrides\[(.+)\]$/.exec(key);
+      if (match) overrides[match[1]] = value;
+    }
+    return { overrides, returnTo: params.get("return_to") || "" };
+  }
+
+  function handleSyncNoticeHttp(route, body, contentType, targetHost = host) {
+    const { overrides, returnTo } = parseNoticeForm(body, contentType);
+    const result = targetHost.notices(route.action === "list" ? { action: "list" } : { action: route.action, id: route.id, overrides });
+    const status = result.ok ? (route.json || route.action === "list" ? 200 : 303) : 422;
+    const headers = [];
+    let responseBody = "";
+    if (status === 303) {
+      const target = returnTo && returnTo.startsWith("/") && !returnTo.startsWith("//") ? returnTo : "/";
+      headers.push(["Location", target]);
+    } else {
+      headers.push(["Content-Type", "application/json; charset=utf-8"]);
+      responseBody = JSON.stringify(result);
+    }
+    return { status, headers, body: responseBody, exit: 0, errors: [], noticeResult: result };
+  }
+
   function announceFill() {
     if (!fillState) return;
     const msg = {
@@ -327,6 +415,7 @@ export function createWorkerRuntime({
       const needsBootstrap = plan.bootstrap && !host.syncState().bootstrapped;
       if (push || snapshot) report({ kind: "sync-pass", path: `${applied.pending} pending` });
       currentCursor = plan.bootstrap ? null : applied.cursor;
+      const syncNotices = applied.notices?.length ? host.notices({ action: "list" }).notices : null;
       if (bootstrapFill) {
         fillState = fresh(bootstrapFill);
         put(FILL, fillState);
@@ -341,8 +430,9 @@ export function createWorkerRuntime({
       } else {
         drainDelayMs = DRAIN_RETRY_BASE_MS;
       }
-      return applied;
+      return { ...applied, syncNotices };
     });
+    if (result.syncNotices) emitSyncNotices(result.syncNotices);
     if (!initial && result.notified) emitRecordsChanged(result.changes);
     return result;
   }
@@ -374,12 +464,14 @@ export function createWorkerRuntime({
           currentCursor = null;
           kickSync(0);
         }
+        const syncNotices = consumed.notices?.length ? host.notices({ action: "list" }).notices : null;
         if (consumed.applied > 0 || consumed.notified) {
           localRevision++;
           save();
-          return { applied: consumed.applied, changes: consumed.changes };
+          return { applied: consumed.applied, changes: consumed.changes, syncNotices };
         }
       });
+      if (changed?.syncNotices) emitSyncNotices(changed.syncNotices);
       if (changed) {
         if (branches.isActive()) {
           emitBranchState(branches.noteMainDelta(changed.applied || 1));
@@ -513,7 +605,13 @@ export function createWorkerRuntime({
 
   function localRequest(method, path, options, targetHost = host) {
     const started = now();
-    const result = targetHost.request(method, path, options);
+    const noticeRoute = matchSyncNoticeRoute(method, path, options?.body, options?.contentType);
+    const result = noticeRoute
+      ? handleSyncNoticeHttp(noticeRoute, options?.body, options?.contentType, targetHost)
+      : targetHost.request(method, path, options);
+    if (result.noticeResult && Array.isArray(result.noticeResult.notices)) {
+      emitSyncNotices(result.noticeResult.notices);
+    }
     report({ kind: "local", method, path, status: result.status, ms: Math.round(now() - started) });
     return result;
   }
@@ -923,6 +1021,9 @@ export function createWorkerRuntime({
     if (method === "sync") {
       return syncPass();
     }
+    if (method === "notices") {
+      return runNoticeAction(payload || { action: "list" });
+    }
     if (method === "serverRequest") {
       return handleServerRequest(payload);
     }
@@ -994,6 +1095,9 @@ export function createWorkerRuntime({
       const first = payload.path
         ? await runRequest("GET", target => navigate({ method: "GET", path: payload.path }, target), { tabId: coordinator.workerId })
         : null;
+      if (host && typeof host.notices === "function" && host.syncState().notices > 0) {
+        emitSyncNotices(host.notices({ action: "list" }).notices);
+      }
       return {
         compileMs: compiled - started,
         restored: bootInfo.restored,
@@ -1108,6 +1212,10 @@ export function createWorkerRuntime({
       }
       if (type === "save") return postMessage({ id, result: await coordinator.call("save", null, { idempotent: true }) });
       if (type === "sync") return postMessage({ id, result: await coordinator.call("sync", null, { idempotent: true }) });
+      if (type === "notices") {
+        const action = payload?.action || "list";
+        return postMessage({ id, result: await coordinator.call("notices", payload || { action: "list" }, { idempotent: action === "list" }) });
+      }
       if (type === "wipe") return postMessage({ id, result: await coordinator.call("wipe", null, { idempotent: true }) });
       if (type === "branch.create") return postMessage({ id, result: await coordinator.call("branch.create", payload, { idempotent: false }) });
       if (type === "branch.status") return postMessage({ id, result: await coordinator.call("branch.status", payload, { idempotent: true }) });

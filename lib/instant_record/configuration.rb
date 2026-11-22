@@ -64,12 +64,18 @@ module InstantRecord
     # bits, and two gigabytes do not fit in one.
     attr_accessor :max_file_size
 
+    # Maximum bytes accepted in a single sync_file upload chunk (and advertised
+    # to browser and native clients so requests stay below reverse-proxy body
+    # limits). Left alone it is InstantRecord::Files::DEFAULT_CHUNK_SIZE.
+    attr_accessor :file_chunk_size
+
     def initialize
       @endpoint = DEFAULT_MOUNT_PATH
       @mount_path = nil
       @sync_interval = 3
       @file_store = nil
       @max_file_size = nil
+      @file_chunk_size = nil
       @authenticate_request = nil
       @headers = nil
       @sync_scope = nil
