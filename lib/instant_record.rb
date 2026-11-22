@@ -177,6 +177,18 @@ module InstantRecord
     def pending_count = Client.pending_count
     def cursor = Client.cursor
 
+    # Copy-on-write local SQLite staging branch. Forks the live local SQLite
+    # workspace into an isolated offline copy for safe bulk edits and visual UI
+    # preview, then either approves (extracting & replaying queued outbox
+    # mutations onto current `main`) or discards with zero server impact.
+    def branch!(name: nil, directory: nil, &block)
+      Branch.open(name: name, directory: directory, &block)
+    end
+
+    def current_branch = Branch.current
+    def branched? = Branch.active?
+    def branch_name = Branch.current_name
+
     # On-demand history page for a windowed model (see Client.fetch_history).
     # Shares the tick's single-flight guard both ways: a fetch during a sync
     # pass returns :busy for the caller to retry, and a tick arriving while a
@@ -344,4 +356,6 @@ ActiveSupport.on_load(:active_record) do
   require "instant_record/outbox_mutation"
   require "instant_record/sync_metadata"
   require "instant_record/client"
+  require "instant_record/branch"
+  require "instant_record/branch/sqlite_store"
 end
