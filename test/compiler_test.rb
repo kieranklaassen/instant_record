@@ -300,8 +300,7 @@ class CompilerTest < ActiveSupport::TestCase
       FileUtils.mkdir_p(File.join(app, "app/screens"))
 
       File.write(File.join(emit, "main.rb"), "require_relative \"boot\"\nif ARGV.length > 0 && ARGV[0] == \"sidekiq\"\nend\n")
-      File.write(File.join(emit, "app/models/instant_record/client/transport.rb"), "File.write(REQUEST, body)\nFile.read(RESPONSE)\n")
-      File.write(File.join(emit, "app/models/instant_record/client/notifier.rb"), "File.write(\"/host/notify\", body)\n")
+      File.write(File.join(emit, "app/models/instant_record/host.rb"), InstantRecord::Compiler::HostAdapters::Wasm.host_source)
 
       plan = { "version" => 1, "baseline" => nil, "migrations" => {} }
       windows = {

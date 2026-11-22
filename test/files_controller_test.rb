@@ -27,6 +27,21 @@ class FilesControllerTest < Minitest::Test
   PIECE = 4
 
   def setup
+    unless ActiveRecord::Base.connection.table_exists?(:clips)
+      ActiveRecord::Migration.suppress_messages do
+        ActiveRecord::Schema.define do
+          create_table :clips, id: :string, force: true do |t|
+            t.string :title
+            t.string :owner
+            t.string :content_type
+            t.integer :byte_size
+            t.integer :server_version, null: false, default: 0
+            t.string :sync_state, null: false, default: "synced"
+            t.timestamps
+          end
+        end
+      end
+    end
     reset_instant_record_tables!
     ActiveRecord::Base.connection.execute("DELETE FROM clips")
     @root = Dir.mktmpdir("instant-record-files")
@@ -55,7 +70,7 @@ class FilesControllerTest < Minitest::Test
     InstantRecord.sync
     InstantRecord.config.file_store = @previous_store
     InstantRecord.config.scope_from = @previous_scope
-    FileUtils.remove_entry(@root)
+    FileUtils.remove_entry(@root) if @root && File.exist?(@root)
   end
 
   Reply = Struct.new(:status, :headers, :body) do
