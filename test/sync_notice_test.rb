@@ -155,7 +155,7 @@ class SyncNoticeTest < Minitest::Test
   def test_changes_notice_carries_sync_notice_lines_and_clears_after_notify
     events = []
     sub = ActiveSupport::Notifications.subscribe("notice.instant_record") { |*, payload| events << payload }
-    note = in_browser { @model.create!(title: "reject me") }
+    in_browser { @model.create!(title: "reject me") }
     mutation_id = InstantRecord::OutboxMutation.sole.id
 
     in_browser do
