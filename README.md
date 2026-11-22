@@ -335,7 +335,7 @@ const { url, status, progress } = useFile(files, "Recording", recording.id)
 ```
 
 - **Local first.** `attach` returns when the file is on this device. It is there after a reload and with no connection, and `files.get` reads it without asking the server anything.
-- **Sent in the background.** The file goes to the server in 4 MB pieces, oldest first, one tab at a time. An upload that is cut off goes on from the piece it stopped at, after a reload too. A file whose record has not reached the server yet waits for it: the server answers 404 until the record's create has synced.
+- **Sent in the background.** The file goes to the server in configurable pieces (512 KB by default, safely below common 1–2 MB reverse-proxy ceilings, and automatically capped to whatever `chunk_size` the server advertises), oldest first, one tab at a time. An upload that is cut off goes on from the piece it stopped at, after a reload too. A file whose record has not reached the server yet waits for it: the server answers 404 until the record's create has synced.
 - **Fetched when asked for.** On another device `open` fetches the file a piece at a time and keeps it, and a fetch that is cut off keeps its pieces. A file the server does not hold (its upload has not finished where it was made) is `FileMissing`.
 - **The record's rules are the file's.** Whoever may be sent the record (`sync_scope`, `syncable_to`) may read its bytes, and whoever may write it (`writable_by`) may send them. Anyone else is answered as for a file that does not exist. A model with no rule shares its files as it shares its rows.
 - **A destroyed record takes its file** from the server. In a browser, `files.prune("Recording", ids)` drops the files of records that are gone, given the ids that are left, and `files.clear()` drops everything, for a sign-out. `fileStore({ name: userId })` keeps the files of two accounts in one browser apart.
@@ -349,12 +349,15 @@ const { url, status, progress } = useFile(files, "Recording", recording.id)
 InstantRecord.configure do |config|
   config.file_store = InstantRecord::FileStore.new("/var/lib/my_app/files")   # or anything that answers what it does
   config.max_file_size = 1024 * 1024 * 1024                                   # for models that name no max_size (two gigabytes when left alone)
+  config.file_chunk_size = 512 * 1024                                         # max bytes per upload piece (512 KB when left alone)
 end
 ```
 
-`GET <mount>/files/:type/:id` is the file (with `Range`), `GET .../upload` says where an upload stands, and `PUT` takes one piece. A file is served as a download that may run nothing, whatever type its record claims. `bin/rails instant_record:files:sweep` removes uploads that were given up.
+`GET <mount>/files/:type/:id` is the file (with `Range` and `X-Instant-Record-Chunk-Size`), `GET .../upload` says where an upload stands (and advertises `chunk_size`), and `PUT` takes one piece. A file is served as a download that may run nothing, whatever type its record claims. `bin/rails instant_record:files:sweep` removes uploads that were given up.
 
-Limits, as built: one file to a record; no checksum, so a file is trusted to be what its size and its pieces' order say; a browser must be able to write its private file system from a page (`createWritable`, which Chromium and Firefox have and Safari names from 26), and without it `open` reads from the server and keeps nothing; a file that waits for a record that never arrives is asked about once a minute while the page is open, until it is pruned; the Ruby client and the native build have no file store. What has run: headless Chromium against a Rails server, in `test/browser/files.mjs` (`node test/browser/files.mjs --big` adds a 200 MB file), and once beside a compiled build of the demo with a file on a todo. No other browser has, and no deployed server: a proxy in front of one must let a 4 MB request body through.
+On Native iOS, `InstantRecordNative` provides a matching disk-backed chunked `FileStore` actor with resumable uploads/downloads, server `chunk_size` negotiation, and LRU cache eviction.
+
+Limits, as built: one file to a record; no checksum, so a file is trusted to be what its size and its pieces' order say; a browser must be able to write its private file system from a page (`createWritable`, which Chromium and Firefox have and Safari names from 26), and without it `open` reads from the server and keeps nothing; a file that waits for a record that never arrives is asked about once a minute while the page is open, until it is pruned; the Ruby `InstantRecord::Client` has no file store. What has run: headless Chromium against a Rails server, in `test/browser/files.mjs` (`node test/browser/files.mjs --big` adds a 200 MB file), once beside a compiled build of the demo with a file on a todo, and `swift test` in `native/ios/InstantRecordNative`.
 
 ## Compile a Rails app for the browser
 
