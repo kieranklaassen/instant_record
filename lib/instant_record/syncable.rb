@@ -10,6 +10,7 @@ module InstantRecord
 
     included do
       extend InstantRecord::RuntimeScoped
+      extend InstantRecord::SyncActions::ClassMethods
 
       before_create :assign_instant_record_uuid
 
@@ -17,19 +18,86 @@ module InstantRecord
       # both runtimes and tests can stub the runtime without re-including.
       # after_create/update/destroy run INSIDE the wrapping transaction
       # (unlike after_commit), which is what gives us write+outbox atomicity.
-      before_save   { self.sync_state = "pending" if instant_record_local_write? }
-      after_create  { record_outbox_mutation("create") if instant_record_local_write? }
-      after_update  { record_outbox_mutation("update") if instant_record_local_write? }
-      after_destroy { record_outbox_mutation("destroy") if instant_record_local_write? }
+      before_save do
+        if instant_record_local_write?
+          if persisted? && InstantRecord::SyncActions.recording_client_mutator?
+            InstantRecord::SyncActions.client_frame.capture_before(self, "update")
+          end
+          self.sync_state = "pending"
+        end
+      end
+      before_destroy do
+        if instant_record_local_write? && InstantRecord::SyncActions.recording_client_mutator?
+          InstantRecord::SyncActions.client_frame.capture_before(self, "destroy")
+        end
+      end
+      after_create do
+        if instant_record_local_write?
+          if InstantRecord::SyncActions.recording_client_mutator?
+            InstantRecord::SyncActions.client_frame.record_create(self)
+          else
+            record_outbox_mutation("create")
+          end
+        end
+      end
+      after_update  { record_outbox_mutation("update") if instant_record_local_write? && !InstantRecord::SyncActions.recording_client_mutator? }
+      after_destroy { record_outbox_mutation("destroy") if instant_record_local_write? && !InstantRecord::SyncActions.recording_client_mutator? }
 
       # Server-originated writes (jobs, console, seeds) are change-logged so
-      # they stream to clients like any other change. Client mutations are
-      # excluded — MutationApplier versions and logs those itself.
-      before_create { self.server_version = 1 if instant_record_server_write? }
-      before_update { self.server_version += 1 if instant_record_server_write? }
-      after_create  { record_server_change("create") if instant_record_server_write? }
-      after_update  { record_server_change("update") if instant_record_server_write? }
-      after_destroy { record_server_change("destroy") if instant_record_server_write? }
+      # they stream to clients like any other change. Client row mutations are
+      # excluded — MutationApplier versions and logs those itself. Server-replayed
+      # sync_actions enforce SyncScope, bump versions, and log changes through
+      # InstantRecord::SyncActions server hooks (no-ops in compiled builds).
+      before_create do
+        if instant_record_server_mutator_write?
+          InstantRecord::SyncActions.server_authorize_create!(self)
+          self.server_version = 1
+          self.sync_state = "synced"
+        elsif instant_record_server_write?
+          self.server_version = 1
+        end
+      end
+      before_update do
+        if instant_record_server_mutator_write?
+          InstantRecord::SyncActions.server_authorize_update_before!(self)
+          self.server_version += 1
+          self.sync_state = "synced"
+        elsif instant_record_server_write?
+          self.server_version += 1
+        end
+      end
+      before_destroy do
+        if instant_record_server_mutator_write?
+          InstantRecord::SyncActions.server_authorize_destroy!(self)
+        end
+      end
+      after_create do
+        if instant_record_server_mutator_write?
+          InstantRecord::SyncActions.server_finalize_create!(self)
+        elsif instant_record_server_write?
+          record_server_change("create")
+        end
+      end
+      after_update do
+        if instant_record_server_mutator_write?
+          InstantRecord::SyncActions.server_finalize_update!(self)
+        elsif instant_record_server_write?
+          record_server_change("update")
+        end
+      end
+      after_destroy do
+        if instant_record_server_mutator_write?
+          InstantRecord::SyncActions.server_finalize_destroy!(self)
+        elsif instant_record_server_write?
+          record_server_change("destroy")
+        end
+      end
+
+      server_only do
+        after_find do
+          InstantRecord::SyncActions.server_note_read(self) if instant_record_server_mutator_write?
+        end
+      end
     end
 
     class_methods do
@@ -118,8 +186,15 @@ module InstantRecord
       !InstantRecord.browser? && !InstantRecord.applying_client_mutation?
     end
 
+    def instant_record_server_mutator_write?
+      !InstantRecord.browser? && InstantRecord::SyncActions.enforcing_server_mutator?
+    end
+
     def assign_instant_record_uuid
-      self.id ||= SecureRandom.uuid
+      return unless id.nil? || id == ""
+
+      frame = InstantRecord::SyncActions.active_frame
+      self.id = frame ? frame.next_uuid : SecureRandom.uuid
     end
 
     def record_outbox_mutation(operation)
