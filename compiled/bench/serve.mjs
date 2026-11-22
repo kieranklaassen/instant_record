@@ -19,8 +19,10 @@ function compress(body, encoding) {
     : gzipSync(body, { level: 9 });
 }
 
-// Pre-warm non-wasm static assets once at startup (matching build-time .br/.gz in compiled/deploy/Dockerfile)
+// Pre-warm non-wasm static assets once (matching build-time .br/.gz in compiled/deploy/Dockerfile)
 // so the first browser request is never charged server-side brotli-11 compression CPU.
+// Run lazily on the harness's initial .wasm pre-warm request instead of blocking listen().
+let prewarmed = null;
 async function prewarm(dir) {
   let entries;
   try { entries = await readdir(dir, { withFileTypes: true }); } catch { return; }
@@ -35,7 +37,9 @@ async function prewarm(dir) {
     packed.set(`br:${full}:${body.length}:${info.mtimeMs}`, compress(body, "br"));
   }
 }
-await prewarm(dist);
+function ensurePrewarmed() {
+  return (prewarmed ||= prewarm(dist));
+}
 
 function acceptsEncoding(header, name) {
   if (!header) return false;
@@ -83,6 +87,7 @@ createServer(async (request, response) => {
   }
   const body = await readFile(file);
   const ext = extname(file);
+  if (ext === ".wasm") await ensurePrewarmed();
   const type = TYPES[ext] || "application/octet-stream";
   const headers = { "content-type": type, "cache-control": /(?:index\.html|instant-record-release\.json)$/.test(file) ? "no-cache" : "public, max-age=31536000, immutable" };
   const shown = file.slice(dist.length);
