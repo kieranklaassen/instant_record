@@ -24,6 +24,9 @@ const { chromium } = find("playwright-core")
 const PORT = Number(process.env.FILES_APP_PORT || 3220)
 const ORIGIN = `http://127.0.0.1:${PORT}`
 const MB = 1024 * 1024
+const PIECE = 512 * 1024
+const offsets = (bytes, start = 0) => Array.from({ length: Math.ceil((bytes - start) / PIECE) }, (_, i) => start + i * PIECE)
+const byteRanges = (bytes, start = 0) => offsets(bytes, start).map((from) => `bytes=${from}-${Math.min(from + PIECE, bytes) - 1}`)
 const root = mkdtempSync(join(tmpdir(), "instant-record-files-app-"))
 const kept = (id) => join(root, "storage/instant_record/clip", id)
 const sha = (bytes) => createHash("sha256").update(bytes).digest("hex")
@@ -158,7 +161,7 @@ try {
   await step("once the record is there the file goes up in pieces, byte for byte", async () => {
     assert.equal(await record(a.page, "one", 10 * MB), "applied")
     assert.deepEqual(await sync(a.page), { sent: 1, waiting: 0 })
-    assert.deepEqual(puts(a.net), [0, 4 * MB, 8 * MB])
+    assert.deepEqual(puts(a.net), offsets(10 * MB))
     assert.equal(sha(readFileSync(kept("one"))), digests.one)
     assert.equal((await stat(a.page, "one")).uploaded, true)
   })
@@ -178,7 +181,7 @@ try {
     a.net.cut = null
     a.net.asked.length = 0
     assert.deepEqual(await sync(a.page), { sent: 1, waiting: 0 })
-    assert.deepEqual(puts(a.net), [8 * MB, 12 * MB, 16 * MB])
+    assert.deepEqual(puts(a.net), offsets(20 * MB, 2 * PIECE))
     assert.equal(sha(readFileSync(kept("two"))), digests.two)
   })
 
@@ -186,8 +189,8 @@ try {
   await step("another device fetches the file a piece at a time, and keeps it", async () => {
     assert.equal(await stat(b.page, "two"), null)
     assert.equal(await digestOf(b.page, "two", "open"), digests.two)
-    assert.equal(ranges(b.net).length, 5)
-    assert.equal(ranges(b.net)[0], `bytes=0-${4 * MB - 1}`)
+    assert.equal(ranges(b.net).length, (20 * MB) / PIECE)
+    assert.equal(ranges(b.net)[0], `bytes=0-${PIECE - 1}`)
   })
 
   await step("with no connection at all it is read from that device", async () => {
@@ -211,7 +214,7 @@ try {
     await c.page.reload()
     await c.page.waitForFunction(() => window.ready)
     assert.equal(await digestOf(c.page, "two", "open"), digests.two)
-    assert.deepEqual(ranges(c.net), [`bytes=${8 * MB}-${12 * MB - 1}`, `bytes=${12 * MB}-${16 * MB - 1}`, `bytes=${16 * MB}-${20 * MB - 1}`])
+    assert.deepEqual(ranges(c.net), byteRanges(20 * MB, 2 * PIECE))
   })
 
   await step("an audio element and a decoder take a file kept in pieces", async () => {
@@ -300,7 +303,7 @@ try {
     await Promise.all([sync(a.page), sync(second)])
     await uploaded(a.page, "three")
     await uploaded(second, "three")
-    assert.deepEqual(puts(a.net).sort((x, y) => x - y), [0, 4 * MB, 8 * MB, 12 * MB])
+    assert.deepEqual(puts(a.net).sort((x, y) => x - y), offsets(15 * MB))
     assert.equal(sha(readFileSync(kept("three"))), digests.three)
     await second.close()
   })
