@@ -188,18 +188,27 @@ class SchemaLockTest < ActiveSupport::TestCase
     end
   end
 
-  test "demo db/instant_record_lock.json passes full upgrade-ladder verification" do
+  test "demo migrations generate and pass full upgrade-ladder lockfile verification" do
     demo_root = File.join(GEM_ROOT, "demo")
     migration_paths = [
       File.join(GEM_ROOT, "db/migrate"),
       File.join(demo_root, "db/migrate")
     ]
-    report = InstantRecord::Compiler.verify_schema(
-      root: demo_root,
-      migration_paths: migration_paths
-    )
-    assert report.ok?, report.to_s
-    assert_operator report.replayed_versions.size, :>=, 15
+    Dir.mktmpdir do |dir|
+      lock_path = File.join(dir, "instant_record_lock.json")
+      InstantRecord::Compiler::SchemaLock.write!(
+        root: demo_root,
+        migration_paths: migration_paths,
+        lock_path: lock_path
+      )
+      report = InstantRecord::Compiler::SchemaLock.verify(
+        root: demo_root,
+        migration_paths: migration_paths,
+        lock_path: lock_path
+      )
+      assert report.ok?, report.to_s
+      assert_operator report.replayed_versions.size, :>=, 15
+    end
   end
 
   private
