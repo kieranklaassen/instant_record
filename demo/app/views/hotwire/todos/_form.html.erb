@@ -1,0 +1,4 @@
+<%= form_with url: hotwire_todos_path, class: "four-form", id: "new_todo" do |f| %>
+  <%= f.text_field "todo[title]", placeholder: "Add a todo and press Enter", aria: { label: "New todo" }, required: true, autofocus: true %>
+  <%= f.submit "Add" %>
+<% end %>

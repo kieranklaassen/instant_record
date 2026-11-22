@@ -1,0 +1,2 @@
+<%= turbo_stream.prepend "todos", partial: "todo", locals: { todo: @todo } %>
+<%= turbo_stream.replace "new_todo", partial: "form" %>
