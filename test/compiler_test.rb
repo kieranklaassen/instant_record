@@ -493,8 +493,7 @@ class CompilerTest < ActiveSupport::TestCase
           puts "sidekiq"
         end
       RUBY
-      File.write(File.join(emit, "app/models/instant_record/client/transport.rb"), "File.write(REQUEST, body)\nFile.read(RESPONSE)\n")
-      File.write(File.join(emit, "app/models/instant_record/client/notifier.rb"), "File.write(\"/host/notify\", message)\n")
+      File.write(File.join(emit, "app/models/instant_record/host.rb"), InstantRecord::Compiler::HostAdapters::Wasm.host_source)
 
       File.write(File.join(app, "app/models/issue.rb"), <<~RUBY)
         class Issue < ApplicationRecord
