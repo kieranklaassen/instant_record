@@ -22,6 +22,7 @@ module InstantRecord
         lib/instant_record/client.rb
         lib/instant_record/client/transport.rb
         lib/instant_record/client/notifier.rb
+        lib/instant_record/branch.rb
         lib/instant_record/native/node.rb
         lib/instant_record/native/screen.rb
       ].freeze
@@ -135,6 +136,7 @@ module InstantRecord
         edit_all!("lib/instant_record.rb", {
           "def browser? = false" => "def browser? = true",
           "require \"instant_record/engine\" if defined?(Rails::Engine)\n" => "",
+          "  require \"instant_record/branch/sqlite_store\"\n" => "",
           "      klass = record_type.to_s.safe_constantize\n      klass if klass.respond_to?(:instant_record_syncable?) && klass.instant_record_syncable?\n" => "      nil\n",
           "    def mutate(mutator_name, args = nil, mutation_id: nil, **kwargs)\n      merged = args ? (kwargs.empty? ? args : args.merge(kwargs)) : kwargs\n      SyncActions.mutate(mutator_name, merged, mutation_id: mutation_id)\n    end\n" => "    def mutate(mutator_name, args = {}, mutation_id: nil)\n      SyncActions.mutate(mutator_name, args, mutation_id: mutation_id)\n    end\n",
           "\nActiveSupport.on_load(:active_job) do\n  require \"instant_record/sync_actions\"\n  InstantRecord::SyncActions.install_active_job_guard!\nend\n" => "\n"
