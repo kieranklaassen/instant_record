@@ -15,6 +15,13 @@ module InstantRecord
     # More changes than this in one notice are not listed one by one.
     MAX_LISTED_CHANGES = 200
 
+    # Individual attribute values larger than this are omitted from delta attrs
+    # (their column stays in changed_columns so UI patchers know to reload).
+    MAX_ATTR_BYTES = 4096
+
+    # Cap total serialized notice size so a huge batch degrades to a wildcard.
+    MAX_NOTICE_BYTES = 65_536
+
     # Cap next_release_ms to 24 hours so it always fits safely inside a signed
     # 32-bit integer on wasm32 Spinel builds.
     MAX_RELEASE_DELAY_MS = 86_400_000
@@ -90,12 +97,19 @@ module InstantRecord
         evicted || drained || pulled
       end
 
-      # Which records changed since the page was last told, as "Type:id"
-      # lines after the notice itself, followed by any quarantined sync notices
-      # as "sync_notice:<json>" lines. The notice alone means anything may have.
+      # Which records changed since the page was last told: "records_changed"
+      # followed by one compact JSON delta per line:
+      #   {"type":"MailEntry","id":"a-1","op":"update","changed_columns":[...],"attrs":{...}}
+      # plus any quarantined sync notices as "sync_notice:<json>" lines. The
+      # notice alone means anything may have changed (bootstrap, eviction,
+      # reset, or a batch past the listing or byte budget).
       def changes_notice
         lines = ["records_changed"]
-        lines.concat(changed_records) unless @unlisted_changes || changed_records.empty?
+        unless @unlisted_changes || changed_records.empty?
+          delta_lines = changed_records.map { |delta| JSON.generate(delta) }
+          delta_payload = "records_changed\n" + delta_lines.join("\n")
+          lines.concat(delta_lines) if delta_payload.bytesize <= MAX_NOTICE_BYTES
+        end
         recorded_notices.each { |notice| lines << "sync_notice:#{JSON.generate(notice)}" }
         lines.join("\n")
       end
@@ -112,17 +126,88 @@ module InstantRecord
         @unlisted_changes = true
       end
 
-      def note_change(type, id)
-        if changed_records.size >= MAX_LISTED_CHANGES
+      def capturing_changes?
+        !!@capturing_changes
+      end
+
+      # Capture local Syncable writes during a request or native action and
+      # flush them to the notifier when the block completes normally.
+      def capture_local_changes
+        nested = @capturing_changes
+        @capturing_changes = true
+        unless nested
+          changed_records.clear
+          changed_index.clear
+          @unlisted_changes = false
+        end
+        result = yield
+        if !nested && (@unlisted_changes || !changed_records.empty?)
+          notify_changed
+        end
+        result
+      rescue StandardError
+        unless nested
+          changed_records.clear
+          changed_index.clear
+          @unlisted_changes = false
+        end
+        raise
+      ensure
+        @capturing_changes = nested
+      end
+
+      def note_change(type, id, op: "update", changed_columns: [], attrs: {})
+        return if @unlisted_changes
+
+        changed_index.clear if changed_records.empty?
+        key = "#{type}\0#{id}"
+        delta = {
+          "type" => type.to_s,
+          "id" => id.to_s,
+          "op" => op.to_s,
+          "changed_columns" => Array(changed_columns).map(&:to_s).uniq,
+          "attrs" => compact_attrs(attrs)
+        }
+
+        if (existing_idx = changed_index[key])
+          changed_records[existing_idx] = merge_delta(changed_records[existing_idx], delta)
+        elsif changed_records.size >= MAX_LISTED_CHANGES
           unlisted_changes
         else
-          changed_records << "#{type}:#{id}"
+          changed_index[key] = changed_records.size
+          changed_records << delta
+        end
+      end
+
+      def note_record_change(record, op, changed_columns: nil)
+        return if @unlisted_changes
+
+        model = record.class
+        raw = record.attributes
+        op_s = op.to_s
+        case op_s
+        when "create"
+          cols = raw.keys.map(&:to_s)
+          note_change(model.name, record.id, op: "create", changed_columns: cols, attrs: compact_attrs(raw))
+        when "update"
+          cols = Array(changed_columns).map(&:to_s).uniq
+          selected = {}
+          cols.each { |col| selected[col] = raw[col] if raw.key?(col) }
+          context_columns_for(model, raw).each { |col| selected[col] = raw[col] if raw.key?(col) }
+          note_change(model.name, record.id, op: "update", changed_columns: cols, attrs: compact_attrs(selected))
+        when "destroy"
+          selected = {}
+          context_columns_for(model, raw).each { |col| selected[col] = raw[col] if raw.key?(col) }
+          note_change(model.name, record.id, op: "destroy", changed_columns: [], attrs: compact_attrs(selected))
+        else
+          note_change(model.name, record.id, op: op_s)
         end
       end
 
       def notify_changed
         notifier.records_changed
         changed_records.clear
+        changed_index.clear
         recorded_notices.clear
         @unlisted_changes = false
       end
@@ -412,8 +497,10 @@ module InstantRecord
         reset_stream
         history_marks.clear
         changed_records.clear
+        changed_index.clear
         recorded_notices.clear
         @unlisted_changes = false
+        @capturing_changes = false
         @eviction_pending = false
         @planned_drain_ids = nil
         nil
@@ -624,15 +711,18 @@ module InstantRecord
       # for legacy events) and note it for the next records_changed notice.
       # Returns whether it actually changed anything here — see upsert_from_server.
       def apply_change(event)
-        event = event.deep_stringify_keys
-        applied = apply_record(event)
-        note_change(event["type"], event["id"]) if applied
-        applied
+        apply_remote_event(event, record_delta: true)
       end
 
       # Apply one remote record payload without noting it for records_changed
       # (used by bootstrap and history pages, which handle notification separately).
       def apply_record(event)
+        apply_remote_event(event, record_delta: false)
+      end
+
+      private
+
+      def apply_remote_event(event, record_delta:)
         event = event.deep_stringify_keys
         model = InstantRecord.synced_model(event["type"])
         return false unless model
@@ -641,14 +731,84 @@ module InstantRecord
           if event["operation"] == "destroy"
             HLC.receive(event["hlc"]) if HLC.valid?(event["hlc"])
             HLC.delete_row_hlc(event["type"], event["id"])
-            !!model.find_by(id: event["id"])&.destroy!
+            record = model.find_by(id: event["id"])
+            return false unless record
+
+            destroy_attrs = record_delta ? destroy_context_attrs(model, record) : nil
+            record.destroy!
+            note_change(event["type"], event["id"], op: "destroy", changed_columns: [], attrs: destroy_attrs) if record_delta
+            true
           else
-            upsert_from_server(model, event["attributes"], event["version"], hlc: event["hlc"])
+            upsert_from_server(model, event["attributes"], event["version"], hlc: event["hlc"], record_delta: record_delta)
           end
         end
       end
 
-      private
+      def changed_index
+        @changed_index ||= {}
+      end
+
+      def merge_delta(prev, incoming)
+        prev_op = prev["op"]
+        next_op = incoming["op"]
+        if next_op == "destroy"
+          {
+            "type" => incoming["type"],
+            "id" => incoming["id"],
+            "op" => "destroy",
+            "changed_columns" => [],
+            "attrs" => incoming["attrs"]
+          }
+        elsif prev_op == "destroy" && next_op == "create"
+          incoming
+        else
+          merged_op = prev_op == "create" ? "create" : next_op
+          {
+            "type" => incoming["type"],
+            "id" => incoming["id"],
+            "op" => merged_op,
+            "changed_columns" => (prev["changed_columns"] + incoming["changed_columns"]).uniq,
+            "attrs" => prev["attrs"].merge(incoming["attrs"])
+          }
+        end
+      end
+
+      def compact_attrs(attrs)
+        return {} unless attrs.is_a?(Hash)
+
+        out = {}
+        attrs.each do |key, value|
+          encoded = wire_value(value)
+          next if encoded.is_a?(String) && encoded.bytesize > MAX_ATTR_BYTES
+
+          out[key.to_s] = encoded
+        end
+        out
+      end
+
+      def wire_value(value)
+        value.respond_to?(:usec) ? value.iso8601(InstantRecord::TIME_PRECISION) : value
+      end
+
+      def context_columns_for(model, raw)
+        cols = ["id"]
+        window = model.respond_to?(:instant_record_sync_window) ? model.instant_record_sync_window : nil
+        cols << window.partition_by.to_s if window && window.partition_by
+        scope_col = model.respond_to?(:instant_record_sync_scope) ? model.instant_record_sync_scope : nil
+        cols << scope_col.to_s if scope_col
+        raw.each_key do |key|
+          name = key.to_s
+          cols << name if name.end_with?("_id")
+        end
+        cols.uniq
+      end
+
+      def destroy_context_attrs(model, record)
+        raw = record.attributes
+        selected = {}
+        context_columns_for(model, raw).each { |col| selected[col] = raw[col] if raw.key?(col) }
+        compact_attrs(selected)
+      end
 
       # Where the parser drops finished events, drained by consume_stream.
       def stream_events
@@ -824,14 +984,19 @@ module InstantRecord
           seen["#{rec["type"]}:#{rec["id"]}"] = true
           moved =
             if rec["operation"] == "destroy"
-              !!model.find_by(id: rec["id"])&.destroy!
+              record = model.find_by(id: rec["id"])
+              if record
+                destroy_attrs = destroy_context_attrs(model, record)
+                record.destroy!
+                note_change(rec["type"], rec["id"], op: "destroy", changed_columns: [], attrs: destroy_attrs)
+                true
+              else
+                false
+              end
             else
               upsert_from_server(model, rec["attributes"], rec["version"], authoritative: true)
             end
-          if moved
-            note_change(rec["type"], rec["id"])
-            changed = true
-          end
+          changed = true if moved
         end
 
         mutation.touched_records.each do |entry|
@@ -854,7 +1019,6 @@ module InstantRecord
           next unless model && rec["attributes"].present?
 
           if upsert_from_server(model, rec["attributes"], rec["version"], authoritative: true)
-            note_change(rec["type"], rec["id"])
             changed = true
           end
           reconciled["#{rec["type"]}:#{rec["id"]}"] = true
@@ -869,16 +1033,21 @@ module InstantRecord
 
           moved =
             if entry["op"] == "create"
-              !!model.find_by(id: entry["id"])&.destroy!
+              record = model.find_by(id: entry["id"])
+              if record
+                destroy_attrs = destroy_context_attrs(model, record)
+                record.destroy!
+                note_change(entry["type"], entry["id"], op: "destroy", changed_columns: [], attrs: destroy_attrs)
+                true
+              else
+                false
+              end
             elsif entry["before"].is_a?(Hash)
               restore_local_snapshot(model, entry["before"])
             else
               false
             end
-          if moved
-            note_change(entry["type"], entry["id"])
-            changed = true
-          end
+          changed = true if moved
         end
         changed
       end
@@ -889,10 +1058,14 @@ module InstantRecord
 
         record = model.find_or_initialize_by(id: sliced["id"])
         record.assign_attributes(sliced.except("id"))
+        was_new = !record.persisted?
+        changed_cols = record.changed.map(&:to_s)
         record.save!(validate: false)
         if sliced["updated_at"]
           record.update_columns(updated_at: Time.parse(sliced["updated_at"].to_s))
+          changed_cols << "updated_at" unless changed_cols.include?("updated_at")
         end
+        note_record_change(record, was_new ? "create" : "update", changed_columns: changed_cols)
         true
       end
 
@@ -901,9 +1074,14 @@ module InstantRecord
 
         # The server never accepted this record (rejected create): remove it.
         HLC.delete_row_hlc(mutation.record_type, mutation.record_id)
-        destroyed = !!InstantRecord.synced_model(mutation.record_type)&.find_by(id: mutation.record_id)&.destroy!
-        note_change(mutation.record_type, mutation.record_id) if destroyed
-        destroyed
+        model = InstantRecord.synced_model(mutation.record_type)
+        record = model&.find_by(id: mutation.record_id)
+        return false unless record
+
+        destroy_attrs = destroy_context_attrs(model, record)
+        record.destroy!
+        note_change(mutation.record_type, mutation.record_id, op: "destroy", changed_columns: [], attrs: destroy_attrs)
+        true
       end
 
       # Roll the local record onto the server's own copy of the row, when the
@@ -916,9 +1094,7 @@ module InstantRecord
         model = InstantRecord.synced_model(mutation.record_type)
         return false unless model && result["server_attributes"].present?
 
-        changed = upsert_from_server(model, result["server_attributes"], result["version"], hlc: result["hlc"], authoritative: true)
-        note_change(mutation.record_type, mutation.record_id) if changed
-        changed
+        upsert_from_server(model, result["server_attributes"], result["version"], hlc: result["hlc"], authoritative: true, record_delta: true)
       end
 
       # Returns whether the row actually moved. Every accepted write comes back
@@ -936,7 +1112,7 @@ module InstantRecord
       #
       # `authoritative` skips the comparison entirely for reconciling rejections,
       # skipped writes, and 3-way merged rows from the server.
-      def upsert_from_server(model, attributes, version, hlc: nil, authoritative: false)
+      def upsert_from_server(model, attributes, version, hlc: nil, authoritative: false, record_delta: true)
         return false unless attributes
 
         HLC.receive(hlc) if HLC.valid?(hlc)
@@ -973,7 +1149,9 @@ module InstantRecord
         HLC.set_row_hlc(model.name, record.id, incoming_hlc, force: authoritative) if incoming_hlc
         return false unless record.changed?
 
-        data_changed = !record.persisted? || (record.changed - BOOKKEEPING_COLUMNS).any?
+        was_new = !record.persisted?
+        changed_cols = record.changed.map(&:to_s)
+        data_changed = was_new || (changed_cols - BOOKKEEPING_COLUMNS).any?
         quarantined = nil
         if inbound_conflict && data_changed
           OutboxMutation.transaction do
@@ -989,9 +1167,11 @@ module InstantRecord
             )
             record.save!(validate: false)
           end
+          note_record_change(record, was_new ? "create" : "update", changed_columns: changed_cols) if record_delta
           announce_notice(quarantined) if quarantined
         elsif data_changed
           record.save!(validate: false)
+          note_record_change(record, was_new ? "create" : "update", changed_columns: changed_cols) if record_delta
         else
           record.update_columns(sync_state: record.sync_state, server_version: record.server_version)
         end

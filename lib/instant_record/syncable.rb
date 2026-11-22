@@ -280,6 +280,11 @@ module InstantRecord
         InstantRecord::HLC.set_row_hlc(self.class.name, id, hlc, force: true)
       end
       @last_outbox_mutation_id = mutation.id
+
+      if InstantRecord::Client.capturing_changes?
+        changed_cols = operation == "update" ? saved_changes.keys : nil
+        InstantRecord::Client.note_record_change(self, operation, changed_columns: changed_cols)
+      end
     end
 
     def consume_hold_for
