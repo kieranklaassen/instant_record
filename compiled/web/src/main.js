@@ -1,8 +1,10 @@
 import { mountBranchPreview } from "./branch-preview.js";
 import { affectsReads, mergeReads } from "./changes.js";
 import { mailboxScope } from "./mailbox-scope.js";
+import { isLocalRoute, parseManifest } from "./manifest.js";
 import { watchRelease } from "./release-updates.js";
 import { isLocalUrl } from "./server-request.js";
+const manifest = parseManifest(import.meta.env.VITE_MANIFEST);
 let releaseRequired;
 const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
 const waiting = new Map();
@@ -68,7 +70,7 @@ const branchApi = {
   discard: () => call("branch.discard"),
 };
 window.__spinel = { marks, call, worker, history: historyFill, reads: null, notices: syncNotices, sourceVersion: import.meta.env.VITE_SOURCE_VERSION,
-  endpoint: syncEndpoint, scope: syncScope(), branch: branchApi, branchState: { active: false } };
+  endpoint: syncEndpoint, scope: syncScope(), manifest, branch: branchApi, branchState: { active: false } };
 
 // Restore the switches before even the first bootstrap can reach Rails.
 try {
@@ -79,9 +81,9 @@ try {
   });
 } catch { /* Storage may be unavailable. */ }
 
-// Static assets, service worker, release manifest, and same-origin sync/file
-// endpoints go straight to the network rather than the in-worker Wasm app.
-const isLocal = (url) => isLocalUrl(url, location.origin, syncEndpoint);
+// Static assets, service worker, release/island manifests, same-origin sync/file
+// endpoints, and non-island routes go straight to the network rather than Wasm.
+const isLocal = (url, method = null) => isLocalUrl(url, location.origin, syncEndpoint) && isLocalRoute(manifest, url.pathname, method, syncEndpoint);
 
 // One page request; the worker follows the app's redirects and returns the final answer.
 const appRequest = (method, path, body, contentType) => call("navigate", { method, path, body, contentType });
@@ -159,7 +161,10 @@ window.fetch = async (input, init) => {
     const responseHeaders = response.contentType ? { "Content-Type": response.contentType } : {};
     return new Response(response.text || null, { status: response.status, headers: responseHeaders });
   }
-  if (!isLocal(url)) return networkFetch(input, init);
+  const requestMethod = isUrlInput
+    ? (init?.method || "GET").toUpperCase()
+    : (init?.method || input.method || "GET").toUpperCase();
+  if (!isLocal(url, requestMethod)) return networkFetch(input, init);
 
   const { method, body, contentType, redirect } = await parseFetchInput(input, init, { binary: true });
   const path = url.pathname + url.search;
@@ -269,7 +274,8 @@ document.close();
 document.addEventListener("turbo:before-morph-element", keepTyping);
 document.addEventListener("turbo:render", () => { redrawing = false; });
 document.addEventListener("turbo:before-visit", event => {
-  if (mailboxScope(event.detail.url) !== initialScope) {
+  const destination = new URL(event.detail.url, location.href);
+  if (mailboxScope(event.detail.url) !== initialScope || !isLocal(destination, "GET")) {
     event.preventDefault();
     location.assign(event.detail.url);
   }
@@ -287,7 +293,7 @@ async function submitLocalForm(event) {
   const target = button?.getAttribute("formtarget") || form.target;
   const url = new URL(button?.getAttribute("formaction") || form.action, location.href);
   const method = (button?.getAttribute("formmethod") || form.method).toUpperCase();
-  if (!isLocal(url) || url.searchParams.has("instant_record_network") || method !== "POST" || (target && target !== "_self")) return;
+  if (!isLocal(url, method) || url.searchParams.has("instant_record_network") || method !== "POST" || (target && target !== "_self")) return;
   event.preventDefault();
   const fields = new FormData(form, button || undefined);
   const file = [...fields.values()].find(value => value instanceof File && value.name);

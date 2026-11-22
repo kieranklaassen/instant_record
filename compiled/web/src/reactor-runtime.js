@@ -4,6 +4,7 @@
 import { BranchManager } from "./branch-manager.js";
 import { advance, fresh, held, query } from "./history-fill.js";
 import { mailboxScope } from "./mailbox-scope.js";
+import { isServerAllowed, parseManifest } from "./manifest.js";
 import { createLeaderCoordinator } from "./leader-election.js";
 import { resolveServerRequest, serverRoot } from "./server-request.js";
 import { openDatabaseStorage } from "./storage-backend.js";
@@ -50,6 +51,7 @@ export function createWorkerRuntime({
   scopeOf = path => mailboxScope(path, !!env.VITE_SHARED_INBOX_DEMO),
   now = () => performance.now(),
 } = {}) {
+  const manifest = parseManifest(env.VITE_MANIFEST);
   const publicEndpoint = env.VITE_SYNC_ENDPOINT || "/instant_record";
   const mountPath = env.VITE_MOUNT_PATH || "/instant_record";
   let syncEndpoint = publicEndpoint;
@@ -879,8 +881,12 @@ export function createWorkerRuntime({
 
   async function handleServerRequest(payload) {
     const targetPath = resolveServerRequest(payload.path, origin);
-    const root = serverRoot(publicEndpoint, mountPath);
     const method = (payload.method || "GET").toUpperCase();
+    const pathname = new URL(targetPath, origin).pathname;
+    if (manifest.mode === "island" && !isServerAllowed(manifest, method, pathname, publicEndpoint)) {
+      throw new Error(`Disallowed server action: ${method} ${pathname}`);
+    }
+    const root = serverRoot(publicEndpoint, mountPath);
     const body = typeof payload.body === "string" ? payload.body : "";
     return fetchReply(method, targetPath, body, root, payload.contentType ?? "");
   }

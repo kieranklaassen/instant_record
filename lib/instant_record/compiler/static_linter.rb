@@ -83,12 +83,12 @@ module InstantRecord
         end
       end
 
-      def self.lint(root, staged: false, server_only_constants: nil, exclude: [])
-        new(root: root, staged: staged, server_only_constants: server_only_constants, exclude: exclude).run
+      def self.lint(root, staged: false, server_only_constants: nil, exclude: [], only_files: nil)
+        new(root: root, staged: staged, server_only_constants: server_only_constants, exclude: exclude, only_files: only_files).run
       end
 
-      def self.check!(root, staged: true, server_only_constants: nil, exclude: [])
-        result = lint(root, staged: staged, server_only_constants: server_only_constants, exclude: exclude)
+      def self.check!(root, staged: true, server_only_constants: nil, exclude: [], only_files: nil)
+        result = lint(root, staged: staged, server_only_constants: server_only_constants, exclude: exclude, only_files: only_files)
         raise BuildError, result.to_s unless result.ok?
 
         result
@@ -96,17 +96,18 @@ module InstantRecord
 
       # Collects constants defined strictly inside `server_only` blocks across a
       # directory tree before AstLowerer strips those blocks.
-      def self.collect_server_only_constants(root, staged: true, exclude: [])
-        linter = new(root: root, staged: staged, exclude: exclude)
+      def self.collect_server_only_constants(root, staged: true, exclude: [], only_files: nil)
+        linter = new(root: root, staged: staged, exclude: exclude, only_files: only_files)
         files = linter.discover_files
         linter.scan_constant_definitions(files)
       end
 
-      def initialize(root:, staged: false, server_only_constants: nil, exclude: [])
+      def initialize(root:, staged: false, server_only_constants: nil, exclude: [], only_files: nil)
         @root = File.expand_path(root.to_s)
         @staged = staged
         @precollected_server_only = server_only_constants
         @exclude = Array(exclude).map { |entry| entry.to_s.sub(%r{\A/+}, "").sub(%r{/+\z}, "") }
+        @only_files = only_files ? Set.new(Array(only_files).map { |entry| entry.to_s.sub(%r{\A/+}, "") }) : nil
       end
 
       def run
@@ -142,6 +143,13 @@ module InstantRecord
       def discover_files
         root_path = Pathname(@root)
         return [] unless root_path.directory?
+
+        if @only_files
+          return @only_files.to_a.sort
+            .reject { |rel| excluded_custom?(rel) }
+            .map { |rel| File.join(@root, rel) }
+            .select { |path| File.file?(path) }
+        end
 
         if @staged
           candidates = Dir.glob("**/*.rb", base: @root).sort

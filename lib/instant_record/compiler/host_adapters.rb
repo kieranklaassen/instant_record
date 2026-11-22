@@ -362,10 +362,10 @@ module InstantRecord
 
         def version_inbox_bundle(app_dir)
           bundle = File.join(app_dir, "app/assets/builds/inbox.js")
-          return unless File.file?(bundle)
+          view = File.join(app_dir, "app/views/email/mailboxes/index.html.erb")
+          return unless File.file?(bundle) && File.file?(view)
 
           digest = Digest::SHA256.file(bundle).hexdigest[0, 10]
-          view = File.join(app_dir, "app/views/email/mailboxes/index.html.erb")
           source = File.read(view)
           target = '<%= asset_path("inbox.js") %>'
           replacement = "/assets/inbox.js?v=#{digest}"
@@ -378,13 +378,15 @@ module InstantRecord
 
         def adapt_demo_views(app_dir)
           layout_path = File.join(app_dir, "app/views/layouts/application.html.erb")
-          source = File.read(layout_path)
-          source = source.gsub('<span class="micro-label">Local-first Rails demos —', '<span class="micro-label"><a href="/">All demos</a> ·')
-          source = source.gsub('<%= source_path(page: controller_path, view: action_name) %>', "/source")
-          source = source.gsub("Read live out of app.wasm — not a snippet", "View the source for this build")
-          source = source.gsub('demo-<%= controller_path.split("/").first %>', "demo-<%= content_for(:demo_scope) %>")
-          source = source.gsub('<% demo = controller_path.split("/").first %>', "<% demo = content_for(:demo_scope).to_s %>")
-          File.write(layout_path, source)
+          if File.file?(layout_path)
+            source = File.read(layout_path)
+            source = source.gsub('<span class="micro-label">Local-first Rails demos —', '<span class="micro-label"><a href="/">All demos</a> ·')
+            source = source.gsub('<%= source_path(page: controller_path, view: action_name) %>', "/source")
+            source = source.gsub("Read live out of app.wasm — not a snippet", "View the source for this build")
+            source = source.gsub('demo-<%= controller_path.split("/").first %>', "demo-<%= content_for(:demo_scope) %>")
+            source = source.gsub('<% demo = controller_path.split("/").first %>', "<% demo = content_for(:demo_scope).to_s %>")
+            File.write(layout_path, source)
+          end
 
           views_dir = File.join(app_dir, "app/views")
           views_root = Pathname(views_dir)
