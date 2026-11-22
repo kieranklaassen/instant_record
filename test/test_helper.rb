@@ -73,6 +73,7 @@ module InstantRecordTestHelpers
     InstantRecord::SyncMetadata.delete_all
     InstantRecord::Change.delete_all
     InstantRecord::AppliedMutation.delete_all
+    InstantRecord::Client.forget_database
   end
 
   # Who is asking, as an app's `scope_from` would hand it to the gem. An id of
@@ -95,20 +96,27 @@ module InstantRecordTestHelpers
   # Rails constant when other tests have already required "rails".
   def with_rails_application(app)
     had_rails = Object.const_defined?(:Rails)
-    if had_rails
-      previous_app = Rails.application
+    Object.const_set(:Rails, Module.new) unless had_rails
+
+    had_setter = Rails.respond_to?(:application=)
+    had_getter = Rails.respond_to?(:application)
+    previous_app = had_getter ? Rails.application : nil
+
+    if had_setter
       Rails.application = app
     else
-      rails = Module.new
-      rails.define_singleton_method(:application) { app }
-      Object.const_set(:Rails, rails)
+      Rails.define_singleton_method(:application) { app }
     end
     yield
   ensure
-    if had_rails
+    if !had_rails
+      Object.send(:remove_const, :Rails) if Object.const_defined?(:Rails)
+    elsif had_setter
       Rails.application = previous_app
+    elsif had_getter
+      Rails.define_singleton_method(:application) { previous_app }
     else
-      Object.send(:remove_const, :Rails)
+      Rails.singleton_class.send(:remove_method, :application)
     end
   end
 end
