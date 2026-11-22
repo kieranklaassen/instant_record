@@ -38,9 +38,15 @@ int ir_open(const char *database_path);
      "sync_plan", "cursor", "history", "request"       as the browser host uses them */
 const char *ir_call(const char *entry, const char *input);
 
-/* What changed during the last call: empty, or "records_changed" and then
-   one "Type:id" line for each record when the app could list them. */
+/* What changed during the last call: empty, "records_changed" when anything
+   may have changed, or "records_changed" followed by one compact JSON delta
+   per line: {"type":...,"id":...,"op":...,"changed_columns":[...],"attrs":{...}}. */
 const char *ir_notice(void);
+
+/* Tables and partitions read during the last "render" or "request" call,
+   as compact JSON {"tables":[...],"models":[...],"partitions":{...}}, or
+   empty when nothing was tracked. */
+const char *ir_reads(void);
 
 const char *ir_error(void);
 

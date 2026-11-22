@@ -1,3 +1,4 @@
+import { affectsReads, mergeReads } from "./changes.js";
 import { mailboxScope } from "./mailbox-scope.js";
 import { watchRelease } from "./release-updates.js";
 let releaseRequired;
@@ -20,7 +21,10 @@ worker.onmessage = (event) => {
     return;
   }
   if (type === "records_changed") {
-    if (marks.rendered) recordsChanged(event.data.changes);
+    if (event.data.reads) {
+      if (window.__spinel) window.__spinel.reads = event.data.reads;
+    }
+    if (marks.rendered) recordsChanged(event.data.changes, event.data.reads);
     return;
   }
   const entry = waiting.get(id);
@@ -39,7 +43,7 @@ const marks = { start: performance.now() };
 // Where the sync server is and who this browser is to it, for a page that asks it for
 // something itself: the bytes of a record that declares sync_file (frontend/files.js).
 const syncEndpoint = import.meta.env.VITE_SYNC_ENDPOINT || "/instant_record";
-window.__spinel = { marks, call, worker, history: historyFill, sourceVersion: import.meta.env.VITE_SOURCE_VERSION,
+window.__spinel = { marks, call, worker, history: historyFill, reads: null, sourceVersion: import.meta.env.VITE_SOURCE_VERSION,
   endpoint: syncEndpoint, scope: syncScope() };
 
 // Restore the switches before even the first bootstrap can reach Rails.
@@ -138,6 +142,11 @@ window.fetch = async (input, init) => {
     return new Response(null, { status: ok ? 200 : result.status });
   }
   const { result, redirected, finalPath } = await appRequest(method, path, body, contentType);
+  if ((method === "GET" || redirected) && result.reads) {
+    const finalParams = new URL(finalPath, location.origin).searchParams;
+    const partial = finalParams.has("_only") || finalParams.has("fragment");
+    window.__spinel.reads = partial ? mergeReads(window.__spinel.reads, result.reads) : result.reads;
+  }
   const headers = result.headers.filter(([name]) => !/^(content-length|transfer-encoding)$/i.test(name));
   // The socket server adds this default when it writes a response; the reactor entry skips that
   // writer, and without it Turbo treats the page as a download and falls back to a full load.
@@ -152,14 +161,18 @@ window.fetch = async (input, init) => {
   return response;
 };
 
-// The gem's service worker posts records_changed to its clients; the demo's layout turns that
-// into this window event for pages that refresh in place, and reloads the rest.
-// `changes` lists the records that changed as { type, id }, or is null when
-// the sync pass could not list them: then anything may have changed.
-function recordsChanged(changes) {
+// The gem's worker posts records_changed to its clients; the demo's layout turns that
+// into this window event for pages that refresh in place, and reloads the rest when
+// the changed rows affect the tables/partitions this page read.
+// `changes` lists structured row deltas { type, id, op, changed_columns, attrs }, or
+// is null when the sync pass could not list them (wildcard).
+function recordsChanged(changes, reads) {
+  const effectiveReads = reads ?? window.__spinel?.reads ?? null;
   if (document.querySelector("[data-instant-refresh]")) {
-    window.dispatchEvent(new CustomEvent("instant-record:records-changed", { detail: { changes: changes || null } }));
-  } else {
+    window.dispatchEvent(new CustomEvent("instant-record:records-changed", {
+      detail: { changes: changes || null, reads: effectiveReads },
+    }));
+  } else if (affectsReads(changes, effectiveReads)) {
     window.location.reload(); // what the demo's layout does for pages without an in-place refresh
   }
 }
@@ -188,6 +201,7 @@ const boot = await call("boot", { module: await window.__wasm, path: location.pa
 marks.booted = performance.now();
 marks.compileMs = window.__wasmMs ?? boot.compileMs;
 const { result, finalPath } = boot.first;
+if (result.reads) window.__spinel.reads = result.reads;
 marks.firstResponse = performance.now();
 marks.firstRequestMs = result.ms;
 if (finalPath !== location.pathname + location.search) history.replaceState(null, "", finalPath);
@@ -232,6 +246,7 @@ async function submitLocalForm(event) {
   }
   if (response.redirected) location.assign(response.finalPath);
   else {
+    if (response.result.reads) window.__spinel.reads = response.result.reads;
     document.open();
     document.write(response.result.body);
     document.close();

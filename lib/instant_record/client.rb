@@ -15,6 +15,13 @@ module InstantRecord
     # More changes than this in one notice are not listed one by one.
     MAX_LISTED_CHANGES = 200
 
+    # Individual attribute values larger than this are omitted from delta attrs
+    # (their column stays in changed_columns so UI patchers know to reload).
+    MAX_ATTR_BYTES = 4096
+
+    # Cap total serialized notice size so a huge batch degrades to a wildcard.
+    MAX_NOTICE_BYTES = 65_536
+
     class << self
       # Applying remote state must never enqueue new outbox mutations.
       def applying_remote? = @applying_remote
@@ -42,22 +49,29 @@ module InstantRecord
       # that has never synced hydrates from the bootstrap snapshot instead of
       # replaying the whole change log from cursor 0.
       def sync_pass
-        changed = evict_beyond_windows
-        changed = drain || changed
-        # Evictions and acknowledged writes are not listed one by one, and
-        # neither is a bootstrap: the page is told that anything may have changed.
-        unlisted_changes if changed || !bootstrapped?
+        evicted = evict_beyond_windows
+        drained = drain
+        # Evictions and bootstrap are bulk operations: the page is told that
+        # anything may have changed. Bootstrapped outbox drains emit per-row
+        # deltas through apply_results.
+        unlisted_changes if evicted || !bootstrapped?
+        changed = evicted || drained
         changed = (bootstrapped? ? poll_changes : bootstrap) || changed
         notify_changed if changed
         changed
       end
 
-      # Which records changed since the page was last told, as "Type:id"
-      # lines after the notice itself. The notice alone means anything may have.
+      # Which records changed since the page was last told: "records_changed"
+      # followed by one compact JSON delta per line:
+      #   {"type":"MailEntry","id":"a-1","op":"update","changed_columns":[...],"attrs":{...}}
+      # The notice alone means anything may have changed (bootstrap, eviction,
+      # reset, or a batch past the listing or byte budget).
       def changes_notice
         return "records_changed" if @unlisted_changes || changed_records.empty?
 
-        "records_changed\n" + changed_records.join("\n")
+        lines = changed_records.map { |delta| JSON.generate(delta) }
+        notice = "records_changed\n" + lines.join("\n")
+        notice.bytesize > MAX_NOTICE_BYTES ? "records_changed" : notice
       end
 
       def changed_records
@@ -68,17 +82,88 @@ module InstantRecord
         @unlisted_changes = true
       end
 
-      def note_change(type, id)
-        if changed_records.size >= MAX_LISTED_CHANGES
+      def capturing_changes?
+        !!@capturing_changes
+      end
+
+      # Capture local Syncable writes during a request or native action and
+      # flush them to the notifier when the block completes normally.
+      def capture_local_changes
+        nested = @capturing_changes
+        @capturing_changes = true
+        unless nested
+          changed_records.clear
+          changed_index.clear
+          @unlisted_changes = false
+        end
+        result = yield
+        if !nested && (@unlisted_changes || !changed_records.empty?)
+          notify_changed
+        end
+        result
+      rescue StandardError
+        unless nested
+          changed_records.clear
+          changed_index.clear
+          @unlisted_changes = false
+        end
+        raise
+      ensure
+        @capturing_changes = nested
+      end
+
+      def note_change(type, id, op: "update", changed_columns: [], attrs: {})
+        return if @unlisted_changes
+
+        changed_index.clear if changed_records.empty?
+        key = "#{type}\0#{id}"
+        delta = {
+          "type" => type.to_s,
+          "id" => id.to_s,
+          "op" => op.to_s,
+          "changed_columns" => Array(changed_columns).map(&:to_s).uniq,
+          "attrs" => compact_attrs(attrs)
+        }
+
+        if (existing_idx = changed_index[key])
+          changed_records[existing_idx] = merge_delta(changed_records[existing_idx], delta)
+        elsif changed_records.size >= MAX_LISTED_CHANGES
           unlisted_changes
         else
-          changed_records << "#{type}:#{id}"
+          changed_index[key] = changed_records.size
+          changed_records << delta
+        end
+      end
+
+      def note_record_change(record, op, changed_columns: nil)
+        return if @unlisted_changes
+
+        model = record.class
+        raw = record.attributes
+        op_s = op.to_s
+        case op_s
+        when "create"
+          cols = raw.keys.map(&:to_s)
+          note_change(model.name, record.id, op: "create", changed_columns: cols, attrs: compact_attrs(raw))
+        when "update"
+          cols = Array(changed_columns).map(&:to_s).uniq
+          selected = {}
+          cols.each { |col| selected[col] = raw[col] if raw.key?(col) }
+          context_columns_for(model, raw).each { |col| selected[col] = raw[col] if raw.key?(col) }
+          note_change(model.name, record.id, op: "update", changed_columns: cols, attrs: compact_attrs(selected))
+        when "destroy"
+          selected = {}
+          context_columns_for(model, raw).each { |col| selected[col] = raw[col] if raw.key?(col) }
+          note_change(model.name, record.id, op: "destroy", changed_columns: [], attrs: compact_attrs(selected))
+        else
+          note_change(model.name, record.id, op: op_s)
         end
       end
 
       def notify_changed
         notifier.records_changed
         changed_records.clear
+        changed_index.clear
         @unlisted_changes = false
       end
 
@@ -181,7 +266,7 @@ module InstantRecord
         instrument("bootstrap") do |event|
           body = transport.get_json("/bootstrap")
           records = Array(body["records"])
-          records.each { |record| apply_change(record) }
+          records.each { |record| apply_change_silently(record) }
           event[:records] = records.size
 
           # Cursor written last: a crash mid-apply leaves it nil, so the next
@@ -259,7 +344,9 @@ module InstantRecord
         reset_stream
         history_marks.clear
         changed_records.clear
+        changed_index.clear
         @unlisted_changes = false
+        @capturing_changes = false
         @eviction_pending = false
         nil
       end
@@ -379,7 +466,7 @@ module InstantRecord
         instrument("fetch_history") do |event|
           body = transport.get_json(history_path(model, partition, before_at, before_id, limit))
           records = Array(body["records"])
-          records.each { |record| apply_change(record) }
+          records.each { |record| apply_change_silently(record) }
           extend_history_mark(model, partition, records, has_more: !!body["has_more"])
           event[:applied] = records.size
           event[:has_more] = !!body["has_more"]
@@ -431,22 +518,102 @@ module InstantRecord
       # Apply one remote change event (last-write-wins). Returns whether it
       # actually changed anything here — see upsert_from_server.
       def apply_change(event)
+        apply_remote_event(event, record_delta: true)
+      end
+
+      # Apply a remote record during bulk hydration (bootstrap or history
+      # backfill) without recording per-row live deltas.
+      def apply_change_silently(event)
+        apply_remote_event(event, record_delta: false)
+      end
+
+      private
+
+      def apply_remote_event(event, record_delta:)
         event = event.deep_stringify_keys
         model = InstantRecord.synced_model(event["type"])
         return false unless model
 
-        applied = applying_remote do
+        applying_remote do
           if event["operation"] == "destroy"
-            !!model.find_by(id: event["id"])&.destroy!
+            record = model.find_by(id: event["id"])
+            return false unless record
+
+            destroy_attrs = record_delta ? destroy_context_attrs(model, record) : nil
+            record.destroy!
+            note_change(event["type"], event["id"], op: "destroy", changed_columns: [], attrs: destroy_attrs) if record_delta
+            true
           else
-            upsert_from_server(model, event["attributes"], event["version"])
+            upsert_from_server(model, event["attributes"], event["version"], record_delta: record_delta)
           end
         end
-        note_change(event["type"], event["id"]) if applied
-        applied
       end
 
-      private
+      def changed_index
+        @changed_index ||= {}
+      end
+
+      def merge_delta(prev, incoming)
+        prev_op = prev["op"]
+        next_op = incoming["op"]
+        if next_op == "destroy"
+          {
+            "type" => incoming["type"],
+            "id" => incoming["id"],
+            "op" => "destroy",
+            "changed_columns" => [],
+            "attrs" => incoming["attrs"]
+          }
+        elsif prev_op == "destroy" && next_op == "create"
+          incoming
+        else
+          merged_op = prev_op == "create" ? "create" : next_op
+          {
+            "type" => incoming["type"],
+            "id" => incoming["id"],
+            "op" => merged_op,
+            "changed_columns" => (prev["changed_columns"] + incoming["changed_columns"]).uniq,
+            "attrs" => prev["attrs"].merge(incoming["attrs"])
+          }
+        end
+      end
+
+      def compact_attrs(attrs)
+        return {} unless attrs.is_a?(Hash)
+
+        out = {}
+        attrs.each do |key, value|
+          encoded = wire_value(value)
+          next if encoded.is_a?(String) && encoded.bytesize > MAX_ATTR_BYTES
+
+          out[key.to_s] = encoded
+        end
+        out
+      end
+
+      def wire_value(value)
+        value.respond_to?(:usec) ? value.iso8601(InstantRecord::TIME_PRECISION) : value
+      end
+
+      def context_columns_for(model, raw)
+        cols = ["id"]
+        window = model.respond_to?(:instant_record_sync_window) ? model.instant_record_sync_window : nil
+        cols << window.partition_by.to_s if window && window.partition_by
+        scope_col = model.respond_to?(:instant_record_sync_scope) ? model.instant_record_sync_scope : nil
+        cols << scope_col.to_s if scope_col
+        raw.each_key do |key|
+          name = key.to_s
+          cols << name if name.end_with?("_id")
+        end
+        cols.uniq
+      end
+
+      def destroy_context_attrs(model, record)
+        raw = record.attributes
+        selected = {}
+        context_columns_for(model, raw).each { |col| selected[col] = raw[col] if raw.key?(col) }
+        compact_attrs(selected)
+      end
 
       # Where the parser drops finished events, drained by consume_stream.
       def stream_events
@@ -512,14 +679,25 @@ module InstantRecord
         record = model&.find_by(id: mutation.record_id)
         return unless record
 
-        record.update_columns(sync_state: "synced", server_version: version || record.server_version)
+        next_version = version || record.server_version
+        changed_cols = []
+        changed_cols << "sync_state" if record.sync_state != "synced"
+        changed_cols << "server_version" if record.server_version != next_version
+        record.update_columns(sync_state: "synced", server_version: next_version)
+        note_record_change(record, "update", changed_columns: changed_cols) unless changed_cols.empty?
       end
 
       def reconcile_rejection(mutation, result)
         return if reconcile_to_server_state(mutation, result)
 
         # The server never accepted this record (rejected create): remove it.
-        InstantRecord.synced_model(mutation.record_type)&.find_by(id: mutation.record_id)&.destroy!
+        model = InstantRecord.synced_model(mutation.record_type)
+        record = model&.find_by(id: mutation.record_id)
+        return unless record
+
+        destroy_attrs = destroy_context_attrs(model, record)
+        record.destroy!
+        note_change(mutation.record_type, mutation.record_id, op: "destroy", changed_columns: [], attrs: destroy_attrs)
       end
 
       # Roll the local record onto the server's own copy of the row, when the
@@ -567,7 +745,7 @@ module InstantRecord
       # destroyed, and the record would keep the value the server just refused
       # and sit at `pending` forever. Nothing was discarded remotely in that
       # case, so the discard seam does not fire either.
-      def upsert_from_server(model, attributes, version, authoritative: false)
+      def upsert_from_server(model, attributes, version, authoritative: false, record_delta: true)
         return false unless attributes
 
         # Schema skew must not raise here either: a client behind the server is
@@ -594,7 +772,10 @@ module InstantRecord
         record.sync_state = "synced"
         return false unless record.changed?
 
+        was_new = record.new_record?
+        changed_cols = record.changed.map(&:to_s)
         record.save!(validate: false)
+        note_record_change(record, was_new ? "create" : "update", changed_columns: changed_cols) if record_delta
         true
       end
 

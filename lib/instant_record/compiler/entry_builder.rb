@@ -32,13 +32,19 @@ module InstantRecord
           def self.handle_request
             req = Tep::Parser.parse(<<read:in>>)
             res = Tep::Response.new
-            Tep::APP.dispatch(req, res)
+            reads = InstantRecord::ReadTracker.track do
+              InstantRecord::Client.capture_local_changes do
+                Tep::APP.dispatch(req, res)
+              end
+            end
             out = +""
             out << res.status.to_s << "\n"
             res.headers.each { |name, value| out << name.to_s << ": " << value.to_s << "\n" }
             res.header_fields.each { |pair| out << pair[0].to_s << ": " << pair[1].to_s << "\n" }
             res.set_cookies.each { |cookie| out << "Set-Cookie: " << cookie.to_s << "\n" }
             out << "X-File-Path: " << res.file_path << "\n" if res.file_path.length > 0
+            reads_json = InstantRecord::ReadTracker.serialize(reads)
+            out << "X-Instant-Record-Reads: " << reads_json << "\n" unless reads_json.empty?
             out << "\n" << res.body
             <<write:out>>out)
             0
@@ -81,7 +87,7 @@ module InstantRecord
               records = Array(page["records"])
               more = page["has_more"] == true
               InstantRecord::OutboxMutation.transaction do
-                records.each { |record| InstantRecord::Client.apply_change(record) }
+                records.each { |record| InstantRecord::Client.apply_change_silently(record) }
                 InstantRecord::SyncMetadata.set(key, more ? "more" : "end")
               end
               result = { ok: true, applied: records.size, has_more: more }
@@ -135,7 +141,12 @@ module InstantRecord
           def self.render
             input = JSON.parse(NativeHost.ir_host_take("in"))
             screen = NativeScreens.find(input["screen"].to_s, InstantRecord::Native::Screen.strings(input["params"]))
-            NativeHost.ir_host_give("out", screen.json)
+            rendered = ""
+            reads = InstantRecord::ReadTracker.track do
+              rendered = screen.json
+            end
+            NativeHost.ir_host_give("reads", InstantRecord::ReadTracker.serialize(reads))
+            NativeHost.ir_host_give("out", rendered)
             0
           end
 
@@ -144,7 +155,9 @@ module InstantRecord
           def self.action
             input = JSON.parse(NativeHost.ir_host_take("in"))
             screen = NativeScreens.find(input["screen"].to_s, InstantRecord::Native::Screen.strings(input["params"]))
-            screen.perform(input["action"].to_s, InstantRecord::Native::Screen.strings(input["args"]), InstantRecord::Native::Screen.strings(input["values"]))
+            InstantRecord::Client.capture_local_changes do
+              screen.perform(input["action"].to_s, InstantRecord::Native::Screen.strings(input["args"]), InstantRecord::Native::Screen.strings(input["values"]))
+            end
             0
           end
 

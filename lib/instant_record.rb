@@ -31,6 +31,7 @@ require "active_support/isolated_execution_state"
 require "instant_record/version"
 require "instant_record/configuration"
 require "instant_record/runtime_scoped"
+require "instant_record/read_tracker"
 require "instant_record/native"
 require "instant_record/engine" if defined?(Rails::Engine)
 

@@ -132,6 +132,11 @@ module InstantRecord
         changes_payload: changes_payload,
         base_version: self[:server_version] || 0
       )
+
+      if InstantRecord::Client.capturing_changes?
+        changed_cols = operation == "update" ? saved_changes.keys : nil
+        InstantRecord::Client.note_record_change(self, operation, changed_columns: changed_cols)
+      end
     end
 
     # Mirrors MutationApplier's log_change/log_destroy payload shapes.

@@ -273,13 +273,31 @@ class SyncLoopTest < Minitest::Test
     assert_equal 41, InstantRecord.cursor
   end
 
+  def parse_notice(notice)
+    lines = notice.split("\n")
+    return [lines.first, nil] if lines.size <= 1
+
+    [lines.first, lines[1..].map { |line| JSON.parse(line) }]
+  end
+
   def test_a_stream_batch_tells_the_page_which_records_changed
     in_browser do
       InstantRecord::Client.consume_stream(sse_frame(71, "n-1") + sse_frame(72, "n-2"))
       InstantRecord::Client.consume_stream(sse_frame(73, "n-3"))
     end
 
-    assert_equal ["records_changed\nMemo:n-1\nMemo:n-2", "records_changed\nMemo:n-3"], @notifier.notices
+    assert_equal 2, @notifier.notices.size
+    header1, deltas1 = parse_notice(@notifier.notices[0])
+    header2, deltas2 = parse_notice(@notifier.notices[1])
+    assert_equal "records_changed", header1
+    assert_equal "records_changed", header2
+    assert_equal %w[n-1 n-2], deltas1.map { |d| d["id"] }
+    assert_equal %w[Memo Memo], deltas1.map { |d| d["type"] }
+    assert_equal %w[create create], deltas1.map { |d| d["op"] }
+    assert_includes deltas1.first["changed_columns"], "title"
+    assert_equal "n-1", deltas1.first.dig("attrs", "title")
+    assert_equal ["n-3"], deltas2.map { |d| d["id"] }
+    assert_equal "create", deltas2.first["op"]
   end
 
   def test_a_pass_that_drained_the_outbox_does_not_list_its_changes
@@ -299,7 +317,138 @@ class SyncLoopTest < Minitest::Test
       InstantRecord::Client.consume_stream(sse_frame(900, "after"))
     end
 
-    assert_equal ["records_changed", "records_changed\nMemo:after"], @notifier.notices
+    assert_equal "records_changed", @notifier.notices.first
+    header, deltas = parse_notice(@notifier.notices.last)
+    assert_equal "records_changed", header
+    assert_equal 1, deltas.size
+    assert_equal({ "type" => "Memo", "id" => "after", "op" => "create" }, deltas.first.slice("type", "id", "op"))
+  end
+
+  def test_update_and_destroy_deltas_carry_changed_columns_and_context_attrs
+    in_browser do
+      InstantRecord::Client.apply_events([
+        { "type" => "Memo", "id" => "u-1", "operation" => "create", "version" => 1, "cursor" => 1,
+          "attributes" => { "id" => "u-1", "title" => "v1", "owner" => "maya", "updated_at" => Time.current.iso8601(6) } }
+      ])
+      InstantRecord::Client.apply_events([
+        { "type" => "Memo", "id" => "u-1", "operation" => "update", "version" => 2, "cursor" => 2,
+          "attributes" => { "id" => "u-1", "title" => "v2", "owner" => "maya", "updated_at" => (Time.current + 10).iso8601(6) } }
+      ])
+      InstantRecord::Client.apply_events([
+        { "type" => "Memo", "id" => "u-1", "operation" => "destroy", "version" => 3, "cursor" => 3, "attributes" => {} }
+      ])
+    end
+
+    _h1, create_deltas = parse_notice(@notifier.notices[0])
+    _h2, update_deltas = parse_notice(@notifier.notices[1])
+    _h3, destroy_deltas = parse_notice(@notifier.notices[2])
+
+    assert_equal "create", create_deltas.sole["op"]
+    assert_equal "v1", create_deltas.sole.dig("attrs", "title")
+
+    update_delta = update_deltas.sole
+    assert_equal "update", update_delta["op"]
+    assert_includes update_delta["changed_columns"], "title"
+    refute_includes update_delta["changed_columns"], "owner"
+    assert_equal "v2", update_delta.dig("attrs", "title")
+    assert_equal "u-1", update_delta.dig("attrs", "id")
+
+    destroy_delta = destroy_deltas.sole
+    assert_equal "destroy", destroy_delta["op"]
+    assert_equal [], destroy_delta["changed_columns"]
+    assert_equal "u-1", destroy_delta.dig("attrs", "id")
+  end
+
+  def test_batch_coalesces_repeated_changes_to_the_same_record
+    now = Time.current
+    in_browser do
+      InstantRecord::Client.apply_events([
+        { "type" => "Memo", "id" => "c-1", "operation" => "create", "version" => 1, "cursor" => 10,
+          "attributes" => { "id" => "c-1", "title" => "first", "state" => "open", "updated_at" => now.iso8601(6) } },
+        { "type" => "Memo", "id" => "c-1", "operation" => "update", "version" => 2, "cursor" => 11,
+          "attributes" => { "id" => "c-1", "title" => "second", "state" => "open", "updated_at" => (now + 5).iso8601(6) } }
+      ])
+    end
+
+    _h, deltas = parse_notice(@notifier.notices.sole)
+    assert_equal 1, deltas.size
+    assert_equal "create", deltas.sole["op"]
+    assert_equal "second", deltas.sole.dig("attrs", "title")
+  end
+
+  def test_oversized_attr_is_omitted_from_attrs_while_staying_in_changed_columns
+    big = "x" * (InstantRecord::Client::MAX_ATTR_BYTES + 100)
+    in_browser do
+      InstantRecord::Client.apply_events([
+        { "type" => "Memo", "id" => "big-1", "operation" => "create", "version" => 1, "cursor" => 20,
+          "attributes" => { "id" => "big-1", "title" => big, "state" => "ok", "updated_at" => Time.current.iso8601(6) } }
+      ])
+    end
+
+    _h, deltas = parse_notice(@notifier.notices.sole)
+    delta = deltas.sole
+    assert_includes delta["changed_columns"], "title"
+    refute delta["attrs"].key?("title"), "values above MAX_ATTR_BYTES must be omitted from compact delta attrs"
+    assert_equal "ok", delta.dig("attrs", "state")
+  end
+
+  def test_capture_local_changes_emits_typed_deltas_for_local_writes
+    in_browser do
+      memo = nil
+      InstantRecord::Client.capture_local_changes do
+        memo = @model.create!(id: "loc-1", title: "draft", state: "open")
+        memo.update!(title: "published")
+      end
+      InstantRecord::Client.capture_local_changes do
+        memo.destroy!
+      end
+    end
+
+    assert_equal 2, @notifier.notices.size
+    _h1, d1 = parse_notice(@notifier.notices[0])
+    assert_equal "create", d1.sole["op"]
+    assert_equal "published", d1.sole.dig("attrs", "title")
+
+    _h2, d2 = parse_notice(@notifier.notices[1])
+    assert_equal "destroy", d2.sole["op"]
+    assert_equal "loc-1", d2.sole["id"]
+  end
+
+  def test_bootstrapped_drain_emits_typed_deltas_for_applied_and_rejected_results
+    InstantRecord::Client.cursor = 5
+    in_browser do
+      kept = @model.create!(id: "kept-1", title: "kept")
+      doomed = @model.create!(id: "doomed-1", title: "rejected")
+      m_kept = InstantRecord::OutboxMutation.find_by!(record_id: kept.id)
+      m_doomed = InstantRecord::OutboxMutation.find_by!(record_id: doomed.id)
+      @transport.respond_with([
+        { "mutation_id" => m_kept.id, "status" => "applied", "version" => 3 },
+        { "mutation_id" => m_doomed.id, "status" => "rejected", "reason" => "forbidden" }
+      ])
+
+      InstantRecord.start
+      InstantRecord.tick
+    end
+
+    _h, deltas = parse_notice(@notifier.notices.sole)
+    by_id = deltas.index_by { |d| d["id"] }
+    assert_equal "update", by_id["kept-1"]["op"]
+    assert_includes by_id["kept-1"]["changed_columns"], "sync_state"
+    assert_equal "synced", by_id["kept-1"].dig("attrs", "sync_state")
+    assert_equal "destroy", by_id["doomed-1"]["op"]
+  end
+
+  def test_notice_exceeding_byte_budget_degrades_to_wildcard
+    payload = "a" * 2000
+    in_browser do
+      events = 40.times.map do |i|
+        { "type" => "Memo", "id" => "b-#{i}", "operation" => "create", "version" => 1, "cursor" => 100 + i,
+          "attributes" => { "id" => "b-#{i}", "title" => payload, "updated_at" => Time.current.iso8601(6) } }
+      end
+      InstantRecord::Client.apply_events(events)
+    end
+
+    assert_equal ["records_changed"], @notifier.notices
   end
 
   def test_reopening_the_stream_discards_a_half_received_frame

@@ -172,7 +172,8 @@ class CompilerTest < ActiveSupport::TestCase
       assert_includes File.read(File.join(app, "app/models/slack/seeds.rb")), "Browser build: the seeding routines"
 
       count = InstantRecord::Compiler::GemVendor.vendor(gem_src: GEM_ROOT, app_dir: app, demo: true)
-      assert_equal 14, count
+      assert_equal 15, count
+      assert File.file?(File.join(app, "lib/instant_record/read_tracker.rb"))
       assert_includes File.read(File.join(app, "lib/instant_record.rb")), "def browser? = true"
       refute File.exist?(File.join(app, "lib/instant_record/syncable.rb"))
       assert File.file?(File.join(app, "app/models/concerns/syncable.rb"))
@@ -279,6 +280,9 @@ class CompilerTest < ActiveSupport::TestCase
       wasm_main = File.read(File.join(emit, "main_wasm.rb"))
       assert_includes wasm_main, "module WasmBridge"
       assert_includes wasm_main, 'File.read("/host/in")'
+      assert_includes wasm_main, "InstantRecord::ReadTracker.track"
+      assert_includes wasm_main, "InstantRecord::Client.capture_local_changes"
+      assert_includes wasm_main, "X-Instant-Record-Reads: "
       assert_includes wasm_main, 'if previous < "00000020261120000001"'
       assert_includes wasm_main, '\#{x}\#@y\#$z'
       assert_includes wasm_main, "InstantRecord.sync(Note)"
@@ -296,6 +300,7 @@ class CompilerTest < ActiveSupport::TestCase
       native_main = File.read(File.join(emit, "main_native.rb"))
       assert_includes native_main, "module NativeBridge"
       assert_includes native_main, 'when "inbox_list" then InboxListScreen.new(params)'
+      assert_includes native_main, 'NativeHost.ir_host_give("reads", InstantRecord::ReadTracker.serialize(reads))'
       assert_includes native_main, 'InstantRecord::SyncMetadata.set("schema_version", "00000020261120000001")'
       assert_includes native_main, "InstantRecord::Client.streaming = false"
 
@@ -320,6 +325,7 @@ class CompilerTest < ActiveSupport::TestCase
       File.write(File.join(emit, "runtime/pool.rb"), "require \"timeout\"\nThread.current\nFiber.yield\n")
       File.write(File.join(emit, "runtime/message_digest.rb"), "require \"openssl\"\nmodule MD\n  def self.aes_256_gcm_encrypt; end\nend\n")
       File.write(File.join(emit, "runtime/db.rb"), "sqlite3_bind_int64\nsqlite3_last_insert_rowid\n")
+      File.write(File.join(emit, "runtime/sqlite_adapter.rb"), "module SqliteAdapter\n  def self.each_row(sql)\n  end\nend\n")
       File.write(File.join(emit, "runtime/active_record/base.rb"), "module ActiveRecord\n  class Base\n    def has_changes_to_save?\n    end\n  end\nend\n")
       File.write(File.join(emit, "runtime/action_text.rb"), "line1\nline2\n")
       File.write(File.join(emit, "app/models/note.rb"), <<~RUBY)
@@ -348,6 +354,7 @@ class CompilerTest < ActiveSupport::TestCase
       assert_includes pool, "WasmThread.current"
       assert_includes pool, "WasmFiber.yield"
       assert_includes File.read(File.join(tree, "runtime/db.rb")), "rh_sqlite3_bind_int64"
+      assert_includes File.read(File.join(tree, "runtime/sqlite_adapter.rb")), "InstantRecord::ReadTracker.record_sql(sql)"
       assert_includes File.read(File.join(tree, "runtime/message_digest.rb")), "NotImplementedError"
       assert_includes File.read(File.join(tree, "runtime/active_record/base.rb")), "def changed"
       assert_includes File.read(File.join(tree, "app/models/note.rb")), "ActiveSupport.cast_datetime(value)"

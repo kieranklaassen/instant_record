@@ -2,6 +2,7 @@
 // retry-only outbox draining, and non-blocking async change polling (window=0, so the
 // worker never blocks on network I/O during user clicks and Puma threads are never held).
 import { AppHost } from "./app-host.js";
+import { decodeBroadcast, encodeBroadcast, mergeReads } from "./changes.js";
 import { advance, fresh, held, query } from "./history-fill.js";
 import { mailboxScope } from "./mailbox-scope.js";
 import { openSnapshot, withFiles } from "./snapshot-store.js";
@@ -85,6 +86,7 @@ let snapshotRevision;
 let changes;
 
 let host = null;
+let activeReads = null;
 let currentCursor = null;
 // Read with the cursor, and sent with each poll so the server can say when the
 // person behind this browser has changed.
@@ -98,6 +100,7 @@ let drainDelayMs = DRAIN_RETRY_BASE_MS;
 // Keep each tab's hot reactor until a peer changes the durable revision.
 async function withSnapshot(mode, operation) {
   let wrote = false;
+  let wroteChanges = null;
   try {
     const result = await withFiles(mode, async (get, put) => {
       const revision = await get(REVISION);
@@ -117,16 +120,17 @@ async function withSnapshot(mode, operation) {
         localRevision++;
         currentCursor = null;
       }
-      return operation(() => {
+      return operation((deltaChanges = null) => {
         const bytes = host.databaseBytes();
         if (!bytes) throw new Error("SQLite did not produce a database snapshot");
         snapshotRevision = (revision ?? 0) + 1;
         put(DATABASE, bytes);
         put(REVISION, snapshotRevision);
         wrote = true;
+        wroteChanges = Array.isArray(deltaChanges) ? deltaChanges : null;
       }, put);
     });
-    if (wrote) changes.postMessage(snapshotRevision);
+    if (wrote) changes.postMessage(encodeBroadcast(snapshotRevision, wroteChanges));
     return result;
   } catch (error) {
     // Discard uncommitted in-memory changes before the next operation.
@@ -185,7 +189,7 @@ async function drain(initial = false, early = null) {
     // After a bootstrap the next poll reads the cursor and the identity afresh.
     currentCursor = plan.bootstrap ? null : result.cursor;
     if (result.changed || result.notified) {
-      save();
+      save(result.notified ? result.changes : null);
     }
 
     if (result.pending > 0 || needsBootstrap) {
@@ -196,7 +200,9 @@ async function drain(initial = false, early = null) {
     }
     return result;
   });
-  if (!initial && result.notified) self.postMessage({ type: "records_changed", changes: result.changes });
+  if (!initial && result.notified) {
+    self.postMessage({ type: "records_changed", changes: result.changes, reads: activeReads });
+  }
   return result;
 }
 
@@ -233,11 +239,13 @@ async function pollChanges() {
         kickSync(0);
       }
       if (consumed.applied > 0 || consumed.notified) {
-        save();
+        save(consumed.changes);
         return { changes: consumed.changes };
       }
     });
-    if (changed) self.postMessage({ type: "records_changed", changes: changed.changes });
+    if (changed) {
+      self.postMessage({ type: "records_changed", changes: changed.changes, reads: activeReads });
+    }
   } catch {
     // offline: try again on the next interval
   } finally {
@@ -353,7 +361,8 @@ function runRequest(method, render) {
     const result = render();
     if (writing) {
       localRevision++;
-      save();
+      const deltaChanges = result?.notified ? result.changes : null;
+      save(deltaChanges);
       drainDelayMs = DRAIN_RETRY_BASE_MS;
       kickSync();
     }
@@ -361,9 +370,17 @@ function runRequest(method, render) {
   });
 }
 
+function recordReads(method, path, result) {
+  if (method !== "GET" || result.status < 200 || result.status >= 300 || !result.reads) return;
+  const params = new URL(path, self.location.origin).searchParams;
+  const partial = params.has("_only") || params.has("fragment");
+  activeReads = partial ? mergeReads(activeReads, result.reads) : result.reads;
+}
+
 function localRequest(method, path, options) {
   const started = performance.now();
   const result = host.request(method, path, options);
+  recordReads(method, path, result);
   report({ kind: "local", method, path, status: result.status, ms: Math.round(performance.now() - started) });
   return result;
 }
@@ -371,6 +388,8 @@ function localRequest(method, path, options) {
 function navigate({ method, path, body, contentType }) {
   const started = performance.now();
   let result = localRequest(method, path, { body: body ?? "", contentType: contentType || "application/x-www-form-urlencoded" });
+  const notified = result.notified;
+  const writeChanges = result.changes;
   let redirected = false;
   let finalPath = path;
   for (let hops = 0; hops < 5 && result.status >= 300 && result.status < 400; hops++) {
@@ -381,7 +400,7 @@ function navigate({ method, path, body, contentType }) {
     redirected = true;
     result = localRequest("GET", finalPath);
   }
-  return { result: { ...result, ms: performance.now() - started }, redirected, finalPath };
+  return { result: { ...result, ms: performance.now() - started }, redirected, finalPath, notified, changes: writeChanges };
 }
 
 // A browser with no database of its own asks for the inbox's shell. Anything short of a whole
@@ -424,7 +443,11 @@ async function boot(payload = {}) {
   syncScope = typeof payload.scope === "string" ? payload.scope : "";
   openSnapshot(scope);
   changes = new BroadcastChannel("instant-record-spinel-changes" + (scope ? "/" + scope : ""));
-  changes.onmessage = () => { if (host) self.postMessage({ type: "records_changed" }); };
+  changes.onmessage = (event) => {
+    if (!host) return;
+    const { changes: peerChanges } = decodeBroadcast(event?.data);
+    self.postMessage({ type: "records_changed", changes: peerChanges, reads: activeReads });
+  };
   if (scope) syncEndpoint = publicEndpoint.replace(/\/instant_record\/?$/, "") + "/email/sync/" + scope;
   const started = performance.now();
   // The shell downloads while the module compiles.

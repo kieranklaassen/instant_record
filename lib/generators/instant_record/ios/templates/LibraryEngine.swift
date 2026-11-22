@@ -25,5 +25,6 @@ final class LibraryEngine: Engine {
     func open(database: String) -> Bool { ir_open(database) == 0 }
     func call(_ entry: String, _ input: String) -> String? { ir_call(entry, input).map { String(cString: $0) } }
     func notice() -> String { String(cString: ir_notice()) }
+    func reads() -> String { String(cString: ir_reads()) }
     func error() -> String { String(cString: ir_error()) }
 }

@@ -14,6 +14,7 @@ module InstantRecord
         lib/instant_record/version.rb
         lib/instant_record/configuration.rb
         lib/instant_record/runtime_scoped.rb
+        lib/instant_record/read_tracker.rb
         lib/instant_record/syncable.rb
         lib/instant_record/outbox_mutation.rb
         lib/instant_record/sync_metadata.rb
