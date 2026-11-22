@@ -15,6 +15,7 @@ module InstantRecord
     config.after_initialize do
       if defined?(::InertiaRails::Renderer)
         require "instant_record/inertia"
+        require "instant_record/inertia/renderer"
         ::InertiaRails::Renderer.prepend(InstantRecord::Inertia::Renderer)
       end
     end

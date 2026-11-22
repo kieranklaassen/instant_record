@@ -1,19 +1,12 @@
 // An HTTP client for Inertia that the local database answers.
 //
 // In the compiled runtime the app's controllers run in a worker in this tab.
-// The page's `fetch` reaches them; XMLHttpRequest, which Inertia uses, does
-// not, and the worker's requests carry no headers. So this client sends each
-// Inertia request through `fetch` and says in the address what the headers
-// would have: `_inertia=1` for "answer with a page object" and `_only` for a
-// partial reload's props.
-//
-// A write is a form post. The worker follows the app's redirect itself, so
-// the client then asks for the page it is on, which is what the server does
-// with `redirect_back`.
+// The page's `fetch` reaches them with full HTTP headers (X-Inertia,
+// X-Inertia-Partial-Component, X-Inertia-Partial-Data, Accept, Referer, ...);
+// XMLHttpRequest, which Inertia uses by default, does not. So this client sends
+// each Inertia request through `fetch` with its real headers and lets the
+// worker follow redirects like a browser.
 import { HttpResponseError } from "@inertiajs/core"
-
-const header = (headers, name) =>
-  Object.entries(headers || {}).find(([key]) => key.toLowerCase() === name)?.[1]
 
 const formBody = (data, verb) => {
   const fields = new URLSearchParams()
@@ -23,8 +16,16 @@ const formBody = (data, verb) => {
   return fields
 }
 
-const failure = (status, url) =>
-  new HttpResponseError(`Request failed with status ${status}`, { status, data: "", headers: {} }, url)
+const failure = (status, url, data = "", headers = {}) =>
+  new HttpResponseError(`Request failed with status ${status}`, { status, data, headers }, url)
+
+const responseHeaders = (headers) => {
+  const result = {}
+  if (headers && typeof headers.forEach === "function") {
+    headers.forEach((value, key) => { result[key.toLowerCase()] = value })
+  }
+  return result
+}
 
 const xsrf = () => decodeURIComponent(document.cookie.match(/(?:^|; )XSRF-TOKEN=([^;]*)/)?.[1] || "")
 
@@ -34,9 +35,8 @@ const xsrf = () => decodeURIComponent(document.cookie.match(/(?:^|; )XSRF-TOKEN=
 // would answer every one with the whole page.
 //
 // It reaches Rails with the token Inertia's own requests carry. Beside a
-// local database it is the page's own `fetch`, which the worker is meant to
-// answer; that half has not run. `keepalive` lets the browser finish the
-// request after the page is gone.
+// local database it is the page's own `fetch`, which the worker answers.
+// `keepalive` lets the browser finish the request after the page is gone.
 export async function write(url, data, { keepalive = false } = {}) {
   const headers = { "X-Requested-With": "XMLHttpRequest" }
   const token = xsrf()
@@ -53,19 +53,24 @@ export const localHttpClient = {
     const target = new URL(url, window.location.href)
     for (const [key, value] of Object.entries(params || {})) target.searchParams.set(key, String(value))
     const verb = method.toUpperCase()
-
-    let page = target
-    if (verb !== "GET") {
-      const sent = await fetch(target, { method: "POST", body: formBody(data, verb), redirect: "manual", signal })
-      if (!sent.ok) throw failure(sent.status, url)
-      page = new URL(window.location.href)
+    const requestHeaders = {}
+    for (const [key, value] of Object.entries(headers || {})) {
+      if (value === null || value === undefined) continue
+      if (verb !== "GET" && verb !== "HEAD" && key.toLowerCase() === "content-type") continue
+      requestHeaders[key] = String(value)
     }
 
-    page.searchParams.set("_inertia", "1")
-    const only = header(headers, "x-inertia-partial-data")
-    if (only) page.searchParams.set("_only", only)
-    const response = await fetch(page, { signal })
-    if (!response.ok) throw failure(response.status, url)
-    return { status: 200, data: await response.text(), headers: { "x-inertia": "true", "content-type": "application/json" } }
+    const init = {
+      method: verb === "GET" || verb === "HEAD" ? verb : "POST",
+      headers: requestHeaders,
+      signal,
+    }
+    if (verb !== "GET" && verb !== "HEAD") init.body = formBody(data, verb)
+
+    const response = await fetch(target, init)
+    const text = await response.text()
+    const replyHeaders = responseHeaders(response.headers)
+    if (!response.ok) throw failure(response.status, url, text, replyHeaders)
+    return { status: response.status, data: text, headers: replyHeaders }
   },
 }

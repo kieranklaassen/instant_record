@@ -1,3 +1,4 @@
+import { extractHeaders, hasHeader, headerValue } from "./http-headers.js";
 import { mailboxScope } from "./mailbox-scope.js";
 import { watchRelease } from "./release-updates.js";
 let releaseRequired;
@@ -60,7 +61,8 @@ const isLocal = (url) => url.origin === location.origin && !isFile(url) &&
   !url.pathname.startsWith("/assets/") && !url.pathname.startsWith("/harness/") && !/^\/app[-.\w]*\.wasm$/.test(url.pathname);
 
 // One page request; the worker follows the app's redirects and returns the final answer.
-const appRequest = (method, path, body, contentType) => call("navigate", { method, path, body, contentType });
+const appRequest = (method, path, body, contentType, headers) =>
+  call("navigate", { method, path, body, contentType, headers });
 
 const encodeFormData = (form) => {
   const fields = new URLSearchParams();
@@ -68,16 +70,19 @@ const encodeFormData = (form) => {
   return fields.toString();
 };
 
-const headerValue = (headers, target) => {
-  if (!headers) return undefined;
-  if (headers instanceof Headers) return headers.get(target) || undefined;
-  const lower = target.toLowerCase();
-  if (Array.isArray(headers)) {
-    const pair = headers.find(([k]) => k.toLowerCase() === lower);
-    return pair?.[1];
+const defaultBrowserHeaders = ({ referrer = location.href, referrerPolicy = "" } = {}) => {
+  const headers = { Host: location.host };
+  if (location.protocol === "https:") headers["X-Forwarded-Proto"] = "https";
+  if (referrer && referrerPolicy !== "no-referrer") headers.Referer = referrer;
+  return headers;
+};
+
+const withBrowserHeaders = (headers, options) => {
+  const merged = { ...headers };
+  for (const [name, value] of Object.entries(defaultBrowserHeaders(options))) {
+    if (!hasHeader(merged, name)) merged[name] = value;
   }
-  for (const [k, v] of Object.entries(headers)) if (k.toLowerCase() === lower) return v;
-  return undefined;
+  return merged;
 };
 
 // The same seam a service worker's fetch handler is, from inside the page.
@@ -96,10 +101,12 @@ window.fetch = async (input, init) => {
   let body;
   let contentType;
   let redirect;
+  let requestHeaders;
 
   if (isUrlInput) {
     method = (init?.method || "GET").toUpperCase();
     redirect = init?.redirect || "follow";
+    requestHeaders = withBrowserHeaders(extractHeaders(init?.headers), { referrerPolicy: init?.referrerPolicy });
     contentType = headerValue(init?.headers, "content-type");
     if (method !== "GET" && method !== "HEAD" && init?.body != null) {
       const raw = init.body;
@@ -108,7 +115,7 @@ window.fetch = async (input, init) => {
         contentType = "application/x-www-form-urlencoded";
       } else if (raw instanceof URLSearchParams) {
         body = raw.toString();
-        contentType ||= "application/x-www-form-urlencoded";
+        contentType = "application/x-www-form-urlencoded";
       } else if (typeof raw === "string") {
         body = raw;
       } else {
@@ -119,6 +126,7 @@ window.fetch = async (input, init) => {
     const request = init ? new Request(input, init) : input;
     method = request.method.toUpperCase();
     redirect = request.redirect;
+    requestHeaders = withBrowserHeaders(extractHeaders(request.headers), { referrerPolicy: request.referrerPolicy });
     contentType = request.headers.get("content-type") || undefined;
     if (method !== "GET" && method !== "HEAD") {
       if (contentType && contentType.startsWith("multipart/form-data")) {
@@ -133,11 +141,11 @@ window.fetch = async (input, init) => {
 
   if (redirect === "manual") {
     // The demo's controllers post with redirect: "manual" and only need to know it went through.
-    const result = await call("request", { method, path, body, contentType });
+    const result = await call("request", { method, path, body, contentType, headers: requestHeaders });
     const ok = result.status < 400;
     return new Response(null, { status: ok ? 200 : result.status });
   }
-  const { result, redirected, finalPath } = await appRequest(method, path, body, contentType);
+  const { result, redirected, finalPath } = await appRequest(method, path, body, contentType, requestHeaders);
   const headers = result.headers.filter(([name]) => !/^(content-length|transfer-encoding)$/i.test(name));
   // The socket server adds this default when it writes a response; the reactor entry skips that
   // writer, and without it Turbo treats the page as a download and falls back to a full load.
@@ -181,7 +189,12 @@ function syncScope() {
   }
 }
 
-const boot = await call("boot", { module: await window.__wasm, path: location.pathname + location.search, scope: syncScope() }).catch(error => {
+const boot = await call("boot", {
+  module: await window.__wasm,
+  path: location.pathname + location.search,
+  scope: syncScope(),
+  headers: defaultBrowserHeaders({ referrer: document.referrer }),
+}).catch(error => {
   document.body.textContent = "The app could not open this release. Your saved database was kept. " + error.message;
   throw error;
 });
@@ -222,7 +235,13 @@ async function submitLocalForm(event) {
     window.alert("This compiled runtime does not support file uploads.");
     return;
   }
-  const response = await appRequest(method, url.pathname + url.search, encodeFormData(fields), "application/x-www-form-urlencoded");
+  const response = await appRequest(
+    method,
+    url.pathname + url.search,
+    encodeFormData(fields),
+    "application/x-www-form-urlencoded",
+    withBrowserHeaders({ Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" }),
+  );
   if (response.result.status >= 400) {
     document.open();
     document.write(response.result.body || "<p>Request failed</p>");

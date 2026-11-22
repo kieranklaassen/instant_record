@@ -3,6 +3,7 @@
 // worker never blocks on network I/O during user clicks and Puma threads are never held).
 import { AppHost } from "./app-host.js";
 import { advance, fresh, held, query } from "./history-fill.js";
+import { redirectHeaders } from "./http-headers.js";
 import { mailboxScope } from "./mailbox-scope.js";
 import { openSnapshot, withFiles } from "./snapshot-store.js";
 
@@ -368,18 +369,23 @@ function localRequest(method, path, options) {
   return result;
 }
 
-function navigate({ method, path, body, contentType }) {
+function navigate({ method, path, body, contentType, headers }) {
   const started = performance.now();
-  let result = localRequest(method, path, { body: body ?? "", contentType: contentType || "application/x-www-form-urlencoded" });
+  let result = localRequest(method, path, {
+    body: body ?? "",
+    contentType: contentType || "application/x-www-form-urlencoded",
+    headers,
+  });
   let redirected = false;
   let finalPath = path;
+  const followHeaders = redirectHeaders(headers);
   for (let hops = 0; hops < 5 && result.status >= 300 && result.status < 400; hops++) {
     const location = result.headers.find(([name]) => name.toLowerCase() === "location")?.[1];
     if (!location) break;
     const next = new URL(location, self.location.origin);
     finalPath = next.pathname + next.search;
     redirected = true;
-    result = localRequest("GET", finalPath);
+    result = localRequest("GET", finalPath, { headers: followHeaders });
   }
   return { result: { ...result, ms: performance.now() - started }, redirected, finalPath };
 }
@@ -515,7 +521,7 @@ async function boot(payload = {}) {
     const at = url.searchParams.get("at");
     if (before && at) await loadHistory({ type: "MailEntry", before: { id: before, created_at: at }, limit: 50 });
   }
-  const first = payload.path ? await runRequest("GET", () => navigate({ method: "GET", path: payload.path })) : null;
+  const first = payload.path ? await runRequest("GET", () => navigate({ method: "GET", path: payload.path, headers: payload.headers })) : null;
   setInterval(pollChanges, POLL_EVERY_MS);
   // With the first page on screen, bring the rest of the inbox down behind it.
   if (scope && scope !== "invalid/invalid") {
@@ -572,7 +578,11 @@ self.onmessage = async (event) => {
     if (type === "navigate") return self.postMessage({ id, result: await runRequest(payload.method, () => navigate(payload)) });
     if (type === "request") {
       const started = performance.now();
-      const result = await runRequest(payload.method, () => localRequest(payload.method, payload.path, { body: payload.body ?? "", contentType: payload.contentType || "application/x-www-form-urlencoded" }));
+      const result = await runRequest(payload.method, () => localRequest(payload.method, payload.path, {
+        body: payload.body ?? "",
+        contentType: payload.contentType || "application/x-www-form-urlencoded",
+        headers: payload.headers,
+      }));
       return self.postMessage({ id, result: { ...result, ms: performance.now() - started } });
     }
     if (type === "save") return self.postMessage({ id, result: await withSnapshot("readwrite", save => save()) });

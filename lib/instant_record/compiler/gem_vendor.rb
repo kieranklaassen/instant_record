@@ -14,6 +14,7 @@ module InstantRecord
         lib/instant_record/version.rb
         lib/instant_record/configuration.rb
         lib/instant_record/runtime_scoped.rb
+        lib/instant_record/inertia.rb
         lib/instant_record/syncable.rb
         lib/instant_record/outbox_mutation.rb
         lib/instant_record/sync_metadata.rb
@@ -110,12 +111,16 @@ module InstantRecord
           "      []\n"
         )
 
-        # Screens are found by name through a generated `case` (EntryBuilder), not constant lookup.
+        # Screens and the compiled Inertia responder carry explicit RBS types;
+        # screens are found by name through a generated `case` (EntryBuilder).
         FileUtils.mkdir_p(File.join(@app, "sig/instant_record"))
-        FileUtils.cp(
-          File.join(@gem, "sig/instant_record/native.rbs"),
-          File.join(@app, "sig/instant_record/native.rbs")
-        )
+        %w[native.rbs inertia.rbs].each do |rbs|
+          FileUtils.cp(
+            File.join(@gem, "sig/instant_record", rbs),
+            File.join(@app, "sig/instant_record", rbs)
+          )
+        end
+        edit!("lib/instant_record/inertia.rb", "require \"instant_record/inertia/renderer\"\n", "")
         File.write(
           File.join(@app, "lib/instant_record/native.rb"),
           "require \"instant_record/native/node\"\nrequire \"instant_record/native/screen\"\n"

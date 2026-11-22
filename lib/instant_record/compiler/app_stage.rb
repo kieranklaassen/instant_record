@@ -80,11 +80,13 @@ module InstantRecord
       REMOVE = [
         # Browser dependencies come from the compiled runtime. The server's lockfile
         # would also bring Rack's request throttling middleware into the Wasm build.
-        "Gemfile.lock", "config/initializers/rack_attack.rb",
+        # Server environment files (e.g. production.rb's assume_ssl/force_ssl)
+        # belong behind a TLS reverse proxy, not inside the local browser worker.
+        "Gemfile.lock", "config/environments", "config/initializers/rack_attack.rb",
         # The compiled worker gets its endpoint from SYNC_ENDPOINT.
         "config/initializers/instant_record.rb",
-        # The Inbox speaks Inertia's protocol itself in the browser (its controller's
-        # browser_only half); the gem's setup stays on the server.
+        # The Inbox uses InstantRecord::Inertia::Page directly in both runtimes;
+        # inertia_rails's server initializer stays on the server.
         "config/initializers/inertia_rails.rb", "app/views/inertia.html.erb",
         "app/controllers/source_controller.rb",
         # RubyLLM answers on the server only: its setup, the reply and the job that asks for

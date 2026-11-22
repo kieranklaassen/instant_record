@@ -10,6 +10,7 @@
 // Works the same in Node (tests) and in a browser worker; only `exchange` differs.
 import { WASI, File, OpenFile, Directory, PreopenDirectory, ConsoleStdout } from "@bjorn3/browser_wasi_shim";
 import { readNotice } from "./changes.js";
+import { buildHttpRequest } from "./http-headers.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -130,28 +131,14 @@ export class AppHost {
   }
 
   // One HTTP request through the app's own router and controllers.
-  request(method, path, { body = "", contentType = "application/x-www-form-urlencoded" } = {}) {
-    // Rails forms send PATCH and DELETE as POST plus a _method field. The socket server applies
-    // that override while reading the request; the reactor entry skips that reader, so do it here.
-    if (method === "POST" && contentType.startsWith("application/x-www-form-urlencoded")) {
-      const text = typeof body === "string" ? body : decoder.decode(body);
-      const override = new URLSearchParams(text).get("_method");
-      if (override && /^(patch|put|delete)$/i.test(override)) method = override.toUpperCase();
-    }
-    const payload = typeof body === "string" ? encoder.encode(body) : body;
-    const cookie = [...this.cookies].map(([name, value]) => `${name}=${value}`).join("; ");
-    const head = `${method} ${path} HTTP/1.1\r\nHost: localhost\r\n` +
-      (cookie ? `Cookie: ${cookie}\r\n` : "") +
-      (payload.length ? `Content-Type: ${contentType}\r\nContent-Length: ${payload.length}\r\n` : "") + "\r\n";
-    const input = new Uint8Array(head.length + payload.length);
-    input.set(encoder.encode(head));
-    input.set(payload, head.length);
+  request(method, path, { body = "", contentType, headers = {} } = {}) {
+    const input = buildHttpRequest(method, path, { body, contentType, headers, cookies: this.cookies });
 
     const result = this.call("wasm_request", input);
     const text = decoder.decode(result.out);
     const split = text.indexOf("\n\n");
     const lines = (split < 0 ? text : text.slice(0, split)).split("\n");
-    const headers = [];
+    const responseHeaders = [];
     for (const line of lines.slice(1)) {
       const colon = line.indexOf(": ");
       if (colon < 0) continue;
@@ -163,11 +150,11 @@ export class AppHost {
         if (/max-age=0/i.test(value)) this.cookies.delete(pair.slice(0, equals));
         else this.cookies.set(pair.slice(0, equals), pair.slice(equals + 1));
       } else {
-        headers.push([name, value]);
+        responseHeaders.push([name, value]);
       }
     }
     const status = Number(lines[0]) || 500;
-    return { status, headers, body: split < 0 ? "" : text.slice(split + 2), exit: result.exit, errors: result.errors };
+    return { status, headers: responseHeaders, body: split < 0 ? "" : text.slice(split + 2), exit: result.exit, errors: result.errors };
   }
 
   // One pass of the gem's own sync loop (InstantRecord::Client.sync_pass).

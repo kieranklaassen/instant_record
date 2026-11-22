@@ -23,8 +23,9 @@ import { localHttpClient, write } from "./http.js"
 import { liveTransport } from "./live.js"
 import { local } from "./window.js"
 
-// The compiled runtime's own templates place the first page in an attribute
-// of the root element, where plain escaping is enough.
+// InstantRecord's Inertia pages place the first page in an attribute
+// of the root element, where plain escaping is enough. Apps using
+// inertia_rails's script element leave data-page absent and fall through.
 const pageInAttribute = (id = "app") => {
   const page = document.getElementById(id)?.dataset.page
   return page ? { page: JSON.parse(page) } : {}
@@ -32,7 +33,8 @@ const pageInAttribute = (id = "app") => {
 
 export const instantRecord = () => ({
   live: liveTransport,
-  ...(local() ? { http: localHttpClient, ...pageInAttribute() } : {}),
+  ...pageInAttribute(),
+  ...(local() ? { http: localHttpClient } : {}),
 })
 
 export { localHttpClient, liveTransport, write }
