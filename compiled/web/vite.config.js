@@ -15,7 +15,13 @@ const classicShell = {
 
 // The app's own assets live under /assets, so the harness builds into /harness.
 export default defineConfig({
-  build: { assetsDir: "harness", target: "esnext", sourcemap: false, rollupOptions: { output: { format: "iife" } } },
+  build: {
+    assetsDir: "harness",
+    target: "esnext",
+    sourcemap: false,
+    // strict: a module is strict by its nature, and the classic script has to say so.
+    rollupOptions: { output: { format: "iife", strict: true } },
+  },
   worker: { format: "es" },
   plugins: [classicShell],
 });

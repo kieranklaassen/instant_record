@@ -26,7 +26,9 @@ test("the built shell loads no module in the page", { skip: !existsSync(vite) &&
     const [, entry] = html.match(/<script defer src="\/(harness\/[^"]+)"><\/script>/) || [];
     assert.ok(entry, "the shell's script is a deferred classic script");
     // Compiling as a classic script throws on import, export, import.meta and top-level await.
-    new vm.Script(readFileSync(join(out, entry), "utf8"));
+    const source = readFileSync(join(out, entry), "utf8");
+    new vm.Script(source);
+    assert.match(source, /^"use strict";/, "the shell's script stays strict, as the module it is written as");
     assert.ok(readdirSync(join(out, "harness")).some(name => name.startsWith("worker-")), "the worker is its own file");
   } finally {
     rmSync(out, { recursive: true, force: true });
