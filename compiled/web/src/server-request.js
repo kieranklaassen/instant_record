@@ -29,7 +29,7 @@ export function resolveServerRequest(path, origin) {
   }
   const baseOrigin = new URL(origin).origin;
   const url = new URL(path, baseOrigin);
-  if (url.origin !== baseOrigin) {
+  if (url.origin !== baseOrigin || !url.pathname.startsWith("/") || url.pathname.startsWith("//")) {
     throw new Error("Invalid server request path");
   }
   url.searchParams.delete("instant_record_network");

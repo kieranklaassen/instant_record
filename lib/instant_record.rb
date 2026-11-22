@@ -215,7 +215,9 @@ module InstantRecord
     def server_url(path)
       path_str = path.to_s
       separator = path_str.include?("?") ? "&" : "?"
-      "#{endpoint.to_s.delete_suffix(mount_path)}#{path_str}#{separator}#{NETWORK_MARKER}"
+      current_mount = mount_path
+      base = (endpoint == DEFAULT_MOUNT_PATH && current_mount != DEFAULT_MOUNT_PATH) ? "" : endpoint.to_s.delete_suffix(current_mount)
+      "#{base}#{path_str}#{separator}#{NETWORK_MARKER}"
     end
 
     # Tell the sync loop a stream is live, so its own catch-up poll stands down.

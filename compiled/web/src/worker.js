@@ -561,7 +561,7 @@ self.onmessage = async (event) => {
       const root = serverRoot(publicEndpoint, mountPath);
       const method = (payload.method || "GET").toUpperCase();
       const body = typeof payload.body === "string" ? payload.body : "";
-      const reply = await fetchReply(method, targetPath, body, root, payload.contentType);
+      const reply = await fetchReply(method, targetPath, body, root, payload.contentType ?? "");
       return self.postMessage({ id, result: reply });
     }
     if (type === "boot") return self.postMessage({ id, result: await boot(payload) });

@@ -78,8 +78,8 @@ module InstantRecord
         @demo = @app_source.nil?
         @models = models
         @sync_windows = sync_windows
-        @endpoint = endpoint
-        @mount_path = mount_path
+        @endpoint = (endpoint && !endpoint.to_s.empty?) ? endpoint.to_s.sub(%r{/+\z}, "") : nil
+        @mount_path = (mount_path && !mount_path.to_s.empty?) ? mount_path.to_s.sub(%r{/+\z}, "") : nil
         @target = target.nil? || target.to_s.empty? ? nil : target.to_s
         if @target && !TARGETS.include?(@target)
           raise ArgumentError, "Unknown target #{@target}. Leave it out for this machine, or use #{TARGETS.join(' or ')}."

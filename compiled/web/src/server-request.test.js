@@ -23,6 +23,8 @@ test("resolveServerRequest accepts any consumer path and strips instant_record_n
 
 test("resolveServerRequest rejects protocol-relative and cross-origin paths", () => {
   assert.throws(() => resolveServerRequest("//evil.test/steal", "https://app.example"));
+  assert.throws(() => resolveServerRequest("/.//evil.test/steal?instant_record_network=1", "https://app.example"));
+  assert.throws(() => resolveServerRequest("/..//evil.test/steal", "https://app.example"));
   assert.throws(() => resolveServerRequest("https://evil.test/steal", "https://app.example"));
   assert.throws(() => resolveServerRequest("/\\evil.test/steal", "https://app.example"));
   assert.throws(() => resolveServerRequest("", "https://app.example"));

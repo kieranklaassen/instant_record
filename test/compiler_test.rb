@@ -377,6 +377,21 @@ class CompilerTest < ActiveSupport::TestCase
         broken.send(:ensure_web_node_modules, File.join(workspace, "web"))
       end
       assert_match(/npm ci/, error.message)
+
+      # Existing broken symlink pointing at the configured path also raises BuildError.
+      File.symlink("#{dir}/missing_modules", File.join(workspace, "web/node_modules"))
+      broken_link_error = assert_raises(InstantRecord::Compiler::BuildError) do
+        broken.send(:ensure_web_node_modules, File.join(workspace, "web"))
+      end
+      assert_match(/npm ci/, broken_link_error.message)
+
+      # NativeBuild strips trailing slashes from endpoint and mount_path while preserving nil.
+      native_norm = InstantRecord::Compiler::NativeBuild.new(
+        workspace: workspace, gem_root: GEM_ROOT, toolchain: fake[:toolchain_file],
+        app_source: app_root, models: ["Task"], endpoint: "https://api.example/sync/", mount_path: "/sync/"
+      )
+      assert_equal "https://api.example/sync", native_norm.instance_variable_get(:@endpoint)
+      assert_equal "/sync", native_norm.instance_variable_get(:@mount_path)
     end
   end
 

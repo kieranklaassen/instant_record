@@ -77,24 +77,8 @@ const headerValue = (headers, target) => {
   return undefined;
 };
 
-// The same seam a service worker's fetch handler is, from inside the page.
-const networkFetch = window.fetch.bind(window);
-window.fetch = async (input, init) => {
+async function parseFetchInput(input, init, { binary = true } = {}) {
   const isUrlInput = typeof input === "string" || input instanceof URL;
-  const url = isUrlInput ? new URL(input, location.href) : new URL(input.url);
-  if (url.origin === location.origin && url.searchParams.has("instant_record_network")) {
-    const method = (isUrlInput ? init?.method : init?.method || input.method) || "GET";
-    const contentType = isUrlInput
-      ? headerValue(init?.headers, "content-type")
-      : (init?.headers ? headerValue(init.headers, "content-type") : input.headers.get("content-type") || undefined);
-    const body = isUrlInput ? init?.body : (init?.body ?? (method.toUpperCase() !== "GET" && method.toUpperCase() !== "HEAD" ? await input.clone().text() : undefined));
-    const response = await call("serverRequest", { path: url.pathname + url.search, method, body, contentType });
-    if (!response.status) throw new TypeError("Sync server unreachable");
-    const responseHeaders = response.contentType ? { "Content-Type": response.contentType } : {};
-    return new Response(response.text || null, { status: response.status, headers: responseHeaders });
-  }
-  if (!isLocal(url)) return networkFetch(input, init);
-
   let method;
   let body;
   let contentType;
@@ -115,11 +99,12 @@ window.fetch = async (input, init) => {
       } else if (typeof raw === "string") {
         body = raw;
       } else {
-        body = new Uint8Array(await new Response(raw).arrayBuffer());
+        const res = new Response(raw);
+        body = binary ? new Uint8Array(await res.arrayBuffer()) : await res.text();
       }
     }
   } else {
-    const request = init ? new Request(input, init) : input;
+    const request = init ? new Request(input, init) : input.clone();
     method = request.method.toUpperCase();
     redirect = request.redirect;
     contentType = request.headers.get("content-type") || undefined;
@@ -128,10 +113,28 @@ window.fetch = async (input, init) => {
         body = encodeFormData(await request.formData());
         contentType = "application/x-www-form-urlencoded";
       } else {
-        body = new Uint8Array(await request.arrayBuffer());
+        body = binary ? new Uint8Array(await request.arrayBuffer()) : await request.text();
       }
     }
   }
+  return { method, body, contentType, redirect };
+}
+
+// The same seam a service worker's fetch handler is, from inside the page.
+const networkFetch = window.fetch.bind(window);
+window.fetch = async (input, init) => {
+  const isUrlInput = typeof input === "string" || input instanceof URL;
+  const url = isUrlInput ? new URL(input, location.href) : new URL(input.url);
+  if (url.origin === location.origin && url.searchParams.has("instant_record_network")) {
+    const { method, body, contentType } = await parseFetchInput(input, init, { binary: false });
+    const response = await call("serverRequest", { path: url.pathname + url.search, method, body, contentType });
+    if (!response.status) throw new TypeError("Sync server unreachable");
+    const responseHeaders = response.contentType ? { "Content-Type": response.contentType } : {};
+    return new Response(response.text || null, { status: response.status, headers: responseHeaders });
+  }
+  if (!isLocal(url)) return networkFetch(input, init);
+
+  const { method, body, contentType, redirect } = await parseFetchInput(input, init, { binary: true });
   const path = url.pathname + url.search;
 
   if (redirect === "manual") {
@@ -217,7 +220,7 @@ async function submitLocalForm(event) {
   const target = button?.getAttribute("formtarget") || form.target;
   const url = new URL(button?.getAttribute("formaction") || form.action, location.href);
   const method = (button?.getAttribute("formmethod") || form.method).toUpperCase();
-  if (!isLocal(url) || method !== "POST" || (target && target !== "_self")) return;
+  if (!isLocal(url) || url.searchParams.has("instant_record_network") || method !== "POST" || (target && target !== "_self")) return;
   event.preventDefault();
   const fields = new FormData(form, button || undefined);
   const file = [...fields.values()].find(value => value instanceof File && value.name);
@@ -226,20 +229,15 @@ async function submitLocalForm(event) {
     return;
   }
   const response = await appRequest(method, url.pathname + url.search, encodeFormData(fields), "application/x-www-form-urlencoded");
-  if (response.result.status >= 400) {
-    document.open();
-    document.write(response.result.body || "<p>Request failed</p>");
-    document.close();
-    window.addEventListener("submit", submitLocalForm);
+  if (response.result.status < 400 && response.redirected) {
+    location.assign(response.finalPath);
     return;
   }
-  if (response.redirected) location.assign(response.finalPath);
-  else {
-    document.open();
-    document.write(response.result.body);
-    document.close();
-    window.addEventListener("submit", submitLocalForm);
-  }
+  const html = response.result.status >= 400 ? (response.result.body || "<p>Request failed</p>") : response.result.body;
+  document.open();
+  document.write(html);
+  document.close();
+  window.addEventListener("submit", submitLocalForm);
 }
 window.addEventListener("submit", submitLocalForm);
 releaseRequired = watchRelease(networkFetch, import.meta.env.VITE_SOURCE_VERSION, () => waiting.size > 0);

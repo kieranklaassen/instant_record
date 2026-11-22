@@ -62,6 +62,12 @@ class InstantRecordTest < Minitest::Test
     end
   end
 
+  def test_server_url_drops_default_endpoint_when_only_mount_path_is_customised
+    with_mount_path("/sync") do
+      assert_equal "/sessions?instant_record_network=1", InstantRecord.server_url("/sessions")
+    end
+  end
+
   def test_server_url_preserves_existing_query_parameters
     assert_equal "/items?page=2&instant_record_network=1", InstantRecord.server_url("/items?page=2")
   end

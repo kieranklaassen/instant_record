@@ -463,6 +463,9 @@ module InstantRecord
             File.delete(modules)
             File.symlink(configured, modules)
           end
+          unless File.directory?(modules)
+            raise BuildError, "WEB_NODE_MODULES symlink target does not exist (#{File.readlink(modules)}). Install the web dependencies with `npm ci` and run `bin/rails instant_record:doctor`."
+          end
         elsif !File.exist?(modules)
           if configured.nil? || configured.empty? || !File.directory?(configured)
             raise BuildError, "WEB_NODE_MODULES is missing (#{configured || 'unset'}). Install the web dependencies from compiled/web/package.json with `npm ci` and set WEB_NODE_MODULES in #{@toolchain.path}."
