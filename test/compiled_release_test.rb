@@ -51,16 +51,32 @@ class CompiledReleaseTest < Minitest::Test
         dist.join("app-#{name}.wasm").write("module-#{name}")
         dist.join("index.html").write(name)
         dist.join("instant-record-release.json").write(JSON.generate(version: name * 64))
+        dist.join("instant_record.manifest.json").write(JSON.generate(schema_version: 1, mode: "full"))
         InstantRecord::Compiler.publish(root)
         response = app.get("https://browser.test/items", "HTTP_ACCEPT" => "text/html")
         assert_equal name, response.body
         assert_equal "no-cache", response["cache-control"]
       end
+      assert_equal 200, app.get("https://browser.test/instant_record.manifest.json").status
       assert_equal "module-a", app.get("https://browser.test/app-a.wasm").body
       assert_equal "Rails", app.get("https://server.test/items", "HTTP_ACCEPT" => "text/html").body
       assert_equal "Rails", app.get("https://browser.test/instant_record/bootstrap", "HTTP_ACCEPT" => "text/html").body
       assert_equal "Rails", app.post("https://browser.test/items").body
       assert_equal 404, app.get("https://browser.test/harness/missing.js").status
+
+      # In island mode, non-island HTML routes pass through to Rails instead of serving index.html.
+      island_manifest = {
+        schema_version: 1,
+        mode: "island",
+        local_routes: [{ method: "GET", path: "/items" }, { method: "GET", path: "/items/:id" }]
+      }
+      dist.join("instant_record.manifest.json").write(JSON.generate(island_manifest))
+      dist.join("instant-record-release.json").write(JSON.generate(version: "c" * 64))
+      dist.join("app-c.wasm").write("module-c")
+      InstantRecord::Compiler.publish(root)
+      assert_equal "b", app.get("https://browser.test/items", "HTTP_ACCEPT" => "text/html").body
+      assert_equal "b", app.get("https://browser.test/items/42", "HTTP_ACCEPT" => "text/html").body
+      assert_equal "Rails", app.get("https://browser.test/billing/invoices", "HTTP_ACCEPT" => "text/html").body
     end
   end
 end

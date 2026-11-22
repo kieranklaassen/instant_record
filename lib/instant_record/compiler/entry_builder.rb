@@ -1,16 +1,17 @@
 require "fileutils"
 require "json"
 require_relative "../native"
+require_relative "manifest"
 require_relative "runner"
 
 module InstantRecord
   class Compiler
     # Builds the reactor entry files (`main_wasm.rb` and `main_native.rb`) from
-    # a shared bridge and boot template.
+    # a shared bridge and boot template, driven by `instant_record.manifest.json`.
     module EntryBuilder
       BANNER = "\n\n# ── persistent reactor entry"
-      DEMO_MODELS = %w[Issue ChatUser Channel Message Note MailEntry AssistantChat AssistantTurn AuthNote].freeze
       MODEL_NAME_PATTERN = /\A[A-Z]\w*(?:::[A-Z]\w*)*\z/
+      IDENTIFIER_PATTERN = /\A[a-z_][a-z0-9_]*\z/
 
       PRELUDE = <<~'RUBY'
 
@@ -198,14 +199,60 @@ module InstantRecord
 
       module_function
 
-      def app_models(demo:, models:)
-        return DEMO_MODELS if demo
+      def coerce_manifest(manifest)
+        return nil if manifest.nil?
+        return manifest if manifest.is_a?(Manifest)
+        return Manifest.new(manifest) if manifest.is_a?(Hash)
+        return Manifest.read(manifest.to_s) if manifest.is_a?(String) || manifest.is_a?(Pathname)
 
-        list = Array(models)
+        raise ArgumentError, "Unsupported manifest: #{manifest.inspect}"
+      end
+
+      def app_models(manifest: nil, models: nil)
+        parsed = coerce_manifest(manifest)
+        list =
+          if parsed&.island?
+            parsed.synced_model_names
+          elsif parsed && parsed.synced_model_names.any?
+            parsed.synced_model_names
+          else
+            Array(models)
+          end
         if list.empty? || !list.all? { |name| name.is_a?(String) && MODEL_NAME_PATTERN.match?(name) }
           raise BuildError, "Declare at least one named model that includes InstantRecord::Syncable."
         end
         list
+      end
+
+      def model_declarations(manifest)
+        parsed = coerce_manifest(manifest)
+        return "" unless parsed
+
+        lines = []
+        parsed.models.each do |entry|
+          name = entry["name"]
+          next unless name.is_a?(String) && MODEL_NAME_PATTERN.match?(name)
+
+          if (window = entry["sync_window"])
+            limit = Integer(window["limit"].to_s, 10)
+            partition_by = window["partition_by"]
+            if partition_by && !partition_by.to_s.empty?
+              raise BuildError, "Invalid sync_window partition_by #{partition_by.inspect} on #{name}" unless IDENTIFIER_PATTERN.match?(partition_by.to_s)
+
+              lines << "#{name}.sync_window(limit: #{limit}, partition_by: :#{partition_by})\n"
+            else
+              lines << "#{name}.sync_window(limit: #{limit})\n"
+            end
+          end
+
+          column = entry.dig("sync_scope", "column")
+          if column && !column.to_s.empty?
+            raise BuildError, "Invalid sync_scope column #{column.inspect} on #{name}" unless IDENTIFIER_PATTERN.match?(column.to_s)
+
+            lines << "#{name}.sync_scope(:#{column})\n"
+          end
+        end
+        lines.join
       end
 
       def migrations(demo:, plan:, previous:, applied: "")
@@ -256,13 +303,13 @@ module InstantRecord
         fill(DATABASE, { "pragmas" => lines, "migrations" => steps, "model_set" => models.sort.join(",") })
       end
 
-      def start(streaming:, comment:, demo:, models:)
-        windows = demo ? "Message.sync_window(limit: 50, partition_by: :channel_id)\n" : ""
+      def start(streaming:, comment:, models:, manifest: nil)
+        declarations = model_declarations(manifest)
         flag = "#{comment}\nInstantRecord::Client.streaming = #{streaming ? 'true' : 'false'}"
-        fill(START, { "windows" => windows, "models" => models.join(", "), "streaming" => flag })
+        fill(START, { "windows" => declarations, "models" => models.join(", "), "streaming" => flag })
       end
 
-      def write_wasm_entry(emit_dir:, demo:, models:, migration_plan:, pipeline_dir:)
+      def write_wasm_entry(emit_dir:, demo: false, manifest: nil, models: nil, migration_plan:, pipeline_dir:)
         if demo
           FileUtils.cp(
             File.join(pipeline_dir, "sqlite_release.rb"),
@@ -276,7 +323,7 @@ module InstantRecord
         raise BuildError, "Expected sidekiq marker in #{File.join(emit_dir, 'main.rb')}" unless cut
 
         head = source[0...cut]
-        resolved_models = app_models(demo: demo, models: models)
+        resolved_models = app_models(manifest: manifest, models: models)
         entry = BANNER + " for wasm32-wasi (see EntryBuilder) ─────────\n" +
           PRELUDE +
           bridge(
@@ -293,8 +340,8 @@ module InstantRecord
           start(
             streaming: true,
             comment: "# JS worker owns non-blocking inbound polling; Client#sync_pass handles bootstrap + outbox drain.",
-            demo: demo,
-            models: resolved_models
+            models: resolved_models,
+            manifest: manifest
           )
 
         File.write(File.join(emit_dir, "main_wasm.rb"), head + entry)
@@ -312,7 +359,7 @@ module InstantRecord
         raise BuildError, e.message
       end
 
-      def write_native_entry(tree_dir:, app_dir:, demo:, models:, migration_plan:)
+      def write_native_entry(tree_dir:, app_dir:, demo: false, manifest: nil, models: nil, migration_plan:)
         wasm_main = File.read(File.join(tree_dir, "main_wasm.rb"))
         unless wasm_main.scan(BANNER).length == 1
           raise BuildError, "main_wasm.rb has no entry to start from"
@@ -321,7 +368,7 @@ module InstantRecord
         head = wasm_main[0...wasm_main.index(BANNER)]
         found = discover_screens(app_dir)
         cases = found.map { |name, cls| %(    when "#{name}" then #{cls}.new(params)\n) }.join
-        resolved_models = app_models(demo: demo, models: models)
+        resolved_models = app_models(manifest: manifest, models: models)
         previous = 'InstantRecord::SyncMetadata.get("schema_version").to_s'
         applied = 'InstantRecord::SyncMetadata.set("schema_version", "<<version>>")'
         db_body = database(
@@ -345,8 +392,8 @@ module InstantRecord
           start(
             streaming: false,
             comment: "# A sync pass pulls through the host: Client#sync_pass handles bootstrap, outbox drain and the poll.",
-            demo: demo,
-            models: resolved_models
+            models: resolved_models,
+            manifest: manifest
           )
 
         File.write(File.join(tree_dir, "main_native.rb"), head + entry)

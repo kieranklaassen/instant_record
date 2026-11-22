@@ -6,6 +6,9 @@ require_relative "compiler/runner"
 require_relative "compiler/toolchain"
 require_relative "compiler/path_scrubber"
 require_relative "compiler/browser_migrations"
+require_relative "compiler/manifest"
+require_relative "compiler/route_analyzer"
+require_relative "compiler/reachability_tracer"
 require_relative "compiler/app_stage"
 require_relative "compiler/gem_vendor"
 require_relative "compiler/entry_builder"
@@ -29,41 +32,71 @@ module InstantRecord
       toolchain || ENV.fetch("INSTANT_RECORD_TOOLCHAIN") { gem_root.join("compiled/toolchain.env").to_s }
     end
 
-    def self.build(root:, models:, toolchain:, endpoint:, baseline: nil, migration_paths: nil)
+    def self.build(root:, toolchain:, endpoint:, models: nil, baseline: nil, migration_paths: nil, island: nil, overrides: nil)
       with_workspace(root: root, toolchain: toolchain, stage_web: true) do |shared|
-        WasmBuild.new(**shared, models: models, endpoint: endpoint, baseline: baseline, migration_paths: migration_paths || shared[:migration_paths]).run
+        WasmBuild.new(
+          **shared,
+          models: models,
+          endpoint: endpoint,
+          baseline: baseline,
+          migration_paths: migration_paths || shared[:migration_paths],
+          island: island,
+          overrides: overrides
+        ).run
       end
     end
 
     # The same app as libraries a native host links: for this machine, or
     # with target "iphonesimulator" or "iphoneos" for the iOS simulator or
     # an iPhone. Returns the folder that holds them.
-    def self.build_native(root:, models:, toolchain:, endpoint:, target: nil, baseline: nil, migration_paths: nil)
+    def self.build_native(root:, toolchain:, endpoint:, models: nil, target: nil, baseline: nil, migration_paths: nil, island: nil, overrides: nil)
       with_workspace(root: root, toolchain: toolchain, stage_web: false) do |shared|
-        NativeBuild.new(**shared, models: models, endpoint: endpoint, target: target, baseline: baseline, migration_paths: migration_paths || shared[:migration_paths]).run
+        NativeBuild.new(
+          **shared,
+          models: models,
+          endpoint: endpoint,
+          target: target,
+          baseline: baseline,
+          migration_paths: migration_paths || shared[:migration_paths],
+          island: island,
+          overrides: overrides
+        ).run
       end
     end
 
     # Build the repository's own demo into compiled/web/dist.
-    def self.build_demo(toolchain: nil, endpoint: nil, shell_snapshot: nil)
+    def self.build_demo(toolchain: nil, endpoint: nil, shell_snapshot: nil, island: nil)
       WasmBuild.new(
         workspace: gem_root.join("compiled"),
         gem_root: gem_root,
         toolchain: demo_toolchain(toolchain),
         endpoint: endpoint,
-        shell_snapshot: shell_snapshot
+        shell_snapshot: shell_snapshot,
+        island: island
       ).run
     end
 
     # Build the repository's own demo into compiled/.build-native[/target].
-    def self.build_demo_native(target: nil, toolchain: nil, endpoint: nil)
+    def self.build_demo_native(target: nil, toolchain: nil, endpoint: nil, island: nil)
       NativeBuild.new(
         workspace: gem_root.join("compiled"),
         gem_root: gem_root,
         toolchain: demo_toolchain(toolchain),
         endpoint: endpoint,
-        target: target
+        target: target,
+        island: island
       ).run
+    end
+
+    # Analyze a Rails app's local-first island(s) and return its Manifest without compiling.
+    def self.manifest(root:, island: nil, overrides: nil, native: false, migration_paths: nil)
+      AppStage.analyze(
+        source: root,
+        native: native,
+        island: island,
+        overrides: overrides,
+        migration_paths: migration_paths
+      ).manifest
     end
 
     def self.doctor(toolchain:, target: :wasm, web_dir: nil)

@@ -1,5 +1,7 @@
 import { mailboxScope } from "./mailbox-scope.js";
+import { isLocalRoute, parseManifest } from "./manifest.js";
 import { watchRelease } from "./release-updates.js";
+const manifest = parseManifest(import.meta.env.VITE_MANIFEST);
 let releaseRequired;
 const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
 const waiting = new Map();
@@ -40,7 +42,7 @@ const marks = { start: performance.now() };
 // something itself: the bytes of a record that declares sync_file (frontend/files.js).
 const syncEndpoint = import.meta.env.VITE_SYNC_ENDPOINT || "/instant_record";
 window.__spinel = { marks, call, worker, history: historyFill, sourceVersion: import.meta.env.VITE_SOURCE_VERSION,
-  endpoint: syncEndpoint, scope: syncScope() };
+  endpoint: syncEndpoint, scope: syncScope(), manifest };
 
 // Restore the switches before even the first bootstrap can reach Rails.
 try {
@@ -56,8 +58,9 @@ try {
 const filesPath = new URL(syncEndpoint + "/files/", location.href);
 const isFile = (url) => url.origin === filesPath.origin && url.pathname.startsWith(filesPath.pathname);
 
-const isLocal = (url) => url.origin === location.origin && !isFile(url) &&
-  !url.pathname.startsWith("/assets/") && !url.pathname.startsWith("/harness/") && !/^\/app[-.\w]*\.wasm$/.test(url.pathname);
+const isLocal = (url, method = null) => url.origin === location.origin && !isFile(url) &&
+  !url.pathname.startsWith("/assets/") && !url.pathname.startsWith("/harness/") && !/^\/app[-.\w]*\.wasm$/.test(url.pathname) &&
+  isLocalRoute(manifest, url.pathname, method);
 
 // One page request; the worker follows the app's redirects and returns the final answer.
 const appRequest = (method, path, body, contentType) => call("navigate", { method, path, body, contentType });
@@ -90,7 +93,10 @@ window.fetch = async (input, init) => {
     if (!response.status) throw new TypeError("Sync server unreachable");
     return new Response(response.text || null, { status: response.status });
   }
-  if (!isLocal(url)) return networkFetch(input, init);
+  const requestMethod = isUrlInput
+    ? (init?.method || "GET").toUpperCase()
+    : (init?.method || input.method || "GET").toUpperCase();
+  if (!isLocal(url, requestMethod)) return networkFetch(input, init);
 
   let method;
   let body;
@@ -196,7 +202,8 @@ document.open();
 document.write(result.status === 200 ? result.body : `<pre>${result.status}\n${(result.errors || []).join("\n")}</pre>`);
 document.close();
 document.addEventListener("turbo:before-visit", event => {
-  if (mailboxScope(event.detail.url) !== initialScope) {
+  const destination = new URL(event.detail.url, location.href);
+  if (mailboxScope(event.detail.url) !== initialScope || !isLocal(destination, "GET")) {
     event.preventDefault();
     location.assign(event.detail.url);
   }
@@ -214,7 +221,7 @@ async function submitLocalForm(event) {
   const target = button?.getAttribute("formtarget") || form.target;
   const url = new URL(button?.getAttribute("formaction") || form.action, location.href);
   const method = (button?.getAttribute("formmethod") || form.method).toUpperCase();
-  if (!isLocal(url) || method !== "POST" || (target && target !== "_self")) return;
+  if (!isLocal(url, method) || method !== "POST" || (target && target !== "_self")) return;
   event.preventDefault();
   const fields = new FormData(form, button || undefined);
   const file = [...fields.values()].find(value => value instanceof File && value.name);

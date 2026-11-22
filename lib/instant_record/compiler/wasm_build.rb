@@ -6,6 +6,7 @@ require_relative "app_stage"
 require_relative "browser_migrations"
 require_relative "entry_builder"
 require_relative "gem_vendor"
+require_relative "manifest"
 require_relative "runner"
 require_relative "source_pages"
 require_relative "toolchain"
@@ -77,6 +78,8 @@ module InstantRecord
         endpoint: nil,
         baseline: nil,
         migration_paths: nil,
+        island: nil,
+        overrides: nil,
         shell_snapshot: nil,
         build_dir: nil,
         out: $stdout
@@ -93,6 +96,8 @@ module InstantRecord
         @endpoint = (endpoint || ENV.fetch("SYNC_ENDPOINT", DEFAULT_SYNC_ENDPOINT)).to_s.sub(%r{/+\z}, "")
         @baseline = baseline
         @migration_paths = migration_paths
+        @island = island
+        @overrides = overrides
         @shell_snapshot = shell_snapshot.nil? ? ENV.fetch("INSTANT_RECORD_SHELL_SNAPSHOT", "") : shell_snapshot.to_s
         @runner = Runner.new(build_dir: @build_dir)
         @out = out
@@ -135,23 +140,31 @@ module InstantRecord
       def emit_tree(native: false)
         FileUtils.mkdir_p(@build_dir)
         app = File.join(@build_dir, "app-src")
+        manifest_path = File.join(@build_dir, Manifest::FILENAME)
+
+        stage = AppStage.stage(
+          source: @source_root,
+          target: app,
+          native: native,
+          island: @island,
+          overrides: @overrides,
+          models: @demo ? nil : @models,
+          migration_paths: @migration_paths,
+          overlay_dir: @demo ? File.join(@pipeline_dir, "demo") : nil,
+          manifest_path: manifest_path
+        )
+        manifest = stage.manifest
 
         if @demo
           plan = DEMO_MIGRATION_PLAN
-          DemoCarver.carve(
-            gem_src: @gem_root,
-            target: app,
-            overlay_dir: File.join(@pipeline_dir, "demo"),
-            native: native
-          )
         else
           plan = BrowserMigrations.plan(
             root: @app_source,
             baseline: @baseline,
-            migration_paths: @migration_paths
+            migration_paths: @migration_paths,
+            only_files: manifest.island? ? stage.trace.migrations : nil
           )
           File.write(File.join(@build_dir, "browser-migrations.json"), JSON.generate(plan))
-          AppStage.stage(source: @app_source, target: app, native: native)
         end
 
         GemVendor.vendor(gem_src: @gem_root, app_dir: app, demo: @demo)
@@ -168,13 +181,14 @@ module InstantRecord
         EntryBuilder.write_wasm_entry(
           emit_dir: emit,
           demo: @demo,
+          manifest: manifest,
           models: @models,
           migration_plan: plan,
           pipeline_dir: @pipeline_dir
         )
         WasmTree.build(source: emit, target: tree, demo: @demo)
 
-        { app: app, emit: emit, tree: tree, plan: plan }
+        { app: app, emit: emit, tree: tree, plan: plan, manifest: manifest }
       end
 
       def input_digest
@@ -204,13 +218,28 @@ module InstantRecord
           digest.update(@baseline.to_s)
         end
 
-        AppStage::FILES.each do |name|
+        (AppStage::FILES + [Manifest::CONFIG_FILE]).each do |name|
           candidate = File.join(@source_root, name)
           paths << candidate if File.file?(candidate)
         end
 
-        digest.update(@demo ? "" : JSON.generate(@models))
+        config_overrides = Manifest.merge_overrides(
+          Manifest.load_config(@source_root, island: @island),
+          @overrides
+        )
+        config_overrides[:include]["files"].each do |rel|
+          candidate = File.expand_path(rel.delete_prefix("/"), @source_root)
+          paths << candidate if candidate.start_with?("#{@source_root}#{File::SEPARATOR}") && File.file?(candidate)
+        end
+
+        digest.update(@demo ? "" : JSON.generate(Array(@models)))
+        digest.update("\0")
+        digest.update(@island.to_s)
+        digest.update("\0")
+        digest.update(JSON.generate(@overrides || {}))
+        digest.update("\0")
         digest.update(@shell_snapshot)
+        digest.update("\0")
 
         inputs.each do |base_root, folders|
           folders.each do |folder|
@@ -460,6 +489,7 @@ module InstantRecord
         app = emitted[:app]
         emit = emitted[:emit]
         plan = emitted[:plan]
+        manifest = emitted[:manifest]
 
         web = File.join(@workspace, "web")
         ensure_web_node_modules(web)
@@ -467,7 +497,7 @@ module InstantRecord
         digest = Digest::SHA256.file(final_wasm).hexdigest[0, 10]
         dist = File.join(@build_dir, "site")
 
-        model_set = EntryBuilder.app_models(demo: @demo, models: @models).sort.join(",")
+        model_set = EntryBuilder.app_models(manifest: manifest, models: @models).sort.join(",")
         schema_source = File.read(File.join(app, "db/schema.rb"))
         shell_fingerprint = Digest::SHA256.hexdigest([SHELL_FORMAT.to_s, model_set, schema_source].join("\n"))
         schema_digest = Digest::SHA256.file(File.join(emit, "config/schema.rb")).hexdigest
@@ -485,12 +515,14 @@ module InstantRecord
             "VITE_SCHEMA_VERSION" => plan["version"].to_s,
             "VITE_SCHEMA_BASELINE" => plan["baseline"].nil? ? "" : plan["baseline"].to_s,
             "VITE_MIGRATION_HISTORY" => JSON.generate(plan["history"] || {}),
-            "VITE_SCHEMA_DIGEST" => schema_digest
+            "VITE_SCHEMA_DIGEST" => schema_digest,
+            "VITE_MANIFEST" => manifest ? manifest.to_compact_json : "{}"
           },
           log: "vite.log"
         )
 
         File.write(File.join(dist, "instant-record-release.json"), JSON.generate("version" => wanted))
+        File.write(File.join(dist, Manifest::FILENAME), manifest.to_json) if manifest
         FileUtils.cp(final_wasm, File.join(dist, "app-#{digest}.wasm"))
 
         assets = File.join(dist, "assets")
@@ -520,7 +552,7 @@ module InstantRecord
         shell_worker = File.join(@source_root, "app/views/pwa/service-worker.js")
         FileUtils.cp(shell_worker, File.join(dist, "service-worker.js")) if File.file?(shell_worker)
 
-        inject_preloads(dist, @source_root)
+        inject_preloads(dist, app)
         [dist, digest]
       end
 

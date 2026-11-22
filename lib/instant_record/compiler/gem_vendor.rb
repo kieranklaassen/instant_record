@@ -1,6 +1,7 @@
 require "digest"
 require "fileutils"
 require "pathname"
+require "prism"
 require_relative "runner"
 
 module InstantRecord
@@ -70,9 +71,9 @@ module InstantRecord
       def run
         copy_gem_files
         apply_core_seams
+        rewrite_scoped_blocks
         unnest_syncable_concern
         write_sqlite_database_yml
-        rewrite_scoped_blocks
         apply_demo_seams if @demo
         COPY.length + 1
       end
@@ -149,7 +150,6 @@ module InstantRecord
             target = File.join(models_dir, rel)
             source = File.read(target)
             adapted = source.gsub("include InstantRecord::Syncable", "include Syncable")
-            adapted = strip_server_only(adapted)
             File.write(target, adapted) if adapted != source
           end
         end
@@ -162,15 +162,14 @@ module InstantRecord
       end
 
       def rewrite_scoped_blocks
-        %w[app/controllers app/screens].each do |subdir|
+        %w[app/models app/controllers app/helpers app/screens].each do |subdir|
           root = File.join(@app, subdir)
           next unless File.directory?(root)
 
           Dir.glob("**/*.rb", base: root).sort.each do |rel|
             target = File.join(root, rel)
             source = File.read(target)
-            changed = strip_server_only(source)
-            changed = unwrap_client_only(changed)
+            changed = rewrite_runtime_blocks(source)
             File.write(target, changed) if changed != source
           end
         end
@@ -237,17 +236,79 @@ module InstantRecord
         )
       end
 
-      def strip_server_only(source)
-        source.gsub(/(?<=\n|\A)( *)server_only do\n.*?\n\1end\n?/m, "")
+      # Prism-based rewriter: strips `server_only` blocks and unwraps
+      # `browser_only`/`client_only` blocks (both `do...end` and `{...}`).
+      def rewrite_runtime_blocks(source)
+        return source unless source.include?("server_only") || source.include?("browser_only") || source.include?("client_only")
+
+        parsed = Prism.parse(source)
+        return source unless parsed.success?
+
+        edits = []
+        collect_scoped_block_edits(parsed.value, source, edits)
+        return source if edits.empty?
+
+        result = source.b
+        edits.sort_by { |e| -e[:start] }.each do |edit|
+          result[edit[:start]...edit[:finish]] = edit[:replacement].b
+        end
+        result.force_encoding(source.encoding)
       end
 
-      def unwrap_client_only(source)
-        source.gsub(/(?<=\n|\A)( *)(?:browser|client)_only do\n(.*?)\n\1end(?=\n|\z)/m) do
-          indent = Regexp.last_match(1)
-          Regexp.last_match(2).split("\n", -1).map do |line|
-            line.start_with?("#{indent}  ") ? line[2..] : line
-          end.join("\n")
+      def collect_scoped_block_edits(node, source, edits)
+        return unless node
+
+        if node.is_a?(Prism::CallNode) && node.receiver.nil? && node.block.is_a?(Prism::BlockNode) &&
+            %i[server_only browser_only client_only].include?(node.name)
+          start_off, end_off, indent = line_bounds(source, node.location.start_offset, node.location.end_offset)
+          replacement =
+            if node.name == :server_only
+              ""
+            else
+              unwrap_block_body(node.block, source, indent)
+            end
+          edits << { start: start_off, finish: end_off, replacement: replacement }
+          return
         end
+
+        node.compact_child_nodes.each { |child| collect_scoped_block_edits(child, source, edits) }
+      end
+
+      def line_bounds(source, start_off, end_off)
+        bytes = source.b
+        line_start = bytes.rindex("\n", start_off)
+        line_start = line_start ? line_start + 1 : 0
+        prefix = bytes[line_start...start_off]
+        full_line = prefix.match?(/\A[ \t]*\z/)
+        indent = full_line ? prefix : ""
+        effective_start = full_line ? line_start : start_off
+        effective_end = end_off
+        effective_end += 1 if full_line && bytes.getbyte(effective_end) == 10 # trailing "\n"
+        [effective_start, effective_end, indent]
+      end
+
+      def unwrap_block_body(block, source, indent)
+        return "" unless block.body
+
+        bytes = source.b
+        open_end = block.opening_loc.end_offset
+        close_start = block.closing_loc.start_offset
+        inner = bytes[open_end...close_start]
+        # Drop leading comment/newline on the `do` line and trailing whitespace before `end`.
+        inner = inner.sub(/\A[^\n]*\n/, "") if inner.include?("\n")
+        inner = inner.sub(/\n[ \t]*\z/, "\n")
+        lines = inner.split("\n", -1)
+        lines.pop if lines.last == ""
+        unwrapped = lines.map do |line|
+          if line.strip.empty?
+            ""
+          elsif line.start_with?("#{indent}  ")
+            line[2..]
+          else
+            "#{indent}#{line.lstrip}"
+          end
+        end
+        unwrapped.empty? ? "" : "#{unwrapped.join("\n")}\n"
       end
 
       def edit!(rel, old, replacement)

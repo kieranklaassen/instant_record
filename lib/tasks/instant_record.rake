@@ -17,8 +17,22 @@ namespace :instant_record do
       toolchain: toolchain_path.call,
       endpoint: ENV.fetch("SYNC_ENDPOINT") { Rails.application.config.instant_record.mount_path || InstantRecord::DEFAULT_MOUNT_PATH },
       baseline: Rails.application.config.instant_record.compiled_migration_baseline,
-      migration_paths: Rails.application.config.paths["db/migrate"].existent
+      migration_paths: Rails.application.config.paths["db/migrate"].existent,
+      island: ENV["INSTANT_RECORD_ISLAND"].presence || Rails.application.config.instant_record.island,
+      overrides: Rails.application.config.instant_record.include
     }
+  end
+
+  desc "Print the canonical instant_record.manifest.json for this app's local-first island"
+  task :manifest, [:island] => :environment do |_task, args|
+    require "instant_record/compiler"
+    manifest = InstantRecord::Compiler.manifest(
+      root: Rails.root,
+      island: args[:island].presence || ENV["INSTANT_RECORD_ISLAND"].presence || Rails.application.config.instant_record.island,
+      overrides: Rails.application.config.instant_record.include,
+      migration_paths: Rails.application.config.paths["db/migrate"].existent
+    )
+    puts manifest.to_json
   end
 
   desc "Compile this Rails app to a static browser site using Roundhouse, Spinel and SQLite"

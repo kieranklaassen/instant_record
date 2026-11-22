@@ -4,8 +4,10 @@
 import { AppHost } from "./app-host.js";
 import { advance, fresh, held, query } from "./history-fill.js";
 import { mailboxScope } from "./mailbox-scope.js";
+import { isServerAllowed, parseManifest } from "./manifest.js";
 import { openSnapshot, withFiles } from "./snapshot-store.js";
 
+const manifest = parseManifest(import.meta.env.VITE_MANIFEST);
 const publicEndpoint = import.meta.env.VITE_SYNC_ENDPOINT || "/instant_record";
 let syncEndpoint = publicEndpoint;
 const POLL_EVERY_MS = 1000;
@@ -553,16 +555,10 @@ self.onmessage = async (event) => {
     }
     if (type === "serverRequest") {
       const url = new URL(payload.path, self.location.origin);
-      // The Auth page asks Rails who is signed in, and tries the sync server by hand.
-      const auth = payload.method === "GET"
-        ? ["/auth/session", "/instant_record/bootstrap"]
-        : ["/auth/session", "/auth/session/sign_out", "/instant_record/mutations"];
-      const allowed = auth.includes(url.pathname) || (payload.method === "GET" && url.pathname === "/receipts/probe") ||
-        (payload.method === "POST" && (url.pathname === "/slack/reset" ||
-          (import.meta.env.VITE_SHARED_INBOX_DEMO && url.pathname === new URL(syncEndpoint, self.location.origin).pathname + "/incoming" &&
-            url.pathname.startsWith("/email/sync/"))));
-      if (!allowed) throw new Error("Unknown demo server action");
-      const root = publicEndpoint.replace(/\/instant_record\/?$/, "");
+      if (!isServerAllowed(manifest, payload.method, url.pathname, publicEndpoint)) {
+        throw new Error(`Disallowed server action: ${payload.method} ${url.pathname}`);
+      }
+      const root = new URL(publicEndpoint, self.location.origin).origin;
       url.searchParams.delete("instant_record_network");
       const body = typeof payload.body === "string" ? payload.body : "";
       const reply = await fetchReply(payload.method, url.pathname + url.search, body, root);
