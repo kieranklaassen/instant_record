@@ -51,6 +51,8 @@ public final class AppHost: ObservableObject {
     /// The screens on show, as the app last described them.
     @Published public private(set) var screens: [Route: Node] = [:]
     @Published public private(set) var status = Status()
+    /// Quarantined offline writes the server rejected or LWW overwrote.
+    @Published public private(set) var notices: [SyncNotice] = []
     /// True from launch until the first sync of a database that has never
     /// synced has ended: there is nothing to show yet, and that is not "empty".
     @Published public private(set) var fetchingFirst = false
@@ -143,8 +145,10 @@ public final class AppHost: ObservableObject {
                 return Transport.offline
             }
             if self.engine.boot(database: store.database) { self.open = store } else { self.report() }
-            let first = self.engine.syncs && self.position()["bootstrap"] == "needed"
+            let pos = self.engine.syncs ? self.position() : [:]
+            let first = self.engine.syncs && pos["bootstrap"] == "needed"
             DispatchQueue.main.async { self.fetchingFirst = first }
+            self.loadNoticesIfNeeded(from: pos)
             self.draw()
         }
         schedule.request()
@@ -255,6 +259,21 @@ public final class AppHost: ObservableObject {
         undrawn = false
     }
 
+    /// Re-apply a quarantined local write so it queues a fresh outbox mutation.
+    public func retryNotice(_ id: String, overrides: [String: String] = [:]) {
+        resolveNotice("retry", id: id, overrides: overrides)
+    }
+
+    /// Fork a quarantined local write into a new record with a fresh UUID.
+    public func forkNotice(_ id: String, overrides: [String: String] = [:]) {
+        resolveNotice("fork", id: id, overrides: overrides)
+    }
+
+    /// Dismiss a quarantined sync notice without deleting its audit row.
+    public func dismissNotice(_ id: String) {
+        resolveNotice("dismiss", id: id, overrides: [:])
+    }
+
     // Follow the server's events while in front, from the database now open.
     // Called again when another database opens, which drops the request
     // held for the one that was left.
@@ -324,7 +343,9 @@ public final class AppHost: ObservableObject {
             thread.run {
                 guard self.open == store else { return done.resume() }
                 if self.engine.call("stream", event) == nil { self.report() }
-                if self.engine.notice().hasPrefix("records_changed") { self.draw() }
+                let signal = NoticeSignal.parse(self.engine.notice())
+                if !signal.syncNotices.isEmpty { self.mergeNotices(signal.syncNotices) }
+                if signal.recordsChanged { self.draw() }
                 done.resume()
             }
         }
@@ -381,7 +402,9 @@ public final class AppHost: ObservableObject {
                 let synced = self.engine.call("sync", store.endpoint)
                 self.prepared = nil
                 if synced == nil { outcome.error = self.engine.error() }
-                if self.engine.notice().hasPrefix("records_changed") { self.draw() }
+                let signal = NoticeSignal.parse(self.engine.notice())
+                if !signal.syncNotices.isEmpty { self.mergeNotices(signal.syncNotices) }
+                if signal.recordsChanged { self.draw() }
                 let state = self.position()
                 outcome.pending = Int(state["pending"] ?? "") ?? 0
                 outcome.nextRelease = Self.releaseDelay(from: state)
@@ -412,7 +435,9 @@ public final class AppHost: ObservableObject {
     // that has never synced has nothing to show yet.
     private func arrive(at route: Route) {
         let drawn = engine.call("render", route.input()).flatMap { try? Node(json: $0) }
-        let first = engine.syncs && position()["bootstrap"] == "needed"
+        let pos = engine.syncs ? position() : [:]
+        let first = engine.syncs && pos["bootstrap"] == "needed"
+        loadNoticesIfNeeded(from: pos)
         DispatchQueue.main.async {
             self.root = route
             if let drawn { self.screens[route] = drawn }
@@ -491,6 +516,53 @@ public final class AppHost: ObservableObject {
         DispatchQueue.main.async {
             self.status.error = message
             self.undrawn = false
+        }
+    }
+
+    private func resolveNotice(_ action: String, id: String, overrides: [String: String]) {
+        let payload: [String: Any] = ["action": action, "id": id, "overrides": overrides]
+        let input = (try? JSONSerialization.data(withJSONObject: payload)).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+        thread.run {
+            guard let raw = self.engine.call("notices", input) else {
+                self.report()
+                return
+            }
+            if let response = try? JSONDecoder().decode(SyncNoticesResponse.self, from: Data(raw.utf8)) {
+                DispatchQueue.main.async {
+                    if let list = response.notices { self.notices = list }
+                    if !response.ok, let message = response.error {
+                        self.status.error = message
+                        self.undrawn = false
+                    }
+                }
+            }
+            self.draw()
+        }
+        if action == "retry" || action == "fork" {
+            schedule.request()
+        }
+    }
+
+    private func loadNoticesIfNeeded(from position: [String: String]) {
+        let count = Int(position["notices"] ?? "") ?? 0
+        guard count > 0 else {
+            DispatchQueue.main.async { self.notices = [] }
+            return
+        }
+        guard let raw = engine.call("notices", "{\"action\":\"list\"}"),
+              let response = try? JSONDecoder().decode(SyncNoticesResponse.self, from: Data(raw.utf8)),
+              let list = response.notices else { return }
+        DispatchQueue.main.async { self.notices = list }
+    }
+
+    private func mergeNotices(_ incoming: [SyncNotice]) {
+        DispatchQueue.main.async {
+            var merged = incoming
+            let incomingIds = Set(incoming.map(\.id))
+            for existing in self.notices where !incomingIds.contains(existing.id) {
+                merged.append(existing)
+            }
+            self.notices = merged
         }
     }
 

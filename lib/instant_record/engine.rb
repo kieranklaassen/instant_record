@@ -22,6 +22,12 @@ module InstantRecord
     # A record that declares sync_file takes its file with it when it goes.
     config.to_prepare { InstantRecord::Files.forget_on_destroy }
 
+    initializer "instant_record.helpers" do
+      ActiveSupport.on_load(:action_view) do
+        include InstantRecord::SyncNoticesHelper
+      end
+    end
+
     initializer "instant_record.compiled_site" do |app|
       host = app.config.instant_record.compiled_host
       if host.present?

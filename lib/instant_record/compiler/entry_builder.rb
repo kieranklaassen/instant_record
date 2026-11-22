@@ -104,9 +104,33 @@ module InstantRecord
           def self.cursor
             key = InstantRecord::Client.identity_key
             next_ms = InstantRecord::Client.next_release_ms
-            out = "cursor=" + InstantRecord::Client.cursor.to_s + " pending=" + InstantRecord::Client.pending_count.to_s + " bootstrap=" + (InstantRecord::Client.bootstrapped? ? "ready" : "needed") + " identity=" + (key.nil? ? "" : key) + " held=" + InstantRecord::Client.held_count.to_s
+            out = "cursor=" + InstantRecord::Client.cursor.to_s + " pending=" + InstantRecord::Client.pending_count.to_s + " bootstrap=" + (InstantRecord::Client.bootstrapped? ? "ready" : "needed") + " identity=" + (key.nil? ? "" : key) + " notices=" + InstantRecord::SyncNotice.active.count.to_s + " held=" + InstantRecord::Client.held_count.to_s
             out += " next_release_ms=" + next_ms.to_s unless next_ms.nil?
             <<write:out>>out)
+            0
+          end
+
+          # List or resolve quarantined sync notices ("list", "retry", "fork", "dismiss").
+          def self.notices
+            raw = <<read:in>>.to_s.strip
+            input = raw.empty? ? {} : JSON.parse(raw)
+            action = input["action"].to_s
+            action = "list" if action.empty?
+            result =
+              if action == "list"
+                { "ok" => true, "notices" => InstantRecord::SyncNotice.active.recent.map { |n| n.as_notice } }
+              else
+                resolved = InstantRecord::SyncNotice.resolve(input["id"], action: action, overrides: input["overrides"])
+                if action == "retry" || action == "fork"
+                  InstantRecord::Client.unlisted_changes
+                  InstantRecord::Client.notify_changed
+                end
+                resolved
+              end
+            <<write:out>>JSON.generate(result))
+            0
+          rescue StandardError => error
+            <<write:out>>JSON.generate({ "ok" => false, "error" => error.message, "notices" => InstantRecord::SyncNotice.active.recent.map { |n| n.as_notice } }))
             0
           end
 

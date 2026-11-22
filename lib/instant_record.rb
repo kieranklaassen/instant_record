@@ -189,6 +189,9 @@ module InstantRecord
     def next_release_at = Client.next_release_at
     def next_release_ms = Client.next_release_ms
     def cursor = Client.cursor
+    def sync_notices = SyncNotice.active.recent
+    def sync_notices_count = SyncNotice.active.count
+    def resolve_sync_notice(id, action:, overrides: {}) = SyncNotice.resolve(id, action: action, overrides: overrides)
 
     # Hold local outbox writes created inside the block for `seconds` before they
     # mature for sync, recording a pre-mutation snapshot so cancel_pending can
@@ -398,6 +401,7 @@ ActiveSupport.on_load(:active_record) do
   require "instant_record/syncable"
   require "instant_record/outbox_mutation"
   require "instant_record/sync_metadata"
+  require "instant_record/sync_notice"
   require "instant_record/client"
   require "instant_record/branch"
   require "instant_record/branch/sqlite_store"
