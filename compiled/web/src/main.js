@@ -181,7 +181,12 @@ function syncScope() {
   }
 }
 
-const boot = await call("boot", { module: await window.__wasm, path: location.pathname + location.search, scope: syncScope() }).catch(error => {
+const boot = await call("boot", {
+  module: await window.__wasm,
+  path: location.pathname + location.search,
+  scope: syncScope(),
+  visible: document.visibilityState !== "hidden",
+}).catch(error => {
   document.body.textContent = "The app could not open this release. Your saved database was kept. " + error.message;
   throw error;
 });
@@ -195,6 +200,20 @@ if (finalPath !== location.pathname + location.search) history.replaceState(null
 document.open();
 document.write(result.status === 200 ? result.body : `<pre>${result.status}\n${(result.errors || []).join("\n")}</pre>`);
 document.close();
+
+function reportVisibility() {
+  worker.postMessage({ type: "instant_record.visibility", visible: document.visibilityState !== "hidden" });
+}
+function reportPageHide() {
+  worker.postMessage({ type: "instant_record.pagehide" });
+}
+function bindVisibility() {
+  document.addEventListener("visibilitychange", reportVisibility);
+  window.addEventListener("pagehide", reportPageHide);
+  reportVisibility();
+}
+bindVisibility();
+
 document.addEventListener("turbo:before-visit", event => {
   if (mailboxScope(event.detail.url) !== initialScope) {
     event.preventDefault();
@@ -228,6 +247,7 @@ async function submitLocalForm(event) {
     document.write(response.result.body || "<p>Request failed</p>");
     document.close();
     window.addEventListener("submit", submitLocalForm);
+    bindVisibility();
     return;
   }
   if (response.redirected) location.assign(response.finalPath);
@@ -236,6 +256,7 @@ async function submitLocalForm(event) {
     document.write(response.result.body);
     document.close();
     window.addEventListener("submit", submitLocalForm);
+    bindVisibility();
   }
 }
 window.addEventListener("submit", submitLocalForm);

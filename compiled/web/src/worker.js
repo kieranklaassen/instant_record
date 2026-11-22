@@ -1,14 +1,13 @@
 // Dedicated worker: owns the persistent WASI reactor app, a cached IndexedDB handle,
-// retry-only outbox draining, and non-blocking async change polling (window=0, so the
-// worker never blocks on network I/O during user clicks and Puma threads are never held).
+// retry-only outbox draining, and a leader-elected visibility-aware SSE change stream.
 import { AppHost } from "./app-host.js";
 import { advance, fresh, held, query } from "./history-fill.js";
 import { mailboxScope } from "./mailbox-scope.js";
 import { openSnapshot, withFiles } from "./snapshot-store.js";
+import { createStreamLeader } from "./stream-leader.js";
 
 const publicEndpoint = import.meta.env.VITE_SYNC_ENDPOINT || "/instant_record";
 let syncEndpoint = publicEndpoint;
-const POLL_EVERY_MS = 1000;
 const QUIET_MS = 30;
 const DRAIN_RETRY_BASE_MS = 500;
 const DRAIN_RETRY_CAP_MS = 10000;
@@ -86,18 +85,22 @@ let changes;
 
 let host = null;
 let currentCursor = null;
-// Read with the cursor, and sent with each poll so the server can say when the
+// Read with the cursor, and sent with each stream so the server can say when the
 // person behind this browser has changed.
 let currentIdentity = "";
 let kickTimer = null;
-let pollInFlight = false;
 let draining = null;
 let localRevision = 0;
 let drainDelayMs = DRAIN_RETRY_BASE_MS;
+let streamLeader = null;
+let streamOpen = false;
+let pageVisible = true;
+let pageTornDown = false;
 
 // Keep each tab's hot reactor until a peer changes the durable revision.
 async function withSnapshot(mode, operation) {
   let wrote = false;
+  let wroteChanges = null;
   try {
     const result = await withFiles(mode, async (get, put) => {
       const revision = await get(REVISION);
@@ -117,16 +120,17 @@ async function withSnapshot(mode, operation) {
         localRevision++;
         currentCursor = null;
       }
-      return operation(() => {
+      return operation((changeList = null) => {
         const bytes = host.databaseBytes();
         if (!bytes) throw new Error("SQLite did not produce a database snapshot");
         snapshotRevision = (revision ?? 0) + 1;
         put(DATABASE, bytes);
         put(REVISION, snapshotRevision);
         wrote = true;
+        wroteChanges = changeList ?? null;
       }, put);
     });
-    if (wrote) changes.postMessage(snapshotRevision);
+    if (wrote) changes.postMessage({ revision: snapshotRevision, changes: wroteChanges });
     return result;
   } catch (error) {
     // Discard uncommitted in-memory changes before the next operation.
@@ -143,7 +147,12 @@ function kickSync(delay = QUIET_MS) {
 // The connection came back: send what is waiting now, not at the next retry.
 self.addEventListener("online", () => {
   kickSync(0);
+  streamLeader?.setOnline(true);
   if (mailScope && fillState && !fillState.done && !fillState.full) scheduleFill(0);
+});
+
+self.addEventListener("offline", () => {
+  streamLeader?.setOnline(false);
 });
 
 function syncPass() {
@@ -182,10 +191,10 @@ async function drain(initial = false, early = null) {
     });
     const needsBootstrap = plan.bootstrap && !host.syncState().bootstrapped;
     if (push || snapshot) report({ kind: "sync-pass", path: `${result.pending} pending` });
-    // After a bootstrap the next poll reads the cursor and the identity afresh.
+    // After a bootstrap the next stream reads the cursor and the identity afresh.
     currentCursor = plan.bootstrap ? null : result.cursor;
     if (result.changed || result.notified) {
-      save();
+      save(result.changes);
     }
 
     if (result.pending > 0 || needsBootstrap) {
@@ -194,55 +203,54 @@ async function drain(initial = false, early = null) {
     } else {
       drainDelayMs = DRAIN_RETRY_BASE_MS;
     }
-    return result;
+    return { ...result, needsBootstrap };
   });
   if (!initial && result.notified) self.postMessage({ type: "records_changed", changes: result.changes });
+  if (!result.retried) {
+    if (plan.bootstrap && !result.needsBootstrap) streamLeader?.reconnect();
+    else if (result.pending === 0) streamLeader?.wake();
+  }
   return result;
 }
 
-// Non-blocking catch-up poll: window=0 returns immediately (zero held server threads),
-// async fetch keeps the worker event loop unblocked for user clicks, and an empty body
-// skips Wasm entirely.
-async function pollChanges() {
-  if (!host || pollInFlight || draining || kickTimer) return;
-  const revision = snapshotRevision;
-  pollInFlight = true;
-  try {
-    if (currentCursor === null) {
-      const state = host.syncState();
-      if (state.pending > 0 || !state.bootstrapped) {
-        kickSync(0);
-        return;
-      }
-      currentCursor = state.cursor;
-      currentIdentity = state.identity;
-    }
-    const who = currentIdentity ? `&identity=${encodeURIComponent(currentIdentity)}` : "";
-    const { status, text } = await fetchReply("GET", `/events?after=${currentCursor}&window=0${who}`);
-    if (status !== 200) return;
-    if (!text.trim() || draining || kickTimer || revision !== snapshotRevision) return;
-
-    const changed = await withSnapshot("readwrite", save => {
-      if (draining || kickTimer || revision !== snapshotRevision) return;
-      const consumed = host.consumeStream(text);
-      currentCursor = consumed.cursor;
-      // The server said this browser synced as someone else, and the client dropped what it
-      // held. Bootstrap as whoever is here now, at once, and never poll from zero.
-      if (!consumed.bootstrapped) {
-        currentCursor = null;
-        kickSync(0);
-      }
-      if (consumed.applied > 0 || consumed.notified) {
-        save();
-        return { changes: consumed.changes };
-      }
-    });
-    if (changed) self.postMessage({ type: "records_changed", changes: changed.changes });
-  } catch {
-    // offline: try again on the next interval
-  } finally {
-    pollInFlight = false;
+// Read fresh cursor/identity from IndexedDB so a promoted follower always starts
+// from the persisted state rather than a stale in-memory value.
+async function readStreamParams() {
+  if (!host || draining || kickTimer) return { ready: false };
+  const state = await withSnapshot("readonly", () => host.syncState());
+  if (state.pending > 0 || !state.bootstrapped) {
+    if (!draining && !kickTimer) kickSync(0);
+    return { ready: false };
   }
+  currentCursor = state.cursor;
+  currentIdentity = state.identity;
+  return { ready: true, cursor: state.cursor, identity: state.identity };
+}
+
+// Apply complete SSE frames from the leader's streaming connection, persist to
+// IndexedDB, and notify this tab (followers learn through the `changes` channel).
+async function applyStreamFrames(framesText) {
+  if (draining) await draining.catch(() => {});
+  if (!host) return { applied: 0, cursor: currentCursor || 0, reset: false };
+  const outcome = await withSnapshot("readwrite", save => {
+    const consumed = host.consumeStream(framesText);
+    currentCursor = consumed.cursor;
+    const reset = !consumed.bootstrapped;
+    // The server said this browser synced as someone else, and the client dropped what it
+    // held. Bootstrap as whoever is here now, at once, and never stream from zero.
+    if (reset) {
+      currentCursor = null;
+      currentIdentity = "";
+    }
+    if (consumed.applied > 0 || consumed.notified || reset) {
+      save(consumed.changes);
+      return { applied: consumed.applied, cursor: consumed.cursor, reset, changes: consumed.changes, notify: true };
+    }
+    return { applied: consumed.applied, cursor: consumed.cursor, reset, changes: null, notify: false };
+  });
+  if (outcome.reset) kickSync(0);
+  if (outcome.notify) self.postMessage({ type: "records_changed", changes: outcome.changes });
+  return outcome;
 }
 
 // A page of older rows, or the rows matching `search`, brought into the local database.
@@ -422,9 +430,14 @@ async function earlyBootstrap(path) {
 async function boot(payload = {}) {
   const scope = mailboxScope(payload.path || "/");
   syncScope = typeof payload.scope === "string" ? payload.scope : "";
+  if (typeof payload.visible === "boolean") pageVisible = payload.visible;
   openSnapshot(scope);
   changes = new BroadcastChannel("instant-record-spinel-changes" + (scope ? "/" + scope : ""));
-  changes.onmessage = () => { if (host) self.postMessage({ type: "records_changed" }); };
+  changes.onmessage = (event) => {
+    if (!host) return;
+    const detail = event.data && typeof event.data === "object" ? event.data.changes : null;
+    self.postMessage({ type: "records_changed", changes: detail || null });
+  };
   if (scope) syncEndpoint = publicEndpoint.replace(/\/instant_record\/?$/, "") + "/email/sync/" + scope;
   const started = performance.now();
   // The shell downloads while the module compiles.
@@ -499,11 +512,27 @@ async function boot(payload = {}) {
     shell = null;
     restored = await open();
   }
+  streamLeader = createStreamLeader({
+    getEndpoint: () => syncEndpoint,
+    mailboxScope: scope,
+    getSyncScope: () => syncScope,
+    initialVisible: pageVisible,
+    isOfflineSimulated: () => simulation.offline,
+    getLatencyMs: () => simulation.latencyMs,
+    getStreamParams: readStreamParams,
+    applyFrames: applyStreamFrames,
+    onReport: entry => report(entry),
+    onStreamStateChange: open => {
+      streamOpen = open;
+      self.postMessage({ type: "instant_record.stream_state", streamOpen: open });
+    },
+  });
+
   const bootstrapStart = performance.now();
   if (!restored && !shell) await drain(true, await bootstrapFetch);
-  // The shell is as old as its cursor. Ask for what came after it now, not at the first
-  // interval, and do not hold the first page for the answer.
-  if (shell) pollChanges();
+  // The shell is as old as its cursor. Start the leader stream now so catch-up
+  // begins immediately without holding the first page render.
+  if (shell && !pageTornDown) streamLeader.start();
   const bootstrapMs = performance.now() - bootstrapStart;
 
   if (scope) {
@@ -516,7 +545,7 @@ async function boot(payload = {}) {
     if (before && at) await loadHistory({ type: "MailEntry", before: { id: before, created_at: at }, limit: 50 });
   }
   const first = payload.path ? await runRequest("GET", () => navigate({ method: "GET", path: payload.path })) : null;
-  setInterval(pollChanges, POLL_EVERY_MS);
+  if (!pageTornDown) streamLeader.start();
   // With the first page on screen, bring the rest of the inbox down behind it.
   if (scope && scope !== "invalid/invalid") {
     mailScope = scope;
@@ -529,6 +558,17 @@ async function boot(payload = {}) {
 self.onmessage = async (event) => {
   const { id, type, payload } = event.data;
   try {
+    if (type === "instant_record.visibility") {
+      pageVisible = !!event.data.visible;
+      streamLeader?.setVisible(pageVisible);
+      return;
+    }
+    if (type === "instant_record.pagehide") {
+      pageTornDown = true;
+      pageVisible = false;
+      streamLeader?.stop();
+      return;
+    }
     if (type === "instant_record.clear_log") {
       history.length = 0;
       return;
@@ -537,8 +577,9 @@ self.onmessage = async (event) => {
       const previous = simulation;
       simulation = event.data.settings;
       if (event.data.backlog) {
-        self.postMessage({ type: "instant_record.debug_backlog", entries: history, streamOpen: false });
+        self.postMessage({ type: "instant_record.debug_backlog", entries: history, streamOpen });
       }
+      streamLeader?.setOfflineSimulated(!!simulation.offline);
       if (host && previous.offline && !simulation.offline) {
         drainDelayMs = DRAIN_RETRY_BASE_MS;
         kickSync(0);
@@ -566,6 +607,9 @@ self.onmessage = async (event) => {
       url.searchParams.delete("instant_record_network");
       const body = typeof payload.body === "string" ? payload.body : "";
       const reply = await fetchReply(payload.method, url.pathname + url.search, body, root);
+      if (payload.method !== "GET" && reply.status >= 200 && reply.status < 400) {
+        streamLeader?.reconnect();
+      }
       return self.postMessage({ id, result: reply });
     }
     if (type === "boot") return self.postMessage({ id, result: await boot(payload) });

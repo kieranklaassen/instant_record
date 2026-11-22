@@ -43,4 +43,44 @@ class EventStreamTest < Minitest::Test
 
     assert_equal [{ "type" => "Item", "cursor" => 5 }], events
   end
+
+  def test_event_stream_headers_forbid_public_or_shared_caching
+    cache_control = InstantRecord::EventsController::EVENT_STREAM_HEADERS["cache-control"]
+    assert_equal "no-store", cache_control
+    refute_match(/public|s-maxage/i, cache_control)
+    assert_equal "text/event-stream", InstantRecord::EventsController::EVENT_STREAM_HEADERS["content-type"]
+    assert_equal "no", InstantRecord::EventsController::EVENT_STREAM_HEADERS["x-accel-buffering"]
+  end
+
+  def test_event_stream_isolates_per_user_scoped_changes
+    reset_instant_record_tables!
+    model = scoped_model("EventScopedItem")
+    previous_synced = InstantRecord.synced_models.dup
+    InstantRecord.sync(model)
+
+    cursor_before = InstantRecord::Change.maximum(:id).to_i
+    alice_note = model.create!(title: "Alice secret", state: "alice")
+    bob_note = model.create!(title: "Bob secret", state: "bob")
+    public_note = model.create!(title: "Shared note", state: "public")
+
+    alice_chunks = []
+    Stream.new(cursor: cursor_before, deadline: Time.current, heartbeat: 0, identity: Person.new("alice")).each { |chunk| alice_chunks << chunk }
+
+    bob_chunks = []
+    Stream.new(cursor: cursor_before, deadline: Time.current, heartbeat: 0, identity: Person.new("bob")).each { |chunk| bob_chunks << chunk }
+
+    alice_events = []
+    InstantRecord::Client::Transport::SseParser.new { |event| alice_events << event }.feed(alice_chunks.join)
+    bob_events = []
+    InstantRecord::Client::Transport::SseParser.new { |event| bob_events << event }.feed(bob_chunks.join)
+
+    alice_visible = alice_events.reject { |e| e["operation"] == "destroy" }.map { |e| e["id"] }
+    bob_visible = bob_events.reject { |e| e["operation"] == "destroy" }.map { |e| e["id"] }
+    assert_equal [alice_note.id, public_note.id], alice_visible
+    assert_equal [bob_note.id, public_note.id], bob_visible
+    refute_includes alice_chunks.join, "Bob secret"
+    refute_includes bob_chunks.join, "Alice secret"
+  ensure
+    InstantRecord.sync(previous_synced) if previous_synced
+  end
 end
