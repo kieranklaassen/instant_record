@@ -24,6 +24,7 @@ module InstantRecord
         lib/instant_record/client.rb
         lib/instant_record/client/transport.rb
         lib/instant_record/client/notifier.rb
+        lib/instant_record/branch.rb
         lib/instant_record/native/node.rb
         lib/instant_record/native/screen.rb
       ].freeze

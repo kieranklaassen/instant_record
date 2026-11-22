@@ -68,6 +68,10 @@ module InstantRecord
 
               def load_engine = nil
 
+              def load_branch_store = nil
+
+              def default_mount_path = InstantRecord::DEFAULT_MOUNT_PATH
+
               def resolve_syncable_model(_record_type) = nil
 
               def discover_syncable_models = []
@@ -108,6 +112,10 @@ module InstantRecord
               def browser? = true
 
               def load_engine = nil
+
+              def load_branch_store = nil
+
+              def default_mount_path = InstantRecord::DEFAULT_MOUNT_PATH
 
               def resolve_syncable_model(_record_type) = nil
 

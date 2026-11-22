@@ -12,6 +12,18 @@ module InstantRecord
       require "instant_record/engine" if defined?(Rails::Engine)
     end
 
+    def load_branch_store
+      require "instant_record/branch/sqlite_store"
+    end
+
+    def default_mount_path
+      configured =
+        if defined?(Rails) && Rails.application && Rails.application.config.respond_to?(:instant_record)
+          Rails.application.config.instant_record.mount_path
+        end
+      configured.is_a?(String) ? configured : InstantRecord::DEFAULT_MOUNT_PATH
+    end
+
     def resolve_syncable_model(record_type)
       klass = record_type.to_s.safe_constantize
       klass if klass.respond_to?(:instant_record_syncable?) && klass.instant_record_syncable?
