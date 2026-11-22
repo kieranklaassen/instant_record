@@ -50,16 +50,15 @@ function acceptsEncoding(header, name) {
   return false;
 }
 
-// Flush large payloads before EOF so a pacing proxy that pauses on the final chunk
-// does not receive `end` in the same read tick as that chunk. Total bytes and
-// Content-Length are identical.
+// Flush large payloads and wait for socket drain before sending the final byte + EOF so a
+// pacing proxy that pauses on large chunks does not receive `end` while the final chunk's
+// write timer is still pending. Total bytes and Content-Length are identical.
 function sendPayload(response, payload) {
-  if (payload.length > 2048) {
-    response.write(payload.subarray(0, payload.length - 1));
-    setImmediate(() => response.end(payload.subarray(payload.length - 1)));
-  } else {
-    response.end(payload);
-  }
+  if (payload.length <= 2048) return response.end(payload);
+  const tail = payload.subarray(payload.length - 1);
+  const finish = () => setTimeout(() => { if (!response.destroyed) response.end(tail); }, 1);
+  if (response.write(payload.subarray(0, payload.length - 1))) finish();
+  else response.once("drain", finish);
 }
 
 createServer(async (request, response) => {
