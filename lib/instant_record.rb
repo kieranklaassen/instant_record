@@ -104,12 +104,16 @@ module InstantRecord
     # endpoints and mirroring Change#as_event: clients apply all three through
     # the same upsert path.
     def record_payload(record)
-      {
+      payload = {
         type: record.class.name,
         id: record.id,
         version: record[:server_version],
         attributes: wire_attributes(record.attributes)
       }
+      if (stamp = HLC.record_hlc(record.class.name, record.id))
+        payload[:hlc] = stamp
+      end
+      payload
     end
 
     # Begin background sync in the browser.
@@ -392,10 +396,11 @@ end
 
 ActiveSupport.on_load(:active_record) do
   require "instant_record/sync_window"
+  require "instant_record/sync_metadata"
+  require "instant_record/hlc"
   require "instant_record/sync_actions"
   require "instant_record/syncable"
   require "instant_record/outbox_mutation"
-  require "instant_record/sync_metadata"
   require "instant_record/sync_notice"
   require "instant_record/client"
   require "instant_record/branch"
