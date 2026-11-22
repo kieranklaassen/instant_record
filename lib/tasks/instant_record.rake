@@ -64,6 +64,30 @@ namespace :instant_record do
       puts "Removed #{removed} given-up #{"upload".pluralize(removed)}"
     end
   end
+
+  desc "Run headless dual-runtime parity checks across CRuby+DB, compiled app.wasm (Node AppHost), and Native C ABI (Fiddle)"
+  task verify_parity: :environment do
+    require "instant_record/testing"
+    Rails.application.eager_load!
+    InstantRecord::Testing.verify_parity(
+      rails_app: Rails.application,
+      root: Rails.root
+    )
+  rescue InstantRecord::Testing::Error => e
+    abort e.message
+  end
+
+  desc "Run deterministic seeded multi-client chaos simulation across CRuby+DB, compiled app.wasm, and Native C ABI (SEED=, SEEDS=, STEPS=, CLIENTS=, RUNTIMES=, REQUIRE_COMPILED=1)"
+  task chaos: :environment do
+    require "instant_record/testing"
+    Rails.application.eager_load!
+    InstantRecord::Testing.run_chaos(
+      rails_app: Rails.application,
+      root: Rails.root
+    )
+  rescue InstantRecord::Testing::Error => e
+    abort e.message
+  end
 end
 
 Rake::Task.define_task("assets:precompile").enhance do

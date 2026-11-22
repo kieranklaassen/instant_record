@@ -1,6 +1,7 @@
 require "etc"
 require "fileutils"
 require "pathname"
+require "rbconfig"
 require_relative "entry_builder"
 require_relative "runner"
 require_relative "toolchain"
@@ -9,7 +10,8 @@ require_relative "wasm_build"
 module InstantRecord
   class Compiler
     # Build the compiled app as a native static library (plus screenless host
-    # binary for this machine, or cross-compiled libraries for iOS).
+    # binary and Fiddle-loadable shared library for this machine, or
+    # cross-compiled libraries for iOS).
     class NativeBuild
       TARGETS = %w[iphonesimulator iphoneos].freeze
       ENTRIES = (WasmBuild::REACTOR_EXPORTS.split(",").map { |name| name.split(".")[1] } + %w[render action open]).freeze
@@ -18,6 +20,14 @@ module InstantRecord
       RUNTIME_CFLAGS = %w[-O2 -Wno-all -ffunction-sections -fdata-sections -ffp-contract=off].freeze
       PACKAGES = WasmBuild::SPINEL_PACKAGES
       IOS_MINIMUM = "17.0"
+
+      def self.shared_library_name
+        darwin? ? "libinstant_record_app.dylib" : "libinstant_record_app.so"
+      end
+
+      def self.darwin?
+        RbConfig::CONFIG["host_os"].to_s.match?(/darwin/i)
+      end
 
       # Fields of a screen's node that Spinel did not type as a hash of strings.
       # One loose hash anywhere in the app loosens the struct field for every screen.
@@ -149,11 +159,12 @@ module InstantRecord
           "-I#{File.join(@pipeline_dir, 'native')}"
         ]
 
+        pic = @target ? [] : ["-fPIC"]
         objects = [
-          [app_c, CFLAGS],
-          [File.join(@pipeline_dir, "native_shim.c"), CFLAGS],
-          [File.join(@pipeline_dir, "sqlite/rh_shim.c"), CFLAGS],
-          [File.join(sqlite_src, "sqlite3.c"), SQLITE_CFLAGS]
+          [app_c, CFLAGS + pic],
+          [File.join(@pipeline_dir, "native_shim.c"), CFLAGS + pic],
+          [File.join(@pipeline_dir, "sqlite/rh_shim.c"), CFLAGS + pic],
+          [File.join(sqlite_src, "sqlite3.c"), SQLITE_CFLAGS + pic]
         ].map do |source, cflags|
           made = File.join(out_dir, "#{File.basename(source, '.c')}.o")
           @runner.run([*cc, *cflags, *includes, "-c", source, "-o", made], log: "cc.log")
@@ -187,7 +198,17 @@ module InstantRecord
           ],
           log: "link.log"
         )
-        @out.puts "built #{library} and #{host} (#{File.size(host)} bytes)"
+
+        shared = File.join(@build_dir, self.class.shared_library_name)
+        shared_args =
+          if self.class.darwin?
+            ["-dynamiclib", "-O2", "-Wl,-force_load,#{library}", File.join(spinel_home, "lib/libspinel_rt.a")]
+          else
+            ["-shared", "-O2", "-Wl,--whole-archive", library, "-Wl,--no-whole-archive", File.join(spinel_home, "lib/libspinel_rt.a")]
+          end
+        @runner.run([*cc, *shared_args, "-lm", "-o", shared], log: "link-shared.log")
+
+        @out.puts "built #{library}, #{shared} and #{host} (#{File.size(host)} bytes)"
         Pathname(@build_dir)
       end
 

@@ -38,10 +38,14 @@ module InstantRecord
 
         def get_json(path)
           JSON.parse(exchange("GET", path, ""))
+        rescue JSON::ParserError => e
+          raise Error, "GET #{path} invalid JSON: #{e.message}"
         end
 
         def post_json(path, payload)
           JSON.parse(exchange("POST", path, JSON.generate(payload)))
+        rescue JSON::ParserError => e
+          raise Error, "POST #{path} invalid JSON: #{e.message}"
         end
 
         # The host returns the whole catch-up stream at once (the loop polls with window=0).

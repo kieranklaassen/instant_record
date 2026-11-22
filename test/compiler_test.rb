@@ -328,6 +328,12 @@ class CompilerTest < ActiveSupport::TestCase
             self.created_at = value
           end
         end
+        def fill_timestamps(creating)
+          now = ActiveSupport.db_now
+          if !(creating) || @updated_at_raw.nil? || @updated_at_raw.empty?
+            @updated_at_raw = now
+          end
+        end
       RUBY
       File.write(File.join(emit, "app/views/slack/channels/_sidebar.rb"), <<~RUBY)
         channels.each do |channel|
@@ -351,6 +357,7 @@ class CompilerTest < ActiveSupport::TestCase
       assert_includes File.read(File.join(tree, "runtime/message_digest.rb")), "NotImplementedError"
       assert_includes File.read(File.join(tree, "runtime/active_record/base.rb")), "def changed"
       assert_includes File.read(File.join(tree, "app/models/note.rb")), "ActiveSupport.cast_datetime(value)"
+      assert_includes File.read(File.join(tree, "app/models/note.rb")), "!(creating) && !InstantRecord::Client.applying_remote?"
       assert_includes File.read(File.join(tree, "app/views/slack/channels/_sidebar.rb")), "channel_row == channel"
       assert_includes File.read(File.join(tree, "runtime/action_text.rb")), "# Pruned for browser wasm"
     end
@@ -421,6 +428,7 @@ class CompilerTest < ActiveSupport::TestCase
       end
       assert File.file?(native_out.join("libinstant_record_app.a"))
       assert File.file?(native_out.join("host"))
+      assert File.file?(native_out.join(InstantRecord::Compiler::NativeBuild.shared_library_name))
 
       # Native iOS simulator build cross-compiles Spinel runtime into libspinel_rt.a.
       ios_out = with_path(fake[:bin_dir]) do
@@ -435,6 +443,7 @@ class CompilerTest < ActiveSupport::TestCase
       assert File.file?(ios_out.join("libinstant_record_app.a"))
       assert File.file?(ios_out.join("libspinel_rt.a"))
       refute File.exist?(ios_out.join("host"))
+      refute File.exist?(ios_out.join(InstantRecord::Compiler::NativeBuild.shared_library_name))
     end
   end
 
