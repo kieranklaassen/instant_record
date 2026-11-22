@@ -74,15 +74,10 @@ class InstantRecordTest < Minitest::Test
 
   # The mount path lives in Rails config, which a plain-AR test process has none
   # of; the gem falls back to the default without it.
-  def with_mount_path(path)
+  def with_mount_path(path, &block)
     config = Struct.new(:instant_record).new(Struct.new(:mount_path).new(path))
     application = Object.new
     application.define_singleton_method(:config) { config }
-    rails = Module.new
-    rails.define_singleton_method(:application) { application }
-    Object.const_set(:Rails, rails)
-    yield
-  ensure
-    Object.send(:remove_const, :Rails)
+    with_rails_application(application, &block)
   end
 end
