@@ -278,6 +278,7 @@ class CompilerTest < ActiveSupport::TestCase
 
       wasm_main = File.read(File.join(emit, "main_wasm.rb"))
       assert_includes wasm_main, "module WasmBridge"
+      assert_includes wasm_main, "InstantRecord::Client.handle_history("
       assert_includes wasm_main, 'File.read("/host/in")'
       assert_includes wasm_main, 'if previous < "00000020261120000001"'
       assert_includes wasm_main, '\#{x}\#@y\#$z'
@@ -295,6 +296,7 @@ class CompilerTest < ActiveSupport::TestCase
       assert_equal ["inbox_list"], screens
       native_main = File.read(File.join(emit, "main_native.rb"))
       assert_includes native_main, "module NativeBridge"
+      assert_includes native_main, "InstantRecord::Client.handle_history("
       assert_includes native_main, 'when "inbox_list" then InboxListScreen.new(params)'
       assert_includes native_main, 'InstantRecord::SyncMetadata.set("schema_version", "00000020261120000001")'
       assert_includes native_main, "InstantRecord::Client.streaming = false"

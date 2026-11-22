@@ -25,14 +25,12 @@ class FetchHistoryTest < Minitest::Test
     @transport = HistoryTransport.new
     InstantRecord::Client.transport = @transport
     reset_instant_record_tables!
-    InstantRecord::Client.instance_variable_set(:@history_marks, nil)
     InstantRecord.instance_variable_set(:@ticking, false)
   end
 
   def teardown
     InstantRecord.sync
     InstantRecord::Client.transport = nil
-    InstantRecord::Client.instance_variable_set(:@history_marks, nil)
     InstantRecord.instance_variable_set(:@ticking, false)
   end
 
@@ -267,5 +265,131 @@ class FetchHistoryTest < Minitest::Test
 
     refute reply["ok"]
     assert reply["error"]
+  end
+
+  def test_history_mark_persists_in_sqlite_across_vm_restarts
+    now = Time.now.utc
+    @transport.pages = [{ "records" => [record_payload("m-2", now - 120), record_payload("m-1", now - 180)],
+                          "has_more" => true }]
+
+    in_browser { InstantRecord.fetch_history(@model, partition: "a", before: before_cursor(now)) }
+    # Simulate a fresh VM / warm restart with zero in-memory client state.
+    InstantRecord::Client.forget_database
+
+    in_browser do
+      result = InstantRecord.fetch_history(@model, partition: "a", before: before_cursor(now))
+      assert result[:ok]
+      assert_equal 0, result[:applied]
+      assert result[:has_more]
+    end
+    assert_equal 1, @transport.history_requests.size, "durable SQLite mark must survive VM restart"
+  end
+
+  def test_handle_history_unifies_wasm_bridge_with_client_contiguity_ledger
+    now = Time.now.utc
+    key = URI.encode_www_form(
+      type: "Memo",
+      before_created_at: now.iso8601(6),
+      before_id: "zz-boundary",
+      limit: "2",
+      partition: "a"
+    )
+
+    # Probe before any fetch misses so the worker asks the server.
+    probe = InstantRecord::Client.handle_history(key: key)
+    refute probe[:ok]
+
+    # Applying the server page through the bridge populates the shared ledger.
+    page = JSON.generate(
+      records: [record_payload("m-2", now - 120), record_payload("m-1", now - 180)],
+      has_more: true
+    )
+    applied = InstantRecord::Client.handle_history(key: key, response: page)
+    assert applied[:ok]
+    assert_equal 2, applied[:applied]
+    assert applied[:has_more]
+
+    # Both the bridge and Client.fetch_history serve the page locally without network I/O.
+    repeat_bridge = InstantRecord::Client.handle_history(key: key)
+    assert repeat_bridge[:ok]
+    assert_equal 0, repeat_bridge[:applied]
+    assert repeat_bridge[:has_more]
+
+    in_browser do
+      from_client = InstantRecord.fetch_history(@model, partition: "a", before: before_cursor(now))
+      assert from_client[:ok]
+      assert_equal 0, from_client[:applied]
+      assert from_client[:has_more]
+    end
+    assert_empty @transport.history_requests
+
+    # A deeper page below the mark boundary still misses in the bridge.
+    deeper_key = URI.encode_www_form(
+      type: "Memo",
+      before_created_at: (now - 180).iso8601(6),
+      before_id: "m-1",
+      limit: "2",
+      partition: "a"
+    )
+    refute InstantRecord::Client.handle_history(key: deeper_key)[:ok]
+  end
+
+  def test_handle_history_preserves_opaque_receipts_for_non_windowed_and_native_keys
+    plain = syncable_model("MailItem")
+    InstantRecord.sync(@model, plain)
+    now = Time.now.utc
+    record = { "type" => "MailItem", "id" => "mail-1", "version" => 1,
+               "attributes" => { "id" => "mail-1", "title" => "Hello",
+                                 "created_at" => now.iso8601(6), "updated_at" => now.iso8601(6) } }
+
+    refute InstantRecord::Client.handle_history(key: "older:support")[:ok]
+
+    applied = InstantRecord::Client.handle_history(
+      key: "older:support",
+      response: JSON.generate(records: [record], has_more: true)
+    )
+    assert applied[:ok]
+    assert_equal 1, applied[:applied]
+    assert applied[:has_more]
+    assert_equal "more", InstantRecord::SyncMetadata.get("history:older:support")
+
+    probe = InstantRecord::Client.handle_history(key: "older:support")
+    assert probe[:ok]
+    assert_equal 0, probe[:applied]
+    assert probe[:has_more]
+
+    # Search keys also keep their opaque receipt.
+    InstantRecord::Client.handle_history(key: "search=hello", response: JSON.generate(records: [], has_more: false))
+    assert_equal "end", InstantRecord::SyncMetadata.get("history:search=hello")
+    search_probe = InstantRecord::Client.handle_history(key: "search=hello")
+    assert search_probe[:ok]
+    refute search_probe[:has_more]
+  end
+
+  def test_handle_history_decodes_utf8_and_plus_encoded_partitions
+    now = Time.now.utc
+    partition = "café room"
+    key = URI.encode_www_form(
+      type: "Memo",
+      before_created_at: now.iso8601(6),
+      before_id: "zz-boundary",
+      limit: "2",
+      partition: partition
+    )
+    row = { "type" => "Memo", "id" => "m-utf8", "version" => 1,
+            "attributes" => { "id" => "m-utf8", "title" => "hello", "state" => partition,
+                              "created_at" => (now - 120).iso8601(6), "updated_at" => (now - 120).iso8601(6) } }
+
+    applied = InstantRecord::Client.handle_history(
+      key: key,
+      response: JSON.generate(records: [row], has_more: false)
+    )
+    assert applied[:ok]
+    assert_equal 1, applied[:applied]
+    assert InstantRecord::SyncMetadata.get("history:window:Memo/#{partition}")
+
+    probe = InstantRecord::Client.handle_history(key: key)
+    assert probe[:ok]
+    refute probe[:has_more]
   end
 end
