@@ -1,8 +1,10 @@
 require "uri"
 require "time"
+require "json"
 require "active_support/notifications"
 require "instant_record/client/transport"
 require "instant_record/client/notifier"
+require "instant_record/client/rebaser"
 
 module InstantRecord
   # Ruby reconciles local records and queued mutations. The worker handles network I/O.
@@ -14,6 +16,20 @@ module InstantRecord
 
     # More changes than this in one notice are not listed one by one.
     MAX_LISTED_CHANGES = 200
+
+    # Upper bound on bounded batches drained in a single synchronous pass.
+    MAX_DRAIN_CHUNKS_PER_PASS = 50
+
+    DRAIN_BATCH_LIMIT_KEY = "drain_batch_limit".freeze
+    RETRY_PREFIX = "outbox_5xx:".freeze
+    QUARANTINE_PREFIX = "quarantined:".freeze
+
+    # Individual attribute values larger than this are omitted from delta attrs
+    # (their column stays in changed_columns so UI patchers know to reload).
+    MAX_ATTR_BYTES = 4096
+
+    # Cap total serialized notice size so a huge batch degrades to a wildcard.
+    MAX_NOTICE_BYTES = 65_536
 
     # Cap next_release_ms to 24 hours so it always fits safely inside a signed
     # 32-bit integer on wasm32 Spinel builds.
@@ -90,12 +106,19 @@ module InstantRecord
         evicted || drained || pulled
       end
 
-      # Which records changed since the page was last told, as "Type:id"
-      # lines after the notice itself, followed by any quarantined sync notices
-      # as "sync_notice:<json>" lines. The notice alone means anything may have.
+      # Which records changed since the page was last told: "records_changed"
+      # followed by one compact JSON delta per line:
+      #   {"type":"MailEntry","id":"a-1","op":"update","changed_columns":[...],"attrs":{...}}
+      # plus any quarantined sync notices as "sync_notice:<json>" lines. The
+      # notice alone means anything may have changed (bootstrap, eviction,
+      # reset, or a batch past the listing or byte budget).
       def changes_notice
         lines = ["records_changed"]
-        lines.concat(changed_records) unless @unlisted_changes || changed_records.empty?
+        unless @unlisted_changes || changed_records.empty?
+          delta_lines = changed_records.map { |delta| JSON.generate(delta) }
+          delta_payload = "records_changed\n" + delta_lines.join("\n")
+          lines.concat(delta_lines) if delta_payload.bytesize <= MAX_NOTICE_BYTES
+        end
         recorded_notices.each { |notice| lines << "sync_notice:#{JSON.generate(notice)}" }
         lines.join("\n")
       end
@@ -112,17 +135,88 @@ module InstantRecord
         @unlisted_changes = true
       end
 
-      def note_change(type, id)
-        if changed_records.size >= MAX_LISTED_CHANGES
+      def capturing_changes?
+        !!@capturing_changes
+      end
+
+      # Capture local Syncable writes during a request or native action and
+      # flush them to the notifier when the block completes normally.
+      def capture_local_changes
+        nested = @capturing_changes
+        @capturing_changes = true
+        unless nested
+          changed_records.clear
+          changed_index.clear
+          @unlisted_changes = false
+        end
+        result = yield
+        if !nested && (@unlisted_changes || !changed_records.empty?)
+          notify_changed
+        end
+        result
+      rescue StandardError
+        unless nested
+          changed_records.clear
+          changed_index.clear
+          @unlisted_changes = false
+        end
+        raise
+      ensure
+        @capturing_changes = nested
+      end
+
+      def note_change(type, id, op: "update", changed_columns: [], attrs: {})
+        return if @unlisted_changes
+
+        changed_index.clear if changed_records.empty?
+        key = "#{type}\0#{id}"
+        delta = {
+          "type" => type.to_s,
+          "id" => id.to_s,
+          "op" => op.to_s,
+          "changed_columns" => Array(changed_columns).map(&:to_s).uniq,
+          "attrs" => compact_attrs(attrs)
+        }
+
+        if (existing_idx = changed_index[key])
+          changed_records[existing_idx] = merge_delta(changed_records[existing_idx], delta)
+        elsif changed_records.size >= MAX_LISTED_CHANGES
           unlisted_changes
         else
-          changed_records << "#{type}:#{id}"
+          changed_index[key] = changed_records.size
+          changed_records << delta
+        end
+      end
+
+      def note_record_change(record, op, changed_columns: nil)
+        return if @unlisted_changes
+
+        model = record.class
+        raw = record.attributes
+        op_s = op.to_s
+        case op_s
+        when "create"
+          cols = raw.keys.map(&:to_s)
+          note_change(model.name, record.id, op: "create", changed_columns: cols, attrs: compact_attrs(raw))
+        when "update"
+          cols = Array(changed_columns).map(&:to_s).uniq
+          selected = {}
+          cols.each { |col| selected[col] = raw[col] if raw.key?(col) }
+          context_columns_for(model, raw).each { |col| selected[col] = raw[col] if raw.key?(col) }
+          note_change(model.name, record.id, op: "update", changed_columns: cols, attrs: compact_attrs(selected))
+        when "destroy"
+          selected = {}
+          context_columns_for(model, raw).each { |col| selected[col] = raw[col] if raw.key?(col) }
+          note_change(model.name, record.id, op: "destroy", changed_columns: [], attrs: compact_attrs(selected))
+        else
+          note_change(model.name, record.id, op: op_s)
         end
       end
 
       def notify_changed
         notifier.records_changed
         changed_records.clear
+        changed_index.clear
         recorded_notices.clear
         @unlisted_changes = false
       end
@@ -173,7 +267,7 @@ module InstantRecord
       # a held mutation that matures mid-fetch from altering the batch body
       # between sync_plan and drain.
       def plan_drain(now = Time.now.utc)
-        mutations = pending_mutations(now)
+        mutations = drain_batch(now: now)
         @planned_drain_ids = mutations.map { |m| m[:id] }
         mutations
       end
@@ -229,24 +323,32 @@ module InstantRecord
             .exists?
 
           restored = applying_remote do
-            case mutation.operation
-            when "create"
-              model.find_by(id: mutation.record_id)&.destroy!
+            if Rebaser.confirmed_snapshot(mutation.record_type, mutation.record_id) &&
+                (mutation.operation == "create" || mutation.rollback_payload.is_a?(Hash))
+              Rebaser.reconcile_quarantined_mutation(mutation)
               true
-            when "update", "destroy"
-              if mutation.rollback_payload.is_a?(Hash)
-                restore_record(model, mutation, earlier_pending: earlier_pending)
+            else
+              case mutation.operation
+              when "create"
+                model.find_by(id: mutation.record_id)&.destroy!
+                mutation.destroy!
                 true
+              when "update", "destroy"
+                if mutation.rollback_payload.is_a?(Hash)
+                  restore_record(model, mutation, earlier_pending: earlier_pending)
+                  mutation.destroy!
+                  true
+                else
+                  false
+                end
               else
                 false
               end
-            else
-              false
             end
           end
           next unless restored
 
-          mutation.destroy!
+          Rebaser.clear_confirmed_snapshot(mutation.record_type, mutation.record_id) unless earlier_pending
           cancelled = {
             mutation_id: mutation.id,
             record_type: mutation.record_type,
@@ -259,6 +361,37 @@ module InstantRecord
 
         instrument("cancel_pending", cancelled)
         true
+      end
+
+      # Next bounded chunk of matured outbox mutations to POST. Respects
+      # `config.drain_batch_size`, adaptive 5xx bisection limits, and per-record
+      # causal ordering behind held (`hold_for:`) mutations.
+      def drain_batch(limit: effective_drain_batch_size, now: Time.now.utc)
+        matured_outbox_rows(now).first(limit).map(&:as_mutation)
+      end
+
+      def effective_drain_batch_size
+        configured = [InstantRecord.config.drain_batch_size.to_i, 1].max
+        adaptive = SyncMetadata.get(DRAIN_BATCH_LIMIT_KEY)&.to_i
+        adaptive && adaptive.positive? ? [configured, adaptive].min : configured
+      end
+
+      def quarantined_mutations
+        entries = []
+        SyncMetadata.all.each do |entry|
+          next unless entry.key.start_with?(QUARANTINE_PREFIX)
+
+          entries << JSON.parse(entry.value)
+        rescue JSON::ParserError
+          next
+        end
+        entries.sort_by { |e| [e["quarantined_at"].to_s, e["mutation_id"].to_s] }
+      end
+
+      def clear_quarantined_mutations
+        SyncMetadata.all.each do |entry|
+          entry.destroy if entry.key.start_with?(QUARANTINE_PREFIX)
+        end
       end
 
       def cursor
@@ -302,6 +435,7 @@ module InstantRecord
             model.delete_all if model
           end
         end
+        destroyed_ids = []
         OutboxMutation.all.each do |mutation|
           drop = types.include?(mutation.record_type)
           if !drop && mutation.mutator?
@@ -312,8 +446,12 @@ module InstantRecord
               end
             end
           end
-          mutation.destroy if drop
+          if drop
+            destroyed_ids << mutation.id
+            mutation.destroy
+          end
         end
+        Rebaser.reset_types(types)
         SyncNotice.all.each do |notice|
           notice.destroy if types.include?(notice.record_type)
         end
@@ -322,8 +460,15 @@ module InstantRecord
         # starts here again and a destroy made in between is not missed.
         SyncMetadata.set("replay_from", cursor) if bootstrapped? && SyncMetadata.get("replay_from").nil?
         SyncMetadata.all.each do |entry|
-          entry.destroy if entry.key == "cursor" || entry.key == "identity" || entry.key.start_with?("history:") ||
-            types.any? { |type| entry.key.start_with?("#{HLC::ROW_PREFIX}#{type}:") }
+          if entry.key == "cursor" || entry.key == "identity" || entry.key == DRAIN_BATCH_LIMIT_KEY ||
+              entry.key.start_with?("history:") ||
+              types.any? { |type| entry.key.start_with?("#{HLC::ROW_PREFIX}#{type}:") } ||
+              (entry.key.start_with?(RETRY_PREFIX) && destroyed_ids.include?(entry.key[RETRY_PREFIX.length..]))
+            entry.destroy
+          elsif entry.key.start_with?(QUARANTINE_PREFIX)
+            parsed = begin JSON.parse(entry.value) rescue nil end
+            entry.destroy if parsed && types.include?(parsed["record_type"])
+          end
         end
         history_marks.clear
         unlisted_changes
@@ -340,23 +485,7 @@ module InstantRecord
 
         instrument("bootstrap") do |event|
           body = transport.get_json("/bootstrap")
-          observe_server_time(body["server_time"])
-          records = Array(body["records"])
-          records.each { |record| apply_record(record) }
-          event[:records] = records.size
-
-          # Cursor written last: a crash mid-apply leaves it nil, so the next
-          # tick re-bootstraps; upserts make the retry idempotent. A failure
-          # never falls through to a cursor-0 poll of the full change log.
-          SyncMetadata.set("identity", body["identity"]) if body["identity"]
-          replay = SyncMetadata.get("replay_from")
-          if replay.nil? || replay.to_i > body["cursor"].to_i
-            self.cursor = body["cursor"]
-          else
-            self.cursor = replay.to_i
-          end
-          SyncMetadata.all.each { |entry| entry.destroy if entry.key == "replay_from" } unless replay.nil?
-          unlisted_changes
+          event[:records] = apply_bootstrap_body(body)
           true
         end
       rescue Transport::Error => e
@@ -364,11 +493,101 @@ module InstantRecord
         false
       end
 
-      # Outbox up. Returns true when anything was sent and applied.
+      # Outbox up in bounded batches. Halves batch size on multi-mutation 5xx
+      # responses and isolates a single poison pill after N 5xx retries so
+      # healthy mutations behind it keep draining. Returns true when anything
+      # was sent, applied, or quarantined.
       def drain
         return false if InstantRecord.branched?
 
         drain_outbox.first
+      end
+
+      # Merge pre-fetched push and/or bootstrap responses from an async worker
+      # into the current SQLite state by mutation_id, without discarding acks
+      # when newer local edits landed while the network call was in flight.
+      # Pure self-acks persist SQLite (`changed: true`) while staying quiet on
+      # `records_changed`; evictions, reconciliations, quarantines, and
+      # bootstrap still notify tabs.
+      def apply_prepared_sync(push: nil, bootstrap: nil)
+        return { changed: false, progressed: false, failed: false, quarantined: 0 } if InstantRecord.branched?
+
+        evicted = evict_beyond_windows
+        changed = evicted
+        reconciled = false
+        bootstrapped_now = false
+        progressed = false
+        failed = false
+        quarantined = 0
+
+        if push
+          push = push.deep_stringify_keys
+          status = push["status"].to_i
+          sent_ids = Array(push["mutation_ids"]).map(&:to_s)
+
+          if status >= 200 && status < 300
+            begin
+              body = JSON.parse(push["body"].to_s)
+              observe_server_time(body["server_time"])
+              instrument("drain") do |event|
+                results = Array(body["results"]).map { |r| r.deep_stringify_keys }
+                resolved, batch_reconciled = apply_results_with_counts(results)
+                clear_adaptive_batch_limit if pending_count == 0
+                changed = true if resolved.positive?
+                reconciled = true if batch_reconciled
+                progressed = true if resolved.positive? || sent_ids.none? { |id| OutboxMutation.find_by(id: id) }
+                event[:posted] = sent_ids.size
+                event[:rejected] = results.count { |r| r["status"] == "rejected" }
+                event[:reasons] = results.filter_map { |r| r["reason"] }.uniq.first(3)
+                event[:batches] = 1
+                event[:quarantined] = 0
+              end
+            rescue JSON::ParserError => e
+              log_failure("drain", Transport::Error.new("POST /mutations -> invalid JSON: #{e.message}", status: status))
+              failed = true
+            end
+          elsif status >= 500 && status < 600
+            outcome = handle_drain_failure(sent_ids, status: status, error: "POST /mutations -> #{status}")
+            if outcome[:quarantined].positive?
+              quarantined += outcome[:quarantined]
+              changed = true
+              reconciled = true if outcome[:reconciled]
+              progressed = true
+            else
+              log_failure("drain", Transport::Error.new("POST /mutations -> #{status}", status: status))
+              failed = true
+            end
+          else
+            log_failure("drain", Transport::Error.new("POST /mutations -> #{status}", status: status))
+            failed = true
+          end
+        end
+
+        if bootstrap && !bootstrapped?
+          bootstrap = bootstrap.deep_stringify_keys
+          status = bootstrap["status"].to_i
+          if status >= 200 && status < 300
+            begin
+              body = JSON.parse(bootstrap["body"].to_s)
+              instrument("bootstrap") do |event|
+                event[:records] = apply_bootstrap_body(body)
+              end
+              changed = true
+              bootstrapped_now = true
+              progressed = true
+            rescue JSON::ParserError => e
+              log_failure("bootstrap", Transport::Error.new("GET /bootstrap -> invalid JSON: #{e.message}", status: status))
+              failed = true
+            end
+          else
+            log_failure("bootstrap", Transport::Error.new("GET /bootstrap -> #{status}", status: status))
+            failed = true
+          end
+        end
+
+        notify_changed if evicted || reconciled || bootstrapped_now || recorded_notices.any?
+
+        { changed: changed, progressed: progressed, failed: failed, quarantined: quarantined }
       end
 
       def observe_server_time(server_time)
@@ -412,8 +631,10 @@ module InstantRecord
         reset_stream
         history_marks.clear
         changed_records.clear
+        changed_index.clear
         recorded_notices.clear
         @unlisted_changes = false
+        @capturing_changes = false
         @eviction_pending = false
         @planned_drain_ids = nil
         nil
@@ -549,106 +770,278 @@ module InstantRecord
       end
 
       # Server results for a posted batch. Every result drops the outbox row —
-      # each one is a durable resolution, not a retry — and what happens to the
-      # record depends on which resolution it is:
-      # applied           -> mark the record synced (pure bookkeeping, stays quiet)
-      # applied + skipped -> the write lost last-write-wins; reconcile to the
-      #                      value that won, because it did NOT land here
-      # rejected          -> reconcile to server state
+      # each one is a durable resolution, not a retry — and reconciles the row
+      # through GGPO dirty-row rebasing so newer unacked local edits on the same
+      # row are deterministically replayed over server truth instead of clobbered.
       #
-      # Returns whether any result changed visible local record data (a rollback
-      # or removal), as distinct from pure self-acknowledgements.
+      # Returns whether any result changed visible local record data (a rollback,
+      # removal, or rebase delta), as distinct from pure self-acknowledgements.
       def apply_results(results)
+        apply_results_with_counts(results).last
+      end
+
+      # Apply one remote change event (HLC-ordered, with updated_at fallback
+      # for legacy events) and note it for the next records_changed notice.
+      # Clean rows apply directly; dirty rows rewind to their server-confirmed
+      # snapshot, apply server truth, and deterministically replay remaining
+      # unacked mutations. Returns whether the visible row moved.
+      def apply_change(event)
+        apply_remote_event(event, record_delta: true)
+      end
+
+      # Apply one remote record payload without noting it for records_changed
+      # (used by bootstrap and history pages, which handle notification separately).
+      def apply_record(event)
+        apply_remote_event(event, record_delta: false)
+      end
+
+      private
+
+      def apply_remote_event(event, record_delta:)
+        event = event.deep_stringify_keys
+        model = InstantRecord.synced_model(event["type"])
+        return false unless model
+
+        record_id = event["id"] || (event["attributes"].is_a?(Hash) && event["attributes"]["id"])
+        applying_remote do
+          if record_id && Rebaser.dirty?(event["type"], record_id)
+            Rebaser.apply_server_delta(
+              model,
+              record_id,
+              operation: event["operation"],
+              attributes: event["attributes"],
+              version: event["version"],
+              hlc: event["hlc"],
+              record_delta: record_delta
+            )
+          elsif event["operation"] == "destroy"
+            HLC.receive(event["hlc"]) if HLC.valid?(event["hlc"])
+            HLC.delete_row_hlc(event["type"], record_id)
+            record = model.find_by(id: record_id)
+            return false unless record
+
+            destroy_attrs = record_delta ? destroy_context_attrs(model, record) : nil
+            record.destroy!
+            note_change(event["type"], record_id, op: "destroy", changed_columns: [], attrs: destroy_attrs) if record_delta
+            true
+          else
+            upsert_from_server(model, event["attributes"], event["version"], hlc: event["hlc"], record_delta: record_delta)
+          end
+        end
+      end
+
+      def changed_index
+        @changed_index ||= {}
+      end
+
+      def merge_delta(prev, incoming)
+        prev_op = prev["op"]
+        next_op = incoming["op"]
+        if next_op == "destroy"
+          {
+            "type" => incoming["type"],
+            "id" => incoming["id"],
+            "op" => "destroy",
+            "changed_columns" => [],
+            "attrs" => incoming["attrs"]
+          }
+        elsif prev_op == "destroy" && next_op == "create"
+          incoming
+        else
+          merged_op = prev_op == "create" ? "create" : next_op
+          {
+            "type" => incoming["type"],
+            "id" => incoming["id"],
+            "op" => merged_op,
+            "changed_columns" => (prev["changed_columns"] + incoming["changed_columns"]).uniq,
+            "attrs" => prev["attrs"].merge(incoming["attrs"])
+          }
+        end
+      end
+
+      def compact_attrs(attrs)
+        return {} unless attrs.is_a?(Hash)
+
+        out = {}
+        attrs.each do |key, value|
+          encoded = wire_value(value)
+          next if encoded.is_a?(String) && encoded.bytesize > MAX_ATTR_BYTES
+
+          out[key.to_s] = encoded
+        end
+        out
+      end
+
+      def wire_value(value)
+        value.respond_to?(:usec) ? value.iso8601(InstantRecord::TIME_PRECISION) : value
+      end
+
+      def context_columns_for(model, raw)
+        cols = ["id"]
+        window = model.respond_to?(:instant_record_sync_window) ? model.instant_record_sync_window : nil
+        cols << window.partition_by.to_s if window && window.partition_by
+        scope_col = model.respond_to?(:instant_record_sync_scope) ? model.instant_record_sync_scope : nil
+        cols << scope_col.to_s if scope_col
+        raw.each_key do |key|
+          name = key.to_s
+          cols << name if name.end_with?("_id")
+        end
+        cols.uniq
+      end
+
+      def destroy_context_attrs(model, record)
+        raw = record.attributes
+        selected = {}
+        context_columns_for(model, raw).each { |col| selected[col] = raw[col] if raw.key?(col) }
+        compact_attrs(selected)
+      end
+
+      def apply_results_with_counts(results)
+        resolved = 0
         reconciled = false
         Array(results).each do |result|
           result = result.deep_stringify_keys
           mutation = OutboxMutation.find_by(id: result["mutation_id"])
           next unless mutation
 
-          quarantined = nil
+          notice = nil
           OutboxMutation.transaction do
-            applying_remote do
-              HLC.receive(result["hlc"]) if HLC.valid?(result["hlc"])
-              if mutation.mutator?
-                case result["status"]
-                when "applied"
-                  reconciled = true if reconcile_applied_mutator(mutation, result)
-                when "rejected"
-                  quarantined = quarantine_mutation(
-                    mutation,
-                    kind: "rejected",
-                    reason: result["reason"].to_s.presence || "Rejected by server",
-                    result: result
-                  )
-                  reconciled = true if reconcile_rejected_mutator(mutation, result)
-                end
-              else
-                case result["status"]
-                when "applied"
-                  # `skipped` means our write lost resolution; quarantine the
-                  # user's attempted write in SyncNotice and reconcile to the
-                  # winner. `merged` means a 3-way column merge produced a
-                  # combined row on the server; reconcile authoritatively.
-                  if result["skipped"]
-                    quarantined = quarantine_mutation(
+            SyncMetadata.delete("#{RETRY_PREFIX}#{mutation.id}")
+            if mutation.mutator?
+              changed_visible = applying_remote do
+                HLC.receive(result["hlc"]) if HLC.valid?(result["hlc"])
+                moved =
+                  case result["status"]
+                  when "applied"
+                    reconcile_applied_mutator(mutation, result)
+                  when "rejected"
+                    notice = quarantine_mutation(
                       mutation,
-                      kind: "conflict",
-                      reason: result["reason"].to_s.presence || "Overwritten by a newer server change",
+                      kind: "rejected",
+                      reason: result["reason"].to_s.presence || "Rejected by server",
                       result: result
                     )
-                    reconciled = true if reconcile_to_server_state(mutation, result)
-                  elsif result["merged"] || result["server_attributes"].present?
-                    reconciled = true if reconcile_to_server_state(mutation, result)
+                    reconcile_rejected_mutator(mutation, result)
                   else
-                    mark_synced(mutation, result["version"], hlc: result["hlc"])
+                    false
                   end
-                when "rejected"
-                  quarantined = quarantine_mutation(
-                    mutation,
-                    kind: "rejected",
-                    reason: result["reason"].to_s.presence || "Rejected by server",
-                    result: result
-                  )
-                  reconciled = true if reconcile_rejection(mutation, result)
-                end
+                mutation.destroy!
+                moved
               end
-              mutation.destroy!
+              reconciled = true if changed_visible
+            else
+              if result["status"] == "applied" && result["skipped"]
+                notice = quarantine_mutation(
+                  mutation,
+                  kind: "conflict",
+                  reason: result["reason"].to_s.presence || "Overwritten by a newer server change",
+                  result: result
+                )
+              elsif result["status"] == "rejected"
+                notice = quarantine_mutation(
+                  mutation,
+                  kind: "rejected",
+                  reason: result["reason"].to_s.presence || "Rejected by server",
+                  result: result
+                )
+              end
+              changed_visible = applying_remote do
+                Rebaser.reconcile_mutation_result(mutation, result, record_delta: true)
+              end
+              reconciled = true if changed_visible
             end
           end
-          announce_notice(quarantined) if quarantined
+          announce_notice(notice) if notice
+          resolved += 1
         end
-        reconciled
+        [resolved, reconciled]
       end
 
-      # Apply one remote change event (HLC-ordered, with updated_at fallback
-      # for legacy events) and note it for the next records_changed notice.
-      # Returns whether it actually changed anything here — see upsert_from_server.
-      def apply_change(event)
-        event = event.deep_stringify_keys
-        applied = apply_record(event)
-        note_change(event["type"], event["id"]) if applied
-        applied
+      def apply_bootstrap_body(body)
+        observe_server_time(body["server_time"])
+        records = Array(body["records"])
+        records.each { |record| apply_record(record) }
+
+        # Cursor written last: a crash mid-apply leaves it nil, so the next
+        # tick re-bootstraps; upserts make the retry idempotent. A failure
+        # never falls through to a cursor-0 poll of the full change log.
+        SyncMetadata.set("identity", body["identity"]) if body["identity"]
+        replay = SyncMetadata.get("replay_from")
+        if replay.nil? || replay.to_i > body["cursor"].to_i
+          self.cursor = body["cursor"]
+        else
+          self.cursor = replay.to_i
+        end
+        SyncMetadata.all.each { |entry| entry.destroy if entry.key == "replay_from" } unless replay.nil?
+        unlisted_changes
+        records.size
       end
 
-      # Apply one remote record payload without noting it for records_changed
-      # (used by bootstrap and history pages, which handle notification separately).
-      def apply_record(event)
-        event = event.deep_stringify_keys
-        model = InstantRecord.synced_model(event["type"])
-        return false unless model
+      def clear_adaptive_batch_limit
+        SyncMetadata.delete(DRAIN_BATCH_LIMIT_KEY)
+      end
 
-        applying_remote do
-          if event["operation"] == "destroy"
-            HLC.receive(event["hlc"]) if HLC.valid?(event["hlc"])
-            HLC.delete_row_hlc(event["type"], event["id"])
-            !!model.find_by(id: event["id"])&.destroy!
+      def handle_drain_failure(sent_ids, status:, error:)
+        return { quarantined: 0, reconciled: false, bisected: false } unless status.is_a?(Integer) && status >= 500 && status < 600
+
+        live_mutations = sent_ids.filter_map { |id| OutboxMutation.find_by(id: id) }
+        return { quarantined: 0, reconciled: false, bisected: false } if live_mutations.empty?
+
+        if live_mutations.size > 1
+          next_limit = [live_mutations.size / 2, 1].max
+          SyncMetadata.set(DRAIN_BATCH_LIMIT_KEY, next_limit)
+          return { quarantined: 0, reconciled: false, bisected: true }
+        end
+
+        mutation = live_mutations.first
+        retry_key = "#{RETRY_PREFIX}#{mutation.id}"
+        attempts = SyncMetadata.get(retry_key).to_i + 1
+        threshold = [InstantRecord.config.max_server_error_retries.to_i, 1].max
+
+        if attempts >= threshold
+          reconciled = isolate_poison_pill(mutation, status: status, error: error, attempts: attempts)
+          SyncMetadata.delete(retry_key)
+          clear_adaptive_batch_limit
+          { quarantined: 1, reconciled: reconciled, bisected: false }
+        else
+          SyncMetadata.set(retry_key, attempts)
+          { quarantined: 0, reconciled: false, bisected: false }
+        end
+      end
+
+      def isolate_poison_pill(mutation, status:, error:, attempts:)
+        payload = {
+          "mutation_id" => mutation.id,
+          "record_type" => mutation.record_type,
+          "record_id" => mutation.record_id,
+          "operation" => mutation.operation,
+          "changes" => mutation.changes_payload,
+          "base_version" => mutation.base_version,
+          "status" => status,
+          "error" => error.to_s,
+          "attempts" => attempts,
+          "quarantined_at" => Time.now.utc.iso8601(InstantRecord::TIME_PRECISION)
+        }
+        SyncMetadata.set("#{QUARANTINE_PREFIX}#{mutation.id}", JSON.generate(payload))
+        changed_visible = applying_remote do
+          if mutation.mutator?
+            moved = reconcile_rejected_mutator(mutation, {})
+            mutation.destroy!
+            moved
           else
-            upsert_from_server(model, event["attributes"], event["version"], hlc: event["hlc"])
+            Rebaser.reconcile_quarantined_mutation(mutation, record_delta: true)
           end
         end
+        instrument("poison_pill",
+          mutation_id: mutation.id,
+          record_type: mutation.record_type,
+          record_id: mutation.record_id,
+          operation: mutation.operation,
+          status: status,
+          attempts: attempts,
+          error: error.to_s)
+        changed_visible
       end
-
-      private
 
       # Where the parser drops finished events, drained by consume_stream.
       def stream_events
@@ -717,36 +1110,61 @@ module InstantRecord
 
         planned_ids = @planned_drain_ids
         @planned_drain_ids = nil
-        mutations = planned_ids.nil? ? pending_mutations : planned_mutations(planned_ids)
-        return [false, false] if mutations.empty?
+        first_batch = planned_ids.nil? ? drain_batch : planned_mutations(planned_ids)
+        return [false, false] if first_batch.empty?
 
         instrument("drain") do |event|
-          body = transport.post_json("/mutations", mutations_payload(mutations))
-          observe_server_time(body["server_time"])
-          reconciled = apply_results(body["results"])
+          total_posted = 0
+          total_rejected = 0
+          reasons = []
+          batches = 0
+          quarantined = 0
+          did_work = false
+          reconciled = false
 
-          results = Array(body["results"]).map { |r| r.deep_stringify_keys }
-          event[:posted] = mutations.size
-          event[:rejected] = results.count { |r| r["status"] == "rejected" }
-          event[:reasons] = results.filter_map { |r| r["reason"] }.uniq.first(3)
-          [true, reconciled]
+          max_chunks = planned_ids.nil? ? MAX_DRAIN_CHUNKS_PER_PASS : 1
+          max_chunks.times do |chunk_index|
+            mutations = chunk_index == 0 ? first_batch : drain_batch
+            break if mutations.empty?
+
+            begin
+              body = transport.post_json("/mutations", mutations_payload(mutations))
+              observe_server_time(body["server_time"])
+              results = Array(body["results"]).map { |r| r.deep_stringify_keys }
+              resolved, batch_reconciled = apply_results_with_counts(results)
+
+              batches += 1
+              total_posted += mutations.size
+              total_rejected += results.count { |r| r["status"] == "rejected" }
+              results.each do |r|
+                reason = r["reason"]
+                reasons << reason if reason && !reasons.include?(reason)
+              end
+              did_work = true
+              reconciled = true if batch_reconciled
+              clear_adaptive_batch_limit if pending_count == 0
+              break if resolved == 0
+            rescue Transport::Error => e
+              outcome = handle_drain_failure(mutations.map { |m| m[:id] }, status: e.status, error: e.message)
+              if outcome[:quarantined].positive?
+                quarantined += outcome[:quarantined]
+                did_work = true
+                reconciled = true if outcome[:reconciled]
+                next
+              else
+                log_failure("drain", e)
+                break
+              end
+            end
+          end
+
+          event[:posted] = total_posted
+          event[:rejected] = total_rejected
+          event[:reasons] = reasons.first(3)
+          event[:batches] = batches
+          event[:quarantined] = quarantined
+          [did_work, reconciled]
         end
-      rescue Transport::Error => e
-        log_failure("drain", e)
-        [false, false]
-      end
-
-      def mark_synced(mutation, version, hlc: nil)
-        model = InstantRecord.synced_model(mutation.record_type)
-        record = model&.find_by(id: mutation.record_id)
-        return unless record
-
-        still_pending = OutboxMutation.where(record_type: mutation.record_type, record_id: mutation.record_id)
-          .where.not(id: mutation.id)
-          .exists?
-        next_state = still_pending ? "pending" : "synced"
-        record.update_columns(sync_state: next_state, server_version: version || record.server_version)
-        HLC.set_row_hlc(mutation.record_type, mutation.record_id, hlc) if HLC.valid?(hlc)
       end
 
       def matured_outbox_rows(now)
@@ -782,7 +1200,7 @@ module InstantRecord
         # undoing an update must not resurrect it.
         return if mutation.operation == "update" && existing.nil?
 
-        # mark_synced keeps sync_state == "pending" while this held mutation is
+        # Rebaser keeps sync_state == "pending" while this held mutation is
         # still in the outbox, so a persisted row at sync_state == "synced" means
         # a newer remote change (or server reconciliation) already replaced it.
         return if existing && existing.sync_state == "synced"
@@ -812,7 +1230,6 @@ module InstantRecord
           record.save!(validate: false)
         end
       end
-
       def reconcile_applied_mutator(mutation, result)
         seen = {}
         changed = false
@@ -824,14 +1241,19 @@ module InstantRecord
           seen["#{rec["type"]}:#{rec["id"]}"] = true
           moved =
             if rec["operation"] == "destroy"
-              !!model.find_by(id: rec["id"])&.destroy!
+              record = model.find_by(id: rec["id"])
+              if record
+                destroy_attrs = destroy_context_attrs(model, record)
+                record.destroy!
+                note_change(rec["type"], rec["id"], op: "destroy", changed_columns: [], attrs: destroy_attrs)
+                true
+              else
+                false
+              end
             else
               upsert_from_server(model, rec["attributes"], rec["version"], authoritative: true)
             end
-          if moved
-            note_change(rec["type"], rec["id"])
-            changed = true
-          end
+          changed = true if moved
         end
 
         mutation.touched_records.each do |entry|
@@ -854,7 +1276,6 @@ module InstantRecord
           next unless model && rec["attributes"].present?
 
           if upsert_from_server(model, rec["attributes"], rec["version"], authoritative: true)
-            note_change(rec["type"], rec["id"])
             changed = true
           end
           reconciled["#{rec["type"]}:#{rec["id"]}"] = true
@@ -869,16 +1290,21 @@ module InstantRecord
 
           moved =
             if entry["op"] == "create"
-              !!model.find_by(id: entry["id"])&.destroy!
+              record = model.find_by(id: entry["id"])
+              if record
+                destroy_attrs = destroy_context_attrs(model, record)
+                record.destroy!
+                note_change(entry["type"], entry["id"], op: "destroy", changed_columns: [], attrs: destroy_attrs)
+                true
+              else
+                false
+              end
             elsif entry["before"].is_a?(Hash)
               restore_local_snapshot(model, entry["before"])
             else
               false
             end
-          if moved
-            note_change(entry["type"], entry["id"])
-            changed = true
-          end
+          changed = true if moved
         end
         changed
       end
@@ -889,38 +1315,16 @@ module InstantRecord
 
         record = model.find_or_initialize_by(id: sliced["id"])
         record.assign_attributes(sliced.except("id"))
+        was_new = !record.persisted?
+        changed_cols = record.changed.map(&:to_s)
         record.save!(validate: false)
         if sliced["updated_at"]
           record.update_columns(updated_at: Time.parse(sliced["updated_at"].to_s))
+          changed_cols << "updated_at" unless changed_cols.include?("updated_at")
         end
+        note_record_change(record, was_new ? "create" : "update", changed_columns: changed_cols)
         true
       end
-
-      def reconcile_rejection(mutation, result)
-        return reconcile_to_server_state(mutation, result) if result["server_attributes"].present?
-
-        # The server never accepted this record (rejected create): remove it.
-        HLC.delete_row_hlc(mutation.record_type, mutation.record_id)
-        destroyed = !!InstantRecord.synced_model(mutation.record_type)&.find_by(id: mutation.record_id)&.destroy!
-        note_change(mutation.record_type, mutation.record_id) if destroyed
-        destroyed
-      end
-
-      # Roll the local record onto the server's own copy of the row, when the
-      # result carries one. Returns whether visible local row data changed.
-      #
-      # Authoritative: the server told us what it holds in answer to a write of
-      # ours it would not take (or merged), so its row wins here regardless of
-      # clocks.
-      def reconcile_to_server_state(mutation, result)
-        model = InstantRecord.synced_model(mutation.record_type)
-        return false unless model && result["server_attributes"].present?
-
-        changed = upsert_from_server(model, result["server_attributes"], result["version"], hlc: result["hlc"], authoritative: true)
-        note_change(mutation.record_type, mutation.record_id) if changed
-        changed
-      end
-
       # Returns whether the row actually moved. Every accepted write comes back
       # down the change stream, so a client is constantly re-applying its own
       # rows; treating those as changes would announce them, and an announcement
@@ -936,7 +1340,7 @@ module InstantRecord
       #
       # `authoritative` skips the comparison entirely for reconciling rejections,
       # skipped writes, and 3-way merged rows from the server.
-      def upsert_from_server(model, attributes, version, hlc: nil, authoritative: false)
+      def upsert_from_server(model, attributes, version, hlc: nil, authoritative: false, record_delta: true)
         return false unless attributes
 
         HLC.receive(hlc) if HLC.valid?(hlc)
@@ -973,7 +1377,9 @@ module InstantRecord
         HLC.set_row_hlc(model.name, record.id, incoming_hlc, force: authoritative) if incoming_hlc
         return false unless record.changed?
 
-        data_changed = !record.persisted? || (record.changed - BOOKKEEPING_COLUMNS).any?
+        was_new = !record.persisted?
+        changed_cols = record.changed.map(&:to_s)
+        data_changed = was_new || (changed_cols - BOOKKEEPING_COLUMNS).any?
         quarantined = nil
         if inbound_conflict && data_changed
           OutboxMutation.transaction do
@@ -989,9 +1395,11 @@ module InstantRecord
             )
             record.save!(validate: false)
           end
+          note_record_change(record, was_new ? "create" : "update", changed_columns: changed_cols) if record_delta
           announce_notice(quarantined) if quarantined
         elsif data_changed
           record.save!(validate: false)
+          note_record_change(record, was_new ? "create" : "update", changed_columns: changed_cols) if record_delta
         else
           record.update_columns(sync_state: record.sync_state, server_version: record.server_version)
         end

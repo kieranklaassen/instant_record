@@ -8,6 +8,7 @@ import { isServerAllowed, parseManifest } from "./manifest.js";
 import { createLeaderCoordinator } from "./leader-election.js";
 import { resolveServerRequest, serverRoot } from "./server-request.js";
 import { openDatabaseStorage } from "./storage-backend.js";
+import { runDrain } from "./sync-drain.js";
 import { nextSyncAction } from "./sync-schedule.js";
 
 const POLL_EVERY_MS = 1000;
@@ -81,7 +82,7 @@ export function createWorkerRuntime({
   let pollInFlight = false;
   let draining = null;
   let localRevision = 0;
-  let drainDelayMs = DRAIN_RETRY_BASE_MS;
+  const drainRetry = { baseMs: DRAIN_RETRY_BASE_MS, capMs: DRAIN_RETRY_CAP_MS, delayMs: DRAIN_RETRY_BASE_MS };
 
   let mailScope = "";
   let fillState = null;
@@ -153,7 +154,7 @@ export function createWorkerRuntime({
         localRevision++;
         save();
         if (action === "retry" || action === "fork") {
-          drainDelayMs = DRAIN_RETRY_BASE_MS;
+          drainRetry.delayMs = DRAIN_RETRY_BASE_MS;
           kickSync();
         }
       }
@@ -390,7 +391,7 @@ export function createWorkerRuntime({
       const revision = localRevision;
       draining = drain().finally(() => {
         draining = null;
-        if (revision !== localRevision) kickSync();
+        if (revision !== localRevision && !kickTimer) kickSync();
       });
     }
     return draining;
@@ -398,51 +399,25 @@ export function createWorkerRuntime({
 
   async function drain(initial = false, early = null) {
     if (branches.isActive()) return { changed: false, skipped: true };
-    const { plan, revision } = await withDb("readonly", () => ({ plan: host.syncPlan(), revision: localRevision }));
-    if (!plan.push && !plan.bootstrap) {
-      drainDelayMs = DRAIN_RETRY_BASE_MS;
-      applySyncSchedule(nextSyncAction({ pending: 0, bootstrapped: true, nextReleaseMs: plan.next_release_ms ?? null }, QUIET_MS));
-      return { changed: false, notified: false, pending: 0, nextReleaseMs: plan.next_release_ms ?? null };
-    }
-    const push = plan.push ? await fetchReply("POST", "/mutations", plan.push) : null;
-    const snapshot = plan.bootstrap ? (early?.status === 200 ? early : await fetchReply("GET", "/bootstrap")) : null;
-
-    const result = await withDb("readwrite", save => {
-      if (revision !== localRevision) {
-        kickSync();
-        return { changed: false, retried: true };
-      }
-      const applied = host.sync(syncEndpoint, (method, url, body) => {
-        const reply = method === "POST" ? push : snapshot;
-        if (!reply || reply.method !== method || reply.url !== url || reply.body !== body) {
-          throw new Error("Unexpected request while applying prepared sync responses");
-        }
-        return { status: reply.status, body: reply.text };
-      });
-      const needsBootstrap = plan.bootstrap && !host.syncState().bootstrapped;
-      if (push || snapshot) report({ kind: "sync-pass", path: `${applied.pending} pending` });
-      currentCursor = plan.bootstrap ? null : applied.cursor;
-      const syncNotices = applied.notices?.length ? host.notices({ action: "list" }).notices : null;
-      if (applied.changed || applied.notified) {
+    return runDrain({
+      withSnapshot: (mode, op) => withDb(mode, save => op(() => {
         localRevision++;
         save();
-      }
-      const action = nextSyncAction(
-        { pending: applied.pending, bootstrapped: !needsBootstrap, nextReleaseMs: applied.nextReleaseMs },
-        drainDelayMs,
-      );
-      if (action.kind === "immediate") {
-        kickSync(action.delay);
-        drainDelayMs = Math.min(drainDelayMs * 2, DRAIN_RETRY_CAP_MS);
-      } else {
-        drainDelayMs = DRAIN_RETRY_BASE_MS;
-        applySyncSchedule(action);
-      }
-      return { ...applied, syncNotices };
+      })),
+      fetchReply,
+      getHost: () => host,
+      syncEndpoint,
+      initial,
+      early,
+      report,
+      setCursor: cursor => { currentCursor = cursor; },
+      onRecordsChanged: changedRecords => emitRecordsChanged(changedRecords),
+      onSyncNotices: notices => emitSyncNotices(notices),
+      scheduleRetry: delay => kickSync(delay),
+      scheduleHeld: delay => applySyncSchedule({ kind: "held", delay }),
+      onIdle: () => applySyncSchedule({ kind: "idle" }),
+      retryState: drainRetry,
     });
-    if (result.syncNotices) emitSyncNotices(result.syncNotices);
-    if (!initial && result.notified) emitRecordsChanged(result.changes);
-    return result;
   }
 
   async function pollChanges() {
@@ -598,14 +573,16 @@ export function createWorkerRuntime({
       if (writing) {
         localRevision++;
         save();
-        drainDelayMs = DRAIN_RETRY_BASE_MS;
+        drainRetry.delayMs = DRAIN_RETRY_BASE_MS;
         applySyncSchedule(nextSyncAction(host.syncState(), QUIET_MS));
       }
       return rendered;
     });
     if (writing) {
-      // Peer tabs need to refresh when another tab mutates local SQLite.
-      emitRecordsChanged(null, { excludeTabId: tabId });
+      // Peer tabs receive typed row deltas when the write recorded them,
+      // degrading cleanly to null (wildcard) when unlisted.
+      const deltaChanges = result?.notified ? result.changes : null;
+      emitRecordsChanged(deltaChanges, { excludeTabId: tabId });
     }
     return result;
   }
@@ -626,6 +603,8 @@ export function createWorkerRuntime({
   function navigate({ method, path, body, contentType }, targetHost = host) {
     const started = now();
     let result = localRequest(method, path, { body: body ?? "", contentType: contentType || "application/x-www-form-urlencoded" }, targetHost);
+    const notified = result.notified;
+    const writeChanges = result.changes;
     let redirected = false;
     let finalPath = path;
     for (let hops = 0; hops < 5 && result.status >= 300 && result.status < 400; hops++) {
@@ -636,7 +615,7 @@ export function createWorkerRuntime({
       redirected = true;
       result = localRequest("GET", finalPath, undefined, targetHost);
     }
-    return { result: { ...result, ms: now() - started }, redirected, finalPath };
+    return { result: { ...result, ms: now() - started }, redirected, finalPath, notified, changes: writeChanges };
   }
 
   async function fetchShell(scope, path, hasExistingDb) {
@@ -990,7 +969,7 @@ export function createWorkerRuntime({
       });
       const postApproveState = host.syncState();
       if (result.applied > 0 || postApproveState.pending > 0 || postApproveState.nextReleaseMs != null) {
-        drainDelayMs = DRAIN_RETRY_BASE_MS;
+        drainRetry.delayMs = DRAIN_RETRY_BASE_MS;
         applySyncSchedule(nextSyncAction(result.applied > 0 ? { ...postApproveState, pending: Math.max(postApproveState.pending, 1) } : postApproveState, 0));
       }
       report({ kind: "branch", method: "APPROVE", path: `${result.name} (${result.applied} applied, ${result.skipped} skipped)`, status: 200 });
@@ -1002,7 +981,7 @@ export function createWorkerRuntime({
       const result = branches.discard();
       const postDiscardState = host.syncState();
       if (postDiscardState.pending > 0 || postDiscardState.nextReleaseMs != null) {
-        drainDelayMs = DRAIN_RETRY_BASE_MS;
+        drainRetry.delayMs = DRAIN_RETRY_BASE_MS;
         applySyncSchedule(nextSyncAction(postDiscardState, 0));
       }
       report({ kind: "branch", method: "DISCARD", path: `${result.name} (${result.dropped} dropped)`, status: 200 });
@@ -1066,7 +1045,7 @@ export function createWorkerRuntime({
       },
       onLeaderSimulationChange: (next, prev) => {
         if (host && prev.offline && !next.offline) {
-          drainDelayMs = DRAIN_RETRY_BASE_MS;
+          drainRetry.delayMs = DRAIN_RETRY_BASE_MS;
           kickSync(0);
           if (mailScope && fillState && !fillState.done && !fillState.full) scheduleFill(0);
         }
@@ -1165,7 +1144,7 @@ export function createWorkerRuntime({
           postMessage({ type: "instant_record.debug_backlog", entries: history, streamOpen: false });
         }
         if (isLeaderOrStandalone() && host && previous.offline && !localSimulation.offline && !effectiveSimulation().offline) {
-          drainDelayMs = DRAIN_RETRY_BASE_MS;
+          drainRetry.delayMs = DRAIN_RETRY_BASE_MS;
           kickSync(0);
         }
         return;

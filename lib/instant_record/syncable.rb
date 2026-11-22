@@ -19,6 +19,13 @@ module InstantRecord
 
       # Guarded at call time, not include time, so the same class works in
       # both runtimes and tests can stub the runtime without re-including.
+      # Capture the server-confirmed row snapshot BEFORE the first unacked
+      # local write mutates the row, inside the same transaction as the write
+      # and outbox insert so rollbacks undo all three atomically.
+      before_create  { capture_confirmed_snapshot(creating: true) if instant_record_local_write? && !InstantRecord::SyncActions.recording_client_mutator? }
+      before_update  { capture_confirmed_snapshot(creating: false) if instant_record_local_write? && !InstantRecord::SyncActions.recording_client_mutator? }
+      before_destroy { capture_confirmed_snapshot(creating: false) if instant_record_local_write? && !InstantRecord::SyncActions.recording_client_mutator? }
+
       # after_create/update/destroy run INSIDE the wrapping transaction
       # (unlike after_commit), which is what gives us write+outbox atomicity.
       before_save do
@@ -206,6 +213,21 @@ module InstantRecord
         @instant_record_discarded_change_handler
       end
 
+      # Deterministic replay hook for GGPO dirty-row rebasing. When incoming
+      # server truth rewinds a dirty row to its confirmed snapshot, this block
+      # receives `(record, mutation)` for each remaining unacked mutation so
+      # custom domain mutators (e.g. counters, set merges, state transitions)
+      # can replay deterministically on top of server truth. Return `:destroy`
+      # to delete the row, truthy to keep the mutated record, or `nil`/`:default`
+      # to fall back to standard attribute replay.
+      def on_replay_mutation(&block)
+        @instant_record_replay_mutation_handler = block
+      end
+
+      def instant_record_replay_mutation_handler
+        @instant_record_replay_mutation_handler
+      end
+
       # Declare how same-column concurrent collisions resolve on this column:
       #   :lww         - last-write-wins by server-anchored HLC (default)
       #   :union       - 3-way set/collection union (arrays, JSON arrays, CSV, hashes)
@@ -251,6 +273,10 @@ module InstantRecord
       self.id = frame ? frame.next_uuid : SecureRandom.uuid
     end
 
+    def capture_confirmed_snapshot(creating:)
+      InstantRecord::Client::Rebaser.capture_before_local_write(self.class, id, creating: creating)
+    end
+
     def record_outbox_mutation(operation)
       changes_payload =
         case operation
@@ -280,6 +306,11 @@ module InstantRecord
         InstantRecord::HLC.set_row_hlc(self.class.name, id, hlc, force: true)
       end
       @last_outbox_mutation_id = mutation.id
+
+      if InstantRecord::Client.capturing_changes?
+        changed_cols = operation == "update" ? saved_changes.keys : nil
+        InstantRecord::Client.note_record_change(self, operation, changed_columns: changed_cols)
+      end
     end
 
     def consume_hold_for

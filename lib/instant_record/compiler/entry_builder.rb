@@ -35,36 +35,65 @@ module InstantRecord
           def self.handle_request
             req = Tep::Parser.parse(<<read:in>>)
             res = Tep::Response.new
-            Tep::APP.dispatch(req, res)
+            reads = InstantRecord::ReadTracker.track do
+              InstantRecord::Client.capture_local_changes do
+                Tep::APP.dispatch(req, res)
+              end
+            end
             out = +""
             out << res.status.to_s << "\n"
             res.headers.each { |name, value| out << name.to_s << ": " << value.to_s << "\n" }
             res.header_fields.each { |pair| out << pair[0].to_s << ": " << pair[1].to_s << "\n" }
             res.set_cookies.each { |cookie| out << "Set-Cookie: " << cookie.to_s << "\n" }
             out << "X-File-Path: " << res.file_path << "\n" if res.file_path.length > 0
+            reads_json = InstantRecord::ReadTracker.serialize(reads)
+            out << "X-Instant-Record-Reads: " << reads_json << "\n" unless reads_json.empty?
             out << "\n" << res.body
             <<write:out>>out)
             0
           end
 
-          # Capture the exact outgoing batch before the worker yields to browser requests.
+          # Capture the next bounded outgoing batch before the worker yields to browser requests.
           def self.sync_plan
             mutations = InstantRecord::Client.plan_drain
             push = mutations.empty? ? "" : JSON.generate(InstantRecord::Client.mutations_payload(mutations))
             next_ms = InstantRecord::Client.next_release_ms
-            plan = { push: push, bootstrap: !InstantRecord::Client.bootstrapped? }
+            plan = {
+              push: push,
+              mutation_ids: mutations.map { |m| m[:id] },
+              bootstrap: !InstantRecord::Client.bootstrapped?
+            }
             plan[:next_release_ms] = next_ms unless next_ms.nil?
             <<write:out>>JSON.generate(plan))
             0
           end
 
           def self.handle_sync
-            endpoint = <<read:in>>.strip
-            InstantRecord.config.endpoint = endpoint if endpoint.length > 0
-            changed = InstantRecord::Client.sync_pass
+            raw = <<read:in>>.strip
+            if raw.start_with?("{")
+              input = JSON.parse(raw)
+              endpoint = input["endpoint"].to_s.strip
+              InstantRecord.config.endpoint = endpoint if endpoint.length > 0
+              outcome = InstantRecord::Client.apply_prepared_sync(
+                push: input["push"],
+                bootstrap: input["bootstrap"]
+              )
+              changed = outcome[:changed]
+              suffix = " progressed=" + (outcome[:progressed] ? "1" : "0") +
+                " failed=" + (outcome[:failed] ? "1" : "0") +
+                " quarantined=" + outcome[:quarantined].to_s
+            else
+              InstantRecord.config.endpoint = raw if raw.length > 0
+              changed = InstantRecord::Client.sync_pass
+              suffix = ""
+            end
             next_ms = InstantRecord::Client.next_release_ms
-            out = (changed ? "changed" : "unchanged") + " pending=" + InstantRecord::Client.pending_count.to_s + " cursor=" + InstantRecord::Client.cursor.to_s + " held=" + InstantRecord::Client.held_count.to_s
+            out = (changed ? "changed" : "unchanged") +
+              " pending=" + InstantRecord::Client.pending_count.to_s +
+              " cursor=" + InstantRecord::Client.cursor.to_s +
+              " held=" + InstantRecord::Client.held_count.to_s
             out += " next_release_ms=" + next_ms.to_s unless next_ms.nil?
+            out += suffix
             <<write:out>>out)
             0
           ensure
@@ -194,7 +223,12 @@ module InstantRecord
           def self.render
             input = JSON.parse(NativeHost.ir_host_take("in"))
             screen = NativeScreens.find(input["screen"].to_s, InstantRecord::Native::Screen.strings(input["params"]))
-            NativeHost.ir_host_give("out", screen.json)
+            rendered = ""
+            reads = InstantRecord::ReadTracker.track do
+              rendered = screen.json
+            end
+            NativeHost.ir_host_give("reads", InstantRecord::ReadTracker.serialize(reads))
+            NativeHost.ir_host_give("out", rendered)
             0
           end
 
@@ -203,7 +237,9 @@ module InstantRecord
           def self.action
             input = JSON.parse(NativeHost.ir_host_take("in"))
             screen = NativeScreens.find(input["screen"].to_s, InstantRecord::Native::Screen.strings(input["params"]))
-            screen.perform(input["action"].to_s, InstantRecord::Native::Screen.strings(input["args"]), InstantRecord::Native::Screen.strings(input["values"]))
+            InstantRecord::Client.capture_local_changes do
+              screen.perform(input["action"].to_s, InstantRecord::Native::Screen.strings(input["args"]), InstantRecord::Native::Screen.strings(input["values"]))
+            end
             0
           end
 

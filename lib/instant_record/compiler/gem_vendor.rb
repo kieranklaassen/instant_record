@@ -17,6 +17,7 @@ module InstantRecord
         lib/instant_record/host.rb
         lib/instant_record/configuration.rb
         lib/instant_record/runtime_scoped.rb
+        lib/instant_record/read_tracker.rb
         lib/instant_record/sync_actions.rb
         lib/instant_record/syncable.rb
         lib/instant_record/outbox_mutation.rb
@@ -25,6 +26,7 @@ module InstantRecord
         lib/instant_record/sync_notice.rb
         lib/instant_record/sync_window.rb
         lib/instant_record/client.rb
+        lib/instant_record/client/rebaser.rb
         lib/instant_record/client/transport.rb
         lib/instant_record/client/notifier.rb
         lib/instant_record/branch.rb
