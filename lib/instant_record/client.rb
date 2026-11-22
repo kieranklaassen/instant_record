@@ -205,7 +205,16 @@ module InstantRecord
         end
         destroyed_ids = []
         OutboxMutation.all.each do |mutation|
-          if types.include?(mutation.record_type)
+          drop = types.include?(mutation.record_type)
+          if !drop && mutation.mutator?
+            mutation.touched_records.each do |entry|
+              if types.include?(entry["type"])
+                drop = true
+                break
+              end
+            end
+          end
+          if drop
             destroyed_ids << mutation.id
             mutation.destroy
           end
@@ -571,12 +580,29 @@ module InstantRecord
           next unless mutation
 
           SyncMetadata.delete("#{RETRY_PREFIX}#{mutation.id}")
-          changed_visible = applying_remote do
-            Rebaser.reconcile_mutation_result(mutation, result)
-          end
-          if changed_visible
-            note_change(mutation.record_type, mutation.record_id)
-            reconciled = true
+          if mutation.mutator?
+            changed_visible = applying_remote do
+              moved =
+                case result["status"]
+                when "applied"
+                  reconcile_applied_mutator(mutation, result)
+                when "rejected"
+                  reconcile_rejected_mutator(mutation, result)
+                else
+                  false
+                end
+              mutation.destroy!
+              moved
+            end
+            reconciled = true if changed_visible
+          else
+            changed_visible = applying_remote do
+              Rebaser.reconcile_mutation_result(mutation, result)
+            end
+            if changed_visible
+              note_change(mutation.record_type, mutation.record_id)
+              reconciled = true
+            end
           end
           resolved += 1
         end
@@ -649,9 +675,15 @@ module InstantRecord
         }
         SyncMetadata.set("#{QUARANTINE_PREFIX}#{mutation.id}", JSON.generate(payload))
         changed_visible = applying_remote do
-          Rebaser.reconcile_quarantined_mutation(mutation)
+          if mutation.mutator?
+            moved = reconcile_rejected_mutator(mutation, {})
+            mutation.destroy!
+            moved
+          else
+            Rebaser.reconcile_quarantined_mutation(mutation)
+          end
         end
-        note_change(mutation.record_type, mutation.record_id) if changed_visible
+        note_change(mutation.record_type, mutation.record_id) if changed_visible && !mutation.mutator?
         instrument("poison_pill",
           mutation_id: mutation.id,
           record_type: mutation.record_type,
@@ -776,6 +808,88 @@ module InstantRecord
           event[:quarantined] = quarantined
           [did_work, reconciled]
         end
+      end
+      def reconcile_applied_mutator(mutation, result)
+        seen = {}
+        changed = false
+        Array(result["records"]).each do |rec|
+          rec = rec.deep_stringify_keys
+          model = InstantRecord.synced_model(rec["type"])
+          next unless model
+
+          seen["#{rec["type"]}:#{rec["id"]}"] = true
+          moved =
+            if rec["operation"] == "destroy"
+              !!model.find_by(id: rec["id"])&.destroy!
+            else
+              upsert_from_server(model, rec["attributes"], rec["version"], authoritative: true)
+            end
+          if moved
+            note_change(rec["type"], rec["id"])
+            changed = true
+          end
+        end
+
+        mutation.touched_records.each do |entry|
+          key = "#{entry["type"]}:#{entry["id"]}"
+          next if seen[key]
+
+          model = InstantRecord.synced_model(entry["type"])
+          record = model&.find_by(id: entry["id"])
+          record.update_columns(sync_state: "synced") if record
+        end
+        changed
+      end
+
+      def reconcile_rejected_mutator(mutation, result)
+        reconciled = {}
+        changed = false
+        Array(result["records"]).each do |rec|
+          rec = rec.deep_stringify_keys
+          model = InstantRecord.synced_model(rec["type"])
+          next unless model && rec["attributes"].present?
+
+          if upsert_from_server(model, rec["attributes"], rec["version"], authoritative: true)
+            note_change(rec["type"], rec["id"])
+            changed = true
+          end
+          reconciled["#{rec["type"]}:#{rec["id"]}"] = true
+        end
+
+        mutation.touched_records.each do |entry|
+          key = "#{entry["type"]}:#{entry["id"]}"
+          next if reconciled[key]
+
+          model = InstantRecord.synced_model(entry["type"])
+          next unless model
+
+          moved =
+            if entry["op"] == "create"
+              !!model.find_by(id: entry["id"])&.destroy!
+            elsif entry["before"].is_a?(Hash)
+              restore_local_snapshot(model, entry["before"])
+            else
+              false
+            end
+          if moved
+            note_change(entry["type"], entry["id"])
+            changed = true
+          end
+        end
+        changed
+      end
+
+      def restore_local_snapshot(model, attributes)
+        sliced = attributes.slice(*model.column_names)
+        return false unless sliced["id"]
+
+        record = model.find_or_initialize_by(id: sliced["id"])
+        record.assign_attributes(sliced.except("id"))
+        record.save!(validate: false)
+        if sliced["updated_at"]
+          record.update_columns(updated_at: Time.parse(sliced["updated_at"].to_s))
+        end
+        true
       end
       # Returns whether the row actually moved. Every accepted write comes back
       # down the change stream, so a client is constantly re-applying its own
