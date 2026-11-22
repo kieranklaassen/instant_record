@@ -2,6 +2,7 @@
 // retry-only outbox draining, and non-blocking async change polling (window=0, so the
 // worker never blocks on network I/O during user clicks and Puma threads are never held).
 import { AppHost } from "./app-host.js";
+import { BranchManager } from "./branch-manager.js";
 import { advance, fresh, held, query } from "./history-fill.js";
 import { mailboxScope } from "./mailbox-scope.js";
 import { resolveServerRequest, serverRoot } from "./server-request.js";
@@ -91,6 +92,7 @@ let snapshotRevision;
 let changes;
 
 let host = null;
+const branches = new BranchManager();
 let currentCursor = null;
 // Read with the cursor, and sent with each poll so the server can say when the
 // person behind this browser has changed.
@@ -142,6 +144,7 @@ async function withSnapshot(mode, operation) {
 }
 
 function kickSync(delay = QUIET_MS) {
+  if (branches.isActive()) return;
   clearTimeout(kickTimer);
   kickTimer = setTimeout(syncPass, delay);
 }
@@ -155,6 +158,7 @@ self.addEventListener("online", () => {
 function syncPass() {
   clearTimeout(kickTimer);
   kickTimer = null;
+  if (branches.isActive()) return Promise.resolve({ skipped: true, reason: "branched" });
   if (!draining) {
     const revision = localRevision;
     draining = drain().finally(() => {
@@ -168,6 +172,7 @@ function syncPass() {
 // `early` is a bootstrap asked for before the app was up (earlyBootstrap). One that did not
 // arrive is asked for again here.
 async function drain(initial = false, early = null) {
+  if (branches.isActive()) return { changed: false, skipped: true };
   return runDrain({
     withSnapshot,
     fetchReply,
@@ -217,10 +222,17 @@ async function pollChanges() {
       }
       if (consumed.applied > 0 || consumed.notified) {
         save();
-        return { changes: consumed.changes };
+        return { applied: consumed.applied, changes: consumed.changes };
       }
     });
-    if (changed) self.postMessage({ type: "records_changed", changes: changed.changes });
+    if (changed) {
+      if (branches.isActive()) {
+        const state = branches.noteMainDelta(changed.applied || 1);
+        if (state) self.postMessage({ type: "instant_record.branch", state });
+      } else {
+        self.postMessage({ type: "records_changed", changes: changed.changes });
+      }
+    }
   } catch {
     // offline: try again on the next interval
   } finally {
@@ -267,8 +279,8 @@ async function fillStep() {
   fillState = (await withFiles("readonly", get => get(FILL))) || fresh();
   announceFill();
   if (fillState.done || fillState.full) return false;
-  // A write waiting to be sent goes first, and offline there is nothing to fetch.
-  if (simulation.offline || draining || kickTimer) return true;
+  // A write waiting to be sent goes first, and offline/branched there is nothing to fetch.
+  if (simulation.offline || draining || kickTimer || branches.isActive()) return true;
 
   const key = query(fillState, FILL_PAGE);
   const revision = snapshotRevision;
@@ -332,8 +344,15 @@ async function loadHistoryQuery(key) {
 
 function runRequest(method, render) {
   const writing = method !== "GET" && method !== "HEAD";
+  if (branches.isActive()) {
+    const result = render(branches.host());
+    if (writing) {
+      self.postMessage({ type: "instant_record.branch", state: branches.inspect() });
+    }
+    return Promise.resolve(result);
+  }
   return withSnapshot(writing ? "readwrite" : "readonly", save => {
-    const result = render();
+    const result = render(host);
     if (writing) {
       localRevision++;
       save();
@@ -344,16 +363,16 @@ function runRequest(method, render) {
   });
 }
 
-function localRequest(method, path, options) {
+function localRequest(method, path, options, targetHost = host) {
   const started = performance.now();
-  const result = host.request(method, path, options);
+  const result = targetHost.request(method, path, options);
   report({ kind: "local", method, path, status: result.status, ms: Math.round(performance.now() - started) });
   return result;
 }
 
-function navigate({ method, path, body, contentType }) {
+function navigate({ method, path, body, contentType }, targetHost = host) {
   const started = performance.now();
-  let result = localRequest(method, path, { body: body ?? "", contentType: contentType || "application/x-www-form-urlencoded" });
+  let result = localRequest(method, path, { body: body ?? "", contentType: contentType || "application/x-www-form-urlencoded" }, targetHost);
   let redirected = false;
   let finalPath = path;
   for (let hops = 0; hops < 5 && result.status >= 300 && result.status < 400; hops++) {
@@ -362,7 +381,7 @@ function navigate({ method, path, body, contentType }) {
     const next = new URL(location, self.location.origin);
     finalPath = next.pathname + next.search;
     redirected = true;
-    result = localRequest("GET", finalPath);
+    result = localRequest("GET", finalPath, undefined, targetHost);
   }
   return { result: { ...result, ms: performance.now() - started }, redirected, finalPath };
 }
@@ -407,7 +426,15 @@ async function boot(payload = {}) {
   syncScope = typeof payload.scope === "string" ? payload.scope : "";
   openSnapshot(scope);
   changes = new BroadcastChannel("instant-record-spinel-changes" + (scope ? "/" + scope : ""));
-  changes.onmessage = () => { if (host) self.postMessage({ type: "records_changed" }); };
+  changes.onmessage = () => {
+    if (!host) return;
+    if (branches.isActive()) {
+      const state = branches.noteMainDelta(1);
+      if (state) self.postMessage({ type: "instant_record.branch", state });
+    } else {
+      self.postMessage({ type: "records_changed" });
+    }
+  };
   if (scope) syncEndpoint = serverRoot(publicEndpoint, mountPath) + "/email/sync/" + scope;
   const started = performance.now();
   // The shell downloads while the module compiles.
@@ -543,14 +570,65 @@ self.onmessage = async (event) => {
       return self.postMessage({ id, result: reply });
     }
     if (type === "boot") return self.postMessage({ id, result: await boot(payload) });
-    if (type === "navigate") return self.postMessage({ id, result: await runRequest(payload.method, () => navigate(payload)) });
+    if (type === "navigate") return self.postMessage({ id, result: await runRequest(payload.method, target => navigate(payload, target)) });
     if (type === "request") {
       const started = performance.now();
-      const result = await runRequest(payload.method, () => localRequest(payload.method, payload.path, { body: payload.body ?? "", contentType: payload.contentType || "application/x-www-form-urlencoded" }));
+      const result = await runRequest(payload.method, target => localRequest(payload.method, payload.path, { body: payload.body ?? "", contentType: payload.contentType || "application/x-www-form-urlencoded" }, target));
       return self.postMessage({ id, result: { ...result, ms: performance.now() - started } });
     }
     if (type === "save") return self.postMessage({ id, result: await withSnapshot("readwrite", save => save()) });
     if (type === "sync") return self.postMessage({ id, result: await syncPass() });
+    if (type === "branch.create") {
+      const state = await withSnapshot("readonly", () => branches.fork({
+        name: payload?.name,
+        mainHost: host,
+        schemaVersion: targetSchema,
+        createHost: (bytes, version, branchName) => {
+          const staged = new AppHost(host.module, { env: { ...host.env, INSTANT_RECORD_BRANCH: branchName } });
+          staged.cookies = new Map(host.cookies);
+          staged.restoreDatabase(bytes, version);
+          return staged;
+        },
+      }));
+      report({ kind: "branch", method: "FORK", path: state.name, status: "staged" });
+      self.postMessage({ type: "instant_record.branch", state });
+      return self.postMessage({ id, result: state });
+    }
+    if (type === "branch.status") {
+      return self.postMessage({ id, result: branches.inspect() });
+    }
+    if (type === "branch.approve") {
+      const result = await branches.approve({
+        conflict: payload?.conflict || "lww",
+        onMain: (mutations, conflict) => withSnapshot("readwrite", save => {
+          const replay = host.branchReplay(mutations, { conflict });
+          if (replay.applied > 0) {
+            localRevision++;
+            save();
+          }
+          return replay;
+        }),
+      });
+      if (result.applied > 0 || host.syncState().pending > 0) {
+        drainDelayMs = DRAIN_RETRY_BASE_MS;
+        kickSync(0);
+      }
+      report({ kind: "branch", method: "APPROVE", path: `${result.name} (${result.applied} applied, ${result.skipped} skipped)`, status: 200 });
+      self.postMessage({ type: "instant_record.branch", state: { active: false, lastAction: result } });
+      self.postMessage({ type: "records_changed", changes: result.changes || null });
+      return self.postMessage({ id, result });
+    }
+    if (type === "branch.discard") {
+      const result = branches.discard();
+      if (host.syncState().pending > 0) {
+        drainDelayMs = DRAIN_RETRY_BASE_MS;
+        kickSync(0);
+      }
+      report({ kind: "branch", method: "DISCARD", path: `${result.name} (${result.dropped} dropped)`, status: 200 });
+      self.postMessage({ type: "instant_record.branch", state: { active: false, lastAction: result } });
+      self.postMessage({ type: "records_changed", changes: null });
+      return self.postMessage({ id, result });
+    }
   } catch (error) {
     self.postMessage({ id, error: String(error && error.message ? error.message : error) });
   }
