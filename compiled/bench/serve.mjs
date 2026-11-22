@@ -50,6 +50,18 @@ function acceptsEncoding(header, name) {
   return false;
 }
 
+// Flush large payloads before EOF so a pacing proxy that pauses on the final chunk
+// does not receive `end` in the same read tick as that chunk. Total bytes and
+// Content-Length are identical.
+function sendPayload(response, payload) {
+  if (payload.length > 2048) {
+    response.write(payload.subarray(0, payload.length - 1));
+    setImmediate(() => response.end(payload.subarray(payload.length - 1)));
+  } else {
+    response.end(payload);
+  }
+}
+
 createServer(async (request, response) => {
   const url = new URL(request.url, `http://${request.headers.host}`);
   if (url.pathname === "/__test/traffic") {
@@ -85,10 +97,10 @@ createServer(async (request, response) => {
       const compressed = packed.get(key);
       traffic.push({ path: shown, raw: body.length, sent: compressed.length });
       response.writeHead(200, { ...headers, "content-encoding": encoding, "content-length": compressed.length });
-      return response.end(compressed);
+      return sendPayload(response, compressed);
     }
   }
   traffic.push({ path: shown, raw: body.length, sent: body.length });
   response.writeHead(200, { ...headers, "content-length": body.length });
-  response.end(body);
+  sendPayload(response, body);
 }).listen(port, "127.0.0.1", () => console.log(`compiled app on http://127.0.0.1:${port}`));
