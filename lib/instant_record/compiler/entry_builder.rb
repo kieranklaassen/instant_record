@@ -1,5 +1,6 @@
 require "fileutils"
 require "json"
+require "prism"
 require_relative "../native"
 require_relative "runner"
 
@@ -226,6 +227,30 @@ module InstantRecord
         end
       RUBY
 
+      SYNC_ACTIONS_EMPTY = <<~'RUBY'
+
+        module InstantRecord
+          module SyncActions
+            def self.dispatch(name, _args)
+              raise ArgumentError, "Unknown sync_action: " + name
+            end
+          end
+        end
+      RUBY
+
+      SYNC_ACTIONS = <<~'RUBY'
+
+        module InstantRecord
+          module SyncActions
+            def self.dispatch(name, args)
+              case name
+        <<cases>>      else raise ArgumentError, "Unknown sync_action: " + name
+              end
+            end
+          end
+        end
+      RUBY
+
       module_function
 
       def app_models(demo:, models:)
@@ -329,7 +354,7 @@ module InstantRecord
         fill(START, { "config" => cfg, "windows" => windows, "models" => models.join(", "), "streaming" => flag })
       end
 
-      def write_wasm_entry(emit_dir:, demo:, models:, migration_plan:, pipeline_dir:, sync_windows: nil, endpoint: nil, mount_path: nil)
+      def write_wasm_entry(emit_dir:, demo:, models:, migration_plan:, pipeline_dir:, app_dir: nil, sync_windows: nil, endpoint: nil, mount_path: nil)
         if demo
           FileUtils.cp(
             File.join(pipeline_dir, "sqlite_release.rb"),
@@ -346,6 +371,7 @@ module InstantRecord
         resolved_models = app_models(demo: demo, models: models)
         entry = BANNER + " for wasm32-wasi (see EntryBuilder) ─────────\n" +
           PRELUDE +
+          sync_actions_module(app_dir) +
           bridge(
             "WasmBridge",
             read: ->(name) { %(File.read("/host/#{name}")) },
@@ -370,6 +396,163 @@ module InstantRecord
         File.write(File.join(emit_dir, "main_wasm.rb"), head + entry)
       end
 
+      def discover_sync_actions(app_dir)
+        return [] unless app_dir
+
+        models_dir = File.join(app_dir, "app/models")
+        return [] unless File.directory?(models_dir)
+
+        discovered = []
+        Dir.glob("**/*.rb", base: models_dir).sort.each do |rel|
+          path = File.join(models_dir, rel)
+          parsed = Prism.parse_file(path)
+          raise BuildError, "Could not parse #{path} for sync_action discovery" unless parsed.success?
+
+          collect_sync_actions(parsed.value, [], path, discovered)
+        end
+        discovered.sort_by { |entry| "#{entry[:class_name]}.#{entry[:action]}" }
+      end
+
+      def sync_actions_module(app_dir)
+        found = discover_sync_actions(app_dir)
+        return SYNC_ACTIONS_EMPTY if found.empty?
+
+        cases = found.map { |entry| "      when #{JSON.generate("#{entry[:class_name]}.#{entry[:action]}")} then #{entry[:call]}\n" }.join
+        fill(SYNC_ACTIONS, { "cases" => cases })
+      end
+
+      def collect_sync_actions(node, namespace, path, discovered)
+        return unless node
+
+        case node
+        when Prism::ProgramNode
+          collect_sync_actions(node.statements, namespace, path, discovered)
+        when Prism::StatementsNode
+          node.body.each { |child| collect_sync_actions(child, namespace, path, discovered) }
+        when Prism::ModuleNode
+          parts = constant_path_parts(node.constant_path)
+          next_ns = parts ? namespace + parts : namespace
+          collect_sync_actions(node.body, next_ns, path, discovered)
+        when Prism::ClassNode
+          parts = constant_path_parts(node.constant_path)
+          next_ns = parts ? namespace + parts : namespace
+          class_name = next_ns.join("::")
+          unless class_name.empty?
+            class_defs = {}
+            actions = []
+            scan_class_body(node.body, class_defs, actions, path)
+            actions.each do |action_name|
+              call_expr = format_sync_action_call(class_name, action_name, class_defs[action_name], path)
+              discovered << { class_name: class_name, action: action_name, call: call_expr }
+            end
+          end
+          collect_sync_actions(node.body, next_ns, path, discovered)
+        end
+      end
+
+      def scan_class_body(body, class_defs, actions, path)
+        return unless body.is_a?(Prism::StatementsNode)
+
+        body.body.each do |stmt|
+          case stmt
+          when Prism::DefNode
+            if stmt.receiver.is_a?(Prism::SelfNode)
+              class_defs[stmt.name.to_s] = stmt
+            end
+          when Prism::SingletonClassNode
+            if stmt.expression.is_a?(Prism::SelfNode) && stmt.body.is_a?(Prism::StatementsNode)
+              stmt.body.body.each do |inner|
+                class_defs[inner.name.to_s] = inner if inner.is_a?(Prism::DefNode) && inner.receiver.nil?
+              end
+            end
+          when Prism::CallNode
+            next unless stmt.receiver.nil? && stmt.name == :sync_action
+
+            args = Array(stmt.arguments&.arguments)
+            first = args.first
+            action_name =
+              case first
+              when Prism::SymbolNode then first.unescaped
+              when Prism::StringNode then first.unescaped
+              else
+                raise BuildError, "#{path}:#{stmt.location.start_line}: sync_action requires a literal symbol or string name."
+              end
+
+            unless /\A[a-z_][a-zA-Z0-9_]*[!?]?\z/.match?(action_name)
+              raise BuildError, "#{path}:#{stmt.location.start_line}: Invalid sync_action name #{action_name.inspect}."
+            end
+
+            if stmt.block
+              raise BuildError, "#{path}:#{stmt.location.start_line}: sync_action :#{action_name} cannot use a block in compiled builds; define def self.#{action_name}(args) instead."
+            end
+
+            actions << action_name unless actions.include?(action_name)
+          end
+        end
+      end
+
+      def format_sync_action_call(class_name, action_name, def_node, path)
+        return "#{class_name}.#{action_name}(args)" unless def_node
+
+        params = def_node.parameters
+        return "#{class_name}.#{action_name}" unless params
+
+        positionals = Array(params.requireds) + Array(params.optionals)
+        keywords = Array(params.keywords)
+        has_rest = !params.rest.nil? || !params.keyword_rest.nil?
+
+        if positionals.empty? && keywords.empty? && !has_rest
+          "#{class_name}.#{action_name}"
+        elsif positionals.empty? && !keywords.empty? && params.keyword_rest.nil?
+          kw_parts = keywords.map do |kw|
+            key = kw.name.to_s.delete_suffix(":")
+            key_lit = JSON.generate(key)
+            case kw
+            when Prism::RequiredKeywordParameterNode
+              "#{key}: args[#{key_lit}]"
+            when Prism::OptionalKeywordParameterNode
+              default_expr = literal_expr(kw.value)
+              if default_expr
+                "#{key}: args.key?(#{key_lit}) ? args[#{key_lit}] : #{default_expr}"
+              else
+                "#{key}: args[#{key_lit}]"
+              end
+            else
+              raise BuildError, "#{path}:#{def_node.location.start_line}: Unsupported sync_action keyword parameter."
+            end
+          end
+          "#{class_name}.#{action_name}(#{kw_parts.join(', ')})"
+        else
+          "#{class_name}.#{action_name}(args)"
+        end
+      end
+
+      def literal_expr(node)
+        case node
+        when Prism::NilNode then "nil"
+        when Prism::TrueNode then "true"
+        when Prism::FalseNode then "false"
+        when Prism::IntegerNode, Prism::FloatNode then node.value.inspect
+        when Prism::StringNode then JSON.generate(node.unescaped)
+        when Prism::SymbolNode then node.unescaped.to_sym.inspect
+        else nil
+        end
+      end
+
+      def constant_path_parts(node)
+        case node
+        when Prism::ConstantReadNode
+          [node.name.to_s]
+        when Prism::ConstantPathNode
+          parent = node.parent ? constant_path_parts(node.parent) : []
+          return nil unless parent
+
+          parent + [node.name.to_s]
+        else
+          nil
+        end
+      end
+
       def discover_screens(app_dir)
         folder = File.join(app_dir, "app/screens")
         return [] unless File.directory?(folder)
@@ -390,7 +573,13 @@ module InstantRecord
 
         head = wasm_main[0...wasm_main.index(BANNER)]
         found = discover_screens(app_dir)
-        cases = found.map { |name, cls| %(    when "#{name}" then #{cls}.new(params)\n) }.join
+        screens_block =
+          if found.empty?
+            "\nmodule NativeScreens\n  def self.find(name, _params)\n    raise ArgumentError, \"No screen named \" + name\n  end\nend\n"
+          else
+            cases = found.map { |name, cls| %(    when "#{name}" then #{cls}.new(params)\n) }.join
+            fill(NATIVE_SCREENS, { "cases" => cases })
+          end
         resolved_models = app_models(demo: demo, models: models)
         previous = 'InstantRecord::SyncMetadata.get("schema_version").to_s'
         applied = 'InstantRecord::SyncMetadata.set("schema_version", "<<version>>")'
@@ -402,8 +591,9 @@ module InstantRecord
 
         entry = BANNER + " for a native host (see EntryBuilder) ─────────\n" +
           PRELUDE +
+          sync_actions_module(app_dir) +
           NATIVE_HOST +
-          fill(NATIVE_SCREENS, { "cases" => cases }) +
+          screens_block +
           bridge(
             "NativeBridge",
             read: ->(name) { %(NativeHost.ir_host_take("#{name}")) },
