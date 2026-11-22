@@ -1,7 +1,8 @@
-<%# The root of the one Inertia page, the Inbox, as Rails serves it. `npm run
-    build` writes its bundle to app/assets/builds. The tag is here and not in
-    the layout, which the compiled build rewrites and where it has no
-    controller to ask. The compiled runtime renders
-    email/mailboxes/index.html.erb instead and never sees this file. %>
+<%# The root of an Inertia page as Rails serves it: the Inbox, or the Inertia
+    todo app at /inertia. `npm run build` writes both bundles to
+    app/assets/builds. The tag is here and not in the layout, which the
+    compiled build rewrites and where it has no controller to ask. The
+    compiled runtime renders email/mailboxes/index.html.erb instead and never
+    sees this file. %>
 <%= inertia_root(page: page) %>
-<script type="module" src="<%= asset_path("inbox.js") %>"></script>
+<script type="module" src="<%= asset_path(page[:component].start_with?("Todos/") ? "todos.js" : "inbox.js") %>"></script>
