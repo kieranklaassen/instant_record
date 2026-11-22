@@ -1,3 +1,4 @@
+import { mountBranchPreview } from "./branch-preview.js";
 import { mailboxScope } from "./mailbox-scope.js";
 import { watchRelease } from "./release-updates.js";
 import { isLocalUrl } from "./server-request.js";
@@ -135,6 +136,11 @@ worker.onmessage = (event) => {
     window.dispatchEvent(new CustomEvent("instant-record:history", { detail: historyFill }));
     return;
   }
+  if (type === "instant_record.branch") {
+    if (window.__spinel) window.__spinel.branchState = event.data.state;
+    window.dispatchEvent(new CustomEvent("instant-record:branch-changed", { detail: event.data.state }));
+    return;
+  }
   if (type === "records_changed") {
     if (marks.rendered) recordsChanged(event.data.changes);
     return;
@@ -187,6 +193,12 @@ const marks = { start: performance.now() };
 // Where the sync server is and who this browser is to it, for a page that asks it for
 // something itself: the bytes of a record that declares sync_file (frontend/files.js).
 const syncEndpoint = import.meta.env.VITE_SYNC_ENDPOINT || "/instant_record";
+const branchApi = {
+  fork: (name) => call("branch.create", { name }),
+  status: () => call("branch.status"),
+  approve: (options = {}) => call("branch.approve", options),
+  discard: () => call("branch.discard"),
+};
 window.__spinel = {
   marks,
   call,
@@ -195,6 +207,8 @@ window.__spinel = {
   sourceVersion: import.meta.env.VITE_SOURCE_VERSION,
   endpoint: syncEndpoint,
   scope: syncScope(),
+  branch: branchApi,
+  branchState: { active: false },
   faults,
   lastFault: null,
   circuit: circuitState,
@@ -419,9 +433,11 @@ async function submitLocalForm(event) {
   document.write(html);
   document.close();
   window.addEventListener("submit", submitLocalForm);
+  window.dispatchEvent(new Event("instant-record:dom-written"));
 }
 window.addEventListener("submit", submitLocalForm);
-releaseRequired = watchRelease(networkFetch, import.meta.env.VITE_SOURCE_VERSION, () => waiting.size > 0);
+mountBranchPreview(branchApi);
+releaseRequired = watchRelease(networkFetch, import.meta.env.VITE_SOURCE_VERSION, () => waiting.size > 0 || !!window.__spinel?.branchState?.active);
 
 // Resource Timing distinguishes a cached module from a network response and gives
 // compressed and decoded byte counts without downloading the module a second time.
