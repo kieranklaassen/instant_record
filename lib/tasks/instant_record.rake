@@ -42,7 +42,7 @@ namespace :instant_record do
     abort e.message
   end
 
-  desc "Verify the compiler toolchain configuration (optional target: wasm, native, iphonesimulator, iphoneos)"
+  desc "Verify the compiler toolchain configuration and static AOT/32-bit compatibility (optional target: wasm, native, iphonesimulator, iphoneos)"
   task :doctor, [:target] => :environment do |_task, args|
     require "instant_record/compiler"
     toolchain = toolchain_path.call
@@ -50,10 +50,11 @@ namespace :instant_record do
     report = InstantRecord::Compiler.doctor(
       toolchain: toolchain,
       target: args[:target] || :wasm,
-      web_dir: Rails.root.join("tmp/instant_record/compiled/web")
+      web_dir: Rails.root.join("tmp/instant_record/compiled/web"),
+      app_root: Rails.root
     )
     puts report
-    abort "Toolchain check failed." unless report.ok?
+    abort "Doctor check failed." unless report.ok?
   end
 
   namespace :files do

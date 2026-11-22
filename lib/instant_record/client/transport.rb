@@ -55,8 +55,8 @@ module InstantRecord
         # Request file: first line "METHOD URL", then the body. Response file: first line the
         # status, then the body. Status 0 is a network failure.
         def exchange(method, path, body)
-          File.write(REQUEST, "#{method} #{InstantRecord.config.endpoint}#{path}\n#{body}")
-          response = File.read(RESPONSE)
+          InstantRecord::Host.write_channel("request", "#{method} #{InstantRecord.config.endpoint}#{path}\n#{body}")
+          response = InstantRecord::Host.read_channel("response")
           newline = response.index("\n") || response.length
           status = response[0, newline].to_i
           raise Error, "#{method} #{path} -> #{status}" unless status >= 200 && status < 300

@@ -29,15 +29,17 @@ end
 
 require "active_support/isolated_execution_state"
 require "instant_record/version"
+require "instant_record/host"
 require "instant_record/configuration"
 require "instant_record/runtime_scoped"
 require "instant_record/native"
-require "instant_record/engine" if defined?(Rails::Engine)
+InstantRecord::Host.load_engine
 
 module InstantRecord
   class << self
-    # The compiler replaces this method in the browser bundle.
-    def browser? = false
+    # Delegated to InstantRecord::Host so AOT builds swap the host adapter
+    # module instead of string-patching this file.
+    def browser? = Host.browser?
 
     def config
       @config ||= Configuration.new
@@ -60,8 +62,7 @@ module InstantRecord
     def synced_model(record_type)
       return synced_models.find { |model| model.name == record_type } if synced_models.any?
 
-      klass = record_type.to_s.safe_constantize
-      klass if klass.respond_to?(:instant_record_syncable?) && klass.instant_record_syncable?
+      Host.resolve_syncable_model(record_type)
     end
 
     # Every model participating in sync: the explicit allowlist when set,
@@ -69,10 +70,7 @@ module InstantRecord
     def syncable_models
       return synced_models if synced_models.any?
 
-      ActiveRecord::Base.descendants.select do |model|
-        !model.abstract_class? && model.name &&
-          model.respond_to?(:instant_record_syncable?) && model.instant_record_syncable?
-      end
+      Host.discover_syncable_models
     end
 
     # One record's attributes as they cross the wire, in either direction and on

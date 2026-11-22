@@ -114,7 +114,7 @@ module InstantRecord
     end
 
     def assign_instant_record_uuid
-      self.id ||= SecureRandom.uuid
+      self.id = SecureRandom.uuid if InstantRecord::Host.blank_id?(id)
     end
 
     def record_outbox_mutation(operation)

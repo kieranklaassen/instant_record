@@ -6,6 +6,9 @@ require_relative "compiler/runner"
 require_relative "compiler/toolchain"
 require_relative "compiler/path_scrubber"
 require_relative "compiler/browser_migrations"
+require_relative "compiler/ast_lowerer"
+require_relative "compiler/host_adapters"
+require_relative "compiler/static_linter"
 require_relative "compiler/app_stage"
 require_relative "compiler/gem_vendor"
 require_relative "compiler/entry_builder"
@@ -66,8 +69,24 @@ module InstantRecord
       ).run
     end
 
-    def self.doctor(toolchain:, target: :wasm, web_dir: nil)
-      Toolchain.load(toolchain).doctor(target: target, web_dir: web_dir)
+    def self.doctor(toolchain:, target: :wasm, web_dir: nil, app_root: nil)
+      report = Toolchain.load(toolchain).doctor(target: target, web_dir: web_dir)
+      return report unless app_root
+
+      report.with_lint(lint(app_root, staged: false))
+    end
+
+    def self.lint(root, staged: false, exclude: nil)
+      resolved = Pathname(root)
+      effective_exclude =
+        if exclude
+          exclude
+        elsif !staged && resolved.exist? && resolved.realpath == gem_root.join("demo")
+          DemoCarver::REMOVE
+        else
+          []
+        end
+      StaticLinter.lint(root, staged: staged, exclude: effective_exclude)
     end
 
     def self.scrub_path(path, prefix)
