@@ -10,15 +10,42 @@ module InstantRecord
 
     scope :ordered, -> { order(:created_at, :id) }
 
+    def mutator?
+      operation == "mutator"
+    end
+
+    def mutator_name
+      changes_payload["mutator"] || record_id
+    end
+
+    def mutator_args
+      changes_payload["args"] || {}
+    end
+
+    def touched_records
+      Array(changes_payload["touched"])
+    end
+
     def as_mutation
-      {
-        id: id,
-        record_type: record_type,
-        record_id: record_id,
-        operation: operation,
-        changes: changes_payload,
-        base_version: base_version
-      }
+      if mutator?
+        {
+          id: id,
+          mutation_id: id,
+          operation: "mutator",
+          record_type: record_type,
+          mutator: mutator_name,
+          args: mutator_args
+        }
+      else
+        {
+          id: id,
+          record_type: record_type,
+          record_id: record_id,
+          operation: operation,
+          changes: changes_payload,
+          base_version: base_version
+        }
+      end
     end
   end
 end
