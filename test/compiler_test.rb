@@ -174,6 +174,8 @@ class CompilerTest < ActiveSupport::TestCase
       count = InstantRecord::Compiler::GemVendor.vendor(gem_src: GEM_ROOT, app_dir: app, demo: true)
       assert_equal 15, count
       assert_includes File.read(File.join(app, "lib/instant_record.rb")), "def browser? = true"
+      refute_includes File.read(File.join(app, "lib/instant_record.rb")), "branch/sqlite_store"
+      assert File.file?(File.join(app, "lib/instant_record/branch.rb"))
       refute File.exist?(File.join(app, "lib/instant_record/syncable.rb"))
       assert File.file?(File.join(app, "app/models/concerns/syncable.rb"))
       assert_includes File.read(File.join(app, "app/models/concerns/syncable.rb")), "self.id = SecureRandom.uuid if id.blank?"
@@ -440,6 +442,8 @@ class CompilerTest < ActiveSupport::TestCase
       assert_includes wasm_main, '\#{x}\#@y\#$z'
       assert_includes wasm_main, "InstantRecord.sync(Note)"
       assert_includes wasm_main, "InstantRecord::Client.streaming = true"
+      assert_includes wasm_main, "def self.branch_outbox"
+      assert_includes wasm_main, "def self.branch_replay"
 
       screens = InstantRecord::Compiler::EntryBuilder.write_native_entry(
         tree_dir: emit,
@@ -452,6 +456,8 @@ class CompilerTest < ActiveSupport::TestCase
       assert_equal ["inbox_list"], screens
       native_main = File.read(File.join(emit, "main_native.rb"))
       assert_includes native_main, "module NativeBridge"
+      assert_includes native_main, "def self.branch_outbox"
+      assert_includes native_main, "def self.branch_replay"
       assert_includes native_main, 'when "inbox_list" then InboxListScreen.new(params)'
       assert_includes native_main, 'InstantRecord::SyncMetadata.set("schema_version", "00000020261120000001")'
       assert_includes native_main, "InstantRecord::Client.streaming = false"
