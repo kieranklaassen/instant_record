@@ -1,6 +1,7 @@
 // Core worker runtime: coordinates leader election per (origin, scope), OPFS page-level
 // WASI SQLite storage (with IndexedDB fallback), non-blocking outbox draining, change
 // polling, background history fill, and multi-tab RPC routing.
+import { BranchManager } from "./branch-manager.js";
 import { advance, fresh, held, query } from "./history-fill.js";
 import { mailboxScope } from "./mailbox-scope.js";
 import { createLeaderCoordinator } from "./leader-election.js";
@@ -67,6 +68,7 @@ export function createWorkerRuntime({
   let coordinator = null;
   let storage = null;
   let host = null;
+  const branches = new BranchManager();
   let snapshotRevision;
   let currentCursor = null;
   let currentIdentity = "";
@@ -114,6 +116,16 @@ export function createWorkerRuntime({
       coordinator.broadcast({ type: "records_changed", changes }, { excludeTabId });
     } else if (excludeTabId == null) {
       postMessage({ type: "records_changed", changes });
+    }
+  }
+
+  function emitBranchState(state) {
+    if (!state) return;
+    const msg = { type: "instant_record.branch", state };
+    if (coordinator && coordinator.role === "leader") {
+      coordinator.broadcast(msg);
+    } else {
+      postMessage(msg);
     }
   }
 
@@ -250,7 +262,7 @@ export function createWorkerRuntime({
   }
 
   function kickSync(delay = QUIET_MS) {
-    if (!isLeaderOrStandalone()) return;
+    if (!isLeaderOrStandalone() || branches.isActive()) return;
     clearTimeout(kickTimer);
     kickTimer = setTimeout(syncPass, delay);
   }
@@ -265,6 +277,7 @@ export function createWorkerRuntime({
     if (!isLeaderOrStandalone()) return Promise.resolve({ changed: false });
     clearTimeout(kickTimer);
     kickTimer = null;
+    if (branches.isActive()) return Promise.resolve({ skipped: true, reason: "branched" });
     if (!draining) {
       const revision = localRevision;
       draining = drain().finally(() => {
@@ -276,6 +289,7 @@ export function createWorkerRuntime({
   }
 
   async function drain(initial = false, early = null) {
+    if (branches.isActive()) return { changed: false, skipped: true };
     const { plan, revision } = await withDb("readonly", () => ({ plan: host.syncPlan(), revision: localRevision }));
     const push = plan.push ? await fetchReply("POST", "/mutations", plan.push) : null;
     const snapshot = plan.bootstrap ? (early?.status === 200 ? early : await fetchReply("GET", "/bootstrap")) : null;
@@ -341,10 +355,16 @@ export function createWorkerRuntime({
         if (consumed.applied > 0 || consumed.notified) {
           localRevision++;
           save();
-          return { changes: consumed.changes };
+          return { applied: consumed.applied, changes: consumed.changes };
         }
       });
-      if (changed) emitRecordsChanged(changed.changes);
+      if (changed) {
+        if (branches.isActive()) {
+          emitBranchState(branches.noteMainDelta(changed.applied || 1));
+        } else {
+          emitRecordsChanged(changed.changes);
+        }
+      }
     } catch {
       // offline: try again on the next interval
     } finally {
@@ -377,7 +397,7 @@ export function createWorkerRuntime({
     fillState = (await withFiles("readonly", get => get(FILL))) || fresh();
     announceFill();
     if (fillState.done || fillState.full) return false;
-    if (effectiveSimulation().offline || draining || kickTimer) return true;
+    if (effectiveSimulation().offline || draining || kickTimer || branches.isActive()) return true;
 
     const key = query(fillState, FILL_PAGE);
     const revision = localRevision;
@@ -444,8 +464,13 @@ export function createWorkerRuntime({
 
   async function runRequest(method, render, { tabId = null } = {}) {
     const writing = method !== "GET" && method !== "HEAD";
+    if (branches.isActive()) {
+      const result = render(branches.host());
+      if (writing) emitBranchState(branches.inspect());
+      return result;
+    }
     const result = await withDb(writing ? "readwrite" : "readonly", save => {
-      const rendered = render();
+      const rendered = render(host);
       if (writing) {
         localRevision++;
         save();
@@ -461,16 +486,16 @@ export function createWorkerRuntime({
     return result;
   }
 
-  function localRequest(method, path, options) {
+  function localRequest(method, path, options, targetHost = host) {
     const started = now();
-    const result = host.request(method, path, options);
+    const result = targetHost.request(method, path, options);
     report({ kind: "local", method, path, status: result.status, ms: Math.round(now() - started) });
     return result;
   }
 
-  function navigate({ method, path, body, contentType }) {
+  function navigate({ method, path, body, contentType }, targetHost = host) {
     const started = now();
-    let result = localRequest(method, path, { body: body ?? "", contentType: contentType || "application/x-www-form-urlencoded" });
+    let result = localRequest(method, path, { body: body ?? "", contentType: contentType || "application/x-www-form-urlencoded" }, targetHost);
     let redirected = false;
     let finalPath = path;
     for (let hops = 0; hops < 5 && result.status >= 300 && result.status < 400; hops++) {
@@ -479,7 +504,7 @@ export function createWorkerRuntime({
       const next = new URL(location, origin);
       finalPath = next.pathname + next.search;
       redirected = true;
-      result = localRequest("GET", finalPath);
+      result = localRequest("GET", finalPath, undefined, targetHost);
     }
     return { result: { ...result, ms: now() - started }, redirected, finalPath };
   }
@@ -773,7 +798,7 @@ export function createWorkerRuntime({
       if (payload?.syncScope && !syncScope) syncScope = payload.syncScope;
       await preloadPathHistory(currentScope, payload?.path);
       const first = payload?.path
-        ? await runRequest("GET", () => navigate({ method: "GET", path: payload.path }), { tabId })
+        ? await runRequest("GET", target => navigate({ method: "GET", path: payload.path }, target), { tabId })
         : null;
       return {
         first,
@@ -782,19 +807,70 @@ export function createWorkerRuntime({
       };
     }
     if (method === "navigate") {
-      return runRequest(payload.method, () => navigate(payload), { tabId });
+      return runRequest(payload.method, target => navigate(payload, target), { tabId });
     }
     if (method === "request") {
       const started = now();
       const result = await runRequest(
         payload.method,
-        () => localRequest(payload.method, payload.path, {
+        target => localRequest(payload.method, payload.path, {
           body: payload.body ?? "",
           contentType: payload.contentType || "application/x-www-form-urlencoded",
-        }),
+        }, target),
         { tabId },
       );
       return { ...result, ms: now() - started };
+    }
+    if (method === "branch.create") {
+      const state = await withDb("readonly", () => branches.fork({
+        name: payload?.name,
+        mainHost: host,
+        schemaVersion: targetSchema,
+        createHost: (bytes, version, branchName) => {
+          const staged = new AppHost(host.module, { env: { ...host.env, INSTANT_RECORD_BRANCH: branchName } });
+          staged.cookies = new Map(host.cookies);
+          staged.restoreDatabase(bytes, version);
+          return staged;
+        },
+      }));
+      report({ kind: "branch", method: "FORK", path: state.name, status: "staged" });
+      emitBranchState(state);
+      return state;
+    }
+    if (method === "branch.status") {
+      return branches.inspect();
+    }
+    if (method === "branch.approve") {
+      const result = await branches.approve({
+        conflict: payload?.conflict || "lww",
+        onMain: (mutations, conflict) => withDb("readwrite", save => {
+          const replay = host.branchReplay(mutations, { conflict });
+          if (replay.applied > 0) {
+            localRevision++;
+            save();
+          }
+          return replay;
+        }),
+      });
+      if (result.applied > 0 || host.syncState().pending > 0) {
+        drainDelayMs = DRAIN_RETRY_BASE_MS;
+        kickSync(0);
+      }
+      report({ kind: "branch", method: "APPROVE", path: `${result.name} (${result.applied} applied, ${result.skipped} skipped)`, status: 200 });
+      emitBranchState({ active: false, lastAction: result });
+      emitRecordsChanged(result.changes || null);
+      return result;
+    }
+    if (method === "branch.discard") {
+      const result = branches.discard();
+      if (host.syncState().pending > 0) {
+        drainDelayMs = DRAIN_RETRY_BASE_MS;
+        kickSync(0);
+      }
+      report({ kind: "branch", method: "DISCARD", path: `${result.name} (${result.dropped} dropped)`, status: 200 });
+      emitBranchState({ active: false, lastAction: result });
+      emitRecordsChanged(null);
+      return result;
     }
     if (method === "fetch_history") {
       return loadHistory(payload);
@@ -871,7 +947,7 @@ export function createWorkerRuntime({
       const bootInfo = startedRole.bootResult;
       await preloadPathHistory(currentScope, payload.path);
       const first = payload.path
-        ? await runRequest("GET", () => navigate({ method: "GET", path: payload.path }), { tabId: coordinator.workerId })
+        ? await runRequest("GET", target => navigate({ method: "GET", path: payload.path }, target), { tabId: coordinator.workerId })
         : null;
       return {
         compileMs: compiled - started,
@@ -979,6 +1055,10 @@ export function createWorkerRuntime({
       if (type === "save") return postMessage({ id, result: await coordinator.call("save", null, { idempotent: true }) });
       if (type === "sync") return postMessage({ id, result: await coordinator.call("sync", null, { idempotent: true }) });
       if (type === "wipe") return postMessage({ id, result: await coordinator.call("wipe", null, { idempotent: true }) });
+      if (type === "branch.create") return postMessage({ id, result: await coordinator.call("branch.create", payload, { idempotent: false }) });
+      if (type === "branch.status") return postMessage({ id, result: await coordinator.call("branch.status", payload, { idempotent: true }) });
+      if (type === "branch.approve") return postMessage({ id, result: await coordinator.call("branch.approve", payload, { idempotent: false }) });
+      if (type === "branch.discard") return postMessage({ id, result: await coordinator.call("branch.discard", payload, { idempotent: false }) });
     } catch (error) {
       postMessage({ id, error: String(error && error.message ? error.message : error) });
     }
