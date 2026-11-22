@@ -13,6 +13,7 @@ module InstantRecord
     def initialize(app, host:, root:, sync_path:)
       @app = app
       @host = host
+      @root = root
       @files = Rack::Files.new(root)
       @releases = File.dirname(root)
       @sync_path = sync_path
@@ -24,7 +25,8 @@ module InstantRecord
       return @app.call(env) unless request.host == @host && (request.get? || request.head?)
       return @app.call(env) if path == "/up" || path == @sync_path || path.start_with?("#{@sync_path}/")
 
-      asset = path.start_with?("/assets/", "/harness/") || path.match?(%r{\A/app-[a-f0-9]+\.wasm\z})
+      asset = path.start_with?("/assets/", "/harness/") || path.match?(%r{\A/app-[a-f0-9]+\.wasm\z}) ||
+        (path == "/service-worker.js" && File.file?(File.join(@root, "service-worker.js")))
       manifest = path == "/instant-record-release.json"
       return @app.call(env) unless asset || manifest || request.get_header("HTTP_ACCEPT").to_s.include?("text/html")
       status, headers, body = @files.call(asset || manifest ? env : env.merge("PATH_INFO" => "/index.html"))

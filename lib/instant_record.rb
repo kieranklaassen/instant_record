@@ -4,9 +4,9 @@ require "base64"
 module InstantRecord
   DEFAULT_MOUNT_PATH = "/instant_record".freeze
 
-  # Both engine controllers serve a PWA that may run on another origin in
-  # development (Vite dev server); auth on the sync endpoints is out of scope
-  # for the PoC.
+  # Engine endpoints allow cross-origin reads and JSON writes so a separately
+  # hosted compiled site or Vite dev server can reach Rails. Access control is
+  # enforced per model via `sync_scope`, `syncable_to`, and `writable_by`.
   CORS_HEADERS = {
     "access-control-allow-origin" => "*",
     "access-control-allow-methods" => "GET, POST, OPTIONS",
@@ -217,7 +217,11 @@ module InstantRecord
     # ignored — which is why app code builds this URL without asking which
     # runtime it is in.
     def server_url(path)
-      "#{endpoint.to_s.delete_suffix(mount_path)}#{path}?#{NETWORK_MARKER}"
+      path_str = path.to_s
+      separator = path_str.include?("?") ? "&" : "?"
+      current_mount = mount_path
+      base = (endpoint == DEFAULT_MOUNT_PATH && current_mount != DEFAULT_MOUNT_PATH) ? "" : endpoint.to_s.delete_suffix(current_mount)
+      "#{base}#{path_str}#{separator}#{NETWORK_MARKER}"
     end
 
     # Tell the sync loop a stream is live, so its own catch-up poll stands down.
@@ -314,7 +318,12 @@ module InstantRecord
     # that mount, so stripping it leaves the app's own base — read from config
     # rather than assumed, because an app is free to move the mount.
     def mount_path
-      configured = Rails.application.config.instant_record.mount_path if defined?(Rails) && Rails.application
+      return config.mount_path if config.mount_path.is_a?(String)
+
+      configured =
+        if defined?(Rails) && Rails.application && Rails.application.config.respond_to?(:instant_record)
+          Rails.application.config.instant_record.mount_path
+        end
       configured.is_a?(String) ? configured : DEFAULT_MOUNT_PATH
     end
 
