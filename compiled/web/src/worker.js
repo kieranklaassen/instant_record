@@ -5,6 +5,7 @@ import { AppHost } from "./app-host.js";
 import { advance, fresh, held, query } from "./history-fill.js";
 import { mailboxScope } from "./mailbox-scope.js";
 import { openSnapshot, withFiles } from "./snapshot-store.js";
+import { nextSyncAction } from "./sync-schedule.js";
 
 const publicEndpoint = import.meta.env.VITE_SYNC_ENDPOINT || "/instant_record";
 let syncEndpoint = publicEndpoint;
@@ -90,6 +91,7 @@ let currentCursor = null;
 // person behind this browser has changed.
 let currentIdentity = "";
 let kickTimer = null;
+let kickHeld = false;
 let pollInFlight = false;
 let draining = null;
 let localRevision = 0;
@@ -135,9 +137,24 @@ async function withSnapshot(mode, operation) {
   }
 }
 
-function kickSync(delay = QUIET_MS) {
+function kickSync(delay = QUIET_MS, { held = false } = {}) {
   clearTimeout(kickTimer);
+  kickHeld = held;
   kickTimer = setTimeout(syncPass, delay);
+}
+
+function clearHeldKick() {
+  if (kickTimer && kickHeld) {
+    clearTimeout(kickTimer);
+    kickTimer = null;
+    kickHeld = false;
+  }
+}
+
+function applySyncSchedule(action) {
+  if (action.kind === "immediate") kickSync(action.delay);
+  else if (action.kind === "held") kickSync(action.delay, { held: true });
+  else clearHeldKick();
 }
 
 // The connection came back: send what is waiting now, not at the next retry.
@@ -149,6 +166,7 @@ self.addEventListener("online", () => {
 function syncPass() {
   clearTimeout(kickTimer);
   kickTimer = null;
+  kickHeld = false;
   if (!draining) {
     const revision = localRevision;
     draining = drain().finally(() => {
@@ -163,6 +181,11 @@ function syncPass() {
 // arrive is asked for again here.
 async function drain(initial = false, early = null) {
   const { plan, revision } = await withSnapshot("readonly", () => ({ plan: host.syncPlan(), revision: snapshotRevision }));
+  if (!plan.push && !plan.bootstrap) {
+    drainDelayMs = DRAIN_RETRY_BASE_MS;
+    applySyncSchedule(nextSyncAction({ pending: 0, bootstrapped: true, nextReleaseMs: plan.next_release_ms ?? null }, QUIET_MS));
+    return { changed: false, notified: false, pending: 0, nextReleaseMs: plan.next_release_ms ?? null };
+  }
   const push = plan.push ? await fetchReply("POST", "/mutations", plan.push) : null;
   const snapshot = plan.bootstrap ? (early?.status === 200 ? early : await fetchReply("GET", "/bootstrap")) : null;
 
@@ -188,11 +211,16 @@ async function drain(initial = false, early = null) {
       save();
     }
 
-    if (result.pending > 0 || needsBootstrap) {
-      kickSync(drainDelayMs);
+    const action = nextSyncAction(
+      { pending: result.pending, bootstrapped: !needsBootstrap, nextReleaseMs: result.nextReleaseMs },
+      drainDelayMs,
+    );
+    if (action.kind === "immediate") {
+      kickSync(action.delay);
       drainDelayMs = Math.min(drainDelayMs * 2, DRAIN_RETRY_CAP_MS);
     } else {
       drainDelayMs = DRAIN_RETRY_BASE_MS;
+      applySyncSchedule(action);
     }
     return result;
   });
@@ -204,26 +232,28 @@ async function drain(initial = false, early = null) {
 // async fetch keeps the worker event loop unblocked for user clicks, and an empty body
 // skips Wasm entirely.
 async function pollChanges() {
-  if (!host || pollInFlight || draining || kickTimer) return;
+  if (!host || pollInFlight || draining || (kickTimer && !kickHeld)) return;
   const revision = snapshotRevision;
   pollInFlight = true;
   try {
     if (currentCursor === null) {
       const state = host.syncState();
-      if (state.pending > 0 || !state.bootstrapped) {
+      const action = nextSyncAction(state, 0);
+      if (action.kind === "immediate") {
         kickSync(0);
         return;
       }
+      applySyncSchedule(action);
       currentCursor = state.cursor;
       currentIdentity = state.identity;
     }
     const who = currentIdentity ? `&identity=${encodeURIComponent(currentIdentity)}` : "";
     const { status, text } = await fetchReply("GET", `/events?after=${currentCursor}&window=0${who}`);
     if (status !== 200) return;
-    if (!text.trim() || draining || kickTimer || revision !== snapshotRevision) return;
+    if (!text.trim() || draining || (kickTimer && !kickHeld) || revision !== snapshotRevision) return;
 
     const changed = await withSnapshot("readwrite", save => {
-      if (draining || kickTimer || revision !== snapshotRevision) return;
+      if (draining || (kickTimer && !kickHeld) || revision !== snapshotRevision) return;
       const consumed = host.consumeStream(text);
       currentCursor = consumed.cursor;
       // The server said this browser synced as someone else, and the client dropped what it
@@ -285,7 +315,7 @@ async function fillStep() {
   announceFill();
   if (fillState.done || fillState.full) return false;
   // A write waiting to be sent goes first, and offline there is nothing to fetch.
-  if (simulation.offline || draining || kickTimer) return true;
+  if (simulation.offline || draining || (kickTimer && !kickHeld)) return true;
 
   const key = query(fillState, FILL_PAGE);
   const revision = snapshotRevision;
@@ -355,7 +385,7 @@ function runRequest(method, render) {
       localRevision++;
       save();
       drainDelayMs = DRAIN_RETRY_BASE_MS;
-      kickSync();
+      applySyncSchedule(nextSyncAction(host.syncState(), QUIET_MS));
     }
     return result;
   });
@@ -501,6 +531,9 @@ async function boot(payload = {}) {
   }
   const bootstrapStart = performance.now();
   if (!restored && !shell) await drain(true, await bootstrapFetch);
+  // A restored database may still carry held outbox mutations (or ones that
+  // matured while the tab was closed); schedule their drain immediately.
+  if (restored) applySyncSchedule(nextSyncAction(host.syncState(), 0));
   // The shell is as old as its cursor. Ask for what came after it now, not at the first
   // interval, and do not hold the first page for the answer.
   if (shell) pollChanges();

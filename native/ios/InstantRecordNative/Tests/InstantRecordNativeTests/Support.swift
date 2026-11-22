@@ -71,6 +71,7 @@ final class FakeEngine: Engine {
     var bootstrapped = true
     var boots = true
     var syncs = true
+    var nextReleaseMs: Int? = nil
     private var last = ""
     private var endpoint = ""
     private var answer: (String) -> String = { _ in Transport.offline }
@@ -111,7 +112,8 @@ final class FakeEngine: Engine {
             if raises.contains(entry) { return nil }
             return "{\"push\":\(FakeEngine.quoted(push)),\"bootstrap\":\(!bootstrapped)}"
         case "cursor":
-            return "cursor=7 pending=\(push.isEmpty ? 0 : 1) bootstrap=\(bootstrapped ? "ready" : "needed") identity="
+            let release = nextReleaseMs.map { " next_release_ms=\($0)" } ?? ""
+            return "cursor=7 pending=\(push.isEmpty ? 0 : 1) bootstrap=\(bootstrapped ? "ready" : "needed") identity=\(release)"
         case "sync":
             note("sync " + input)
             if raises.contains(entry) { return nil }

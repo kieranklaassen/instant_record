@@ -46,9 +46,12 @@ module InstantRecord
 
           # Capture the exact outgoing batch before the worker yields to browser requests.
           def self.sync_plan
-            mutations = InstantRecord::Client.pending_mutations
+            mutations = InstantRecord::Client.plan_drain
             push = mutations.empty? ? "" : JSON.generate(InstantRecord::Client.mutations_payload(mutations))
-            <<write:out>>JSON.generate({ push: push, bootstrap: !InstantRecord::Client.bootstrapped? }))
+            next_ms = InstantRecord::Client.next_release_ms
+            plan = { push: push, bootstrap: !InstantRecord::Client.bootstrapped? }
+            plan[:next_release_ms] = next_ms unless next_ms.nil?
+            <<write:out>>JSON.generate(plan))
             0
           end
 
@@ -56,8 +59,13 @@ module InstantRecord
             endpoint = <<read:in>>.strip
             InstantRecord.config.endpoint = endpoint if endpoint.length > 0
             changed = InstantRecord::Client.sync_pass
-            <<write:out>>(changed ? "changed" : "unchanged") + " pending=" + InstantRecord::Client.pending_count.to_s + " cursor=" + InstantRecord::Client.cursor.to_s)
+            next_ms = InstantRecord::Client.next_release_ms
+            out = (changed ? "changed" : "unchanged") + " pending=" + InstantRecord::Client.pending_count.to_s + " cursor=" + InstantRecord::Client.cursor.to_s + " held=" + InstantRecord::Client.held_count.to_s
+            out += " next_release_ms=" + next_ms.to_s unless next_ms.nil?
+            <<write:out>>out)
             0
+          ensure
+            InstantRecord::Client.clear_planned_drain
           end
 
           def self.handle_stream
@@ -92,7 +100,10 @@ module InstantRecord
 
           def self.cursor
             key = InstantRecord::Client.identity_key
-            <<write:out>>"cursor=" + InstantRecord::Client.cursor.to_s + " pending=" + InstantRecord::Client.pending_count.to_s + " bootstrap=" + (InstantRecord::Client.bootstrapped? ? "ready" : "needed") + " identity=" + (key.nil? ? "" : key))
+            next_ms = InstantRecord::Client.next_release_ms
+            out = "cursor=" + InstantRecord::Client.cursor.to_s + " pending=" + InstantRecord::Client.pending_count.to_s + " bootstrap=" + (InstantRecord::Client.bootstrapped? ? "ready" : "needed") + " identity=" + (key.nil? ? "" : key) + " held=" + InstantRecord::Client.held_count.to_s
+            out += " next_release_ms=" + next_ms.to_s unless next_ms.nil?
+            <<write:out>>out)
             0
           end
         <<entries>>end

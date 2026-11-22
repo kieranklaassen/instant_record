@@ -11,16 +11,23 @@ module InstantRecord
     included do
       extend InstantRecord::RuntimeScoped
 
+      attr_accessor :hold_for
+      attr_reader :last_outbox_mutation_id
+
       before_create :assign_instant_record_uuid
 
       # Guarded at call time, not include time, so the same class works in
       # both runtimes and tests can stub the runtime without re-including.
       # after_create/update/destroy run INSIDE the wrapping transaction
       # (unlike after_commit), which is what gives us write+outbox atomicity.
-      before_save   { self.sync_state = "pending" if instant_record_local_write? }
-      after_create  { record_outbox_mutation("create") if instant_record_local_write? }
-      after_update  { record_outbox_mutation("update") if instant_record_local_write? }
-      after_destroy { record_outbox_mutation("destroy") if instant_record_local_write? }
+      before_save      { self.sync_state = "pending" if instant_record_local_write? }
+      after_create     { record_outbox_mutation("create") if instant_record_local_write? }
+      after_update     { record_outbox_mutation("update") if instant_record_local_write? }
+      after_destroy    { record_outbox_mutation("destroy") if instant_record_local_write? }
+      after_validation { @hold_for = nil if errors.any? } if respond_to?(:after_validation)
+      after_save       { @hold_for = nil }
+      after_destroy    { @hold_for = nil }
+      after_rollback   { @hold_for = nil } if respond_to?(:after_rollback)
 
       # Server-originated writes (jobs, console, seeds) are change-logged so
       # they stream to clients like any other change. Client mutations are
@@ -30,6 +37,30 @@ module InstantRecord
       after_create  { record_server_change("create") if instant_record_server_write? }
       after_update  { record_server_change("update") if instant_record_server_write? }
       after_destroy { record_server_change("destroy") if instant_record_server_write? }
+    end
+
+    def destroy(hold_for: nil)
+      return super() if hold_for.nil?
+
+      @hold_for = nil
+      previous = InstantRecord::Client.enter_hold(hold_for)
+      begin
+        super()
+      ensure
+        InstantRecord::Client.leave_hold(previous)
+      end
+    end
+
+    def destroy!(hold_for: nil)
+      return super() if hold_for.nil?
+
+      @hold_for = nil
+      previous = InstantRecord::Client.enter_hold(hold_for)
+      begin
+        super()
+      ensure
+        InstantRecord::Client.leave_hold(previous)
+      end
     end
 
     class_methods do
@@ -125,13 +156,45 @@ module InstantRecord
         when "destroy" then {}
         end
 
-      InstantRecord::OutboxMutation.create!(
+      hold = consume_hold_for
+      release_at = hold ? Time.now.utc + hold : nil
+      rollback_payload = release_at ? capture_rollback_payload(operation) : nil
+
+      mutation = InstantRecord::OutboxMutation.create!(
         record_type: self.class.name,
         record_id: id,
         operation: operation,
         changes_payload: changes_payload,
-        base_version: self[:server_version] || 0
+        base_version: self[:server_version] || 0,
+        release_at: release_at,
+        rollback_payload: rollback_payload
       )
+      @last_outbox_mutation_id = mutation.id
+    end
+
+    def consume_hold_for
+      raw = @hold_for
+      @hold_for = nil
+      raw = InstantRecord::Client.current_hold_for if raw.nil?
+      return nil if raw.nil?
+
+      seconds = raw.to_f
+      raise ArgumentError, "hold_for must be non-negative" if seconds < 0.0
+      return nil if seconds == 0.0
+
+      seconds
+    end
+
+    def capture_rollback_payload(operation)
+      case operation
+      when "create"
+        nil
+      when "update"
+        previous = attributes.merge(saved_changes.transform_values(&:first))
+        InstantRecord.snapshot_attributes(previous)
+      when "destroy"
+        InstantRecord.snapshot_attributes(attributes)
+      end
     end
 
     # Mirrors MutationApplier's log_change/log_destroy payload shapes.

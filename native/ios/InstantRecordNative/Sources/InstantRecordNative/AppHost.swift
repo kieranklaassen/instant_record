@@ -292,10 +292,10 @@ public final class AppHost: ObservableObject {
             guard let store = self.open, self.engine.syncs else {
                 // Nothing can sync. Say the pass ended, or the schedule
                 // would wait for it and never start another.
-                return self.ended(ok: self.engine.syncs == false, pending: 0, offline: false, error: nil)
+                return self.ended(ok: self.engine.syncs == false, pending: 0, offline: false, error: nil, nextRelease: nil)
             }
             self.run(store) { outcome in
-                self.ended(ok: outcome.ok, pending: outcome.pending, offline: outcome.offline, error: outcome.error)
+                self.ended(ok: outcome.ok, pending: outcome.pending, offline: outcome.offline, error: outcome.error, nextRelease: outcome.nextRelease)
                 // A tap between the fetch and the hand-over changed what the
                 // app wanted to send. It goes out with a pass of its own.
                 if outcome.outdated { DispatchQueue.main.async { self.schedule.request() } }
@@ -338,6 +338,7 @@ public final class AppHost: ObservableObject {
         var offline = false
         var outdated = false
         var error: String?
+        var nextRelease: TimeInterval?
     }
 
     /// One sync pass for `store`: ask the app what it will want, fetch that
@@ -345,7 +346,7 @@ public final class AppHost: ObservableObject {
     /// `then` runs on this thread when the pass has ended.
     private func run(_ store: Store, then: @escaping (Outcome) -> Void) {
         guard let plan = engine.call("sync_plan", "").flatMap(Self.object) else {
-            return then(Outcome(pending: pending(), error: engine.error()))
+            return then(Outcome(pending: pending(), error: engine.error(), nextRelease: nextRelease()))
         }
         let position = position()
         var wanted: [String] = []
@@ -381,7 +382,9 @@ public final class AppHost: ObservableObject {
                 self.prepared = nil
                 if synced == nil { outcome.error = self.engine.error() }
                 if self.engine.notice().hasPrefix("records_changed") { self.draw() }
-                outcome.pending = self.pending()
+                let state = self.position()
+                outcome.pending = Int(state["pending"] ?? "") ?? 0
+                outcome.nextRelease = Self.releaseDelay(from: state)
                 outcome.outdated = self.unanswered && !outcome.offline
                 outcome.ok = synced != nil && !outcome.offline && outcome.error == nil
                 then(outcome)
@@ -389,14 +392,14 @@ public final class AppHost: ObservableObject {
         }
     }
 
-    private func ended(ok: Bool, pending: Int, offline: Bool, error: String?) {
+    private func ended(ok: Bool, pending: Int, offline: Bool, error: String?, nextRelease: TimeInterval?) {
         draw()
         DispatchQueue.main.async {
             self.fetchingFirst = false
             self.status.pending = pending
             self.status.offline = offline
             if let error { self.status.syncError = error } else if ok { self.status.syncError = "" }
-            self.schedule.finished(ok: ok, pending: pending)
+            self.schedule.finished(ok: ok, pending: pending, nextRelease: nextRelease)
             let waiting = self.refreshing
             self.refreshing = []
             waiting.forEach { $0() }
@@ -444,6 +447,15 @@ public final class AppHost: ObservableObject {
 
     private func pending() -> Int {
         Int(position()["pending"] ?? "") ?? 0
+    }
+
+    private func nextRelease() -> TimeInterval? {
+        Self.releaseDelay(from: position())
+    }
+
+    private static func releaseDelay(from state: [String: String]) -> TimeInterval? {
+        guard let raw = state["next_release_ms"], let ms = Double(raw) else { return nil }
+        return max(0, ms / 1000.0)
     }
 
     // A screen that cannot be drawn keeps the last one that could, and the

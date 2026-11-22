@@ -82,7 +82,13 @@ module InstantRecord
     # the (created_at, id) keyset cursor round-trips exactly and both sides of a
     # last-write-wins comparison are measured with the same ruler.
     def wire_attributes(attributes)
-      attributes.except("sync_state").transform_values do |value|
+      snapshot_attributes(attributes.except("sync_state"))
+    end
+
+    # Full local row snapshot for delay-line rollback: keeps sync_state alongside
+    # every other column, with timestamps at TIME_PRECISION so restore is lossless.
+    def snapshot_attributes(attributes)
+      attributes.transform_values do |value|
         # usec, not iso8601: a Date answers to iso8601 but takes no precision
         # argument, and its default JSON form already round-trips exactly.
         value.respond_to?(:usec) ? value.iso8601(TIME_PRECISION) : value
@@ -168,14 +174,34 @@ module InstantRecord
       return JSON.generate(ok: false, busy: true) if result == :busy
       return JSON.generate(ok: false, started: false) if result == :not_started
 
-      JSON.generate(ok: true, pending: pending_count)
+      payload = { ok: true, pending: pending_count }
+      next_ms = next_release_ms
+      payload[:next_release_ms] = next_ms unless next_ms.nil?
+      JSON.generate(payload)
     rescue StandardError => e
       # Never raise across the JS boundary; a failed pass is a retry, not a crash.
       JSON.generate(ok: false, error: e.message, pending: safe_pending_count)
     end
 
     def pending_count = Client.pending_count
+    def held_count = Client.held_count
+    def held_mutations = Client.held_mutations
+    def next_release_at = Client.next_release_at
+    def next_release_ms = Client.next_release_ms
     def cursor = Client.cursor
+
+    # Hold local outbox writes created inside the block for `seconds` before they
+    # mature for sync, recording a pre-mutation snapshot so cancel_pending can
+    # restore local SQLite and drop the outbox row before release.
+    def hold_for(seconds, &block)
+      Client.with_hold(seconds, &block)
+    end
+
+    # Cancel a held outbox mutation before its release_at matures, restoring the
+    # local SQLite row from its pre-mutation snapshot and deleting the outbox row.
+    def cancel_pending(mutation_id)
+      Client.cancel_pending(mutation_id)
+    end
 
     # On-demand history page for a windowed model (see Client.fetch_history).
     # Shares the tick's single-flight guard both ways: a fetch during a sync
