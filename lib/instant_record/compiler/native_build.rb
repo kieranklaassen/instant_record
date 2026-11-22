@@ -4,6 +4,7 @@ require "fileutils"
 require "json"
 require "open3"
 require "pathname"
+require "rbconfig"
 require "securerandom"
 require_relative "entry_builder"
 require_relative "runner"
@@ -13,7 +14,8 @@ require_relative "wasm_build"
 module InstantRecord
   class Compiler
     # Build the compiled app as a native static library (plus screenless host
-    # binary for this machine, or cross-compiled libraries for iOS).
+    # binary and Fiddle-loadable shared library for this machine, or
+    # cross-compiled libraries for iOS).
     class NativeBuild
       CACHE_SCHEMA_VERSION = 1
       TARGETS = %w[iphonesimulator iphoneos].freeze
@@ -23,6 +25,14 @@ module InstantRecord
       RUNTIME_CFLAGS = %w[-O2 -Wno-all -ffunction-sections -fdata-sections -ffp-contract=off].freeze
       PACKAGES = WasmBuild::SPINEL_PACKAGES
       IOS_MINIMUM = "17.0"
+
+      def self.shared_library_name
+        darwin? ? "libinstant_record_app.dylib" : "libinstant_record_app.so"
+      end
+
+      def self.darwin?
+        RbConfig::CONFIG["host_os"].to_s.match?(/darwin/i)
+      end
 
       # Fields of a screen's node that Spinel did not type as a hash of strings.
       # One loose hash anywhere in the app loosens the struct field for every screen.
@@ -173,8 +183,9 @@ module InstantRecord
           "-I#{File.join(@pipeline_dir, 'native')}"
         ]
 
+        pic = @target ? [] : ["-fPIC"]
         app_obj = File.join(out_dir, "app.o")
-        @runner.run([*cc, *self.class::CFLAGS, *includes, "-c", app_c, "-o", app_obj], log: "cc.log")
+        @runner.run([*cc, *self.class::CFLAGS, *pic, *includes, "-c", app_c, "-o", app_obj], log: "cc.log")
 
         sqlite_headers = header_entries([File.join(sqlite_src, "sqlite3.h")])
         native_shim_headers = header_entries([
@@ -187,7 +198,7 @@ module InstantRecord
           cached_object(
             name: "native_shim",
             source: File.join(@pipeline_dir, "native_shim.c"),
-            cflags: self.class::CFLAGS,
+            cflags: self.class::CFLAGS + pic,
             includes: includes,
             cc: cc,
             toolchain_identity: toolchain_identity,
@@ -196,7 +207,7 @@ module InstantRecord
           cached_object(
             name: "rh_shim",
             source: File.join(@pipeline_dir, "sqlite/rh_shim.c"),
-            cflags: self.class::CFLAGS,
+            cflags: self.class::CFLAGS + pic,
             includes: ["-I#{sqlite_src}"],
             cc: cc,
             toolchain_identity: toolchain_identity,
@@ -205,7 +216,7 @@ module InstantRecord
           cached_object(
             name: "sqlite3",
             source: File.join(sqlite_src, "sqlite3.c"),
-            cflags: self.class::SQLITE_CFLAGS,
+            cflags: self.class::SQLITE_CFLAGS + pic,
             includes: ["-I#{sqlite_src}"],
             cc: cc,
             toolchain_identity: toolchain_identity,
@@ -240,7 +251,17 @@ module InstantRecord
           ],
           log: "link.log"
         )
-        @out.puts "built #{library} and #{host} (#{File.size(host)} bytes)"
+
+        shared = File.join(@build_dir, self.class.shared_library_name)
+        shared_args =
+          if self.class.darwin?
+            ["-dynamiclib", "-O2", "-Wl,-force_load,#{library}", File.join(spinel_home, "lib/libspinel_rt.a")]
+          else
+            ["-shared", "-O2", "-Wl,--whole-archive", library, "-Wl,--no-whole-archive", File.join(spinel_home, "lib/libspinel_rt.a")]
+          end
+        @runner.run([*cc, *shared_args, "-lm", "-o", shared], log: "link-shared.log")
+
+        @out.puts "built #{library}, #{shared} and #{host} (#{File.size(host)} bytes)"
         Pathname(@build_dir)
       end
 
