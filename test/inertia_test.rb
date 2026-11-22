@@ -11,4 +11,16 @@ class InertiaTest < ActiveSupport::TestCase
     assert_equal %w[Issue Comment], live[:counts][:listeners].first[:events]
     assert_equal 150, live[:mail][:throttle]
   end
+
+  test "live props accept optional partition constraints without changing plain-model shape" do
+    mail = Class.new { def self.name = "MailEntry" }
+    live = InstantRecord::Inertia.live_props(
+      mail: { models: [mail], partitions: { mailbox_id: "support" }, throttle: 50 }
+    )
+
+    listener = live[:mail][:listeners].first
+    assert_equal ["MailEntry"], listener[:events]
+    assert_equal({ name: "instant_record", type: "local", partitions: { "mailbox_id" => ["support"] } }, listener[:channel])
+    assert_equal 50, live[:mail][:throttle]
+  end
 end

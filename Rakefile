@@ -33,4 +33,32 @@ namespace :compile do
   end
 end
 
+namespace :instant_record do
+  desc "Run headless dual-runtime parity checks across CRuby, compiled app.wasm (Node AppHost), and Native C ABI (Fiddle)"
+  task :verify_parity do
+    $LOAD_PATH.unshift(File.expand_path("lib", __dir__))
+    require "active_record"
+    require "instant_record"
+    require "instant_record/testing"
+    InstantRecord::Testing.verify_parity(root: __dir__)
+  rescue StandardError => e
+    raise unless defined?(InstantRecord::Testing::Error) && e.is_a?(InstantRecord::Testing::Error)
+
+    abort e.message
+  end
+
+  desc "Run deterministic seeded multi-client chaos simulation across CRuby, compiled app.wasm, and Native C ABI"
+  task :chaos do
+    $LOAD_PATH.unshift(File.expand_path("lib", __dir__))
+    require "active_record"
+    require "instant_record"
+    require "instant_record/testing"
+    InstantRecord::Testing.run_chaos(root: __dir__)
+  rescue StandardError => e
+    raise unless defined?(InstantRecord::Testing::Error) && e.is_a?(InstantRecord::Testing::Error)
+
+    abort e.message
+  end
+end
+
 task default: :test
