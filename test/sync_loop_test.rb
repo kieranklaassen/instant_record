@@ -274,10 +274,7 @@ class SyncLoopTest < Minitest::Test
   end
 
   def parse_notice(notice)
-    lines = notice.split("\n")
-    return [lines.first, nil] if lines.size <= 1
-
-    [lines.first, lines[1..].map { |line| JSON.parse(line) }]
+    parse_notice_with_sync_notices(notice)[0, 2]
   end
 
   def parse_notice_with_sync_notices(notice)
