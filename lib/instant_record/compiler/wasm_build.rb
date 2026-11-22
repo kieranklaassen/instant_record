@@ -8,6 +8,7 @@ require_relative "entry_builder"
 require_relative "gem_vendor"
 require_relative "runner"
 require_relative "source_pages"
+require_relative "static_linter"
 require_relative "toolchain"
 require_relative "wasm_tree"
 
@@ -162,7 +163,14 @@ module InstantRecord
           AppStage.stage(source: @app_source, target: app, native: native)
         end
 
-        GemVendor.vendor(gem_src: @gem_root, app_dir: app, demo: @demo)
+        vendor = GemVendor.new(
+          gem_src: @gem_root,
+          app_dir: app,
+          demo: @demo,
+          target: native ? :native : :wasm
+        )
+        vendor.run
+        StaticLinter.check!(app, staged: true, server_only_constants: vendor.server_only_constants)
 
         emit = File.join(@build_dir, "emit")
         clean(emit)
