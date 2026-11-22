@@ -90,6 +90,7 @@ module InstantRecord
               result = { ok: !mark.nil?, applied: 0, has_more: mark == "more" }
             else
               page = JSON.parse(response)
+              InstantRecord::Client.observe_server_time(page["server_time"])
               records = Array(page["records"])
               more = page["has_more"] == true
               InstantRecord::OutboxMutation.transaction do

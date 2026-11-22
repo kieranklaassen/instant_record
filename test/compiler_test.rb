@@ -172,7 +172,7 @@ class CompilerTest < ActiveSupport::TestCase
       assert_includes File.read(File.join(app, "app/models/slack/seeds.rb")), "Browser build: the seeding routines"
 
       count = InstantRecord::Compiler::GemVendor.vendor(gem_src: GEM_ROOT, app_dir: app, demo: true)
-      assert_equal 18, count
+      assert_equal 19, count
       assert_includes File.read(File.join(app, "lib/instant_record/host.rb")), "def browser? = true"
       assert_includes File.read(File.join(app, "lib/instant_record/host.rb")), "id.blank?"
       assert_includes File.read(File.join(app, "lib/instant_record/host.rb")), 'Db.exec("SAVEPOINT "'

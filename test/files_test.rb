@@ -75,7 +75,7 @@ class FilesTest < Minitest::Test
   def test_what_the_browser_compiles_holds_no_number_past_32_bits
     assert_nil InstantRecord::Configuration.new.max_file_size
     assert_nil InstantRecord::Configuration.new.file_chunk_size
-    %w[configuration.rb syncable.rb].each do |file|
+    %w[configuration.rb syncable.rb hlc.rb].each do |file|
       source = File.read(File.expand_path("../lib/instant_record/#{file}", __dir__), encoding: "UTF-8")
       refute_match(/\d\s*\*\s*\d|\*\*|\d{10,}/, source.gsub(/^\s*#.*$/, ""), "#{file} computes a number the browser may not hold")
     end
