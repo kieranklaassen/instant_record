@@ -120,4 +120,26 @@ final class SyncScheduleTests: XCTestCase {
 
         XCTAssertEqual([0, 5, 0.3], clock.planned)
     }
+
+    func testHeldMutationsScheduleAPassAtNextReleaseWithoutBackoff() {
+        schedule.request()
+        clock.fire()
+        schedule.finished(ok: true, pending: 0, nextRelease: 4.5)
+
+        XCTAssertEqual([0.3, 4.5], clock.planned)
+        XCTAssertTrue(clock.waiting)
+
+        // Backoff was reset because ok && pending == 0: a subsequent failure retries at base pace.
+        clock.fire()
+        schedule.finished(ok: false, pending: 1)
+        XCTAssertEqual(2, clock.planned.last)
+    }
+
+    func testSoonerPollStillWinsOverALaterNextReleaseWhileInFront() {
+        schedule.front(true)
+        clock.fire()
+        schedule.finished(ok: true, pending: 0, nextRelease: 12)
+
+        XCTAssertEqual([0, 5], clock.planned)
+    }
 }
