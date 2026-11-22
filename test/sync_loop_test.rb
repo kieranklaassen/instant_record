@@ -161,24 +161,29 @@ class SyncLoopTest < Minitest::Test
     assert_equal 1, @notifier.notifications, "one notification per pass, not per event"
   end
 
-  def test_many_queued_writes_go_up_in_a_single_request
+  def test_many_queued_writes_go_up_in_bounded_batches
     in_browser do
       InstantRecord.start
       500.times { |i| @model.create!(id: "burst-#{i}", title: "burst #{i}") }
 
-      # Ack everything the batch carries, as the real server would.
-      @transport.respond_with(
-        InstantRecord::OutboxMutation.pluck(:id).map do |id|
-          { "mutation_id" => id, "status" => "applied", "version" => 1 }
-        end
-      )
+      # Ack every mutation in whichever bounded batch arrives, as the real server would.
+      @transport.define_singleton_method(:post_json) do |path, payload|
+        @posts << [path, payload]
+        {
+          "results" => payload[:mutations].map do |m|
+            { "mutation_id" => m[:id], "status" => "applied", "version" => 1 }
+          end
+        }
+      end
 
       InstantRecord.tick
     end
 
-    assert_equal 1, @transport.posts.size,
-      "one pass must batch the whole outbox into one request, not one per write"
-    assert_equal 500, @transport.posts.first.last[:mutations].size
+    batch_size = InstantRecord.config.drain_batch_size
+    assert_equal 500 / batch_size, @transport.posts.size,
+      "500 writes must drain in bounded chunks of #{batch_size}, neither 500 single requests nor one unbounded POST"
+    assert @transport.posts.all? { |(_path, payload)| payload[:mutations].size <= batch_size }
+    assert_equal 500, @transport.posts.sum { |(_path, payload)| payload[:mutations].size }
     assert_equal 0, InstantRecord.pending_count, "acked mutations leave the outbox"
   end
 

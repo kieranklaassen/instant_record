@@ -5,6 +5,7 @@ import { AppHost } from "./app-host.js";
 import { advance, fresh, held, query } from "./history-fill.js";
 import { mailboxScope } from "./mailbox-scope.js";
 import { openSnapshot, withFiles } from "./snapshot-store.js";
+import { runDrain } from "./sync-drain.js";
 
 const publicEndpoint = import.meta.env.VITE_SYNC_ENDPOINT || "/instant_record";
 let syncEndpoint = publicEndpoint;
@@ -93,7 +94,7 @@ let kickTimer = null;
 let pollInFlight = false;
 let draining = null;
 let localRevision = 0;
-let drainDelayMs = DRAIN_RETRY_BASE_MS;
+const drainRetry = { baseMs: DRAIN_RETRY_BASE_MS, capMs: DRAIN_RETRY_CAP_MS, delayMs: DRAIN_RETRY_BASE_MS };
 
 // Keep each tab's hot reactor until a peer changes the durable revision.
 async function withSnapshot(mode, operation) {
@@ -153,7 +154,7 @@ function syncPass() {
     const revision = localRevision;
     draining = drain().finally(() => {
       draining = null;
-      if (revision !== localRevision) kickSync();
+      if (revision !== localRevision && !kickTimer) kickSync();
     });
   }
   return draining;
@@ -162,42 +163,19 @@ function syncPass() {
 // `early` is a bootstrap asked for before the app was up (earlyBootstrap). One that did not
 // arrive is asked for again here.
 async function drain(initial = false, early = null) {
-  const { plan, revision } = await withSnapshot("readonly", () => ({ plan: host.syncPlan(), revision: snapshotRevision }));
-  const push = plan.push ? await fetchReply("POST", "/mutations", plan.push) : null;
-  const snapshot = plan.bootstrap ? (early?.status === 200 ? early : await fetchReply("GET", "/bootstrap")) : null;
-
-  // An edit made during the network wait takes precedence over an old rejection or
-  // snapshot. Retry from SQLite with the original mutation IDs for idempotent replay.
-  const result = await withSnapshot("readwrite", save => {
-    if (revision !== snapshotRevision) {
-      kickSync();
-      return { changed: false, retried: true };
-    }
-    const result = host.sync(syncEndpoint, (method, url, body) => {
-      const reply = method === "POST" ? push : snapshot;
-      if (!reply || reply.method !== method || reply.url !== url || reply.body !== body) {
-        throw new Error("Unexpected request while applying prepared sync responses");
-      }
-      return { status: reply.status, body: reply.text };
-    });
-    const needsBootstrap = plan.bootstrap && !host.syncState().bootstrapped;
-    if (push || snapshot) report({ kind: "sync-pass", path: `${result.pending} pending` });
-    // After a bootstrap the next poll reads the cursor and the identity afresh.
-    currentCursor = plan.bootstrap ? null : result.cursor;
-    if (result.changed || result.notified) {
-      save();
-    }
-
-    if (result.pending > 0 || needsBootstrap) {
-      kickSync(drainDelayMs);
-      drainDelayMs = Math.min(drainDelayMs * 2, DRAIN_RETRY_CAP_MS);
-    } else {
-      drainDelayMs = DRAIN_RETRY_BASE_MS;
-    }
-    return result;
+  return runDrain({
+    withSnapshot,
+    fetchReply,
+    getHost: () => host,
+    syncEndpoint,
+    initial,
+    early,
+    report,
+    setCursor: cursor => { currentCursor = cursor; },
+    onRecordsChanged: changedRecords => self.postMessage({ type: "records_changed", changes: changedRecords }),
+    scheduleRetry: delay => kickSync(delay),
+    retryState: drainRetry,
   });
-  if (!initial && result.notified) self.postMessage({ type: "records_changed", changes: result.changes });
-  return result;
 }
 
 // Non-blocking catch-up poll: window=0 returns immediately (zero held server threads),
@@ -354,7 +332,7 @@ function runRequest(method, render) {
     if (writing) {
       localRevision++;
       save();
-      drainDelayMs = DRAIN_RETRY_BASE_MS;
+      drainRetry.delayMs = DRAIN_RETRY_BASE_MS;
       kickSync();
     }
     return result;
@@ -540,7 +518,7 @@ self.onmessage = async (event) => {
         self.postMessage({ type: "instant_record.debug_backlog", entries: history, streamOpen: false });
       }
       if (host && previous.offline && !simulation.offline) {
-        drainDelayMs = DRAIN_RETRY_BASE_MS;
+        drainRetry.delayMs = DRAIN_RETRY_BASE_MS;
         kickSync(0);
       }
       return;

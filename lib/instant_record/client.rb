@@ -1,8 +1,10 @@
 require "uri"
 require "time"
+require "json"
 require "active_support/notifications"
 require "instant_record/client/transport"
 require "instant_record/client/notifier"
+require "instant_record/client/rebaser"
 
 module InstantRecord
   # Ruby reconciles local records and queued mutations. The worker handles network I/O.
@@ -14,6 +16,13 @@ module InstantRecord
 
     # More changes than this in one notice are not listed one by one.
     MAX_LISTED_CHANGES = 200
+
+    # Upper bound on bounded batches drained in a single synchronous pass.
+    MAX_DRAIN_CHUNKS_PER_PASS = 50
+
+    DRAIN_BATCH_LIMIT_KEY = "drain_batch_limit".freeze
+    RETRY_PREFIX = "outbox_5xx:".freeze
+    QUARANTINE_PREFIX = "quarantined:".freeze
 
     class << self
       # Applying remote state must never enqueue new outbox mutations.
@@ -116,6 +125,37 @@ module InstantRecord
         OutboxMutation.ordered.map(&:as_mutation)
       end
 
+      # Next bounded chunk of outbox mutations to POST. Respects both
+      # `config.drain_batch_size` and any adaptive bisection limit narrowed
+      # after a 5xx response so a single poison pill cannot stall the queue.
+      def drain_batch(limit: effective_drain_batch_size)
+        OutboxMutation.ordered.limit(limit).map(&:as_mutation)
+      end
+
+      def effective_drain_batch_size
+        configured = [InstantRecord.config.drain_batch_size.to_i, 1].max
+        adaptive = SyncMetadata.get(DRAIN_BATCH_LIMIT_KEY)&.to_i
+        adaptive && adaptive.positive? ? [configured, adaptive].min : configured
+      end
+
+      def quarantined_mutations
+        entries = []
+        SyncMetadata.all.each do |entry|
+          next unless entry.key.start_with?(QUARANTINE_PREFIX)
+
+          entries << JSON.parse(entry.value)
+        rescue JSON::ParserError
+          next
+        end
+        entries.sort_by { |e| [e["quarantined_at"].to_s, e["mutation_id"].to_s] }
+      end
+
+      def clear_quarantined_mutations
+        SyncMetadata.all.each do |entry|
+          entry.destroy if entry.key.start_with?(QUARANTINE_PREFIX)
+        end
+      end
+
       def cursor
         SyncMetadata.get("cursor").to_i
       end
@@ -157,15 +197,27 @@ module InstantRecord
             model.delete_all if model
           end
         end
+        destroyed_ids = []
         OutboxMutation.all.each do |mutation|
-          mutation.destroy if types.include?(mutation.record_type)
+          if types.include?(mutation.record_type)
+            destroyed_ids << mutation.id
+            mutation.destroy
+          end
         end
+        Rebaser.reset_types(types)
         # The rows that stay were last brought up to date at this cursor. The
         # bootstrap to come only adds and changes rows, so the poll after it
         # starts here again and a destroy made in between is not missed.
         SyncMetadata.set("replay_from", cursor) if bootstrapped? && SyncMetadata.get("replay_from").nil?
         SyncMetadata.all.each do |entry|
-          entry.destroy if entry.key == "cursor" || entry.key == "identity" || entry.key.start_with?("history:")
+          if entry.key == "cursor" || entry.key == "identity" || entry.key == DRAIN_BATCH_LIMIT_KEY ||
+              entry.key.start_with?("history:") ||
+              (entry.key.start_with?(RETRY_PREFIX) && destroyed_ids.include?(entry.key[RETRY_PREFIX.length..]))
+            entry.destroy
+          elsif entry.key.start_with?(QUARANTINE_PREFIX)
+            parsed = begin JSON.parse(entry.value) rescue nil end
+            entry.destroy if parsed && types.include?(parsed["record_type"])
+          end
         end
         history_marks.clear
         unlisted_changes
@@ -180,21 +232,7 @@ module InstantRecord
       def bootstrap
         instrument("bootstrap") do |event|
           body = transport.get_json("/bootstrap")
-          records = Array(body["records"])
-          records.each { |record| apply_change(record) }
-          event[:records] = records.size
-
-          # Cursor written last: a crash mid-apply leaves it nil, so the next
-          # tick re-bootstraps; upserts make the retry idempotent. A failure
-          # never falls through to a cursor-0 poll of the full change log.
-          SyncMetadata.set("identity", body["identity"]) if body["identity"]
-          replay = SyncMetadata.get("replay_from")
-          if replay.nil? || replay.to_i > body["cursor"].to_i
-            self.cursor = body["cursor"]
-          else
-            self.cursor = replay.to_i
-          end
-          SyncMetadata.all.each { |entry| entry.destroy if entry.key == "replay_from" } unless replay.nil?
+          event[:records] = apply_bootstrap_body(body)
           true
         end
       rescue Transport::Error => e
@@ -202,24 +240,138 @@ module InstantRecord
         false
       end
 
-      # Outbox up. Returns true when anything was sent and applied.
+      # Outbox up in bounded batches. Halves batch size on multi-mutation 5xx
+      # responses and isolates a single poison pill after N 5xx retries so
+      # healthy mutations behind it keep draining. Returns true when anything
+      # was sent, applied, or quarantined.
       def drain
-        mutations = pending_mutations
-        return false if mutations.empty?
+        return false if OutboxMutation.count == 0
 
         instrument("drain") do |event|
-          body = transport.post_json("/mutations", mutations_payload(mutations))
-          apply_results(body["results"])
+          total_posted = 0
+          total_rejected = 0
+          reasons = []
+          batches = 0
+          quarantined = 0
+          did_work = false
 
-          results = Array(body["results"]).map { |r| r.deep_stringify_keys }
-          event[:posted] = mutations.size
-          event[:rejected] = results.count { |r| r["status"] == "rejected" }
-          event[:reasons] = results.filter_map { |r| r["reason"] }.uniq.first(3)
-          true
+          MAX_DRAIN_CHUNKS_PER_PASS.times do
+            mutations = drain_batch
+            break if mutations.empty?
+
+            begin
+              body = transport.post_json("/mutations", mutations_payload(mutations))
+              results = Array(body["results"]).map { |r| r.deep_stringify_keys }
+              resolved = apply_results(results)
+
+              batches += 1
+              total_posted += mutations.size
+              total_rejected += results.count { |r| r["status"] == "rejected" }
+              results.each do |r|
+                reason = r["reason"]
+                reasons << reason if reason && !reasons.include?(reason)
+              end
+              did_work = true
+              clear_adaptive_batch_limit if OutboxMutation.count == 0
+              break if resolved == 0
+            rescue Transport::Error => e
+              outcome = handle_drain_failure(mutations.map { |m| m[:id] }, status: e.status, error: e.message)
+              if outcome[:quarantined].positive?
+                quarantined += outcome[:quarantined]
+                did_work = true
+                next
+              else
+                log_failure("drain", e)
+                break
+              end
+            end
+          end
+
+          event[:posted] = total_posted
+          event[:rejected] = total_rejected
+          event[:reasons] = reasons.first(3)
+          event[:batches] = batches
+          event[:quarantined] = quarantined
+          did_work
         end
-      rescue Transport::Error => e
-        log_failure("drain", e)
-        false
+      end
+
+      # Merge pre-fetched push and/or bootstrap responses from an async worker
+      # into the current SQLite state by mutation_id, without discarding acks
+      # when newer local edits landed while the network call was in flight.
+      def apply_prepared_sync(push: nil, bootstrap: nil)
+        changed = evict_beyond_windows
+        progressed = false
+        failed = false
+        quarantined = 0
+
+        if push
+          push = push.deep_stringify_keys
+          status = push["status"].to_i
+          sent_ids = Array(push["mutation_ids"]).map(&:to_s)
+
+          if status >= 200 && status < 300
+            begin
+              body = JSON.parse(push["body"].to_s)
+              instrument("drain") do |event|
+                results = Array(body["results"]).map { |r| r.deep_stringify_keys }
+                resolved = apply_results(results)
+                clear_adaptive_batch_limit if OutboxMutation.count == 0
+                changed = true if resolved.positive?
+                progressed = true if resolved.positive? || sent_ids.none? { |id| OutboxMutation.find_by(id: id) }
+                event[:posted] = sent_ids.size
+                event[:rejected] = results.count { |r| r["status"] == "rejected" }
+                event[:reasons] = results.filter_map { |r| r["reason"] }.uniq.first(3)
+                event[:batches] = 1
+                event[:quarantined] = 0
+              end
+            rescue JSON::ParserError => e
+              log_failure("drain", Transport::Error.new("POST /mutations -> invalid JSON: #{e.message}", status: status))
+              failed = true
+            end
+          elsif status >= 500 && status < 600
+            outcome = handle_drain_failure(sent_ids, status: status, error: "POST /mutations -> #{status}")
+            if outcome[:quarantined].positive?
+              quarantined += outcome[:quarantined]
+              changed = true
+              progressed = true
+            else
+              log_failure("drain", Transport::Error.new("POST /mutations -> #{status}", status: status))
+              failed = true
+            end
+          else
+            log_failure("drain", Transport::Error.new("POST /mutations -> #{status}", status: status))
+            failed = true
+          end
+        end
+
+        if bootstrap && !bootstrapped?
+          bootstrap = bootstrap.deep_stringify_keys
+          status = bootstrap["status"].to_i
+          if status >= 200 && status < 300
+            begin
+              body = JSON.parse(bootstrap["body"].to_s)
+              instrument("bootstrap") do |event|
+                event[:records] = apply_bootstrap_body(body)
+              end
+              changed = true
+              progressed = true
+            rescue JSON::ParserError => e
+              log_failure("bootstrap", Transport::Error.new("GET /bootstrap -> invalid JSON: #{e.message}", status: status))
+              failed = true
+            end
+          else
+            log_failure("bootstrap", Transport::Error.new("GET /bootstrap -> #{status}", status: status))
+            failed = true
+          end
+        end
+
+        if changed
+          unlisted_changes
+          notify_changed
+        end
+
+        { changed: changed, progressed: progressed, failed: failed, quarantined: quarantined }
       end
 
       # Set while something outside the VM holds a tailing stream and feeds
@@ -391,62 +543,134 @@ module InstantRecord
       end
 
       # Server results for a posted batch. Every result drops the outbox row —
-      # each one is a durable resolution, not a retry — and what happens to the
-      # record depends on which resolution it is:
-      # applied           -> mark the record synced
-      # applied + skipped -> the write lost last-write-wins; reconcile to the
-      #                      value that won, because it did NOT land here
-      # rejected          -> reconcile to server state
+      # each one is a durable resolution, not a retry — and reconciles the row
+      # through GGPO dirty-row rebasing so newer unacked local edits on the same
+      # row are deterministically replayed over server truth instead of clobbered.
+      # Returns the number of matching outbox mutations resolved.
       def apply_results(results)
+        resolved = 0
         Array(results).each do |result|
           result = result.deep_stringify_keys
           mutation = OutboxMutation.find_by(id: result["mutation_id"])
           next unless mutation
 
+          SyncMetadata.delete("#{RETRY_PREFIX}#{mutation.id}")
           applying_remote do
-            case result["status"]
-            when "applied"
-              # `skipped` is the server saying it threw this write away to
-              # last-write-wins. It is resolved (nothing will retry it) but it
-              # never landed, so marking the record synced would badge a
-              # discarded write as delivered — the record does not hold what the
-              # server holds. Reconcile to the winner, which rides along with the
-              # result; the same value also arrives over the change stream, which
-              # is what makes doing nothing here look fine until the stream is
-              # behind.
-              if result["skipped"]
-                reconcile_to_server_state(mutation, result)
-              else
-                mark_synced(mutation, result["version"])
-              end
-            when "rejected"
-              reconcile_rejection(mutation, result)
-            end
-            mutation.destroy!
+            Rebaser.reconcile_mutation_result(mutation, result)
           end
+          resolved += 1
         end
-        nil
+        resolved
       end
 
-      # Apply one remote change event (last-write-wins). Returns whether it
-      # actually changed anything here — see upsert_from_server.
+      # Apply one remote change event. Clean rows use the direct last-write-wins
+      # path; dirty rows rewind to their server-confirmed snapshot, apply server
+      # truth, and deterministically replay remaining unacked mutations. Returns
+      # whether the visible row actually moved.
       def apply_change(event)
         event = event.deep_stringify_keys
         model = InstantRecord.synced_model(event["type"])
         return false unless model
 
+        record_id = event["id"] || (event["attributes"].is_a?(Hash) && event["attributes"]["id"])
         applied = applying_remote do
-          if event["operation"] == "destroy"
-            !!model.find_by(id: event["id"])&.destroy!
+          if record_id && Rebaser.dirty?(event["type"], record_id)
+            Rebaser.apply_server_delta(
+              model,
+              record_id,
+              operation: event["operation"],
+              attributes: event["attributes"],
+              version: event["version"]
+            )
+          elsif event["operation"] == "destroy"
+            !!model.find_by(id: record_id)&.destroy!
           else
             upsert_from_server(model, event["attributes"], event["version"])
           end
         end
-        note_change(event["type"], event["id"]) if applied
+        note_change(event["type"], record_id) if applied
         applied
       end
 
       private
+
+      def apply_bootstrap_body(body)
+        records = Array(body["records"])
+        records.each { |record| apply_change(record) }
+
+        # Cursor written last: a crash mid-apply leaves it nil, so the next
+        # tick re-bootstraps; upserts make the retry idempotent. A failure
+        # never falls through to a cursor-0 poll of the full change log.
+        SyncMetadata.set("identity", body["identity"]) if body["identity"]
+        replay = SyncMetadata.get("replay_from")
+        if replay.nil? || replay.to_i > body["cursor"].to_i
+          self.cursor = body["cursor"]
+        else
+          self.cursor = replay.to_i
+        end
+        SyncMetadata.all.each { |entry| entry.destroy if entry.key == "replay_from" } unless replay.nil?
+        records.size
+      end
+
+      def clear_adaptive_batch_limit
+        SyncMetadata.delete(DRAIN_BATCH_LIMIT_KEY)
+      end
+
+      def handle_drain_failure(sent_ids, status:, error:)
+        return { quarantined: 0, bisected: false } unless status.is_a?(Integer) && status >= 500 && status < 600
+
+        live_mutations = sent_ids.filter_map { |id| OutboxMutation.find_by(id: id) }
+        return { quarantined: 0, bisected: false } if live_mutations.empty?
+
+        if live_mutations.size > 1
+          next_limit = [live_mutations.size / 2, 1].max
+          SyncMetadata.set(DRAIN_BATCH_LIMIT_KEY, next_limit)
+          return { quarantined: 0, bisected: true }
+        end
+
+        mutation = live_mutations.first
+        retry_key = "#{RETRY_PREFIX}#{mutation.id}"
+        attempts = SyncMetadata.get(retry_key).to_i + 1
+        threshold = [InstantRecord.config.max_server_error_retries.to_i, 1].max
+
+        if attempts >= threshold
+          quarantine_mutation(mutation, status: status, error: error, attempts: attempts)
+          SyncMetadata.delete(retry_key)
+          clear_adaptive_batch_limit
+          { quarantined: 1, bisected: false }
+        else
+          SyncMetadata.set(retry_key, attempts)
+          { quarantined: 0, bisected: false }
+        end
+      end
+
+      def quarantine_mutation(mutation, status:, error:, attempts:)
+        payload = {
+          "mutation_id" => mutation.id,
+          "record_type" => mutation.record_type,
+          "record_id" => mutation.record_id,
+          "operation" => mutation.operation,
+          "changes" => mutation.changes_payload,
+          "base_version" => mutation.base_version,
+          "status" => status,
+          "error" => error.to_s,
+          "attempts" => attempts,
+          "quarantined_at" => Time.now.utc.iso8601(InstantRecord::TIME_PRECISION)
+        }
+        SyncMetadata.set("#{QUARANTINE_PREFIX}#{mutation.id}", JSON.generate(payload))
+        applying_remote do
+          Rebaser.reconcile_quarantined_mutation(mutation)
+        end
+        unlisted_changes
+        instrument("poison_pill",
+          mutation_id: mutation.id,
+          record_type: mutation.record_type,
+          record_id: mutation.record_id,
+          operation: mutation.operation,
+          status: status,
+          attempts: attempts,
+          error: error.to_s)
+      end
 
       # Where the parser drops finished events, drained by consume_stream.
       def stream_events
@@ -505,35 +729,6 @@ module InstantRecord
         params = { type: model.name, before_created_at: before_at.utc.iso8601(6), before_id: before_id, limit: limit }
         params[:partition] = partition if partition
         "/records?#{URI.encode_www_form(params)}"
-      end
-
-      def mark_synced(mutation, version)
-        model = InstantRecord.synced_model(mutation.record_type)
-        record = model&.find_by(id: mutation.record_id)
-        return unless record
-
-        record.update_columns(sync_state: "synced", server_version: version || record.server_version)
-      end
-
-      def reconcile_rejection(mutation, result)
-        return if reconcile_to_server_state(mutation, result)
-
-        # The server never accepted this record (rejected create): remove it.
-        InstantRecord.synced_model(mutation.record_type)&.find_by(id: mutation.record_id)&.destroy!
-      end
-
-      # Roll the local record onto the server's own copy of the row, when the
-      # result carries one. Returns whether it did — the caller distinguishes
-      # "the server has no such row" from "the server has this row".
-      #
-      # Authoritative: the server told us what it holds in answer to a write of
-      # ours it would not take, so its row wins here regardless of timestamps.
-      def reconcile_to_server_state(mutation, result)
-        model = InstantRecord.synced_model(mutation.record_type)
-        return false unless model && result["server_attributes"].present?
-
-        upsert_from_server(model, result["server_attributes"], result["version"], authoritative: true)
-        true
       end
 
       # Returns whether the row actually moved. Every accepted write comes back

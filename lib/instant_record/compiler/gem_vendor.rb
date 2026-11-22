@@ -19,6 +19,7 @@ module InstantRecord
         lib/instant_record/sync_metadata.rb
         lib/instant_record/sync_window.rb
         lib/instant_record/client.rb
+        lib/instant_record/client/rebaser.rb
         lib/instant_record/client/transport.rb
         lib/instant_record/client/notifier.rb
         lib/instant_record/native/node.rb

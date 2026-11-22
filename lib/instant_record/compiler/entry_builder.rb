@@ -44,19 +44,38 @@ module InstantRecord
             0
           end
 
-          # Capture the exact outgoing batch before the worker yields to browser requests.
+          # Capture the next bounded outgoing batch before the worker yields to browser requests.
           def self.sync_plan
-            mutations = InstantRecord::Client.pending_mutations
+            mutations = InstantRecord::Client.drain_batch
             push = mutations.empty? ? "" : JSON.generate(InstantRecord::Client.mutations_payload(mutations))
-            <<write:out>>JSON.generate({ push: push, bootstrap: !InstantRecord::Client.bootstrapped? }))
+            <<write:out>>JSON.generate({
+              push: push,
+              mutation_ids: mutations.map { |m| m[:id] },
+              bootstrap: !InstantRecord::Client.bootstrapped?
+            }))
             0
           end
 
           def self.handle_sync
-            endpoint = <<read:in>>.strip
-            InstantRecord.config.endpoint = endpoint if endpoint.length > 0
-            changed = InstantRecord::Client.sync_pass
-            <<write:out>>(changed ? "changed" : "unchanged") + " pending=" + InstantRecord::Client.pending_count.to_s + " cursor=" + InstantRecord::Client.cursor.to_s)
+            raw = <<read:in>>.strip
+            if raw.start_with?("{")
+              input = JSON.parse(raw)
+              endpoint = input["endpoint"].to_s.strip
+              InstantRecord.config.endpoint = endpoint if endpoint.length > 0
+              outcome = InstantRecord::Client.apply_prepared_sync(
+                push: input["push"],
+                bootstrap: input["bootstrap"]
+              )
+              changed = outcome[:changed]
+              suffix = " progressed=" + (outcome[:progressed] ? "1" : "0") +
+                " failed=" + (outcome[:failed] ? "1" : "0") +
+                " quarantined=" + outcome[:quarantined].to_s
+            else
+              InstantRecord.config.endpoint = raw if raw.length > 0
+              changed = InstantRecord::Client.sync_pass
+              suffix = ""
+            end
+            <<write:out>>(changed ? "changed" : "unchanged") + " pending=" + InstantRecord::Client.pending_count.to_s + " cursor=" + InstantRecord::Client.cursor.to_s + suffix)
             0
           end
 

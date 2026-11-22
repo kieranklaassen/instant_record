@@ -31,9 +31,20 @@ module InstantRecord
     # bits, and two gigabytes do not fit in one.
     attr_accessor :max_file_size
 
+    # Maximum number of outbox mutations sent in a single POST /mutations
+    # request. Bounding the batch keeps large offline backlogs chunked and
+    # lets 5xx poison-pill isolation narrow down a single failing mutation.
+    attr_accessor :drain_batch_size
+
+    # Number of consecutive 5xx responses on an isolated single mutation before
+    # quarantining it as a poison pill so subsequent writes can keep draining.
+    attr_accessor :max_server_error_retries
+
     def initialize
       @endpoint = DEFAULT_MOUNT_PATH
       @sync_interval = 3
+      @drain_batch_size = 100
+      @max_server_error_retries = 3
       @file_store = nil
       @max_file_size = nil
       @scope_from = ->(request) { request.params["scope"] }

@@ -12,5 +12,9 @@ module InstantRecord
       record = find_or_initialize_by(key: key)
       record.update!(value: value.to_s)
     end
+
+    def self.delete(key)
+      find_by(key: key)&.destroy
+    end
   end
 end
