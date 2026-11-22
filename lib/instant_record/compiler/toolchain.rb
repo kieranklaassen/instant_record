@@ -8,11 +8,21 @@ module InstantRecord
     # validates that the required external tools are present before a build.
     class Toolchain
       Check = Struct.new(:name, :status, :detail, keyword_init: true) do
-        def ok? = status != :missing
+        def ok? = status == :ok || status == :optional
       end
 
-      Report = Struct.new(:target, :path, :checks, keyword_init: true) do
-        def ok? = checks.all?(&:ok?)
+      Report = Struct.new(:target, :path, :checks, :lint, keyword_init: true) do
+        def ok? = checks.all?(&:ok?) && (lint.nil? || lint.ok?)
+
+        def with_lint(lint_result)
+          lint_check =
+            if lint_result.ok?
+              Check.new(name: "static lint", status: :ok, detail: "0 issues across #{lint_result.files_checked} files")
+            else
+              Check.new(name: "static lint", status: :fail, detail: "#{lint_result.diagnostics.size} issue(s) across #{lint_result.files_checked} files")
+            end
+          Report.new(target: target, path: path, checks: checks + [lint_check], lint: lint_result)
+        end
 
         def to_s
           lines = ["InstantRecord toolchain check (#{target}) — #{path}"]
@@ -20,9 +30,14 @@ module InstantRecord
             badge = case check.status
             when :ok then "OK"
             when :optional then "OPTIONAL"
+            when :fail then "FAIL"
             else "MISSING"
             end
             lines << format("  [%-8s] %-18s %s", badge, check.name, check.detail)
+          end
+          if lint && !lint.ok?
+            lines << ""
+            lines << lint.to_s
           end
           lines.join("\n")
         end

@@ -8,6 +8,7 @@ import { createLeaderCoordinator } from "./leader-election.js";
 import { resolveServerRequest, serverRoot } from "./server-request.js";
 import { openDatabaseStorage } from "./storage-backend.js";
 import { runDrain } from "./sync-drain.js";
+import { nextSyncAction } from "./sync-schedule.js";
 
 const POLL_EVERY_MS = 1000;
 const QUIET_MS = 30;
@@ -74,6 +75,7 @@ export function createWorkerRuntime({
   let currentCursor = null;
   let currentIdentity = "";
   let kickTimer = null;
+  let kickHeld = false;
   let pollTimer = null;
   let pollInFlight = false;
   let draining = null;
@@ -350,10 +352,25 @@ export function createWorkerRuntime({
     return { method, url, body, status, text, contentType: responseContentType };
   }
 
-  function kickSync(delay = QUIET_MS) {
+  function kickSync(delay = QUIET_MS, { held = false } = {}) {
     if (!isLeaderOrStandalone() || branches.isActive()) return;
     clearTimeout(kickTimer);
+    kickHeld = held;
     kickTimer = setTimeout(syncPass, delay);
+  }
+
+  function clearHeldKick() {
+    if (kickTimer && kickHeld) {
+      clearTimeout(kickTimer);
+      kickTimer = null;
+      kickHeld = false;
+    }
+  }
+
+  function applySyncSchedule(action) {
+    if (action.kind === "immediate") kickSync(action.delay);
+    else if (action.kind === "held") kickSync(action.delay, { held: true });
+    else clearHeldKick();
   }
 
   function handleOnline() {
@@ -366,6 +383,7 @@ export function createWorkerRuntime({
     if (!isLeaderOrStandalone()) return Promise.resolve({ changed: false });
     clearTimeout(kickTimer);
     kickTimer = null;
+    kickHeld = false;
     if (branches.isActive()) return Promise.resolve({ skipped: true, reason: "branched" });
     if (!draining) {
       const revision = localRevision;
@@ -394,31 +412,35 @@ export function createWorkerRuntime({
       onRecordsChanged: changedRecords => emitRecordsChanged(changedRecords),
       onSyncNotices: notices => emitSyncNotices(notices),
       scheduleRetry: delay => kickSync(delay),
+      scheduleHeld: delay => applySyncSchedule({ kind: "held", delay }),
+      onIdle: () => applySyncSchedule({ kind: "idle" }),
       retryState: drainRetry,
     });
   }
 
   async function pollChanges() {
-    if (!isLeaderOrStandalone() || !host || pollInFlight || draining || kickTimer) return;
+    if (!isLeaderOrStandalone() || !host || pollInFlight || draining || (kickTimer && !kickHeld)) return;
     const revision = localRevision;
     pollInFlight = true;
     try {
       if (currentCursor === null) {
         const state = await withDb("readonly", () => host.syncState());
-        if (state.pending > 0 || !state.bootstrapped) {
+        const action = nextSyncAction(state, 0);
+        if (action.kind === "immediate") {
           kickSync(0);
           return;
         }
+        applySyncSchedule(action);
         currentCursor = state.cursor;
         currentIdentity = state.identity;
       }
       const who = currentIdentity ? `&identity=${encodeURIComponent(currentIdentity)}` : "";
       const { status, text } = await fetchReply("GET", `/events?after=${currentCursor}&window=0${who}`);
       if (status !== 200) return;
-      if (!text.trim() || draining || kickTimer || revision !== localRevision) return;
+      if (!text.trim() || draining || (kickTimer && !kickHeld) || revision !== localRevision) return;
 
       const changed = await withDb("readwrite", save => {
-        if (draining || kickTimer || revision !== localRevision) return;
+        if (draining || (kickTimer && !kickHeld) || revision !== localRevision) return;
         const consumed = host.consumeStream(text);
         currentCursor = consumed.cursor;
         if (!consumed.bootstrapped) {
@@ -472,7 +494,7 @@ export function createWorkerRuntime({
     fillState = (await withFiles("readonly", get => get(FILL))) || fresh();
     announceFill();
     if (fillState.done || fillState.full) return false;
-    if (effectiveSimulation().offline || draining || kickTimer || branches.isActive()) return true;
+    if (effectiveSimulation().offline || draining || (kickTimer && !kickHeld) || branches.isActive()) return true;
 
     const key = query(fillState, FILL_PAGE);
     const revision = localRevision;
@@ -550,7 +572,7 @@ export function createWorkerRuntime({
         localRevision++;
         save();
         drainRetry.delayMs = DRAIN_RETRY_BASE_MS;
-        kickSync();
+        applySyncSchedule(nextSyncAction(host.syncState(), QUIET_MS));
       }
       return rendered;
     });
@@ -816,6 +838,7 @@ export function createWorkerRuntime({
 
     const bootstrapStart = now();
     if (!restored && !shell) await drain(true, await bootstrapFetch);
+    if (restored) applySyncSchedule(nextSyncAction(host.syncState(), 0));
     if (shell) pollChanges();
     const bootstrapMs = now() - bootstrapStart;
 
@@ -864,6 +887,7 @@ export function createWorkerRuntime({
     clearTimeout(fillTimer);
     pollTimer = null;
     kickTimer = null;
+    kickHeld = false;
     fillTimer = null;
     host = null;
     if (storage) {
@@ -933,9 +957,10 @@ export function createWorkerRuntime({
           return replay;
         }),
       });
-      if (result.applied > 0 || host.syncState().pending > 0) {
+      const postApproveState = host.syncState();
+      if (result.applied > 0 || postApproveState.pending > 0 || postApproveState.nextReleaseMs != null) {
         drainRetry.delayMs = DRAIN_RETRY_BASE_MS;
-        kickSync(0);
+        applySyncSchedule(nextSyncAction(result.applied > 0 ? { ...postApproveState, pending: Math.max(postApproveState.pending, 1) } : postApproveState, 0));
       }
       report({ kind: "branch", method: "APPROVE", path: `${result.name} (${result.applied} applied, ${result.skipped} skipped)`, status: 200 });
       emitBranchState({ active: false, lastAction: result });
@@ -944,9 +969,10 @@ export function createWorkerRuntime({
     }
     if (method === "branch.discard") {
       const result = branches.discard();
-      if (host.syncState().pending > 0) {
+      const postDiscardState = host.syncState();
+      if (postDiscardState.pending > 0 || postDiscardState.nextReleaseMs != null) {
         drainRetry.delayMs = DRAIN_RETRY_BASE_MS;
-        kickSync(0);
+        applySyncSchedule(nextSyncAction(postDiscardState, 0));
       }
       report({ kind: "branch", method: "DISCARD", path: `${result.name} (${result.dropped} dropped)`, status: 200 });
       emitBranchState({ active: false, lastAction: result });
@@ -1073,6 +1099,7 @@ export function createWorkerRuntime({
     clearTimeout(fillTimer);
     pollTimer = null;
     kickTimer = null;
+    kickHeld = false;
     fillTimer = null;
     if (storage) {
       storage.close();

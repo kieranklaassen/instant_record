@@ -16,9 +16,18 @@ export async function runDrain({
   onRecordsChanged = () => {},
   onSyncNotices = () => {},
   scheduleRetry,
+  scheduleHeld = () => {},
+  onIdle = () => {},
   retryState,
 }) {
   const plan = await withSnapshot("readonly", () => getHost().syncPlan());
+  if (!plan.push && !plan.bootstrap) {
+    retryState.delayMs = retryState.baseMs;
+    const nextReleaseMs = plan.next_release_ms ?? null;
+    if (nextReleaseMs != null) scheduleHeld(Math.max(0, nextReleaseMs));
+    else onIdle();
+    return { changed: false, notified: false, pending: 0, nextReleaseMs };
+  }
   const push = plan.push ? await fetchReply("POST", "/mutations", plan.push) : null;
   const snapshot = plan.bootstrap ? (early?.status === 200 ? early : await fetchReply("GET", "/bootstrap")) : null;
 
@@ -54,8 +63,12 @@ export async function runDrain({
         scheduleRetry(retryState.delayMs);
         retryState.delayMs = Math.min(retryState.delayMs * 2, retryState.capMs);
       }
+    } else if (applied.nextReleaseMs != null) {
+      retryState.delayMs = retryState.baseMs;
+      scheduleHeld(Math.max(0, applied.nextReleaseMs));
     } else {
       retryState.delayMs = retryState.baseMs;
+      onIdle();
     }
     return { ...applied, syncNotices };
   });

@@ -73,6 +73,7 @@ final class FakeEngine: Engine {
     var bootstrapped = true
     var boots = true
     var syncs = true
+    var nextReleaseMs: Int? = nil
     private var last = ""
     private var endpoint = ""
     private var answer: (String) -> String = { _ in Transport.offline }
@@ -113,7 +114,8 @@ final class FakeEngine: Engine {
             if raises.contains(entry) { return nil }
             return "{\"push\":\(FakeEngine.quoted(push)),\"bootstrap\":\(!bootstrapped)}"
         case "cursor":
-            return "cursor=7 pending=\(push.isEmpty ? 0 : 1) bootstrap=\(bootstrapped ? "ready" : "needed") identity= notices=\(noticesCount)"
+            let release = nextReleaseMs.map { " next_release_ms=\($0)" } ?? ""
+            return "cursor=7 pending=\(push.isEmpty ? 0 : 1) bootstrap=\(bootstrapped ? "ready" : "needed") identity= notices=\(noticesCount)\(release)"
         case "notices":
             let object = (try? JSONSerialization.jsonObject(with: Data(input.utf8))) as? [String: Any] ?? [:]
             let action = object["action"] as? String ?? "list"
