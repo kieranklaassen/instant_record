@@ -8,9 +8,11 @@ import { CircuitBreaker, WasmFaultError } from "./faults.js";
 import { FlightRecorder } from "./flight-recorder.js";
 import { advance, fresh, held, query } from "./history-fill.js";
 import { mailboxScope } from "./mailbox-scope.js";
+import { resolveServerRequest, serverRoot } from "./server-request.js";
 import { openSnapshot, withFiles } from "./snapshot-store.js";
 
 const publicEndpoint = import.meta.env.VITE_SYNC_ENDPOINT || "/instant_record";
+const mountPath = import.meta.env.VITE_MOUNT_PATH || "/instant_record";
 let syncEndpoint = publicEndpoint;
 const POLL_EVERY_MS = 1000;
 const QUIET_MS = 30;
@@ -113,12 +115,13 @@ function createHost(module, env = {}) {
   });
 }
 
-async function fetchReply(method, path, body = "", endpoint = syncEndpoint) {
+async function fetchReply(method, path, body = "", endpoint = syncEndpoint, contentType = undefined) {
   const url = endpoint + path;
   const started = performance.now();
   const poll = path.startsWith("/events?");
   let status = 0;
   let text = "";
+  let responseContentType = "";
   let outcome = "failed";
   try {
     if (simulation.latencyMs && !simulation.offline) {
@@ -126,16 +129,18 @@ async function fetchReply(method, path, body = "", endpoint = syncEndpoint) {
     }
     if (simulation.offline) {
       outcome = "offline";
-      return { method, url, body, status, text };
+      return { method, url, body, status, text, contentType: responseContentType };
     }
     const options = { method, signal: AbortSignal.timeout(30000) };
-    if (method === "POST") {
-      options.headers = { "Content-Type": "application/json" };
+    if (method !== "GET" && method !== "HEAD") {
+      const headerType = contentType === undefined ? "application/json" : contentType;
+      if (headerType) options.headers = { "Content-Type": headerType };
       options.body = body;
     }
     const scoped = syncScope ? url + (url.includes("?") ? "&" : "?") + "scope=" + encodeURIComponent(syncScope) : url;
     const response = await fetch(scoped, options);
     text = await response.text();
+    responseContentType = response.headers.get("content-type") || "";
     outcome = status = response.status;
   } catch {
     // A failed exchange stays in the durable outbox for retry.
@@ -146,7 +151,7 @@ async function fetchReply(method, path, body = "", endpoint = syncEndpoint) {
         status: outcome, ms: Math.round(performance.now() - started) });
     }
   }
-  return { method, url, body, status, text };
+  return { method, url, body, status, text, contentType: responseContentType };
 }
 
 const DATABASE = "development.sqlite3";
@@ -593,7 +598,7 @@ async function boot(payload = {}) {
   openSnapshot(scope);
   changes = new BroadcastChannel("instant-record-spinel-changes" + (scope ? "/" + scope : ""));
   changes.onmessage = () => { if (host) self.postMessage({ type: "records_changed" }); };
-  if (scope) syncEndpoint = publicEndpoint.replace(/\/instant_record\/?$/, "") + "/email/sync/" + scope;
+  if (scope) syncEndpoint = serverRoot(publicEndpoint, mountPath) + "/email/sync/" + scope;
   const started = performance.now();
   // The shell downloads while the module compiles.
   const shellFetch = fetchShell(scope, payload.path);
@@ -773,20 +778,11 @@ self.onmessage = async (event) => {
       return;
     }
     if (type === "serverRequest") {
-      const url = new URL(payload.path, self.location.origin);
-      // The Auth page asks Rails who is signed in, and tries the sync server by hand.
-      const auth = payload.method === "GET"
-        ? ["/auth/session", "/instant_record/bootstrap"]
-        : ["/auth/session", "/auth/session/sign_out", "/instant_record/mutations"];
-      const allowed = auth.includes(url.pathname) || (payload.method === "GET" && url.pathname === "/receipts/probe") ||
-        (payload.method === "POST" && (url.pathname === "/slack/reset" ||
-          (import.meta.env.VITE_SHARED_INBOX_DEMO && url.pathname === new URL(syncEndpoint, self.location.origin).pathname + "/incoming" &&
-            url.pathname.startsWith("/email/sync/"))));
-      if (!allowed) throw new Error("Unknown demo server action");
-      const root = publicEndpoint.replace(/\/instant_record\/?$/, "");
-      url.searchParams.delete("instant_record_network");
+      const targetPath = resolveServerRequest(payload.path, self.location.origin);
+      const root = serverRoot(publicEndpoint, mountPath);
+      const method = (payload.method || "GET").toUpperCase();
       const body = typeof payload.body === "string" ? payload.body : "";
-      const reply = await fetchReply(payload.method, url.pathname + url.search, body, root);
+      const reply = await fetchReply(method, targetPath, body, root, payload.contentType ?? "");
       return self.postMessage({ id, result: reply });
     }
     if (type === "boot") return self.postMessage({ id, result: await boot(payload) });
