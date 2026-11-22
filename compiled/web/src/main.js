@@ -5,6 +5,7 @@ const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "modu
 const waiting = new Map();
 let nextId = 1;
 let historyFill = null;
+let syncNotices = [];
 worker.onmessage = (event) => {
   const { id, result, error, type } = event.data;
   if (type === "release_required") return releaseRequired?.();
@@ -17,6 +18,12 @@ worker.onmessage = (event) => {
     historyFill = event.data.state;
     if (window.__spinel) window.__spinel.history = historyFill;
     window.dispatchEvent(new CustomEvent("instant-record:history", { detail: historyFill }));
+    return;
+  }
+  if (type === "instant_record.sync_notices") {
+    syncNotices = Array.isArray(event.data.notices) ? event.data.notices : [];
+    if (window.__spinel) window.__spinel.notices = syncNotices;
+    window.dispatchEvent(new CustomEvent("instant-record:sync-notices", { detail: { notices: syncNotices } }));
     return;
   }
   if (type === "records_changed") {
@@ -39,7 +46,7 @@ const marks = { start: performance.now() };
 // Where the sync server is and who this browser is to it, for a page that asks it for
 // something itself: the bytes of a record that declares sync_file (frontend/files.js).
 const syncEndpoint = import.meta.env.VITE_SYNC_ENDPOINT || "/instant_record";
-window.__spinel = { marks, call, worker, history: historyFill, sourceVersion: import.meta.env.VITE_SOURCE_VERSION,
+window.__spinel = { marks, call, worker, history: historyFill, notices: syncNotices, sourceVersion: import.meta.env.VITE_SOURCE_VERSION,
   endpoint: syncEndpoint, scope: syncScope() };
 
 // Restore the switches before even the first bootstrap can reach Rails.

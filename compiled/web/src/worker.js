@@ -159,6 +159,90 @@ function syncPass() {
   return draining;
 }
 
+function announceNotices(notices) {
+  self.postMessage({ type: "instant_record.sync_notices", notices: Array.isArray(notices) ? notices : [] });
+}
+
+async function runNoticeAction(payload = { action: "list" }) {
+  const action = payload.action || "list";
+  if (action === "list") {
+    return withSnapshot("readonly", () => host.notices({ action: "list" }));
+  }
+  const result = await withSnapshot("readwrite", save => {
+    const resolved = host.notices(payload);
+    if (resolved.ok) {
+      localRevision++;
+      save();
+      if (action === "retry" || action === "fork") {
+        drainDelayMs = DRAIN_RETRY_BASE_MS;
+        kickSync();
+      }
+    }
+    return resolved;
+  });
+  if (Array.isArray(result.notices)) announceNotices(result.notices);
+  if (result.notified) self.postMessage({ type: "records_changed", changes: result.changes });
+  return result;
+}
+
+// Parse local Hotwire form/fetch requests for /instant_record/sync_notices.
+function matchSyncNoticeRoute(method, path, body = "", contentType = "") {
+  const url = new URL(path, self.location.origin);
+  const base = new URL(publicEndpoint, self.location.origin).pathname.replace(/\/+$/, "") + "/sync_notices";
+  const pathname = url.pathname.replace(/\.json$/, "");
+  let verb = method.toUpperCase();
+  if (verb === "POST" && (!contentType || contentType.startsWith("application/x-www-form-urlencoded"))) {
+    const text = typeof body === "string" ? body : new TextDecoder().decode(body || new Uint8Array());
+    const override = new URLSearchParams(text).get("_method");
+    if (override && /^delete$/i.test(override)) verb = "DELETE";
+  }
+  if (pathname === base && verb === "GET") return { action: "list", json: url.pathname.endsWith(".json") };
+  if (!pathname.startsWith(base + "/")) return null;
+  const parts = pathname.slice(base.length + 1).split("/");
+  const id = decodeURIComponent(parts[0] || "");
+  if (!id) return null;
+  if (parts.length === 1 && verb === "DELETE") return { action: "dismiss", id, json: url.pathname.endsWith(".json") };
+  if (parts.length === 2 && verb === "POST" && ["retry", "fork", "dismiss"].includes(parts[1])) {
+    return { action: parts[1], id, json: url.pathname.endsWith(".json") };
+  }
+  return null;
+}
+
+function parseNoticeForm(body, contentType) {
+  const text = typeof body === "string" ? body : new TextDecoder().decode(body || new Uint8Array());
+  if (contentType && contentType.includes("application/json")) {
+    try {
+      const parsed = JSON.parse(text || "{}");
+      return { overrides: parsed.overrides || {}, returnTo: parsed.return_to || "" };
+    } catch {
+      return { overrides: {}, returnTo: "" };
+    }
+  }
+  const params = new URLSearchParams(text);
+  const overrides = {};
+  for (const [key, value] of params.entries()) {
+    const match = /^overrides\[(.+)\]$/.exec(key);
+    if (match) overrides[match[1]] = value;
+  }
+  return { overrides, returnTo: params.get("return_to") || "" };
+}
+
+function handleSyncNoticeHttp(route, body, contentType) {
+  const { overrides, returnTo } = parseNoticeForm(body, contentType);
+  const result = host.notices(route.action === "list" ? { action: "list" } : { action: route.action, id: route.id, overrides });
+  const status = result.ok ? (route.json || route.action === "list" ? 200 : 303) : 422;
+  const headers = [];
+  let responseBody = "";
+  if (status === 303) {
+    const target = returnTo && returnTo.startsWith("/") && !returnTo.startsWith("//") ? returnTo : "/";
+    headers.push(["Location", target]);
+  } else {
+    headers.push(["Content-Type", "application/json; charset=utf-8"]);
+    responseBody = JSON.stringify(result);
+  }
+  return { status, headers, body: responseBody, exit: 0, errors: [], noticeResult: result };
+}
+
 // `early` is a bootstrap asked for before the app was up (earlyBootstrap). One that did not
 // arrive is asked for again here.
 async function drain(initial = false, early = null) {
@@ -184,6 +268,7 @@ async function drain(initial = false, early = null) {
     if (push || snapshot) report({ kind: "sync-pass", path: `${result.pending} pending` });
     // After a bootstrap the next poll reads the cursor and the identity afresh.
     currentCursor = plan.bootstrap ? null : result.cursor;
+    const syncNotices = result.notices?.length ? host.notices({ action: "list" }).notices : null;
     if (result.changed || result.notified) {
       save();
     }
@@ -194,8 +279,9 @@ async function drain(initial = false, early = null) {
     } else {
       drainDelayMs = DRAIN_RETRY_BASE_MS;
     }
-    return result;
+    return { ...result, syncNotices };
   });
+  if (result.syncNotices) announceNotices(result.syncNotices);
   if (!initial && result.notified) self.postMessage({ type: "records_changed", changes: result.changes });
   return result;
 }
@@ -232,11 +318,13 @@ async function pollChanges() {
         currentCursor = null;
         kickSync(0);
       }
+      const syncNotices = consumed.notices?.length ? host.notices({ action: "list" }).notices : null;
       if (consumed.applied > 0 || consumed.notified) {
         save();
-        return { changes: consumed.changes };
+        return { changes: consumed.changes, syncNotices };
       }
     });
+    if (changed?.syncNotices) announceNotices(changed.syncNotices);
     if (changed) self.postMessage({ type: "records_changed", changes: changed.changes });
   } catch {
     // offline: try again on the next interval
@@ -363,7 +451,13 @@ function runRequest(method, render) {
 
 function localRequest(method, path, options) {
   const started = performance.now();
-  const result = host.request(method, path, options);
+  const noticeRoute = matchSyncNoticeRoute(method, path, options?.body, options?.contentType);
+  const result = noticeRoute
+    ? handleSyncNoticeHttp(noticeRoute, options?.body, options?.contentType)
+    : host.request(method, path, options);
+  if (result.noticeResult && Array.isArray(result.noticeResult.notices)) {
+    announceNotices(result.noticeResult.notices);
+  }
   report({ kind: "local", method, path, status: result.status, ms: Math.round(performance.now() - started) });
   return result;
 }
@@ -516,6 +610,8 @@ async function boot(payload = {}) {
     if (before && at) await loadHistory({ type: "MailEntry", before: { id: before, created_at: at }, limit: 50 });
   }
   const first = payload.path ? await runRequest("GET", () => navigate({ method: "GET", path: payload.path })) : null;
+  const initialNoticeCount = host.syncState().notices;
+  if (initialNoticeCount > 0) announceNotices(host.notices({ action: "list" }).notices);
   setInterval(pollChanges, POLL_EVERY_MS);
   // With the first page on screen, bring the rest of the inbox down behind it.
   if (scope && scope !== "invalid/invalid") {
@@ -577,6 +673,7 @@ self.onmessage = async (event) => {
     }
     if (type === "save") return self.postMessage({ id, result: await withSnapshot("readwrite", save => save()) });
     if (type === "sync") return self.postMessage({ id, result: await syncPass() });
+    if (type === "notices") return self.postMessage({ id, result: await runNoticeAction(payload || { action: "list" }) });
   } catch (error) {
     self.postMessage({ id, error: String(error && error.message ? error.message : error) });
   }

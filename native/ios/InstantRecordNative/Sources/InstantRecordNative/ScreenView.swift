@@ -6,6 +6,7 @@ import SwiftUI
 public struct AppView: View {
     @ObservedObject private var host: AppHost
     @Environment(\.scenePhase) private var phase
+    @State private var showingNotices = false
     private let waiting: String
     private let theme: Theme
 
@@ -24,11 +25,15 @@ public struct AppView: View {
         // inset of the stack it was drawn across the bar's buttons.
         VStack(spacing: 0) {
             banner
+            noticesBanner
             NavigationStack(path: $host.path) {
                 // A first screen put in another's place starts afresh.
                 ScreenView(route: host.root, host: host, first: true, waiting: waiting)
                     .id(host.root)
                     .navigationDestination(for: Route.self) { ScreenView(route: $0, host: host, first: false, waiting: waiting) }
+            }
+            .sheet(isPresented: $showingNotices) {
+                SyncNoticesSheet(host: host, theme: theme)
             }
         }
         .background { theme.page?.ignoresSafeArea() }
@@ -60,6 +65,31 @@ public struct AppView: View {
             .padding(.vertical, 8)
             .background((failed ? AnyShapeStyle(.yellow.opacity(0.25)) : theme.fill.map(AnyShapeStyle.init) ?? AnyShapeStyle(.bar)), ignoresSafeAreaEdges: .top)
             .background { theme.page?.ignoresSafeArea(edges: .top) }
+        }
+    }
+
+    @ViewBuilder private var noticesBanner: some View {
+        if !host.notices.isEmpty {
+            let count = host.notices.count
+            let summary = count == 1
+                ? (host.notices[0].isConflict ? "1 sync conflict needs review" : "1 rejected change needs review")
+                : "\(count) sync notices need review"
+            HStack(alignment: .firstTextBaseline) {
+                Label(summary, systemImage: "exclamationmark.bubble")
+                    .font(.footnote)
+                    .fontDesign(theme.ui)
+                    .foregroundStyle(theme.ink)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("sync-notices-banner")
+                Spacer()
+                Button("Review") { showingNotices = true }
+                    .font(.footnote.weight(.medium))
+                    .fontDesign(theme.ui)
+                    .accessibilityIdentifier("sync-notices-review")
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+            .background(Color.orange.opacity(0.18), ignoresSafeAreaEdges: host.status.message == nil ? .top : [])
         }
     }
 }
