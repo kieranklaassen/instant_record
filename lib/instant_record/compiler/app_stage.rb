@@ -48,7 +48,7 @@ module InstantRecord
 
       module_function
 
-      def analyze(source:, native: false, island: nil, overrides: nil, models: nil, migration_paths: nil)
+      def analyze(source:, native: false, island: nil, overrides: nil, models: nil, migration_paths: nil, overlay_dir: nil)
         source_path = File.expand_path(source.to_s)
         route_analysis = RouteAnalyzer.analyze(source_root: source_path, island: island)
         file_config = Manifest.load_config(source_path, island: island)
@@ -59,7 +59,8 @@ module InstantRecord
           route_analysis: route_analysis,
           overrides: merged_overrides,
           native: native,
-          migration_paths: migration_paths
+          migration_paths: migration_paths,
+          overlay_dir: overlay_dir
         )
 
         manifest_models = build_manifest_models(trace, explicit_models: models, island_mode: route_analysis.has_local_first)
@@ -101,7 +102,8 @@ module InstantRecord
           island: island,
           overrides: overrides,
           models: models,
-          migration_paths: migration_paths
+          migration_paths: migration_paths,
+          overlay_dir: overlay_dir
         )
 
         FileUtils.rm_rf(target_path)

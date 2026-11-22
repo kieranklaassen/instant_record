@@ -58,7 +58,10 @@ module InstantRecord
         # Capture the server-confirmed row state right before a clean row
         # transitions to dirty. Called inside the same transaction as the local
         # record write and outbox insert, so rollbacks undo it atomically.
-        def capture_before_local_write(model, record_id, creating:)
+        # +creating+ is positional here and in Syncable's callbacks: as a keyword on a
+        # concern's method, the browser's compiler types it as a Hash and every local
+        # write raises TypeError.
+        def capture_before_local_write(model, record_id, creating)
           record_type = model.name
           return if dirty?(record_type, record_id) && confirmed_snapshot(record_type, record_id)
 
