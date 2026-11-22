@@ -27,7 +27,7 @@ export async function withFiles(mode, operation) {
     let result, failure;
     tx.oncomplete = () => resolve(result);
     tx.onabort = () => reject(failure || tx.error || new Error("Snapshot transaction aborted"));
-    operation(get, (key, value) => files.put(value, key)).then(value => {
+    operation(get, (key, value) => files.put(value, key), key => files.delete(key)).then(value => {
       result = value;
     }, error => {
       failure = error;
