@@ -91,6 +91,34 @@ module InstantRecordTestHelpers
       writable_by { |who| who&.id ? where(state: who.id) : none }
     end
   end
+
+  # Stub Rails.application for a block without clobbering or deleting the real
+  # Rails constant when other tests have already required "rails".
+  def with_rails_application(app)
+    had_rails = Object.const_defined?(:Rails)
+    Object.const_set(:Rails, Module.new) unless had_rails
+
+    had_setter = Rails.respond_to?(:application=)
+    had_getter = Rails.respond_to?(:application)
+    previous_app = had_getter ? Rails.application : nil
+
+    if had_setter
+      Rails.application = app
+    else
+      Rails.define_singleton_method(:application) { app }
+    end
+    yield
+  ensure
+    if !had_rails
+      Object.send(:remove_const, :Rails) if Object.const_defined?(:Rails)
+    elsif had_setter
+      Rails.application = previous_app
+    elsif had_getter
+      Rails.define_singleton_method(:application) { previous_app }
+    else
+      Rails.singleton_class.send(:remove_method, :application)
+    end
+  end
 end
 
 Minitest::Test.include(InstantRecordTestHelpers)
