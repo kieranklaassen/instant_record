@@ -29,15 +29,17 @@ end
 
 require "active_support/isolated_execution_state"
 require "instant_record/version"
+require "instant_record/host"
 require "instant_record/configuration"
 require "instant_record/runtime_scoped"
 require "instant_record/native"
-require "instant_record/engine" if defined?(Rails::Engine)
+InstantRecord::Host.load_engine
 
 module InstantRecord
   class << self
-    # The compiler replaces this method in the browser bundle.
-    def browser? = false
+    # Delegated to InstantRecord::Host so AOT builds swap the host adapter
+    # module instead of string-patching this file.
+    def browser? = Host.browser?
 
     def config
       @config ||= Configuration.new
@@ -60,8 +62,7 @@ module InstantRecord
     def synced_model(record_type)
       return synced_models.find { |model| model.name == record_type } if synced_models.any?
 
-      klass = record_type.to_s.safe_constantize
-      klass if klass.respond_to?(:instant_record_syncable?) && klass.instant_record_syncable?
+      Host.resolve_syncable_model(record_type)
     end
 
     # Every model participating in sync: the explicit allowlist when set,
@@ -69,10 +70,7 @@ module InstantRecord
     def syncable_models
       return synced_models if synced_models.any?
 
-      ActiveRecord::Base.descendants.select do |model|
-        !model.abstract_class? && model.name &&
-          model.respond_to?(:instant_record_syncable?) && model.instant_record_syncable?
-      end
+      Host.discover_syncable_models
     end
 
     # One record's attributes as they cross the wire, in either direction and on
@@ -368,11 +366,7 @@ module InstantRecord
     def mount_path
       return config.mount_path if config.mount_path.is_a?(String)
 
-      configured =
-        if defined?(Rails) && Rails.application && Rails.application.config.respond_to?(:instant_record)
-          Rails.application.config.instant_record.mount_path
-        end
-      configured.is_a?(String) ? configured : DEFAULT_MOUNT_PATH
+      Host.default_mount_path
     end
 
     # The retry decision must survive a database that is itself unhappy:
@@ -409,10 +403,7 @@ ActiveSupport.on_load(:active_record) do
   require "instant_record/sync_notice"
   require "instant_record/client"
   require "instant_record/branch"
-  require "instant_record/branch/sqlite_store"
+  InstantRecord::Host.load_branch_store
 end
 
-ActiveSupport.on_load(:active_job) do
-  require "instant_record/sync_actions"
-  InstantRecord::SyncActions.install_active_job_guard!
-end
+InstantRecord::Host.install_active_job_guard
