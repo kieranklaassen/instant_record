@@ -69,6 +69,48 @@ namespace :instant_record do
     abort e.message
   end
 
+  desc "Run the local MCP stdio server or offline CLI around the compiled native host (pass CLI args after `--`)"
+  task mcp: :environment do
+    require "instant_record/compiler"
+    require "instant_record/mcp"
+
+    Rails.application.eager_load!
+    mount_path = Rails.application.config.instant_record.mount_path || InstantRecord::DEFAULT_MOUNT_PATH
+    default_endpoint =
+      if mount_path.to_s.start_with?("http://", "https://")
+        mount_path.to_s
+      else
+        "http://127.0.0.1:#{ENV.fetch('PORT', '3000')}#{mount_path}"
+      end
+
+    screens = InstantRecord::Compiler::EntryBuilder.discover_screens(Rails.root.to_s).map(&:first)
+    models = InstantRecord.syncable_models.map(&:name)
+    builder = lambda do
+      options = compiler_options.call
+      require_toolchain.call(options[:toolchain])
+      InstantRecord::Compiler.build_native(**options, out: $stderr)
+    end
+
+    cli_args =
+      if (sep = ARGV.index("--"))
+        ARGV[(sep + 1)..]
+      else
+        []
+      end
+
+    status = InstantRecord::Mcp::Cli.run(
+      cli_args,
+      defaults: {
+        root: Rails.root.to_s,
+        endpoint: default_endpoint,
+        models: models,
+        screens: screens,
+        builder: builder
+      }
+    )
+    exit(status)
+  end
+
   desc "Verify the compiler toolchain configuration and static AOT/32-bit compatibility (optional target: wasm, native, iphonesimulator, iphoneos)"
   task :doctor, [:target] => :environment do |_task, args|
     require "instant_record/compiler"

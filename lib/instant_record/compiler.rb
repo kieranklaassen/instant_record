@@ -55,7 +55,7 @@ module InstantRecord
     # The same app as libraries a native host links: for this machine, or
     # with target "iphonesimulator" or "iphoneos" for the iOS simulator or
     # an iPhone. Returns the folder that holds them.
-    def self.build_native(root:, toolchain:, endpoint:, models: nil, target: nil, sync_windows: nil, mount_path: nil, baseline: nil, migration_paths: nil, island: nil, overrides: nil)
+    def self.build_native(root:, toolchain:, endpoint:, models: nil, target: nil, sync_windows: nil, mount_path: nil, baseline: nil, migration_paths: nil, island: nil, overrides: nil, out: $stdout)
       with_workspace(root: root, toolchain: toolchain, stage_web: false) do |shared|
         NativeBuild.new(
           **shared,
@@ -67,7 +67,8 @@ module InstantRecord
           baseline: baseline,
           migration_paths: migration_paths || shared[:migration_paths],
           island: island,
-          overrides: overrides
+          overrides: overrides,
+          out: out
         ).run
       end
     end
@@ -85,14 +86,15 @@ module InstantRecord
     end
 
     # Build the repository's own demo into compiled/.build-native[/target].
-    def self.build_demo_native(target: nil, toolchain: nil, endpoint: nil, island: nil)
+    def self.build_demo_native(target: nil, toolchain: nil, endpoint: nil, island: nil, out: $stdout)
       NativeBuild.new(
         workspace: gem_root.join("compiled"),
         gem_root: gem_root,
         toolchain: demo_toolchain(toolchain),
         endpoint: endpoint,
         target: target,
-        island: island
+        island: island,
+        out: out
       ).run
     end
 
