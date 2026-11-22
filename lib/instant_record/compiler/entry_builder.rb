@@ -121,6 +121,26 @@ module InstantRecord
             <<write:out>>JSON.generate({ "ok" => false, "error" => error.message, "notices" => InstantRecord::SyncNotice.active.recent.map { |n| n.as_notice } }))
             0
           end
+
+          # Staging branch diff: OutboxMutations recorded after `exclude_ids`.
+          def self.branch_outbox
+            raw = <<read:in>>.strip
+            input = raw.empty? ? {} : JSON.parse(raw)
+            summary = InstantRecord::Branch.summary(since_ids: Array(input["exclude_ids"]))
+            <<write:out>>JSON.generate(summary))
+            0
+          end
+
+          # Safely replay extracted staging branch OutboxMutations onto current `main`.
+          def self.branch_replay
+            raw = <<read:in>>.strip
+            input = raw.empty? ? {} : JSON.parse(raw)
+            conflict = input["conflict"].to_s
+            conflict = "lww" if conflict.empty?
+            result = InstantRecord::Branch.replay_mutations(Array(input["mutations"]), conflict: conflict)
+            <<write:out>>JSON.generate(result))
+            0
+          end
         <<entries>>end
       RUBY
 

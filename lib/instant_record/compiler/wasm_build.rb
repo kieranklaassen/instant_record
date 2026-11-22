@@ -29,7 +29,9 @@ module InstantRecord
         "WasmBridge.handle_stream",
         "WasmBridge.cursor",
         "WasmBridge.history",
-        "WasmBridge.notices"
+        "WasmBridge.notices",
+        "WasmBridge.branch_outbox",
+        "WasmBridge.branch_replay"
       ].join(",").freeze
 
       SQLITE_CFLAGS = %w[

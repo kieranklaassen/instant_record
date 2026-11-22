@@ -22,6 +22,7 @@ module InstantRecord
         lib/instant_record/client.rb
         lib/instant_record/client/transport.rb
         lib/instant_record/client/notifier.rb
+        lib/instant_record/branch.rb
         lib/instant_record/native/node.rb
         lib/instant_record/native/screen.rb
       ].freeze
@@ -110,6 +111,7 @@ module InstantRecord
         edit_all!("lib/instant_record.rb", {
           "def browser? = false" => "def browser? = true",
           "require \"instant_record/engine\" if defined?(Rails::Engine)\n" => "",
+          "  require \"instant_record/branch/sqlite_store\"\n" => "",
           "      klass = record_type.to_s.safe_constantize\n      klass if klass.respond_to?(:instant_record_syncable?) && klass.instant_record_syncable?\n" => "      nil\n"
         })
 

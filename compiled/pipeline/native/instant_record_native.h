@@ -36,6 +36,8 @@ int ir_open(const char *database_path);
      "stream"     input a text/event-stream chunk      changes the host fetched
      "open"       input a database path                 what ir_open calls
      "notices"    input {"action":"list"|"retry"|"fork"|"dismiss",...}  quarantined sync notices
+     "branch_outbox"  input {"exclude_ids":[...]}       staged OutboxMutations summary
+     "branch_replay"  input {"mutations":[...],"conflict":"lww"}  replay onto active DB
      "sync_plan", "cursor", "history", "request"       as the browser host uses them */
 const char *ir_call(const char *entry, const char *input);
 

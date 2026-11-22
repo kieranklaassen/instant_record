@@ -12,6 +12,8 @@ static void call_stream(void *ctx)  { (void)ctx; sp_WasmBridge_s_handle_stream()
 static void call_history(void *ctx) { (void)ctx; sp_WasmBridge_s_history(); }
 static void call_cursor(void *ctx)  { (void)ctx; sp_WasmBridge_s_cursor(); }
 static void call_notices(void *ctx) { (void)ctx; sp_WasmBridge_s_notices(); }
+static void call_branch_outbox(void *ctx) { (void)ctx; sp_WasmBridge_s_branch_outbox(); }
+static void call_branch_replay(void *ctx) { (void)ctx; sp_WasmBridge_s_branch_replay(); }
 
 static int run_guarded(void (*fn)(void *)) {
   const char *cls = NULL;
@@ -48,3 +50,9 @@ int wasm_history(void) { return run_guarded(call_history); }
 
 __attribute__((export_name("wasm_notices")))
 int wasm_notices(void) { return run_guarded(call_notices); }
+
+__attribute__((export_name("wasm_branch_outbox")))
+int wasm_branch_outbox(void) { return run_guarded(call_branch_outbox); }
+
+__attribute__((export_name("wasm_branch_replay")))
+int wasm_branch_replay(void) { return run_guarded(call_branch_replay); }

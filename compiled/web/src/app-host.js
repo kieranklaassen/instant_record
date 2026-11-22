@@ -79,6 +79,12 @@ export class AppHost {
     return file ? file.data : null;
   }
 
+  // Independent copy-on-write snapshot of the live SQLite bytes for staging branches.
+  cloneDatabaseBytes() {
+    const bytes = this.databaseBytes();
+    return bytes ? new Uint8Array(bytes) : null;
+  }
+
   restoreDatabase(bytes, schemaVersion = 0) {
     this.storage.contents.set("development.sqlite3", new File(bytes));
     this.hostDir.contents.set("schema_version", new File(encoder.encode(String(schemaVersion).padStart(20, "0"))));
@@ -234,6 +240,29 @@ export class AppHost {
     return {
       ...JSON.parse(decoder.decode(result.out)),
       ...readNotice(decoder.decode(notifyEntry.data)),
+    };
+  }
+
+  // Extract OutboxMutations recorded after `excludeIds` on the active SQLite database.
+  branchOutbox(excludeIds = []) {
+    const result = this.call("wasm_branch_outbox", encoder.encode(JSON.stringify({ exclude_ids: excludeIds })));
+    if (result.exit !== 0) throw new Error(result.errors.join("\n") || "Failed to inspect branch outbox");
+    return JSON.parse(decoder.decode(result.out));
+  }
+
+  // Safely replay extracted branch OutboxMutations onto the active (`main`) SQLite database.
+  branchReplay(mutations, { conflict = "lww" } = {}) {
+    this.notifyFile.data = new Uint8Array();
+    this.hostDir.contents.set("notify", this.notifyFile);
+    const result = this.call("wasm_branch_replay", encoder.encode(JSON.stringify({ mutations, conflict })));
+    if (result.exit !== 0) throw new Error(result.errors.join("\n") || "Failed to replay branch mutations");
+    const parsed = JSON.parse(decoder.decode(result.out));
+    const notifyEntry = this.hostDir.contents.get("notify") || this.notifyFile;
+    return {
+      ...parsed,
+      ...readNotice(decoder.decode(notifyEntry.data)),
+      exit: result.exit,
+      errors: result.errors,
     };
   }
 
