@@ -23,6 +23,7 @@ module InstantRecord
       DEFAULT_SYNC_ENDPOINT = "http://127.0.0.1:3210/instant_record"
       SPINEL_PACKAGES = %w[json stringio zlib].freeze
       HOTWIRE_ASSETS = %w[turbo.min.js stimulus.min.js stimulus-loading.js].freeze
+      CORE_PRELOAD_STYLES = %w[base ui mail].freeze
 
       REACTOR_EXPORTS = [
         "WasmBridge.handle_request",
@@ -311,9 +312,17 @@ module InstantRecord
         links
       end
 
-      def warm_scripts(assets_dir)
+      def warm_scripts(assets_dir, deferred_css: [])
         urls = []
         seen = Digest::SHA256.new
+        deferred_css.each do |name|
+          path = File.join(assets_dir, name)
+          next unless File.file?(path)
+
+          digest = Digest::SHA256.file(path).hexdigest[0, 10]
+          seen.update(name + digest)
+          urls << "/assets/#{name}"
+        end
         [
           [assets_dir, "/assets/"],
           [File.join(assets_dir, "controllers"), "/assets/controllers/"]
@@ -346,19 +355,26 @@ module InstantRecord
         if File.directory?(harness_dir)
           Dir.children(harness_dir).sort.each do |name|
             if name.start_with?("worker-") && name.end_with?(".js")
-              links << %(    <link rel="modulepreload" href="/harness/#{name}">)
+              links << %(    <link rel="modulepreload" fetchpriority="high" href="/harness/#{name}">)
             end
           end
         end
 
         assets_dir = File.join(dist, "assets")
+        deferred_css = []
         if File.directory?(assets_dir)
-          Dir.children(assets_dir).sort.each do |name|
-            links << %(    <link rel="preload" as="style" href="/assets/#{name}">) if name.end_with?(".css")
+          css_files = Dir.children(assets_dir).sort.select { |name| name.end_with?(".css") }
+          css_files.each do |name|
+            stem = File.basename(name, ".css").sub(/-[0-9a-f]{8,}\z/, "")
+            if css_files.length <= 3 || CORE_PRELOAD_STYLES.include?(stem)
+              links << %(    <link rel="preload" as="style" fetchpriority="low" href="/assets/#{name}">)
+            else
+              deferred_css << name
+            end
           end
         end
 
-        links.concat(warm_scripts(assets_dir))
+        links.concat(warm_scripts(assets_dir, deferred_css: deferred_css))
         return if links.empty?
 
         index_path = File.join(dist, "index.html")

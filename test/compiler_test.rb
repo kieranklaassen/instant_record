@@ -688,7 +688,7 @@ class CompilerTest < ActiveSupport::TestCase
       refute File.exist?(Pathname(app_root).join("tmp/instant_record/compiled/pipeline")), "pipeline scripts should not be copied into tmp/"
 
       index_html = output.join("index.html").read
-      assert_includes index_html, '<link rel="modulepreload" href="/harness/worker-abc.js">'
+      assert_includes index_html, '<link rel="modulepreload" fetchpriority="high" href="/harness/worker-abc.js">'
       assert_includes index_html, '<link rel="preload" as="style" href="https://fonts.example.test/font.css">'
       assert_includes index_html, "instant_record.warmed"
 
@@ -752,6 +752,37 @@ class CompilerTest < ActiveSupport::TestCase
       assert File.file?(ios_out.join("libspinel_rt.a"))
       refute File.exist?(ios_out.join("host"))
       refute File.exist?(ios_out.join(InstantRecord::Compiler::NativeBuild.shared_library_name))
+    end
+  end
+
+  test "WasmBuild#inject_preloads keeps core CSS as low-priority preloads and defers extra stylesheets" do
+    Dir.mktmpdir do |dir|
+      fake = create_fake_toolchain(dir)
+      dist = File.join(dir, "dist")
+      FileUtils.mkdir_p(File.join(dist, "harness"))
+      FileUtils.mkdir_p(File.join(dist, "assets"))
+      File.write(File.join(dist, "index.html"), "<!doctype html><html><head>\n  </head><body></body></html>")
+      File.write(File.join(dist, "harness/worker-123.js"), "// worker\n")
+      %w[base.css ui-deadbeef01.css mail.css slack.css extra.css].each do |name|
+        File.write(File.join(dist, "assets", name), "body { color: #000; }\n")
+      end
+
+      build = InstantRecord::Compiler::WasmBuild.new(
+        workspace: dir,
+        gem_root: File.expand_path("..", __dir__),
+        toolchain: fake[:toolchain_file]
+      )
+      build.inject_preloads(dist, nil)
+
+      html = File.read(File.join(dist, "index.html"))
+      assert_includes html, '<link rel="modulepreload" fetchpriority="high" href="/harness/worker-123.js">'
+      assert_includes html, '<link rel="preload" as="style" fetchpriority="low" href="/assets/base.css">'
+      assert_includes html, '<link rel="preload" as="style" fetchpriority="low" href="/assets/ui-deadbeef01.css">'
+      assert_includes html, '<link rel="preload" as="style" fetchpriority="low" href="/assets/mail.css">'
+      refute_includes html, '<link rel="preload" as="style" fetchpriority="low" href="/assets/slack.css">'
+      refute_includes html, '<link rel="preload" as="style" fetchpriority="low" href="/assets/extra.css">'
+      assert_includes html, '"/assets/slack.css"'
+      assert_includes html, '"/assets/extra.css"'
     end
   end
 
