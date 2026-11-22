@@ -37,7 +37,7 @@
     <header>
       <div>
         <h1>One todo list, four ways</h1>
-        <p>The same todo list, built four ways. Each number is the time from the press to the frame that shows the change, measured in the pane itself.</p>
+        <p>The same todo list, built four ways. Each number is the time from the press to the frame that shows the change, measured in the pane itself. Under it, when the answer to the write reached the page.</p>
       </div>
       <form class="press" id="press">
         <input type="text" id="title" placeholder="Type a todo for all four" aria-label="A todo for all four" required>
@@ -57,8 +57,9 @@
             <p><%= way.how %></p>
             <div class="ms" data-ms>&ndash; <small>ms</small></div>
             <div class="bar"><i data-bar></i></div>
+            <p class="facts"><span data-median>no action yet</span></p>
             <p class="facts">
-              <span data-median>no action yet</span>
+              <span data-answered>&nbsp;</span>
               <span><%= @sizes[way.key][:lines] %> lines, <%= @sizes[way.key][:files] %> files</span>
             </p>
           </div>
@@ -93,6 +94,7 @@
           if (!all.length) {
             pane.querySelector("[data-ms]").innerHTML = "&ndash; <small>ms</small>"
             pane.querySelector("[data-median]").textContent = "no action yet"
+            pane.querySelector("[data-answered]").innerHTML = "&nbsp;"
             return
           }
           pane.querySelector("[data-bar]").style.width = `${Math.max(2, (lasts[at] / slowest) * 100)}%`
@@ -102,11 +104,14 @@
 
       window.addEventListener("message", (event) => {
         if (event.data?.type !== "four.time" || !times[event.data.way]) return
-        times[event.data.way].push(event.data)
+        const all = times[event.data.way]
+        const known = all.findIndex((time) => time.at === event.data.at)
+        known < 0 ? all.push(event.data) : (all[known] = event.data) // a late answer comes as the same press again
         const pane = panes.find((each) => each.dataset.way === event.data.way)
         const ms = pane.querySelector("[data-ms]")
         ms.classList.remove("waiting")
         ms.innerHTML = `${event.data.ms} <small>ms to ${event.data.action}</small>`
+        pane.querySelector("[data-answered]").textContent = event.data.answered == null ? "\u00a0" : `answer in hand at ${event.data.answered} ms`
         draw()
       })
 

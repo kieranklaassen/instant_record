@@ -12,6 +12,9 @@
 //   seen_ms     from the input event to the frame that shows the change, read from the page's
 //               own stopwatch (demo/app/javascript/controllers/stopwatch_controller.js), which
 //               is the number /compare shows.
+//   answered_ms from the same input event to the answer to the write reaching the page, on the
+//               page's clock too: the server's answer in three of the apps, the answer of the
+//               app in the browser in the fourth.
 //   server_ms   from the same input event to the end of the request that carried the write to
 //               the server. For the first two apps the page waits for it. For the last two it
 //               happens behind the page.
@@ -98,10 +101,12 @@ for (const { way, origin } of ways) {
     const server = writes.find((at) => at >= time.at);
     await page.waitForLoadState("networkidle").catch(() => {});
     await page.waitForFunction(() => !document.querySelector(".four-list li.pending"));
-    return { ...time, server_ms: server ? Math.round(server - time.at) : null };
+    await page.waitForFunction((at) => window.__stopwatch.history.find((each) => each.at === at)?.answered != null, time.at, { timeout: 5000 }).catch(() => {});
+    const answered = await page.evaluate((at) => window.__stopwatch.history.find((each) => each.at === at)?.answered ?? null, time.at);
+    return { ...time, answered, server_ms: server ? Math.round(server - time.at) : null };
   };
 
-  const seen = { add: [], toggle: [], delete: [] }, server = { add: [], toggle: [], delete: [] };
+  const seen = { add: [], toggle: [], delete: [] }, server = { add: [], toggle: [], delete: [] }, answered = { add: [], toggle: [], delete: [] };
   for (let round = 0; round < SAMPLES + 1; round++) {
     const steps = [
       await timed(async () => { await page.fill(".four input[type='text']", `Todo ${round}`); await page.keyboard.press("Enter"); }),
@@ -109,10 +114,10 @@ for (const { way, origin } of ways) {
       await timed(() => page.click(".four-list li:first-child button")),
     ];
     if (round === 0) continue; // the first round warms the server and the page
-    for (const step of steps) { seen[step.action].push(step.ms); server[step.action].push(step.server_ms); }
+    for (const step of steps) { seen[step.action].push(step.ms); server[step.action].push(step.server_ms); answered[step.action].push(step.answered); }
   }
   result.ways[way] = Object.fromEntries(Object.keys(seen).map((action) =>
-    [action, { seen_ms: median(seen[action]), server_ms: median(server[action].filter((ms) => ms !== null)), seen_all: seen[action] }]));
+    [action, { seen_ms: median(seen[action]), answered_ms: median(answered[action].filter((ms) => ms !== null)), server_ms: median(server[action].filter((ms) => ms !== null)), seen_all: seen[action] }]));
   await page.context().close();
 }
 

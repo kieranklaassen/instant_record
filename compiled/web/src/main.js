@@ -172,7 +172,8 @@ function redraw() {
   const turbo = window.Turbo?.session;
   if (!turbo?.refresh) return window.location.reload();
   if (turbo.navigator.currentVisit) return document.addEventListener("turbo:load", redraw, { once: true });
-  turbo.refresh(document.baseURI);
+  // Morphed, so a field being typed in and the scroll stay as they are.
+  turbo.refresh(document.baseURI, { method: "morph", scroll: "preserve" });
 }
 
 // The shell began compiling the module before this script loaded; pass it on, and ask for the

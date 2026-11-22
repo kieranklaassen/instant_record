@@ -5,7 +5,8 @@ import { Controller } from "@hotwired/stimulus"
 // page updates: it starts at the input event (a submit, a tick, a click on a
 // row's button) and stops in the first frame where the list is different, so
 // it times what a person waits for, whether that was a page, a stream, a
-// React render or a local write.
+// React render or a local write. Beside that it keeps when the write's answer
+// reached the page, which says how long the screen and the truth were apart.
 //
 // The list is the element this controller is on. A row is told from another
 // by its id (or data-id) and its class, so adding, ticking and deleting each
@@ -25,9 +26,15 @@ const write = (name, value) => {
   try { sessionStorage.setItem(key(name), JSON.stringify(value)) } catch {}
 }
 
+// The press being timed. `answered` is set when the page has the answer to its
+// write in hand: from the server for three of the apps, from the app in this
+// browser for the fourth.
+let open = null
+
 const start = (action, at = now()) => {
   const pending = read("pending", null)
   if (pending && at - pending.at < 1000) return // one gesture, several events
+  open = { at, answered: null }
   write("pending", { action, at, before: signature() })
 }
 
@@ -38,11 +45,49 @@ const stop = () => {
   // The frame that holds the change, and then the paint of it.
   requestAnimationFrame(() => setTimeout(() => {
     const time = { action: pending.action, at: pending.at, ms: Math.round(now() - pending.at) }
-    const history = [...read("history", []), time].slice(-60)
-    write("history", history)
-    show(history)
-    if (window.parent !== window) window.parent.postMessage({ type: "four.time", way: way(), ...time }, "*")
+    if (open?.at === pending.at && open.answered !== null) time.answered = open.answered
+    record([...read("history", []), time].slice(-60))
+    tell(time)
   }, 0))
+}
+
+// A write's answer arrived. It may come before the change is shown (the page
+// waited for it) or after (the page drew first).
+const answer = () => {
+  if (!open || open.answered !== null) return
+  open.answered = Math.round((now() - open.at) * 10) / 10
+  const history = read("history", [])
+  const time = history.find((each) => each.at === open.at)
+  if (!time) return // not shown yet: stop() picks it up
+  time.answered = open.answered
+  record(history)
+  tell(time)
+}
+
+const record = (history) => {
+  write("history", history)
+  show(history)
+}
+
+const tell = (time) => {
+  if (window.parent !== window) window.parent.postMessage({ type: "four.time", way: way(), ...time }, "*")
+}
+
+// Every way a page sends a write: fetch (Turbo, and the compiled runtime's own
+// fetch underneath it) and XMLHttpRequest (Inertia).
+const watchWrites = () => {
+  const fetchWas = window.fetch
+  window.fetch = async (input, init) => {
+    const method = (init?.method || input?.method || "GET").toUpperCase()
+    const response = await fetchWas(input, init)
+    if (method !== "GET") answer()
+    return response
+  }
+  const openWas = XMLHttpRequest.prototype.open
+  XMLHttpRequest.prototype.open = function (method, ...rest) {
+    if (String(method).toUpperCase() !== "GET") this.addEventListener("load", answer) // not loadend: a request given up has no answer
+    return openWas.call(this, method, ...rest)
+  }
 }
 
 const median = (values) => {
@@ -60,7 +105,7 @@ const show = (history) => {
   }
   const last = history.at(-1)
   clock.textContent = last
-    ? `${last.action} ${last.ms} ms · median ${median(history.map((time) => time.ms))} ms of ${history.length}`
+    ? `${last.action}: shown ${last.ms} ms${last.answered == null ? "" : `, answered ${last.answered} ms`} · median ${median(history.map((time) => time.ms))} ms of ${history.length}`
     : "no action timed yet"
 }
 
@@ -94,6 +139,7 @@ let armed = false
 const arm = () => {
   if (armed) return
   armed = true
+  watchWrites()
   for (const type of ["submit", "click"]) {
     document.addEventListener(type, (event) => {
       const action = actionOf(event)
