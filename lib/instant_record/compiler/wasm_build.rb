@@ -355,7 +355,9 @@ module InstantRecord
         if File.directory?(harness_dir)
           Dir.children(harness_dir).sort.each do |name|
             if name.start_with?("worker-") && name.end_with?(".js")
-              links << %(    <link rel="modulepreload" fetchpriority="high" href="/harness/#{name}">)
+              # Started here, not preloaded: a modulepreload is a module load in the page, after
+              # which Firefox refuses the import map of the app's own page (compiled/web/vite.config.js).
+              links << %(    <script>try { window.__worker = new Worker("/harness/#{name}", { type: "module" }); } catch (error) {}</script>)
             end
           end
         end
