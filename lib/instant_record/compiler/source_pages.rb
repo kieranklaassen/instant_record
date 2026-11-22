@@ -12,6 +12,7 @@ module InstantRecord
         "home" => ["home", "index", []],
         "email" => ["email/mailboxes", "index", %w[mail_entry mail_directory]],
         "todo" => ["todo/issues", "index", %w[issue]],
+        "instant" => ["instant/todos", "index", %w[issue]],
         "slack" => ["slack/channels", "show", %w[channel chat_user message]],
         "migrate" => ["migrate/notes", "index", %w[note release]],
         "console" => ["console/sessions", "index", %w[issue]],
