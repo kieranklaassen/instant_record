@@ -238,24 +238,31 @@ module InstantRecord
             .exists?
 
           restored = applying_remote do
-            case mutation.operation
-            when "create"
-              model.find_by(id: mutation.record_id)&.destroy!
+            if Rebaser.confirmed_snapshot(mutation.record_type, mutation.record_id) &&
+                (mutation.operation == "create" || mutation.rollback_payload.is_a?(Hash))
+              Rebaser.reconcile_quarantined_mutation(mutation)
               true
-            when "update", "destroy"
-              if mutation.rollback_payload.is_a?(Hash)
-                restore_record(model, mutation, earlier_pending: earlier_pending)
+            else
+              case mutation.operation
+              when "create"
+                model.find_by(id: mutation.record_id)&.destroy!
+                mutation.destroy!
                 true
+              when "update", "destroy"
+                if mutation.rollback_payload.is_a?(Hash)
+                  restore_record(model, mutation, earlier_pending: earlier_pending)
+                  mutation.destroy!
+                  true
+                else
+                  false
+                end
               else
                 false
               end
-            else
-              false
             end
           end
           next unless restored
 
-          mutation.destroy!
           Rebaser.clear_confirmed_snapshot(mutation.record_type, mutation.record_id) unless earlier_pending
           cancelled = {
             mutation_id: mutation.id,
@@ -944,7 +951,8 @@ module InstantRecord
           did_work = false
           reconciled = false
 
-          MAX_DRAIN_CHUNKS_PER_PASS.times do |chunk_index|
+          max_chunks = planned_ids.nil? ? MAX_DRAIN_CHUNKS_PER_PASS : 1
+          max_chunks.times do |chunk_index|
             mutations = chunk_index == 0 ? first_batch : drain_batch
             break if mutations.empty?
 

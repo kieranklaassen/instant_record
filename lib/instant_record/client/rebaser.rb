@@ -404,7 +404,20 @@ module InstantRecord
           visible_changed = (before_visible != after_visible)
 
           if record.new_record? || visible_changed
-            record.save!(validate: false)
+            preserve_timestamps = record.respond_to?(:record_timestamps=) &&
+              assignable["updated_at"].present? &&
+              (!record.new_record? || !model.column_names.include?("created_at") || assignable["created_at"].present?)
+            if preserve_timestamps
+              previous = record.record_timestamps
+              record.record_timestamps = false
+              begin
+                record.save!(validate: false)
+              ensure
+                record.record_timestamps = previous
+              end
+            else
+              record.save!(validate: false)
+            end
           elsif record.changed?
             record.update_columns(server_version: record.server_version, sync_state: record.sync_state)
           end
