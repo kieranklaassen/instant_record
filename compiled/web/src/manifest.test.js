@@ -54,6 +54,8 @@ test("relative patterns and inline param segments normalize and match cleanly", 
   });
   assert.equal(isLocalRoute(custom, "/items/p-42.json", "GET"), true);
   assert.equal(isLocalRoute(custom, "/items/other", "GET"), false);
+  assert.equal(isLocalRoute(custom, "/sync/sync_notices", "GET", "https://api.example.test/sync"), true);
+  assert.equal(isLocalRoute(custom, "/sync/sync_notices/1/retry", "POST", "https://api.example.test/sync"), true);
   assert.equal(isServerAllowed(custom, "POST", "/custom/export", "https://api.example.test/sync"), true);
   assert.equal(isServerAllowed(custom, "GET", "/sync/bootstrap", "https://api.example.test/sync"), true);
 });

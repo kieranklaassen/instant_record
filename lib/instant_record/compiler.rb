@@ -9,6 +9,9 @@ require_relative "compiler/browser_migrations"
 require_relative "compiler/manifest"
 require_relative "compiler/route_analyzer"
 require_relative "compiler/reachability_tracer"
+require_relative "compiler/ast_lowerer"
+require_relative "compiler/host_adapters"
+require_relative "compiler/static_linter"
 require_relative "compiler/app_stage"
 require_relative "compiler/gem_vendor"
 require_relative "compiler/entry_builder"
@@ -104,8 +107,31 @@ module InstantRecord
       ).manifest
     end
 
-    def self.doctor(toolchain:, target: :wasm, web_dir: nil)
-      Toolchain.load(toolchain).doctor(target: target, web_dir: web_dir)
+    def self.doctor(toolchain:, target: :wasm, web_dir: nil, app_root: nil, island: nil, overrides: nil)
+      report = Toolchain.load(toolchain).doctor(target: target, web_dir: web_dir)
+      return report unless app_root
+
+      report.with_lint(lint(app_root, staged: false, island: island, overrides: overrides))
+    end
+
+    def self.lint(root, staged: false, exclude: nil, island: nil, overrides: nil)
+      resolved = Pathname(root)
+      only_files = nil
+      if !staged && exclude.nil? && resolved.join("config/routes.rb").file?
+        analysis = AppStage.analyze(source: resolved, native: true, island: island, overrides: overrides)
+        if analysis.manifest.island?
+          staged_map = analysis.manifest.staged
+          only_files = (
+            Array(staged_map["controllers"]) +
+            Array(staged_map["models"]) +
+            Array(staged_map["helpers"]) +
+            Array(staged_map["screens"]) +
+            Array(staged_map["files"]) +
+            %w[config/application.rb config/importmap.rb]
+          ).select { |rel| rel.end_with?(".rb") }.uniq
+        end
+      end
+      StaticLinter.lint(root, staged: staged, exclude: Array(exclude), only_files: only_files)
     end
 
     def self.scrub_path(path, prefix)

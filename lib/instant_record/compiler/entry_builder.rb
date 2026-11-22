@@ -3,6 +3,7 @@ require "json"
 require "prism"
 require_relative "../native"
 require_relative "manifest"
+require_relative "host_adapters"
 require_relative "runner"
 
 module InstantRecord
@@ -48,9 +49,12 @@ module InstantRecord
 
           # Capture the exact outgoing batch before the worker yields to browser requests.
           def self.sync_plan
-            mutations = InstantRecord::Client.pending_mutations
+            mutations = InstantRecord::Client.plan_drain
             push = mutations.empty? ? "" : JSON.generate(InstantRecord::Client.mutations_payload(mutations))
-            <<write:out>>JSON.generate({ push: push, bootstrap: !InstantRecord::Client.bootstrapped? }))
+            next_ms = InstantRecord::Client.next_release_ms
+            plan = { push: push, bootstrap: !InstantRecord::Client.bootstrapped? }
+            plan[:next_release_ms] = next_ms unless next_ms.nil?
+            <<write:out>>JSON.generate(plan))
             0
           end
 
@@ -58,8 +62,13 @@ module InstantRecord
             endpoint = <<read:in>>.strip
             InstantRecord.config.endpoint = endpoint if endpoint.length > 0
             changed = InstantRecord::Client.sync_pass
-            <<write:out>>(changed ? "changed" : "unchanged") + " pending=" + InstantRecord::Client.pending_count.to_s + " cursor=" + InstantRecord::Client.cursor.to_s)
+            next_ms = InstantRecord::Client.next_release_ms
+            out = (changed ? "changed" : "unchanged") + " pending=" + InstantRecord::Client.pending_count.to_s + " cursor=" + InstantRecord::Client.cursor.to_s + " held=" + InstantRecord::Client.held_count.to_s
+            out += " next_release_ms=" + next_ms.to_s unless next_ms.nil?
+            <<write:out>>out)
             0
+          ensure
+            InstantRecord::Client.clear_planned_drain
           end
 
           def self.handle_stream
@@ -80,6 +89,7 @@ module InstantRecord
               result = { ok: !mark.nil?, applied: 0, has_more: mark == "more" }
             else
               page = JSON.parse(response)
+              InstantRecord::Client.observe_server_time(page["server_time"])
               records = Array(page["records"])
               more = page["has_more"] == true
               InstantRecord::OutboxMutation.transaction do
@@ -94,7 +104,34 @@ module InstantRecord
 
           def self.cursor
             key = InstantRecord::Client.identity_key
-            <<write:out>>"cursor=" + InstantRecord::Client.cursor.to_s + " pending=" + InstantRecord::Client.pending_count.to_s + " bootstrap=" + (InstantRecord::Client.bootstrapped? ? "ready" : "needed") + " identity=" + (key.nil? ? "" : key))
+            next_ms = InstantRecord::Client.next_release_ms
+            out = "cursor=" + InstantRecord::Client.cursor.to_s + " pending=" + InstantRecord::Client.pending_count.to_s + " bootstrap=" + (InstantRecord::Client.bootstrapped? ? "ready" : "needed") + " identity=" + (key.nil? ? "" : key) + " notices=" + InstantRecord::SyncNotice.active.count.to_s + " held=" + InstantRecord::Client.held_count.to_s
+            out += " next_release_ms=" + next_ms.to_s unless next_ms.nil?
+            <<write:out>>out)
+            0
+          end
+
+          # List or resolve quarantined sync notices ("list", "retry", "fork", "dismiss").
+          def self.notices
+            raw = <<read:in>>.to_s.strip
+            input = raw.empty? ? {} : JSON.parse(raw)
+            action = input["action"].to_s
+            action = "list" if action.empty?
+            result =
+              if action == "list"
+                { "ok" => true, "notices" => InstantRecord::SyncNotice.active.recent.map { |n| n.as_notice } }
+              else
+                resolved = InstantRecord::SyncNotice.resolve(input["id"], action: action, overrides: input["overrides"])
+                if action == "retry" || action == "fork"
+                  InstantRecord::Client.unlisted_changes
+                  InstantRecord::Client.notify_changed
+                end
+                resolved
+              end
+            <<write:out>>JSON.generate(result))
+            0
+          rescue StandardError => error
+            <<write:out>>JSON.generate({ "ok" => false, "error" => error.message, "notices" => InstantRecord::SyncNotice.active.recent.map { |n| n.as_notice } }))
             0
           end
 
@@ -647,27 +684,22 @@ module InstantRecord
           )
 
         File.write(File.join(tree_dir, "main_native.rb"), head + entry)
-        rewrite_native_client_host(tree_dir)
+        install_native_host_adapter(tree_dir)
         found.map(&:first)
       end
 
-      def rewrite_native_client_host(tree_dir)
-        client_dir = File.join(tree_dir, "app/models/instant_record/client")
-        seams = 0
-        if File.directory?(client_dir)
-          Dir.glob("**/*.rb", base: client_dir).sort.each do |rel|
-            path = File.join(client_dir, rel)
-            text = File.read(path)
-            changed = text.gsub(/File\.read\("\/host\/(\w+)"\)/, 'NativeHost.ir_host_take("\1")')
-            changed = changed.gsub(/File\.write\("\/host\/(\w+)", /, 'NativeHost.ir_host_give("\1", ')
-            changed = changed.gsub(/File\.write\((?:[\w:]+::)?REQUEST, /, 'NativeHost.ir_host_give("request", ')
-            changed = changed.gsub(/File\.read\((?:[\w:]+::)?RESPONSE\)/, 'NativeHost.ir_host_take("response")')
-            File.write(path, changed) if changed != text
-            seams += 1 if changed.include?("NativeHost.")
-          end
+      def install_native_host_adapter(tree_dir)
+        candidates = [
+          File.join(tree_dir, "app/models/instant_record/host.rb"),
+          File.join(tree_dir, "lib/instant_record/host.rb")
+        ].select { |path| File.file?(path) }
+
+        if candidates.empty?
+          raise BuildError, "expected emitted InstantRecord::Host adapter in #{tree_dir}"
         end
-        unless seams == 2
-          raise BuildError, "expected the transport and the notifier to reach the host, found #{seams} file(s)"
+
+        candidates.each do |path|
+          File.write(path, HostAdapters::Native.host_source)
         end
       end
 

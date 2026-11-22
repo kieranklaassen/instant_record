@@ -9,6 +9,7 @@ require_relative "gem_vendor"
 require_relative "manifest"
 require_relative "runner"
 require_relative "source_pages"
+require_relative "static_linter"
 require_relative "toolchain"
 require_relative "wasm_tree"
 
@@ -30,6 +31,7 @@ module InstantRecord
         "WasmBridge.handle_stream",
         "WasmBridge.cursor",
         "WasmBridge.history",
+        "WasmBridge.notices",
         "WasmBridge.branch_outbox",
         "WasmBridge.branch_replay"
       ].join(",").freeze
@@ -174,7 +176,14 @@ module InstantRecord
           File.write(File.join(@build_dir, "browser-migrations.json"), JSON.generate(plan))
         end
 
-        GemVendor.vendor(gem_src: @gem_root, app_dir: app, demo: @demo)
+        vendor = GemVendor.new(
+          gem_src: @gem_root,
+          app_dir: app,
+          demo: @demo,
+          target: native ? :native : :wasm
+        )
+        vendor.run
+        StaticLinter.check!(app, staged: true, server_only_constants: vendor.server_only_constants)
 
         emit = File.join(@build_dir, "emit")
         clean(emit)

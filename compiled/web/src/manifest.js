@@ -66,14 +66,29 @@ export function matchesAnyPath(compiledRoutes, pathname) {
   return compiledRoutes.some((route) => route.regex.test(normalized));
 }
 
+function syncBasePath(syncEndpoint = "/instant_record") {
+  try {
+    return normalizePath(new URL(syncEndpoint, "http://instant-record.local").pathname);
+  } catch {
+    return normalizePath(syncEndpoint);
+  }
+}
+
+function isLocalSyncNotices(pathname, syncEndpoint = "/instant_record") {
+  const normalized = normalizePath(pathname);
+  const noticesBase = `${syncBasePath(syncEndpoint)}/sync_notices`;
+  return normalized === noticesBase || normalized === `${noticesBase}.json` || normalized.startsWith(`${noticesBase}/`);
+}
+
 // Match a request against the island's local_routes.
 // When `method` is provided:
 // - GET/HEAD match GET routes.
 // - POST matches POST, PATCH, PUT, or DELETE routes (Rails forms tunnel
 //   PATCH/PUT/DELETE over POST with a `_method` parameter).
 // - Explicit PATCH/PUT/DELETE match their exact HTTP verb.
-export function isLocalRoute(manifest, pathname, method = null) {
+export function isLocalRoute(manifest, pathname, method = null, syncEndpoint = "/instant_record") {
   if (!manifest || manifest.mode !== "island" || manifest.localRoutes.length === 0) return true;
+  if (isLocalSyncNotices(pathname, syncEndpoint)) return true;
   if (!method) return matchesAnyPath(manifest.localRoutes, pathname);
 
   const verb = String(method).toUpperCase();
@@ -87,13 +102,7 @@ export function isLocalRoute(manifest, pathname, method = null) {
 export function isServerAllowed(manifest, method, pathname, syncEndpoint = "/instant_record") {
   const verb = String(method || "GET").toUpperCase();
   const normalized = normalizePath(pathname);
-
-  let syncBase = "/instant_record";
-  try {
-    syncBase = normalizePath(new URL(syncEndpoint, "http://instant-record.local").pathname);
-  } catch {
-    syncBase = normalizePath(syncEndpoint);
-  }
+  const syncBase = syncBasePath(syncEndpoint);
 
   if (verb === "GET" && normalized === `${syncBase}/bootstrap`) return true;
   if (verb === "POST" && normalized === `${syncBase}/mutations`) return true;

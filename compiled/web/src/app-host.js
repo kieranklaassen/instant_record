@@ -220,9 +220,12 @@ export class AppHost {
     }
     const text = decoder.decode(result.out);
     const notifyEntry = this.hostDir.contents.get("notify") || this.notifyFile;
+    const nextRelease = /next_release_ms=(\d+)/.exec(text);
     return {
       changed: text.startsWith("changed"),
       pending: Number(/pending=(\d+)/.exec(text)?.[1] ?? -1),
+      held: Number(/held=(\d+)/.exec(text)?.[1] ?? 0),
+      nextReleaseMs: nextRelease ? Number(nextRelease[1]) : null,
       cursor: Number(/cursor=(\d+)/.exec(text)?.[1] ?? 0),
       ...readNotice(decoder.decode(notifyEntry.data)),
       exchanges: this.exchanges,
@@ -254,6 +257,18 @@ export class AppHost {
     return JSON.parse(decoder.decode(result.out));
   }
 
+  notices(request = { action: "list" }) {
+    this.notifyFile.data = new Uint8Array();
+    this.hostDir.contents.set("notify", this.notifyFile);
+    const result = this.call("wasm_notices", encoder.encode(JSON.stringify(request)));
+    if (result.exit !== 0) throw new Error(result.errors.join("\n") || String(result.exit));
+    const notifyEntry = this.hostDir.contents.get("notify") || this.notifyFile;
+    return {
+      ...JSON.parse(decoder.decode(result.out)),
+      ...readNotice(decoder.decode(notifyEntry.data)),
+    };
+  }
+
   // Extract OutboxMutations recorded after `excludeIds` on the active SQLite database.
   branchOutbox(excludeIds = []) {
     const result = this.call("wasm_branch_outbox", encoder.encode(JSON.stringify({ exclude_ids: excludeIds })));
@@ -280,10 +295,14 @@ export class AppHost {
   syncState() {
     const result = this.call("wasm_cursor", new Uint8Array());
     const text = decoder.decode(result.out);
+    const nextRelease = /next_release_ms=(\d+)/.exec(text);
     return {
       bootstrapped: text.includes("bootstrap=ready"),
       cursor: Number(/cursor=(\d+)/.exec(text)?.[1] ?? 0),
       pending: Number(/pending=(\d+)/.exec(text)?.[1] ?? 0),
+      held: Number(/held=(\d+)/.exec(text)?.[1] ?? 0),
+      nextReleaseMs: nextRelease ? Number(nextRelease[1]) : null,
+      notices: Number(/notices=(\d+)/.exec(text)?.[1] ?? 0),
       // The name the server gave whoever this browser synced as, when it tells people apart.
       identity: /identity=(\S+)/.exec(text)?.[1] ?? "",
     };

@@ -15,14 +15,48 @@ module InstantRecord
     # More changes than this in one notice are not listed one by one.
     MAX_LISTED_CHANGES = 200
 
+    # Cap next_release_ms to 24 hours so it always fits safely inside a signed
+    # 32-bit integer on wasm32 Spinel builds.
+    MAX_RELEASE_DELAY_MS = 86_400_000
+
     class << self
       # Applying remote state must never enqueue new outbox mutations.
       def applying_remote? = @applying_remote
       def applying_remote(&block)
+        previous = @applying_remote
         @applying_remote = true
         block.call
       ensure
-        @applying_remote = false
+        @applying_remote = previous
+      end
+
+      def current_hold_for = @hold_for
+
+      def enter_hold(seconds)
+        if seconds.nil?
+          normalized = nil
+        else
+          normalized = seconds.to_f
+          raise ArgumentError, "hold_for must be non-negative" if normalized < 0.0
+          normalized = nil if normalized == 0.0
+        end
+
+        previous = @hold_for
+        @hold_for = normalized
+        previous
+      end
+
+      def leave_hold(previous)
+        @hold_for = previous
+      end
+
+      # Hold local outbox writes created inside the block for `seconds` before
+      # they mature for drain. Nested calls restore the outer hold window.
+      def with_hold(seconds)
+        previous = enter_hold(seconds)
+        yield
+      ensure
+        leave_hold(previous)
       end
 
       # Seams: real implementations are worker-backed and browser-only;
@@ -52,20 +86,26 @@ module InstantRecord
         evicted = evict_beyond_windows
         drained, reconciled = drain_outbox
         pulled = bootstrapped? ? poll_changes : bootstrap
-        notify_changed if evicted || reconciled || pulled
+        notify_changed if evicted || reconciled || pulled || recorded_notices.any?
         evicted || drained || pulled
       end
 
       # Which records changed since the page was last told, as "Type:id"
-      # lines after the notice itself. The notice alone means anything may have.
+      # lines after the notice itself, followed by any quarantined sync notices
+      # as "sync_notice:<json>" lines. The notice alone means anything may have.
       def changes_notice
-        return "records_changed" if @unlisted_changes || changed_records.empty?
-
-        "records_changed\n" + changed_records.join("\n")
+        lines = ["records_changed"]
+        lines.concat(changed_records) unless @unlisted_changes || changed_records.empty?
+        recorded_notices.each { |notice| lines << "sync_notice:#{JSON.generate(notice)}" }
+        lines.join("\n")
       end
 
       def changed_records
         @changed_records ||= []
+      end
+
+      def recorded_notices
+        @recorded_notices ||= []
       end
 
       def unlisted_changes
@@ -83,6 +123,7 @@ module InstantRecord
       def notify_changed
         notifier.records_changed
         changed_records.clear
+        recorded_notices.clear
         @unlisted_changes = false
       end
 
@@ -114,12 +155,110 @@ module InstantRecord
         evicted
       end
 
-      def pending_count
-        OutboxMutation.count
+      def pending_count(now = Time.now.utc)
+        return OutboxMutation.matured(now).count unless OutboxMutation.held(now).exists?
+
+        matured_outbox_rows(now).size
       end
 
-      def pending_mutations
-        OutboxMutation.ordered.map(&:as_mutation)
+      # Matured outbox rows ready to drain (release_at IS NULL OR release_at <= now).
+      # Preserves per-record causal order: a later write to a record with an earlier
+      # held mutation waits behind it, while independent records drain immediately.
+      def pending_mutations(now = Time.now.utc)
+        matured_outbox_rows(now).map(&:as_mutation)
+      end
+
+      # Snapshot the exact outgoing mutation batch for a two-phase host sync
+      # (sync_plan -> network fetch -> sync). Pinning the planned IDs prevents
+      # a held mutation that matures mid-fetch from altering the batch body
+      # between sync_plan and drain.
+      def plan_drain(now = Time.now.utc)
+        mutations = pending_mutations(now)
+        @planned_drain_ids = mutations.map { |m| m[:id] }
+        mutations
+      end
+
+      def clear_planned_drain
+        @planned_drain_ids = nil
+      end
+
+      def held_mutations(now = Time.now.utc)
+        OutboxMutation.held(now).ordered
+      end
+
+      def held_count(now = Time.now.utc)
+        OutboxMutation.held(now).count
+      end
+
+      def next_release_at(now = Time.now.utc)
+        OutboxMutation.held(now).order(:release_at, :created_at, :id).first&.release_at
+      end
+
+      def next_release_ms(now = Time.now.utc)
+        release_at = next_release_at(now)
+        return nil unless release_at
+
+        seconds = release_at.to_f - now.to_f
+        return 0 if seconds <= 0.0
+        return MAX_RELEASE_DELAY_MS if seconds >= 86_400.0
+
+        (seconds * 1000.0).ceil
+      end
+
+      # Cancel a held outbox mutation before its release_at matures: restore the
+      # local SQLite row from its pre-mutation snapshot and delete the outbox row
+      # atomically. Returns true when cancelled, false when unknown, already
+      # released/matured, or superseded by a later outbox mutation on the same row.
+      def cancel_pending(mutation_id, now: Time.now.utc)
+        cancelled = nil
+
+        OutboxMutation.transaction do
+          mutation = OutboxMutation.find_by(id: mutation_id)
+          next unless mutation && mutation.held?(now)
+
+          later = OutboxMutation.where(record_type: mutation.record_type, record_id: mutation.record_id)
+            .where("created_at > :at OR (created_at = :at AND id > :id)", at: mutation.created_at, id: mutation.id)
+            .exists?
+          next if later
+
+          model = InstantRecord.synced_model(mutation.record_type)
+          next unless model
+
+          earlier_pending = OutboxMutation.where(record_type: mutation.record_type, record_id: mutation.record_id)
+            .where.not(id: mutation.id)
+            .exists?
+
+          restored = applying_remote do
+            case mutation.operation
+            when "create"
+              model.find_by(id: mutation.record_id)&.destroy!
+              true
+            when "update", "destroy"
+              if mutation.rollback_payload.is_a?(Hash)
+                restore_record(model, mutation, earlier_pending: earlier_pending)
+                true
+              else
+                false
+              end
+            else
+              false
+            end
+          end
+          next unless restored
+
+          mutation.destroy!
+          cancelled = {
+            mutation_id: mutation.id,
+            record_type: mutation.record_type,
+            record_id: mutation.record_id,
+            operation: mutation.operation
+          }
+        end
+
+        return false unless cancelled
+
+        instrument("cancel_pending", cancelled)
+        true
       end
 
       def cursor
@@ -175,12 +314,16 @@ module InstantRecord
           end
           mutation.destroy if drop
         end
+        SyncNotice.all.each do |notice|
+          notice.destroy if types.include?(notice.record_type)
+        end
         # The rows that stay were last brought up to date at this cursor. The
         # bootstrap to come only adds and changes rows, so the poll after it
         # starts here again and a destroy made in between is not missed.
         SyncMetadata.set("replay_from", cursor) if bootstrapped? && SyncMetadata.get("replay_from").nil?
         SyncMetadata.all.each do |entry|
-          entry.destroy if entry.key == "cursor" || entry.key == "identity" || entry.key.start_with?("history:")
+          entry.destroy if entry.key == "cursor" || entry.key == "identity" || entry.key.start_with?("history:") ||
+            types.any? { |type| entry.key.start_with?("#{HLC::ROW_PREFIX}#{type}:") }
         end
         history_marks.clear
         unlisted_changes
@@ -197,6 +340,7 @@ module InstantRecord
 
         instrument("bootstrap") do |event|
           body = transport.get_json("/bootstrap")
+          observe_server_time(body["server_time"])
           records = Array(body["records"])
           records.each { |record| apply_record(record) }
           event[:records] = records.size
@@ -225,6 +369,10 @@ module InstantRecord
         return false if InstantRecord.branched?
 
         drain_outbox.first
+      end
+
+      def observe_server_time(server_time)
+        HLC.observe_server_time(server_time) if server_time
       end
 
       # Set while something outside the VM holds a tailing stream and feeds
@@ -264,8 +412,10 @@ module InstantRecord
         reset_stream
         history_marks.clear
         changed_records.clear
+        recorded_notices.clear
         @unlisted_changes = false
         @eviction_pending = false
+        @planned_drain_ids = nil
         nil
       end
 
@@ -284,6 +434,7 @@ module InstantRecord
           next if was_reset
 
           event = event.deep_stringify_keys
+          observe_server_time(event["server_time"])
           if event["operation"] == "reset"
             was_reset = reset(event)
             applied += 1
@@ -326,6 +477,7 @@ module InstantRecord
           transport.each_event(path) do |event|
             event = event.deep_stringify_keys
             next if was_reset
+            observe_server_time(event["server_time"])
             if event["operation"] == "reset"
               was_reset = reset(event)
               changed = true
@@ -383,6 +535,7 @@ module InstantRecord
 
         instrument("fetch_history") do |event|
           body = transport.get_json(history_path(model, partition, before_at, before_id, limit))
+          observe_server_time(body["server_time"])
           records = Array(body["records"])
           records.each { |record| apply_record(record) }
           extend_history_mark(model, partition, records, has_more: !!body["has_more"])
@@ -412,43 +565,64 @@ module InstantRecord
           mutation = OutboxMutation.find_by(id: result["mutation_id"])
           next unless mutation
 
-          applying_remote do
-            if mutation.mutator?
-              case result["status"]
-              when "applied"
-                reconciled = true if reconcile_applied_mutator(mutation, result)
-              when "rejected"
-                reconciled = true if reconcile_rejected_mutator(mutation, result)
-              end
-            else
-              case result["status"]
-              when "applied"
-                # `skipped` is the server saying it threw this write away to
-                # last-write-wins. It is resolved (nothing will retry it) but it
-                # never landed, so marking the record synced would badge a
-                # discarded write as delivered — the record does not hold what the
-                # server holds. Reconcile to the winner, which rides along with the
-                # result; the same value also arrives over the change stream, which
-                # is what makes doing nothing here look fine until the stream is
-                # behind.
-                if result["skipped"]
-                  reconciled = true if reconcile_to_server_state(mutation, result)
-                else
-                  mark_synced(mutation, result["version"])
+          quarantined = nil
+          OutboxMutation.transaction do
+            applying_remote do
+              HLC.receive(result["hlc"]) if HLC.valid?(result["hlc"])
+              if mutation.mutator?
+                case result["status"]
+                when "applied"
+                  reconciled = true if reconcile_applied_mutator(mutation, result)
+                when "rejected"
+                  quarantined = quarantine_mutation(
+                    mutation,
+                    kind: "rejected",
+                    reason: result["reason"].to_s.presence || "Rejected by server",
+                    result: result
+                  )
+                  reconciled = true if reconcile_rejected_mutator(mutation, result)
                 end
-              when "rejected"
-                reconciled = true if reconcile_rejection(mutation, result)
+              else
+                case result["status"]
+                when "applied"
+                  # `skipped` means our write lost resolution; quarantine the
+                  # user's attempted write in SyncNotice and reconcile to the
+                  # winner. `merged` means a 3-way column merge produced a
+                  # combined row on the server; reconcile authoritatively.
+                  if result["skipped"]
+                    quarantined = quarantine_mutation(
+                      mutation,
+                      kind: "conflict",
+                      reason: result["reason"].to_s.presence || "Overwritten by a newer server change",
+                      result: result
+                    )
+                    reconciled = true if reconcile_to_server_state(mutation, result)
+                  elsif result["merged"] || result["server_attributes"].present?
+                    reconciled = true if reconcile_to_server_state(mutation, result)
+                  else
+                    mark_synced(mutation, result["version"], hlc: result["hlc"])
+                  end
+                when "rejected"
+                  quarantined = quarantine_mutation(
+                    mutation,
+                    kind: "rejected",
+                    reason: result["reason"].to_s.presence || "Rejected by server",
+                    result: result
+                  )
+                  reconciled = true if reconcile_rejection(mutation, result)
+                end
               end
+              mutation.destroy!
             end
-            mutation.destroy!
           end
+          announce_notice(quarantined) if quarantined
         end
         reconciled
       end
 
-      # Apply one remote change event (last-write-wins) and note it for the next
-      # records_changed notice. Returns whether it actually changed anything
-      # here — see upsert_from_server.
+      # Apply one remote change event (HLC-ordered, with updated_at fallback
+      # for legacy events) and note it for the next records_changed notice.
+      # Returns whether it actually changed anything here — see upsert_from_server.
       def apply_change(event)
         event = event.deep_stringify_keys
         applied = apply_record(event)
@@ -465,9 +639,11 @@ module InstantRecord
 
         applying_remote do
           if event["operation"] == "destroy"
+            HLC.receive(event["hlc"]) if HLC.valid?(event["hlc"])
+            HLC.delete_row_hlc(event["type"], event["id"])
             !!model.find_by(id: event["id"])&.destroy!
           else
-            upsert_from_server(model, event["attributes"], event["version"])
+            upsert_from_server(model, event["attributes"], event["version"], hlc: event["hlc"])
           end
         end
       end
@@ -534,13 +710,19 @@ module InstantRecord
       end
 
       def drain_outbox
-        return [false, false] if InstantRecord.branched?
+        if InstantRecord.branched?
+          @planned_drain_ids = nil
+          return [false, false]
+        end
 
-        mutations = pending_mutations
+        planned_ids = @planned_drain_ids
+        @planned_drain_ids = nil
+        mutations = planned_ids.nil? ? pending_mutations : planned_mutations(planned_ids)
         return [false, false] if mutations.empty?
 
         instrument("drain") do |event|
           body = transport.post_json("/mutations", mutations_payload(mutations))
+          observe_server_time(body["server_time"])
           reconciled = apply_results(body["results"])
 
           results = Array(body["results"]).map { |r| r.deep_stringify_keys }
@@ -554,12 +736,81 @@ module InstantRecord
         [false, false]
       end
 
-      def mark_synced(mutation, version)
+      def mark_synced(mutation, version, hlc: nil)
         model = InstantRecord.synced_model(mutation.record_type)
         record = model&.find_by(id: mutation.record_id)
         return unless record
 
-        record.update_columns(sync_state: "synced", server_version: version || record.server_version)
+        still_pending = OutboxMutation.where(record_type: mutation.record_type, record_id: mutation.record_id)
+          .where.not(id: mutation.id)
+          .exists?
+        next_state = still_pending ? "pending" : "synced"
+        record.update_columns(sync_state: next_state, server_version: version || record.server_version)
+        HLC.set_row_hlc(mutation.record_type, mutation.record_id, hlc) if HLC.valid?(hlc)
+      end
+
+      def matured_outbox_rows(now)
+        return OutboxMutation.matured(now).ordered.to_a unless OutboxMutation.held(now).exists?
+
+        blocked = {}
+        ready = []
+        OutboxMutation.ordered.each do |mutation|
+          key = "#{mutation.record_type}:#{mutation.record_id}"
+          if mutation.held?(now)
+            blocked[key] = true
+          elsif !blocked[key]
+            ready << mutation
+          end
+        end
+        ready
+      end
+
+      def planned_mutations(ids)
+        return [] if ids.empty?
+
+        by_id = {}
+        OutboxMutation.where(id: ids).each { |mutation| by_id[mutation.id] = mutation }
+        ids.filter_map { |id| by_id[id]&.as_mutation }
+      end
+
+      def restore_record(model, mutation, earlier_pending:)
+        snapshot = mutation.rollback_payload
+        attrs = snapshot.slice(*model.column_names)
+        existing = model.find_by(id: mutation.record_id)
+
+        # A remote destroy (or rejected earlier create) already removed this row;
+        # undoing an update must not resurrect it.
+        return if mutation.operation == "update" && existing.nil?
+
+        # mark_synced keeps sync_state == "pending" while this held mutation is
+        # still in the outbox, so a persisted row at sync_state == "synced" means
+        # a newer remote change (or server reconciliation) already replaced it.
+        return if existing && existing.sync_state == "synced"
+
+        record = existing || model.new
+        current_version = existing ? existing.server_version.to_i : 0
+
+        record.assign_attributes(attrs.except("id"))
+        record.id = mutation.record_id
+
+        if earlier_pending
+          record.sync_state = "pending"
+        elsif attrs["sync_state"] == "pending"
+          record.sync_state = "synced"
+          record.server_version = current_version if current_version > record.server_version.to_i
+        end
+
+        if record.respond_to?(:record_timestamps=)
+          previous = record.record_timestamps
+          record.record_timestamps = false
+          begin
+            record.save!(validate: false)
+          ensure
+            record.record_timestamps = previous
+          end
+        else
+          record.save!(validate: false)
+        end
       end
 
       def reconcile_applied_mutator(mutation, result)
@@ -649,6 +900,7 @@ module InstantRecord
         return reconcile_to_server_state(mutation, result) if result["server_attributes"].present?
 
         # The server never accepted this record (rejected create): remove it.
+        HLC.delete_row_hlc(mutation.record_type, mutation.record_id)
         destroyed = !!InstantRecord.synced_model(mutation.record_type)&.find_by(id: mutation.record_id)&.destroy!
         note_change(mutation.record_type, mutation.record_id) if destroyed
         destroyed
@@ -658,12 +910,13 @@ module InstantRecord
       # result carries one. Returns whether visible local row data changed.
       #
       # Authoritative: the server told us what it holds in answer to a write of
-      # ours it would not take, so its row wins here regardless of timestamps.
+      # ours it would not take (or merged), so its row wins here regardless of
+      # clocks.
       def reconcile_to_server_state(mutation, result)
         model = InstantRecord.synced_model(mutation.record_type)
         return false unless model && result["server_attributes"].present?
 
-        changed = upsert_from_server(model, result["server_attributes"], result["version"], authoritative: true)
+        changed = upsert_from_server(model, result["server_attributes"], result["version"], hlc: result["hlc"], authoritative: true)
         note_change(mutation.record_type, mutation.record_id) if changed
         changed
       end
@@ -673,34 +926,20 @@ module InstantRecord
       # rows; treating those as changes would announce them, and an announcement
       # reloads any page without an in-place refresh.
       #
-      # Client-side last-write-wins, with the tie-break stated on purpose: a
-      # remote value must be strictly NEWER to replace a local one, so equal
-      # stamps leave the row alone. Equal stamps are the ordinary case, not the
-      # exotic one — every write we make comes back with the timestamp we sent —
-      # and applying those echoes would re-save the row, announce a change to
-      # every tab, and fire the host app's after_save callbacks for a value that
-      # never moved. Until both paths carried microseconds, rounding hid this by
-      # making an echo look older than its own row; the rule has to be explicit
-      # instead of an artifact of truncation.
+      # Client-side convergence compares server-anchored string-encoded HLCs
+      # (falling back to microsecond updated_at only for legacy events without
+      # an HLC): a remote value must be strictly NEWER to replace a local one,
+      # so equal stamps (such as echoes of our own writes) leave the row alone.
+      # Because HLC physical time is anchored to authoritative server UTC and
+      # extreme forward skew is clamped on the server, a client whose wall clock
+      # runs ahead no longer wins writes it should lose.
       #
-      # The two sides break ties in opposite directions deliberately:
-      # MutationApplier#stale? is strict too, so the server ACCEPTS an
-      # equal-stamped client mutation. A tie is therefore settled once, on the
-      # server, and never has to be settled again here. (Both sides still compare
-      # two machines' wall clocks with no logical clock. Microsecond stamps make
-      # a coincidental tie far less likely than millisecond ones did, so the
-      # tie-break matters less than it used to — but a client whose clock runs
-      # ahead still wins writes it should lose, and that is unchanged.)
-      # `authoritative` skips the comparison entirely, for the one case where the
-      # server's row is the answer no matter what the clocks say: reconciling a
-      # rejection. A rejected update is the ordinary case here, and the server's
-      # un-updated row is necessarily OLDER than the optimistic local row that it
-      # refused — so last-write-wins would drop it, the outbox row would still be
-      # destroyed, and the record would keep the value the server just refused
-      # and sit at `pending` forever. Nothing was discarded remotely in that
-      # case, so the discard seam does not fire either.
-      def upsert_from_server(model, attributes, version, authoritative: false)
+      # `authoritative` skips the comparison entirely for reconciling rejections,
+      # skipped writes, and 3-way merged rows from the server.
+      def upsert_from_server(model, attributes, version, hlc: nil, authoritative: false)
         return false unless attributes
+
+        HLC.receive(hlc) if HLC.valid?(hlc)
 
         # Schema skew must not raise here either: a client behind the server is
         # sent columns it has not migrated yet. They are the server's to keep;
@@ -708,12 +947,16 @@ module InstantRecord
         attributes = attributes.slice(*model.column_names)
         record = model.find_or_initialize_by(id: attributes["id"])
 
+        incoming_hlc = HLC.valid?(hlc) ? hlc : nil
+        local_hlc = record.persisted? ? HLC.row_hlc(model.name, record.id) : nil
         incoming_at = attributes["updated_at"] && Time.parse(attributes["updated_at"].to_s)
         local_at = record.persisted? ? record.updated_at : nil
+        prior_pending = !authoritative && record.persisted? && record.sync_state == "pending"
+        prior_attributes = prior_pending ? InstantRecord.wire_attributes(record.attributes) : nil
 
         record.assign_attributes(attributes.except("id", "server_version"))
 
-        if !authoritative && incoming_at && local_at && incoming_at <= local_at
+        if !authoritative && record.persisted? && stale_remote?(incoming_hlc, local_hlc, incoming_at, local_at)
           # The remote value lost. This is the last moment it exists in this
           # runtime — nothing downstream sees it, which is why models get a seam.
           if (record.changed - BOOKKEEPING_COLUMNS).any?
@@ -722,17 +965,77 @@ module InstantRecord
           return false
         end
 
+        inbound_conflict = prior_pending && (record.changed - BOOKKEEPING_COLUMNS).any? &&
+          OutboxMutation.find_by(record_type: model.name, record_id: record.id).nil?
+
         record.server_version = version || attributes["server_version"] || 0
         record.sync_state = "synced"
+        HLC.set_row_hlc(model.name, record.id, incoming_hlc, force: authoritative) if incoming_hlc
         return false unless record.changed?
 
         data_changed = !record.persisted? || (record.changed - BOOKKEEPING_COLUMNS).any?
-        if data_changed
+        quarantined = nil
+        if inbound_conflict && data_changed
+          OutboxMutation.transaction do
+            quarantined = SyncNotice.record!(
+              kind: "conflict",
+              record_type: model.name,
+              record_id: record.id,
+              operation: "update",
+              reason: "Overwritten by a newer server change",
+              attempted_changes: prior_attributes,
+              server_attributes: InstantRecord.wire_attributes(attributes),
+              server_version: record.server_version
+            )
+            record.save!(validate: false)
+          end
+          announce_notice(quarantined) if quarantined
+        elsif data_changed
           record.save!(validate: false)
         else
           record.update_columns(sync_state: record.sync_state, server_version: record.server_version)
         end
         data_changed
+      end
+
+      def stale_remote?(incoming_hlc, local_hlc, incoming_at, local_at)
+        if incoming_hlc && HLC.valid?(local_hlc)
+          HLC.compare(incoming_hlc, local_hlc) <= 0
+        elsif incoming_hlc && local_at
+          incoming_pt = HLC.physical_time(incoming_hlc)
+          incoming_pt ? incoming_pt <= local_at : false
+        elsif incoming_at && local_at
+          incoming_at <= local_at
+        else
+          false
+        end
+      end
+
+      def quarantine_mutation(mutation, kind:, reason:, result:)
+        return nil if SyncNotice.find_by(mutation_id: mutation.id)
+
+        SyncNotice.record!(
+          mutation_id: mutation.id,
+          kind: kind,
+          record_type: mutation.record_type,
+          record_id: mutation.record_id,
+          operation: mutation.operation,
+          reason: reason,
+          attempted_changes: mutation.changes_payload || {},
+          server_attributes: result["server_attributes"] || {},
+          server_version: result["version"].to_i
+        )
+      end
+
+      def announce_notice(notice)
+        recorded_notices << notice.as_notice
+        instrument("notice",
+          id: notice.id,
+          kind: notice.kind,
+          record_type: notice.record_type,
+          record_id: notice.record_id,
+          operation: notice.operation,
+          reason: notice.reason)
       end
 
       def log_failure(phase, error)

@@ -8,6 +8,7 @@ import { isServerAllowed, parseManifest } from "./manifest.js";
 import { createLeaderCoordinator } from "./leader-election.js";
 import { resolveServerRequest, serverRoot } from "./server-request.js";
 import { openDatabaseStorage } from "./storage-backend.js";
+import { nextSyncAction } from "./sync-schedule.js";
 
 const POLL_EVERY_MS = 1000;
 const QUIET_MS = 30;
@@ -75,6 +76,7 @@ export function createWorkerRuntime({
   let currentCursor = null;
   let currentIdentity = "";
   let kickTimer = null;
+  let kickHeld = false;
   let pollTimer = null;
   let pollInFlight = false;
   let draining = null;
@@ -129,6 +131,94 @@ export function createWorkerRuntime({
     } else {
       postMessage(msg);
     }
+  }
+
+  function emitSyncNotices(notices) {
+    const msg = { type: "instant_record.sync_notices", notices: Array.isArray(notices) ? notices : [] };
+    if (coordinator && coordinator.role === "leader") {
+      coordinator.broadcast(msg);
+    } else {
+      postMessage(msg);
+    }
+  }
+
+  async function runNoticeAction(payload = { action: "list" }) {
+    const action = payload.action || "list";
+    if (action === "list") {
+      return withDb("readonly", () => host.notices({ action: "list" }));
+    }
+    const result = await withDb("readwrite", save => {
+      const resolved = host.notices(payload);
+      if (resolved.ok) {
+        localRevision++;
+        save();
+        if (action === "retry" || action === "fork") {
+          drainDelayMs = DRAIN_RETRY_BASE_MS;
+          kickSync();
+        }
+      }
+      return resolved;
+    });
+    if (Array.isArray(result.notices)) emitSyncNotices(result.notices);
+    if (result.notified) emitRecordsChanged(result.changes);
+    return result;
+  }
+
+  function matchSyncNoticeRoute(method, path, body = "", contentType = "") {
+    const url = new URL(path, origin);
+    const base = new URL(publicEndpoint, origin).pathname.replace(/\/+$/, "") + "/sync_notices";
+    const pathname = url.pathname.replace(/\.json$/, "");
+    let verb = method.toUpperCase();
+    if (verb === "POST" && (!contentType || contentType.startsWith("application/x-www-form-urlencoded"))) {
+      const text = typeof body === "string" ? body : new TextDecoder().decode(body || new Uint8Array());
+      const override = new URLSearchParams(text).get("_method");
+      if (override && /^delete$/i.test(override)) verb = "DELETE";
+    }
+    if (pathname === base && verb === "GET") return { action: "list", json: url.pathname.endsWith(".json") };
+    if (!pathname.startsWith(base + "/")) return null;
+    const parts = pathname.slice(base.length + 1).split("/");
+    const id = decodeURIComponent(parts[0] || "");
+    if (!id) return null;
+    if (parts.length === 1 && verb === "DELETE") return { action: "dismiss", id, json: url.pathname.endsWith(".json") };
+    if (parts.length === 2 && verb === "POST" && ["retry", "fork", "dismiss"].includes(parts[1])) {
+      return { action: parts[1], id, json: url.pathname.endsWith(".json") };
+    }
+    return null;
+  }
+
+  function parseNoticeForm(body, contentType) {
+    const text = typeof body === "string" ? body : new TextDecoder().decode(body || new Uint8Array());
+    if (contentType && contentType.includes("application/json")) {
+      try {
+        const parsed = JSON.parse(text || "{}");
+        return { overrides: parsed.overrides || {}, returnTo: parsed.return_to || "" };
+      } catch {
+        return { overrides: {}, returnTo: "" };
+      }
+    }
+    const params = new URLSearchParams(text);
+    const overrides = {};
+    for (const [key, value] of params.entries()) {
+      const match = /^overrides\[(.+)\]$/.exec(key);
+      if (match) overrides[match[1]] = value;
+    }
+    return { overrides, returnTo: params.get("return_to") || "" };
+  }
+
+  function handleSyncNoticeHttp(route, body, contentType, targetHost = host) {
+    const { overrides, returnTo } = parseNoticeForm(body, contentType);
+    const result = targetHost.notices(route.action === "list" ? { action: "list" } : { action: route.action, id: route.id, overrides });
+    const status = result.ok ? (route.json || route.action === "list" ? 200 : 303) : 422;
+    const headers = [];
+    let responseBody = "";
+    if (status === 303) {
+      const target = returnTo && returnTo.startsWith("/") && !returnTo.startsWith("//") ? returnTo : "/";
+      headers.push(["Location", target]);
+    } else {
+      headers.push(["Content-Type", "application/json; charset=utf-8"]);
+      responseBody = JSON.stringify(result);
+    }
+    return { status, headers, body: responseBody, exit: 0, errors: [], noticeResult: result };
   }
 
   function announceFill() {
@@ -263,10 +353,25 @@ export function createWorkerRuntime({
     return { method, url, body, status, text, contentType: responseContentType };
   }
 
-  function kickSync(delay = QUIET_MS) {
+  function kickSync(delay = QUIET_MS, { held = false } = {}) {
     if (!isLeaderOrStandalone() || branches.isActive()) return;
     clearTimeout(kickTimer);
+    kickHeld = held;
     kickTimer = setTimeout(syncPass, delay);
+  }
+
+  function clearHeldKick() {
+    if (kickTimer && kickHeld) {
+      clearTimeout(kickTimer);
+      kickTimer = null;
+      kickHeld = false;
+    }
+  }
+
+  function applySyncSchedule(action) {
+    if (action.kind === "immediate") kickSync(action.delay);
+    else if (action.kind === "held") kickSync(action.delay, { held: true });
+    else clearHeldKick();
   }
 
   function handleOnline() {
@@ -279,6 +384,7 @@ export function createWorkerRuntime({
     if (!isLeaderOrStandalone()) return Promise.resolve({ changed: false });
     clearTimeout(kickTimer);
     kickTimer = null;
+    kickHeld = false;
     if (branches.isActive()) return Promise.resolve({ skipped: true, reason: "branched" });
     if (!draining) {
       const revision = localRevision;
@@ -293,6 +399,11 @@ export function createWorkerRuntime({
   async function drain(initial = false, early = null) {
     if (branches.isActive()) return { changed: false, skipped: true };
     const { plan, revision } = await withDb("readonly", () => ({ plan: host.syncPlan(), revision: localRevision }));
+    if (!plan.push && !plan.bootstrap) {
+      drainDelayMs = DRAIN_RETRY_BASE_MS;
+      applySyncSchedule(nextSyncAction({ pending: 0, bootstrapped: true, nextReleaseMs: plan.next_release_ms ?? null }, QUIET_MS));
+      return { changed: false, notified: false, pending: 0, nextReleaseMs: plan.next_release_ms ?? null };
+    }
     const push = plan.push ? await fetchReply("POST", "/mutations", plan.push) : null;
     const snapshot = plan.bootstrap ? (early?.status === 200 ? early : await fetchReply("GET", "/bootstrap")) : null;
 
@@ -311,55 +422,66 @@ export function createWorkerRuntime({
       const needsBootstrap = plan.bootstrap && !host.syncState().bootstrapped;
       if (push || snapshot) report({ kind: "sync-pass", path: `${applied.pending} pending` });
       currentCursor = plan.bootstrap ? null : applied.cursor;
+      const syncNotices = applied.notices?.length ? host.notices({ action: "list" }).notices : null;
       if (applied.changed || applied.notified) {
         localRevision++;
         save();
       }
-      if (applied.pending > 0 || needsBootstrap) {
-        kickSync(drainDelayMs);
+      const action = nextSyncAction(
+        { pending: applied.pending, bootstrapped: !needsBootstrap, nextReleaseMs: applied.nextReleaseMs },
+        drainDelayMs,
+      );
+      if (action.kind === "immediate") {
+        kickSync(action.delay);
         drainDelayMs = Math.min(drainDelayMs * 2, DRAIN_RETRY_CAP_MS);
       } else {
         drainDelayMs = DRAIN_RETRY_BASE_MS;
+        applySyncSchedule(action);
       }
-      return applied;
+      return { ...applied, syncNotices };
     });
+    if (result.syncNotices) emitSyncNotices(result.syncNotices);
     if (!initial && result.notified) emitRecordsChanged(result.changes);
     return result;
   }
 
   async function pollChanges() {
-    if (!isLeaderOrStandalone() || !host || pollInFlight || draining || kickTimer) return;
+    if (!isLeaderOrStandalone() || !host || pollInFlight || draining || (kickTimer && !kickHeld)) return;
     const revision = localRevision;
     pollInFlight = true;
     try {
       if (currentCursor === null) {
         const state = await withDb("readonly", () => host.syncState());
-        if (state.pending > 0 || !state.bootstrapped) {
+        const action = nextSyncAction(state, 0);
+        if (action.kind === "immediate") {
           kickSync(0);
           return;
         }
+        applySyncSchedule(action);
         currentCursor = state.cursor;
         currentIdentity = state.identity;
       }
       const who = currentIdentity ? `&identity=${encodeURIComponent(currentIdentity)}` : "";
       const { status, text } = await fetchReply("GET", `/events?after=${currentCursor}&window=0${who}`);
       if (status !== 200) return;
-      if (!text.trim() || draining || kickTimer || revision !== localRevision) return;
+      if (!text.trim() || draining || (kickTimer && !kickHeld) || revision !== localRevision) return;
 
       const changed = await withDb("readwrite", save => {
-        if (draining || kickTimer || revision !== localRevision) return;
+        if (draining || (kickTimer && !kickHeld) || revision !== localRevision) return;
         const consumed = host.consumeStream(text);
         currentCursor = consumed.cursor;
         if (!consumed.bootstrapped) {
           currentCursor = null;
           kickSync(0);
         }
+        const syncNotices = consumed.notices?.length ? host.notices({ action: "list" }).notices : null;
         if (consumed.applied > 0 || consumed.notified) {
           localRevision++;
           save();
-          return { applied: consumed.applied, changes: consumed.changes };
+          return { applied: consumed.applied, changes: consumed.changes, syncNotices };
         }
       });
+      if (changed?.syncNotices) emitSyncNotices(changed.syncNotices);
       if (changed) {
         if (branches.isActive()) {
           emitBranchState(branches.noteMainDelta(changed.applied || 1));
@@ -399,7 +521,7 @@ export function createWorkerRuntime({
     fillState = (await withFiles("readonly", get => get(FILL))) || fresh();
     announceFill();
     if (fillState.done || fillState.full) return false;
-    if (effectiveSimulation().offline || draining || kickTimer || branches.isActive()) return true;
+    if (effectiveSimulation().offline || draining || (kickTimer && !kickHeld) || branches.isActive()) return true;
 
     const key = query(fillState, FILL_PAGE);
     const revision = localRevision;
@@ -477,7 +599,7 @@ export function createWorkerRuntime({
         localRevision++;
         save();
         drainDelayMs = DRAIN_RETRY_BASE_MS;
-        kickSync();
+        applySyncSchedule(nextSyncAction(host.syncState(), QUIET_MS));
       }
       return rendered;
     });
@@ -490,7 +612,13 @@ export function createWorkerRuntime({
 
   function localRequest(method, path, options, targetHost = host) {
     const started = now();
-    const result = targetHost.request(method, path, options);
+    const noticeRoute = matchSyncNoticeRoute(method, path, options?.body, options?.contentType);
+    const result = noticeRoute
+      ? handleSyncNoticeHttp(noticeRoute, options?.body, options?.contentType, targetHost)
+      : targetHost.request(method, path, options);
+    if (result.noticeResult && Array.isArray(result.noticeResult.notices)) {
+      emitSyncNotices(result.noticeResult.notices);
+    }
     report({ kind: "local", method, path, status: result.status, ms: Math.round(now() - started) });
     return result;
   }
@@ -737,6 +865,7 @@ export function createWorkerRuntime({
 
     const bootstrapStart = now();
     if (!restored && !shell) await drain(true, await bootstrapFetch);
+    if (restored) applySyncSchedule(nextSyncAction(host.syncState(), 0));
     if (shell) pollChanges();
     const bootstrapMs = now() - bootstrapStart;
 
@@ -789,6 +918,7 @@ export function createWorkerRuntime({
     clearTimeout(fillTimer);
     pollTimer = null;
     kickTimer = null;
+    kickHeld = false;
     fillTimer = null;
     host = null;
     if (storage) {
@@ -858,9 +988,10 @@ export function createWorkerRuntime({
           return replay;
         }),
       });
-      if (result.applied > 0 || host.syncState().pending > 0) {
+      const postApproveState = host.syncState();
+      if (result.applied > 0 || postApproveState.pending > 0 || postApproveState.nextReleaseMs != null) {
         drainDelayMs = DRAIN_RETRY_BASE_MS;
-        kickSync(0);
+        applySyncSchedule(nextSyncAction(result.applied > 0 ? { ...postApproveState, pending: Math.max(postApproveState.pending, 1) } : postApproveState, 0));
       }
       report({ kind: "branch", method: "APPROVE", path: `${result.name} (${result.applied} applied, ${result.skipped} skipped)`, status: 200 });
       emitBranchState({ active: false, lastAction: result });
@@ -869,9 +1000,10 @@ export function createWorkerRuntime({
     }
     if (method === "branch.discard") {
       const result = branches.discard();
-      if (host.syncState().pending > 0) {
+      const postDiscardState = host.syncState();
+      if (postDiscardState.pending > 0 || postDiscardState.nextReleaseMs != null) {
         drainDelayMs = DRAIN_RETRY_BASE_MS;
-        kickSync(0);
+        applySyncSchedule(nextSyncAction(postDiscardState, 0));
       }
       report({ kind: "branch", method: "DISCARD", path: `${result.name} (${result.dropped} dropped)`, status: 200 });
       emitBranchState({ active: false, lastAction: result });
@@ -886,6 +1018,9 @@ export function createWorkerRuntime({
     }
     if (method === "sync") {
       return syncPass();
+    }
+    if (method === "notices") {
+      return runNoticeAction(payload || { action: "list" });
     }
     if (method === "serverRequest") {
       return handleServerRequest(payload);
@@ -955,6 +1090,9 @@ export function createWorkerRuntime({
       const first = payload.path
         ? await runRequest("GET", target => navigate({ method: "GET", path: payload.path }, target), { tabId: coordinator.workerId })
         : null;
+      if (host && typeof host.notices === "function" && host.syncState().notices > 0) {
+        emitSyncNotices(host.notices({ action: "list" }).notices);
+      }
       return {
         compileMs: compiled - started,
         restored: bootInfo.restored,
@@ -992,6 +1130,7 @@ export function createWorkerRuntime({
     clearTimeout(fillTimer);
     pollTimer = null;
     kickTimer = null;
+    kickHeld = false;
     fillTimer = null;
     if (storage) {
       storage.close();
@@ -1060,6 +1199,10 @@ export function createWorkerRuntime({
       }
       if (type === "save") return postMessage({ id, result: await coordinator.call("save", null, { idempotent: true }) });
       if (type === "sync") return postMessage({ id, result: await coordinator.call("sync", null, { idempotent: true }) });
+      if (type === "notices") {
+        const action = payload?.action || "list";
+        return postMessage({ id, result: await coordinator.call("notices", payload || { action: "list" }, { idempotent: action === "list" }) });
+      }
       if (type === "wipe") return postMessage({ id, result: await coordinator.call("wipe", null, { idempotent: true }) });
       if (type === "branch.create") return postMessage({ id, result: await coordinator.call("branch.create", payload, { idempotent: false }) });
       if (type === "branch.status") return postMessage({ id, result: await coordinator.call("branch.status", payload, { idempotent: true }) });

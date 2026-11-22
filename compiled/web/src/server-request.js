@@ -55,6 +55,12 @@ export function isLocalUrl(url, origin, syncEndpoint = "/instant_record") {
     const syncUrl = new URL(syncEndpoint, origin);
     const syncBase = trimTrailingSlash(syncUrl.pathname);
     if (syncUrl.origin === origin && syncBase && (pathname === syncBase || pathname.startsWith(syncBase + "/"))) {
+      // Quarantined sync notices live in this browser's local SQLite ledger,
+      // so Hotwire form posts and reads under /<mount>/sync_notices stay local.
+      const noticesBase = syncBase + "/sync_notices";
+      if (pathname === noticesBase || pathname === noticesBase + ".json" || pathname.startsWith(noticesBase + "/")) {
+        return true;
+      }
       return false;
     }
   }
