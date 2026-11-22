@@ -110,28 +110,32 @@ module InstantRecord
 
           if remaining.empty?
             clear_confirmed_snapshot(record_type, record_id)
-            return unless model
+            return false unless model
 
             if result["status"] == "applied" && !result["skipped"]
               if mutation.operation != "destroy"
                 record = model.find_by(id: record_id)
                 record&.update_columns(sync_state: "synced", server_version: result["version"] || record.server_version)
               end
+              false
             else
-              materialize_state(model, record_id, updated_snapshot, remaining: [])
+              return false unless updated_snapshot
+
+              !!materialize_state(model, record_id, updated_snapshot, remaining: [])
             end
           else
             write_confirmed_snapshot(record_type, record_id, updated_snapshot) if updated_snapshot
-            return unless model && updated_snapshot
+            return false unless model && updated_snapshot
 
             rebased = replay_onto_confirmed(model, record_id, updated_snapshot, remaining)
-            materialize_state(model, record_id, rebased, remaining: remaining)
+            !!materialize_state(model, record_id, rebased, remaining: remaining)
           end
         end
 
         # Reconcile a poison-pilled mutation removed from the outbox after
         # exhausting 5xx retries. Rewinds to the last confirmed snapshot and
-        # replays any remaining unacked mutations on that row.
+        # replays any remaining unacked mutations on that row. Returns whether
+        # visible local record data changed.
         def reconcile_quarantined_mutation(mutation)
           record_type = mutation.record_type
           record_id = mutation.record_id
@@ -143,14 +147,14 @@ module InstantRecord
 
           if remaining.empty?
             clear_confirmed_snapshot(record_type, record_id)
-            return unless model && snapshot
+            return false unless model && snapshot
 
-            materialize_state(model, record_id, snapshot, remaining: [])
+            !!materialize_state(model, record_id, snapshot, remaining: [])
           else
-            return unless model && snapshot
+            return false unless model && snapshot
 
             rebased = replay_onto_confirmed(model, record_id, snapshot, remaining)
-            materialize_state(model, record_id, rebased, remaining: remaining)
+            !!materialize_state(model, record_id, rebased, remaining: remaining)
           end
         end
 

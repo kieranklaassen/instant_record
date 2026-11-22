@@ -287,14 +287,190 @@ class SyncLoopTest < Minitest::Test
     assert_equal ["records_changed\nMemo:n-1\nMemo:n-2", "records_changed\nMemo:n-3"], @notifier.notices
   end
 
-  def test_a_pass_that_drained_the_outbox_does_not_list_its_changes
+  def test_a_pure_self_ack_stays_quiet_while_still_marking_the_pass_changed_for_persistence
+    InstantRecord::Client.cursor = 0
+    in_browser do
+      memo = @model.create!(id: "local-1", title: "mine")
+      mutation_id = InstantRecord::OutboxMutation.sole.id
+      @transport.respond_with([{ "mutation_id" => mutation_id, "status" => "applied", "version" => 1 }])
+
+      changed = InstantRecord::Client.sync_pass
+
+      assert changed, "draining the outbox mutates SQLite and must still tell the worker to persist the snapshot"
+      assert_equal 0, InstantRecord.pending_count
+      assert_equal "synced", memo.reload.sync_state
+      assert_equal 1, memo.server_version
+    end
+
+    assert_empty @notifier.notices, "acknowledging our own local write must not trigger a records_changed reload"
+  end
+
+  def test_a_self_ack_with_a_concurrent_remote_delta_lists_only_the_remote_record
+    InstantRecord::Client.cursor = 0
     in_browser do
       @model.create!(id: "local-1", title: "mine")
+      mutation_id = InstantRecord::OutboxMutation.sole.id
+      @transport.respond_with([{ "mutation_id" => mutation_id, "status" => "applied", "version" => 1 }])
+      @transport.events_to_yield = [
+        { "type" => "Memo", "id" => "remote-1", "operation" => "create", "version" => 2, "cursor" => 15,
+          "attributes" => { "id" => "remote-1", "title" => "from peer", "updated_at" => Time.current.iso8601(6) } }
+      ]
+
+      InstantRecord.start
+      InstantRecord.tick
+    end
+
+    assert_equal ["records_changed\nMemo:remote-1"], @notifier.notices,
+      "a self-ack must not wipe the concurrent remote delta into an unlisted wildcard reload"
+    assert_equal 15, InstantRecord.cursor
+  end
+
+  def test_a_rejected_write_during_sync_pass_notifies_the_rolled_back_record
+    InstantRecord::Client.cursor = 0
+    in_browser do
+      memo = @model.create!(id: "local-1", title: "server value")
+      server_stamp = memo.updated_at
+      InstantRecord::OutboxMutation.delete_all
+      memo.update!(title: "refused edit")
+      mutation_id = InstantRecord::OutboxMutation.sole.id
+      @transport.respond_with([{
+        "mutation_id" => mutation_id, "status" => "rejected", "reason" => "not permitted",
+        "server_attributes" => { "id" => memo.id, "title" => "server value", "updated_at" => server_stamp.iso8601(6) },
+        "version" => 3
+      }])
+
+      InstantRecord.start
+      InstantRecord.tick
+
+      assert_equal "server value", memo.reload.title
+    end
+
+    assert_equal ["records_changed\nMemo:local-1"], @notifier.notices
+  end
+
+  def test_a_skipped_lww_write_during_sync_pass_notifies_the_winning_record
+    InstantRecord::Client.cursor = 0
+    in_browser do
+      memo = @model.create!(id: "local-1", title: "my losing edit")
+      mutation_id = InstantRecord::OutboxMutation.sole.id
+      @transport.respond_with([{
+        "mutation_id" => mutation_id, "status" => "applied", "version" => 4, "skipped" => true,
+        "server_attributes" => { "id" => memo.id, "title" => "peer winner",
+                                 "updated_at" => (memo.updated_at + 5).utc.iso8601(6) }
+      }])
+
+      InstantRecord.start
+      InstantRecord.tick
+
+      assert_equal "peer winner", memo.reload.title
+    end
+
+    assert_equal ["records_changed\nMemo:local-1"], @notifier.notices
+  end
+
+  def test_a_bootstrap_emits_an_unlisted_change_notice
+    in_browser do
       InstantRecord.start
       InstantRecord.tick
     end
 
     assert_equal ["records_changed"], @notifier.notices
+  end
+
+  def test_a_failed_bootstrap_does_not_leak_unlisted_changes_into_later_notices
+    @transport.define_singleton_method(:get_json) { |_path| raise InstantRecord::Client::Transport::Error, "offline" }
+
+    in_browser do
+      InstantRecord.start
+      InstantRecord.tick
+      assert_empty @notifier.notices
+
+      InstantRecord::Client.consume_stream(sse_frame(81, "after-offline"))
+    end
+
+    assert_equal ["records_changed\nMemo:after-offline"], @notifier.notices
+  end
+
+  def test_an_eviction_emits_an_unlisted_change_notice
+    windowed = syncable_model("Memo") { sync_window limit: 1, partition_by: :state }
+    InstantRecord.sync(windowed)
+    InstantRecord::Client.cursor = 0
+    InstantRecord::Client.applying_remote do
+      windowed.create!(id: "old", state: "a", created_at: 2.hours.ago, updated_at: 2.hours.ago)
+      windowed.create!(id: "new", state: "a", created_at: 1.minute.ago, updated_at: 1.minute.ago)
+    end
+
+    in_browser do
+      InstantRecord.start(cold_boot: true)
+      InstantRecord.tick
+    end
+
+    assert_equal ["records_changed"], @notifier.notices
+    assert_equal %w[new], windowed.pluck(:id)
+  end
+
+  def test_end_to_end_self_ack_echo_rejection_and_concurrent_remote_delta
+    in_browser do
+      # 1. Cold bootstrap emits wildcard notice.
+      @transport.bootstrap_body = {
+        "cursor" => 10,
+        "records" => [
+          { "type" => "Memo", "id" => "m-1", "version" => 1,
+            "attributes" => { "id" => "m-1", "title" => "initial", "updated_at" => 1.minute.ago.utc.iso8601(6) } }
+        ]
+      }
+      InstantRecord.start
+      InstantRecord.tick
+      assert_equal ["records_changed"], @notifier.notices
+
+      # 2. Local edit acknowledged + echoed back in the same pass stays quiet.
+      memo = @model.find("m-1")
+      memo.update!(title: "my edit")
+      mutation_id = InstantRecord::OutboxMutation.sole.id
+      @transport.respond_with([{ "mutation_id" => mutation_id, "status" => "applied", "version" => 2 }])
+      @transport.events_to_yield = [
+        { "type" => "Memo", "id" => "m-1", "operation" => "update", "version" => 2, "cursor" => 11,
+          "attributes" => InstantRecord.wire_attributes(memo.reload.attributes) }
+      ]
+      InstantRecord.tick
+      assert_equal ["records_changed"], @notifier.notices, "self-ack plus own echo must stay completely quiet"
+      assert_equal 11, InstantRecord.cursor
+      assert_equal "synced", memo.reload.sync_state
+
+      # 3. Local edit acked alongside a concurrent remote delta notifies only the remote record.
+      memo.update!(title: "my second edit")
+      mutation_id = InstantRecord::OutboxMutation.sole.id
+      @transport.respond_with([{ "mutation_id" => mutation_id, "status" => "applied", "version" => 3 }])
+      @transport.events_to_yield = [
+        { "type" => "Memo", "id" => "m-1", "operation" => "update", "version" => 3, "cursor" => 12,
+          "attributes" => InstantRecord.wire_attributes(memo.reload.attributes) },
+        { "type" => "Memo", "id" => "m-2", "operation" => "create", "version" => 1, "cursor" => 13,
+          "attributes" => { "id" => "m-2", "title" => "from another user", "updated_at" => Time.current.utc.iso8601(6) } }
+      ]
+      InstantRecord.tick
+      assert_equal ["records_changed", "records_changed\nMemo:m-2"], @notifier.notices
+      assert_equal 13, InstantRecord.cursor
+
+      # 4. Rejected local edit + concurrent remote delta lists both records without wildcard fallback.
+      accepted_attrs = InstantRecord.wire_attributes(memo.reload.attributes)
+      memo.update!(title: "forbidden edit")
+      mutation_id = InstantRecord::OutboxMutation.sole.id
+      @transport.respond_with([{
+        "mutation_id" => mutation_id, "status" => "rejected", "reason" => "forbidden",
+        "server_attributes" => accepted_attrs, "version" => 3
+      }])
+      @transport.events_to_yield = [
+        { "type" => "Memo", "id" => "m-3", "operation" => "create", "version" => 1, "cursor" => 14,
+          "attributes" => { "id" => "m-3", "title" => "concurrent peer", "updated_at" => Time.current.utc.iso8601(6) } }
+      ]
+      InstantRecord.tick
+      assert_equal [
+        "records_changed",
+        "records_changed\nMemo:m-2",
+        "records_changed\nMemo:m-1\nMemo:m-3"
+      ], @notifier.notices
+      assert_equal "my second edit", memo.reload.title
+    end
   end
 
   def test_more_changes_than_can_be_listed_are_not_listed

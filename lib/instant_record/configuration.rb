@@ -5,6 +5,11 @@ module InstantRecord
     # setups (e.g. Vite on :5173 talking to Rails on :3000).
     attr_accessor :endpoint
 
+    # Optional override for the engine's mount path (e.g. "/sync") when
+    # Rails.application.config.instant_record is unavailable, such as inside a
+    # compiled browser or native build.
+    attr_accessor :mount_path
+
     # Base delay, in seconds, for retrying an outbox drain that did not get
     # through. It is not a poll cadence: the browser has no heartbeat, because
     # writes trigger their own sync pass and the change stream carries
@@ -42,6 +47,7 @@ module InstantRecord
 
     def initialize
       @endpoint = DEFAULT_MOUNT_PATH
+      @mount_path = nil
       @sync_interval = 3
       @drain_batch_size = 100
       @max_server_error_retries = 3
