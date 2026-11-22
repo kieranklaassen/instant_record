@@ -280,6 +280,20 @@ class SyncLoopTest < Minitest::Test
     [lines.first, lines[1..].map { |line| JSON.parse(line) }]
   end
 
+  def parse_notice_with_sync_notices(notice)
+    lines = notice.split("\n")
+    deltas = []
+    sync_notices = []
+    lines[1..].each do |line|
+      if line.start_with?("sync_notice:")
+        sync_notices << JSON.parse(line.delete_prefix("sync_notice:"))
+      else
+        deltas << JSON.parse(line)
+      end
+    end
+    [lines.first, deltas.empty? ? nil : deltas, sync_notices]
+  end
+
   def test_a_stream_batch_tells_the_page_which_records_changed
     in_browser do
       InstantRecord::Client.consume_stream(sse_frame(71, "n-1") + sse_frame(72, "n-2"))
@@ -361,10 +375,13 @@ class SyncLoopTest < Minitest::Test
       assert_equal "server value", memo.reload.title
     end
 
-    header, deltas = parse_notice(@notifier.notices.sole)
+    header, deltas, sync_notices = parse_notice_with_sync_notices(@notifier.notices.sole)
     assert_equal "records_changed", header
     assert_equal [{ "type" => "Memo", "id" => "local-1", "op" => "update" }], deltas.map { |d| d.slice("type", "id", "op") }
     assert_equal "server value", deltas.sole.dig("attrs", "title")
+    assert_equal 1, sync_notices.size
+    assert_equal "rejected", sync_notices.sole["kind"]
+    assert_equal "not permitted", sync_notices.sole["reason"]
   end
 
   def test_a_skipped_lww_write_during_sync_pass_notifies_the_winning_record
@@ -384,10 +401,13 @@ class SyncLoopTest < Minitest::Test
       assert_equal "peer winner", memo.reload.title
     end
 
-    header, deltas = parse_notice(@notifier.notices.sole)
+    header, deltas, sync_notices = parse_notice_with_sync_notices(@notifier.notices.sole)
     assert_equal "records_changed", header
     assert_equal [{ "type" => "Memo", "id" => "local-1", "op" => "update" }], deltas.map { |d| d.slice("type", "id", "op") }
     assert_equal "peer winner", deltas.sole.dig("attrs", "title")
+    assert_equal 1, sync_notices.size
+    assert_equal "conflict", sync_notices.sole["kind"]
+    assert_equal "local-1", sync_notices.sole["record_id"]
   end
 
   def test_a_bootstrap_emits_an_unlisted_change_notice
@@ -492,11 +512,13 @@ class SyncLoopTest < Minitest::Test
       InstantRecord.tick
       assert_equal 3, @notifier.notices.size
       assert_equal "records_changed", @notifier.notices[0]
-      _h3, d3 = parse_notice(@notifier.notices[2])
+      _h3, d3, sync_notices = parse_notice_with_sync_notices(@notifier.notices[2])
       assert_equal [
         { "type" => "Memo", "id" => "m-1", "op" => "update" },
         { "type" => "Memo", "id" => "m-3", "op" => "create" }
       ], d3.map { |d| d.slice("type", "id", "op") }
+      assert_equal 1, sync_notices.size
+      assert_equal "forbidden", sync_notices.sole["reason"]
       assert_equal "my second edit", memo.reload.title
     end
   end

@@ -5,7 +5,10 @@
 //   "records_changed"         -> wildcard: anything may have changed (changes: null)
 //   "records_changed\n<line>" -> one compact JSON delta per line:
 //                                {"type","id","op","changed_columns","attrs"}
-//                                (or legacy "Type:id" lines, normalized cleanly)
+//                                (or legacy "Type:id" lines, normalized cleanly),
+//                                plus any "sync_notice:<json>" lines for quarantined
+//                                rejections or LWW conflicts.
+const NOTICE_PREFIX = "sync_notice:";
 
 export function normalizeDelta(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
@@ -22,34 +25,52 @@ export function normalizeDelta(raw) {
 
 export function readNotice(text) {
   if (typeof text !== "string" || !text.startsWith("records_changed")) {
-    return { notified: false, changes: null };
+    return { notified: false, changes: null, notices: [] };
   }
   const lines = text.split("\n").slice(1).filter(Boolean);
-  if (lines.length === 0) return { notified: true, changes: null };
+  if (lines.length === 0) return { notified: true, changes: null, notices: [] };
 
   const changes = [];
+  const notices = [];
+  let unlisted = false;
   for (const line of lines) {
+    if (line.startsWith(NOTICE_PREFIX)) {
+      try {
+        notices.push(JSON.parse(line.slice(NOTICE_PREFIX.length)));
+      } catch {
+        // Ignore malformed notice lines so record refresh still succeeds.
+      }
+      continue;
+    }
+    if (unlisted) continue;
     if (line.startsWith("{")) {
       try {
         const delta = normalizeDelta(JSON.parse(line));
-        if (!delta) return { notified: true, changes: null };
-        changes.push(delta);
+        if (!delta) unlisted = true;
+        else changes.push(delta);
       } catch {
-        return { notified: true, changes: null };
+        unlisted = true;
       }
     } else {
       const at = line.indexOf(":");
-      if (at <= 0) return { notified: true, changes: null };
-      changes.push({
-        type: line.slice(0, at),
-        id: line.slice(at + 1),
-        op: null,
-        changed_columns: [],
-        attrs: {},
-      });
+      if (at <= 0) {
+        unlisted = true;
+      } else {
+        changes.push({
+          type: line.slice(0, at),
+          id: line.slice(at + 1),
+          op: null,
+          changed_columns: [],
+          attrs: {},
+        });
+      }
     }
   }
-  return { notified: true, changes };
+  return {
+    notified: true,
+    changes: !unlisted && changes.length ? changes : null,
+    notices,
+  };
 }
 
 export function encodeBroadcast(revision, changes = null) {

@@ -59,25 +59,33 @@ module InstantRecord
         evicted = evict_beyond_windows
         drained, reconciled = drain_outbox
         pulled = bootstrapped? ? poll_changes : bootstrap
-        notify_changed if evicted || reconciled || pulled
+        notify_changed if evicted || reconciled || pulled || recorded_notices.any?
         evicted || drained || pulled
       end
 
       # Which records changed since the page was last told: "records_changed"
       # followed by one compact JSON delta per line:
       #   {"type":"MailEntry","id":"a-1","op":"update","changed_columns":[...],"attrs":{...}}
-      # The notice alone means anything may have changed (bootstrap, eviction,
+      # plus any quarantined sync notices as "sync_notice:<json>" lines. The
+      # notice alone means anything may have changed (bootstrap, eviction,
       # reset, or a batch past the listing or byte budget).
       def changes_notice
-        return "records_changed" if @unlisted_changes || changed_records.empty?
-
-        lines = changed_records.map { |delta| JSON.generate(delta) }
-        notice = "records_changed\n" + lines.join("\n")
-        notice.bytesize > MAX_NOTICE_BYTES ? "records_changed" : notice
+        lines = ["records_changed"]
+        unless @unlisted_changes || changed_records.empty?
+          delta_lines = changed_records.map { |delta| JSON.generate(delta) }
+          delta_payload = "records_changed\n" + delta_lines.join("\n")
+          lines.concat(delta_lines) if delta_payload.bytesize <= MAX_NOTICE_BYTES
+        end
+        recorded_notices.each { |notice| lines << "sync_notice:#{JSON.generate(notice)}" }
+        lines.join("\n")
       end
 
       def changed_records
         @changed_records ||= []
+      end
+
+      def recorded_notices
+        @recorded_notices ||= []
       end
 
       def unlisted_changes
@@ -166,6 +174,7 @@ module InstantRecord
         notifier.records_changed
         changed_records.clear
         changed_index.clear
+        recorded_notices.clear
         @unlisted_changes = false
       end
 
@@ -258,6 +267,9 @@ module InstantRecord
           end
           mutation.destroy if drop
         end
+        SyncNotice.all.each do |notice|
+          notice.destroy if types.include?(notice.record_type)
+        end
         # The rows that stay were last brought up to date at this cursor. The
         # bootstrap to come only adds and changes rows, so the poll after it
         # starts here again and a destroy made in between is not missed.
@@ -348,6 +360,7 @@ module InstantRecord
         history_marks.clear
         changed_records.clear
         changed_index.clear
+        recorded_notices.clear
         @unlisted_changes = false
         @capturing_changes = false
         @eviction_pending = false
@@ -497,36 +510,54 @@ module InstantRecord
           mutation = OutboxMutation.find_by(id: result["mutation_id"])
           next unless mutation
 
-          applying_remote do
-            if mutation.mutator?
-              case result["status"]
-              when "applied"
-                reconciled = true if reconcile_applied_mutator(mutation, result)
-              when "rejected"
-                reconciled = true if reconcile_rejected_mutator(mutation, result)
-              end
-            else
-              case result["status"]
-              when "applied"
-                # `skipped` is the server saying it threw this write away to
-                # last-write-wins. It is resolved (nothing will retry it) but it
-                # never landed, so marking the record synced would badge a
-                # discarded write as delivered — the record does not hold what the
-                # server holds. Reconcile to the winner, which rides along with the
-                # result; the same value also arrives over the change stream, which
-                # is what makes doing nothing here look fine until the stream is
-                # behind.
-                if result["skipped"]
-                  reconciled = true if reconcile_to_server_state(mutation, result)
-                else
-                  mark_synced(mutation, result["version"])
+          quarantined = nil
+          OutboxMutation.transaction do
+            applying_remote do
+              if mutation.mutator?
+                case result["status"]
+                when "applied"
+                  reconciled = true if reconcile_applied_mutator(mutation, result)
+                when "rejected"
+                  quarantined = quarantine_mutation(
+                    mutation,
+                    kind: "rejected",
+                    reason: result["reason"].to_s.presence || "Rejected by server",
+                    result: result
+                  )
+                  reconciled = true if reconcile_rejected_mutator(mutation, result)
                 end
-              when "rejected"
-                reconciled = true if reconcile_rejection(mutation, result)
+              else
+                case result["status"]
+                when "applied"
+                  # `skipped` is the server saying it threw this write away to
+                  # last-write-wins. It is resolved (nothing will retry it) but it
+                  # never landed, so quarantine the user's attempted write in
+                  # SyncNotice and reconcile to the winner before removing the outbox row.
+                  if result["skipped"]
+                    quarantined = quarantine_mutation(
+                      mutation,
+                      kind: "conflict",
+                      reason: result["reason"].to_s.presence || "Overwritten by a newer server change",
+                      result: result
+                    )
+                    reconciled = true if reconcile_to_server_state(mutation, result)
+                  else
+                    mark_synced(mutation, result["version"])
+                  end
+                when "rejected"
+                  quarantined = quarantine_mutation(
+                    mutation,
+                    kind: "rejected",
+                    reason: result["reason"].to_s.presence || "Rejected by server",
+                    result: result
+                  )
+                  reconciled = true if reconcile_rejection(mutation, result)
+                end
               end
+              mutation.destroy!
             end
-            mutation.destroy!
           end
+          announce_notice(quarantined) if quarantined
         end
         reconciled
       end
@@ -884,6 +915,8 @@ module InstantRecord
 
         incoming_at = attributes["updated_at"] && Time.parse(attributes["updated_at"].to_s)
         local_at = record.persisted? ? record.updated_at : nil
+        prior_pending = !authoritative && record.persisted? && record.sync_state == "pending"
+        prior_attributes = prior_pending ? InstantRecord.wire_attributes(record.attributes) : nil
 
         record.assign_attributes(attributes.except("id", "server_version"))
 
@@ -896,6 +929,9 @@ module InstantRecord
           return false
         end
 
+        inbound_conflict = prior_pending && (record.changed - BOOKKEEPING_COLUMNS).any? &&
+          OutboxMutation.find_by(record_type: model.name, record_id: record.id).nil?
+
         record.server_version = version || attributes["server_version"] || 0
         record.sync_state = "synced"
         return false unless record.changed?
@@ -903,13 +939,57 @@ module InstantRecord
         was_new = !record.persisted?
         changed_cols = record.changed.map(&:to_s)
         data_changed = was_new || (changed_cols - BOOKKEEPING_COLUMNS).any?
-        if data_changed
+        quarantined = nil
+        if inbound_conflict && data_changed
+          OutboxMutation.transaction do
+            quarantined = SyncNotice.record!(
+              kind: "conflict",
+              record_type: model.name,
+              record_id: record.id,
+              operation: "update",
+              reason: "Overwritten by a newer server change",
+              attempted_changes: prior_attributes,
+              server_attributes: InstantRecord.wire_attributes(attributes),
+              server_version: record.server_version
+            )
+            record.save!(validate: false)
+          end
+          note_record_change(record, was_new ? "create" : "update", changed_columns: changed_cols) if record_delta
+          announce_notice(quarantined) if quarantined
+        elsif data_changed
           record.save!(validate: false)
           note_record_change(record, was_new ? "create" : "update", changed_columns: changed_cols) if record_delta
         else
           record.update_columns(sync_state: record.sync_state, server_version: record.server_version)
         end
         data_changed
+      end
+
+      def quarantine_mutation(mutation, kind:, reason:, result:)
+        return nil if SyncNotice.find_by(mutation_id: mutation.id)
+
+        SyncNotice.record!(
+          mutation_id: mutation.id,
+          kind: kind,
+          record_type: mutation.record_type,
+          record_id: mutation.record_id,
+          operation: mutation.operation,
+          reason: reason,
+          attempted_changes: mutation.changes_payload || {},
+          server_attributes: result["server_attributes"] || {},
+          server_version: result["version"].to_i
+        )
+      end
+
+      def announce_notice(notice)
+        recorded_notices << notice.as_notice
+        instrument("notice",
+          id: notice.id,
+          kind: notice.kind,
+          record_type: notice.record_type,
+          record_id: notice.record_id,
+          operation: notice.operation,
+          reason: notice.reason)
       end
 
       def log_failure(phase, error)
