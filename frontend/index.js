@@ -20,7 +20,7 @@
 // kept in this browser, sent to the server in the background and fetched from
 // it when asked for. It needs neither Inertia nor a local database.
 import { localHttpClient, write } from "./http.js"
-import { liveTransport } from "./live.js"
+import { affectsReads, applyRowDeltas, createLiveTransport, filterChanges, liveTransport, patchProp } from "./live.js"
 import { local } from "./window.js"
 
 // InstantRecord's Inertia pages place the first page in an attribute
@@ -31,13 +31,13 @@ const pageInAttribute = (id = "app") => {
   return page ? { page: JSON.parse(page) } : {}
 }
 
-export const instantRecord = () => ({
-  live: liveTransport,
+export const instantRecord = (options) => ({
+  live: options ? createLiveTransport(options) : liveTransport,
   ...pageInAttribute(),
   ...(local() ? { http: localHttpClient } : {}),
 })
 
-export { localHttpClient, liveTransport, write }
+export { affectsReads, applyRowDeltas, createLiveTransport, filterChanges, liveTransport, localHttpClient, patchProp, write }
 export { local, useHistory, useLiveParam, useLiveSearch, useLiveWindow, useStableRows, widenWindow } from "./window.js"
 export { resolveFocus } from "./focus.js"
 export { useKeyboardNavigation } from "./keyboard.js"
@@ -45,8 +45,9 @@ export { chord, keycaps, match } from "./chord.js"
 export { useShortcuts } from "./shortcuts.js"
 export { rangeBetween } from "./range.js"
 export { useSelection } from "./selection.js"
-export { heldActions } from "./held.js"
+export { durableHeldActions, heldActions } from "./held.js"
 export { useUndoable } from "./undo.js"
 export { default as LiveList } from "./LiveList.js"
-export { FileMissing, FileStore, NoRoom, fileStore } from "./files.js"
+export { DEFAULT_CHUNK_SIZE, FileMissing, FileStore, NoRoom, fileStore } from "./files.js"
 export { useFile } from "./file.js"
+export { SYNC_NOTICES_EVENT, createSyncNoticesStore, diffNotice, useSyncNotices } from "./notices.js"

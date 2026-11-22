@@ -1,0 +1,7 @@
+<li class="<%= todo.state %>" id="<%= dom_id(todo) %>">
+  <%= form_with url: hotwire_todo_path(todo), method: :patch, class: "four-toggle" do %>
+    <%= check_box_tag "done", "1", todo.state == "done", id: "todo-#{todo.id}", onchange: "this.form.requestSubmit()" %>
+    <%= label_tag "todo-#{todo.id}", todo.title %>
+  <% end %>
+  <%= button_to "×", hotwire_todo_path(todo), method: :delete, aria: { label: "Delete" } %>
+</li>

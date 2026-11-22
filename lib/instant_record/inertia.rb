@@ -219,4 +219,4 @@ module InstantRecord
   end
 end
 
-require "instant_record/inertia/renderer"
+InstantRecord::Host.load_inertia_renderer

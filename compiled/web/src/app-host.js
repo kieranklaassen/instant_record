@@ -9,7 +9,7 @@
 //                         and the records it can list after it (changes.js)
 // Works the same in Node (tests) and in a browser worker; only `exchange` differs.
 import { WASI, File, OpenFile, Directory, PreopenDirectory, ConsoleStdout } from "@bjorn3/browser_wasi_shim";
-import { readNotice } from "./changes.js";
+import { parseReads, readNotice } from "./changes.js";
 import { buildHttpRequest } from "./http-headers.js";
 
 const encoder = new TextEncoder();
@@ -74,15 +74,44 @@ export class AppHost {
     this.instance = null;
   }
 
+  // The SQLite file's byte length without copying its contents.
+  databaseSize() {
+    const file = this.storage.contents.get("development.sqlite3");
+    if (!file) return 0;
+    if (typeof file.byteLength === "function") return file.byteLength();
+    if (file.data) return file.data.byteLength;
+    if (file.size !== undefined) return Number(file.size);
+    return 0;
+  }
+
   // The SQLite file's bytes, for persisting between page loads (null before the first run).
   databaseBytes() {
     const file = this.storage.contents.get("development.sqlite3");
-    return file ? file.data : null;
+    if (!file) return null;
+    if (typeof file.readAll === "function") return file.readAll();
+    return file.data ?? null;
+  }
+
+  // Flush dirty pages when backed by a page-level OPFS sync handle.
+  flushDatabase() {
+    const file = this.storage.contents.get("development.sqlite3");
+    if (file && typeof file.flush === "function") file.flush();
+  }
+
+  // Mount an existing WASI Inode (such as PagedSyncOPFSFile) at /storage/development.sqlite3.
+  mountDatabase(inode, schemaVersion = 0) {
+    this.storage.contents.set("development.sqlite3", inode);
+    this.hostDir.contents.set("schema_version", new File(encoder.encode(String(schemaVersion).padStart(20, "0"))));
+  }
+
+  // Independent copy-on-write snapshot of the live SQLite bytes for staging branches.
+  cloneDatabaseBytes() {
+    const bytes = this.databaseBytes();
+    return bytes ? new Uint8Array(bytes) : null;
   }
 
   restoreDatabase(bytes, schemaVersion = 0) {
-    this.storage.contents.set("development.sqlite3", new File(bytes));
-    this.hostDir.contents.set("schema_version", new File(encoder.encode(String(schemaVersion).padStart(20, "0"))));
+    this.mountDatabase(new File(bytes), schemaVersion);
   }
 
   // Lazily instantiate and boot the WASI reactor once (after restoreDatabase has placed any saved
@@ -134,27 +163,41 @@ export class AppHost {
   request(method, path, { body = "", contentType, headers = {} } = {}) {
     const input = buildHttpRequest(method, path, { body, contentType, headers, cookies: this.cookies });
 
+    this.notifyFile.data = new Uint8Array();
+    this.hostDir.contents.set("notify", this.notifyFile);
     const result = this.call("wasm_request", input);
     const text = decoder.decode(result.out);
     const split = text.indexOf("\n\n");
     const lines = (split < 0 ? text : text.slice(0, split)).split("\n");
     const responseHeaders = [];
+    let reads = null;
     for (const line of lines.slice(1)) {
       const colon = line.indexOf(": ");
       if (colon < 0) continue;
       const name = line.slice(0, colon);
       const value = line.slice(colon + 2);
-      if (name.toLowerCase() === "set-cookie") {
+      const lower = name.toLowerCase();
+      if (lower === "set-cookie") {
         const pair = value.split(";")[0];
         const equals = pair.indexOf("=");
         if (/max-age=0/i.test(value)) this.cookies.delete(pair.slice(0, equals));
         else this.cookies.set(pair.slice(0, equals), pair.slice(equals + 1));
       } else {
+        if (lower === "x-instant-record-reads") reads = parseReads(value);
         responseHeaders.push([name, value]);
       }
     }
     const status = Number(lines[0]) || 500;
-    return { status, headers: responseHeaders, body: split < 0 ? "" : text.slice(split + 2), exit: result.exit, errors: result.errors };
+    const notifyEntry = this.hostDir.contents.get("notify") || this.notifyFile;
+    return {
+      status,
+      headers: responseHeaders,
+      body: split < 0 ? "" : text.slice(split + 2),
+      reads,
+      ...readNotice(decoder.decode(notifyEntry.data)),
+      exit: result.exit,
+      errors: result.errors,
+    };
   }
 
   // One pass of the gem's own sync loop (InstantRecord::Client.sync_pass).
@@ -178,10 +221,45 @@ export class AppHost {
     }
     const text = decoder.decode(result.out);
     const notifyEntry = this.hostDir.contents.get("notify") || this.notifyFile;
+    const nextRelease = /next_release_ms=(\d+)/.exec(text);
     return {
       changed: text.startsWith("changed"),
       pending: Number(/pending=(\d+)/.exec(text)?.[1] ?? -1),
+      held: Number(/held=(\d+)/.exec(text)?.[1] ?? 0),
+      nextReleaseMs: nextRelease ? Number(nextRelease[1]) : null,
       cursor: Number(/cursor=(\d+)/.exec(text)?.[1] ?? 0),
+      ...readNotice(decoder.decode(notifyEntry.data)),
+      exchanges: this.exchanges,
+      exit: result.exit,
+      errors: result.errors,
+    };
+  }
+
+  // Merge pre-fetched push/bootstrap responses into SQLite by mutation_id
+  // without discarding acks when newer local edits landed during the fetch.
+  applySync(endpoint, { push = null, bootstrap = null } = {}) {
+    this.notifyFile.data = new Uint8Array();
+    this.hostDir.contents.set("notify", this.notifyFile);
+    this.exchanges = [];
+    const payload = JSON.stringify({
+      endpoint: endpoint || "",
+      push,
+      bootstrap,
+    });
+    const result = this.call("wasm_sync", encoder.encode(payload));
+    if (result.exit !== 0) throw new Error(result.errors.join("\n") || "Failed to apply sync responses");
+    const text = decoder.decode(result.out);
+    const notifyEntry = this.hostDir.contents.get("notify") || this.notifyFile;
+    const nextRelease = /next_release_ms=(\d+)/.exec(text);
+    return {
+      changed: text.startsWith("changed"),
+      pending: Number(/pending=(\d+)/.exec(text)?.[1] ?? -1),
+      held: Number(/held=(\d+)/.exec(text)?.[1] ?? 0),
+      nextReleaseMs: nextRelease ? Number(nextRelease[1]) : null,
+      cursor: Number(/cursor=(\d+)/.exec(text)?.[1] ?? 0),
+      progressed: /progressed=1\b/.test(text),
+      failed: /failed=1\b/.test(text),
+      quarantined: Number(/quarantined=(\d+)/.exec(text)?.[1] ?? 0),
       ...readNotice(decoder.decode(notifyEntry.data)),
       exchanges: this.exchanges,
       exit: result.exit,
@@ -212,13 +290,52 @@ export class AppHost {
     return JSON.parse(decoder.decode(result.out));
   }
 
+  notices(request = { action: "list" }) {
+    this.notifyFile.data = new Uint8Array();
+    this.hostDir.contents.set("notify", this.notifyFile);
+    const result = this.call("wasm_notices", encoder.encode(JSON.stringify(request)));
+    if (result.exit !== 0) throw new Error(result.errors.join("\n") || String(result.exit));
+    const notifyEntry = this.hostDir.contents.get("notify") || this.notifyFile;
+    return {
+      ...JSON.parse(decoder.decode(result.out)),
+      ...readNotice(decoder.decode(notifyEntry.data)),
+    };
+  }
+
+  // Extract OutboxMutations recorded after `excludeIds` on the active SQLite database.
+  branchOutbox(excludeIds = []) {
+    const result = this.call("wasm_branch_outbox", encoder.encode(JSON.stringify({ exclude_ids: excludeIds })));
+    if (result.exit !== 0) throw new Error(result.errors.join("\n") || "Failed to inspect branch outbox");
+    return JSON.parse(decoder.decode(result.out));
+  }
+
+  // Safely replay extracted branch OutboxMutations onto the active (`main`) SQLite database.
+  branchReplay(mutations, { conflict = "lww" } = {}) {
+    this.notifyFile.data = new Uint8Array();
+    this.hostDir.contents.set("notify", this.notifyFile);
+    const result = this.call("wasm_branch_replay", encoder.encode(JSON.stringify({ mutations, conflict })));
+    if (result.exit !== 0) throw new Error(result.errors.join("\n") || "Failed to replay branch mutations");
+    const parsed = JSON.parse(decoder.decode(result.out));
+    const notifyEntry = this.hostDir.contents.get("notify") || this.notifyFile;
+    return {
+      ...parsed,
+      ...readNotice(decoder.decode(notifyEntry.data)),
+      exit: result.exit,
+      errors: result.errors,
+    };
+  }
+
   syncState() {
     const result = this.call("wasm_cursor", new Uint8Array());
     const text = decoder.decode(result.out);
+    const nextRelease = /next_release_ms=(\d+)/.exec(text);
     return {
       bootstrapped: text.includes("bootstrap=ready"),
       cursor: Number(/cursor=(\d+)/.exec(text)?.[1] ?? 0),
       pending: Number(/pending=(\d+)/.exec(text)?.[1] ?? 0),
+      held: Number(/held=(\d+)/.exec(text)?.[1] ?? 0),
+      nextReleaseMs: nextRelease ? Number(nextRelease[1]) : null,
+      notices: Number(/notices=(\d+)/.exec(text)?.[1] ?? 0),
       // The name the server gave whoever this browser synced as, when it tells people apart.
       identity: /identity=(\S+)/.exec(text)?.[1] ?? "",
     };
