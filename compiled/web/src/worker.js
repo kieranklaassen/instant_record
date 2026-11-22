@@ -11,6 +11,7 @@ import { openSnapshot, withFiles } from "./snapshot-store.js";
 const runtime = createWorkerRuntime({
   env: {
     VITE_SYNC_ENDPOINT: import.meta.env.VITE_SYNC_ENDPOINT,
+    VITE_MOUNT_PATH: import.meta.env.VITE_MOUNT_PATH,
     VITE_SCHEMA_VERSION: import.meta.env.VITE_SCHEMA_VERSION,
     VITE_SCHEMA_BASELINE: import.meta.env.VITE_SCHEMA_BASELINE,
     VITE_MIGRATION_HISTORY: import.meta.env.VITE_MIGRATION_HISTORY,

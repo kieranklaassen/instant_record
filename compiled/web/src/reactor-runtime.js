@@ -4,6 +4,7 @@
 import { advance, fresh, held, query } from "./history-fill.js";
 import { mailboxScope } from "./mailbox-scope.js";
 import { createLeaderCoordinator } from "./leader-election.js";
+import { resolveServerRequest, serverRoot } from "./server-request.js";
 import { openDatabaseStorage } from "./storage-backend.js";
 
 const POLL_EVERY_MS = 1000;
@@ -47,6 +48,7 @@ export function createWorkerRuntime({
   now = () => performance.now(),
 } = {}) {
   const publicEndpoint = env.VITE_SYNC_ENDPOINT || "/instant_record";
+  const mountPath = env.VITE_MOUNT_PATH || "/instant_record";
   let syncEndpoint = publicEndpoint;
   const targetSchema = Number(env.VITE_SCHEMA_VERSION);
   const legacySchema = env.VITE_SCHEMA_BASELINE;
@@ -56,7 +58,6 @@ export function createWorkerRuntime({
   const shellAlways = env.VITE_SHELL_SNAPSHOT === "1";
   const sourceVersion = env.VITE_SOURCE_VERSION || "";
   const wasmUrl = env.VITE_WASM_URL || "/app.wasm";
-  const sharedInboxDemo = !!env.VITE_SHARED_INBOX_DEMO;
 
   let syncScope = "";
   let currentScope = "";
@@ -203,12 +204,13 @@ export function createWorkerRuntime({
     });
   }
 
-  async function fetchReply(method, path, body = "", endpoint = syncEndpoint) {
+  async function fetchReply(method, path, body = "", endpoint = syncEndpoint, contentType = undefined) {
     const url = endpoint + path;
     const started = now();
     const poll = path.startsWith("/events?");
     let status = 0;
     let text = "";
+    let responseContentType = "";
     let outcome = "failed";
     try {
       if (coordinator?.role === "leader") await coordinator.pruneDeadPeers();
@@ -218,16 +220,18 @@ export function createWorkerRuntime({
       }
       if (effectiveSimulation().offline) {
         outcome = "offline";
-        return { method, url, body, status, text };
+        return { method, url, body, status, text, contentType: responseContentType };
       }
       const options = { method, signal: AbortSignal.timeout(30000) };
-      if (method === "POST") {
-        options.headers = { "Content-Type": "application/json" };
+      if (method !== "GET" && method !== "HEAD") {
+        const headerType = contentType === undefined ? "application/json" : contentType;
+        if (headerType) options.headers = { "Content-Type": headerType };
         options.body = body;
       }
       const scoped = syncScope ? url + (url.includes("?") ? "&" : "?") + "scope=" + encodeURIComponent(syncScope) : url;
       const response = await fetchImpl(scoped, options);
       text = await response.text();
+      responseContentType = response.headers?.get?.("content-type") || "";
       outcome = status = response.status;
     } catch {
       // A failed exchange stays in the durable outbox for retry.
@@ -242,7 +246,7 @@ export function createWorkerRuntime({
         });
       }
     }
-    return { method, url, body, status, text };
+    return { method, url, body, status, text, contentType: responseContentType };
   }
 
   function kickSync(delay = QUIET_MS) {
@@ -741,20 +745,11 @@ export function createWorkerRuntime({
   }
 
   async function handleServerRequest(payload) {
-    const url = new URL(payload.path, origin);
-    const auth = payload.method === "GET"
-      ? ["/auth/session", "/instant_record/bootstrap"]
-      : ["/auth/session", "/auth/session/sign_out", "/instant_record/mutations"];
-    const allowed = auth.includes(url.pathname) ||
-      (payload.method === "GET" && url.pathname === "/receipts/probe") ||
-      (payload.method === "POST" && (url.pathname === "/slack/reset" ||
-        (sharedInboxDemo && url.pathname === new URL(syncEndpoint, origin).pathname + "/incoming" &&
-          url.pathname.startsWith("/email/sync/"))));
-    if (!allowed) throw new Error("Unknown demo server action");
-    const root = publicEndpoint.replace(/\/instant_record\/?$/, "");
-    url.searchParams.delete("instant_record_network");
+    const targetPath = resolveServerRequest(payload.path, origin);
+    const root = serverRoot(publicEndpoint, mountPath);
+    const method = (payload.method || "GET").toUpperCase();
     const body = typeof payload.body === "string" ? payload.body : "";
-    return fetchReply(payload.method, url.pathname + url.search, body, root);
+    return fetchReply(method, targetPath, body, root, payload.contentType ?? "");
   }
 
   async function wipeLocalStorage() {
@@ -824,7 +819,7 @@ export function createWorkerRuntime({
     currentScope = scopeOf(payload.path || "/");
     syncScope = typeof payload.scope === "string" ? payload.scope : "";
     if (currentScope) {
-      syncEndpoint = publicEndpoint.replace(/\/instant_record\/?$/, "") + "/email/sync/" + currentScope;
+      syncEndpoint = serverRoot(publicEndpoint, mountPath) + "/email/sync/" + currentScope;
     }
 
     const started = now();
