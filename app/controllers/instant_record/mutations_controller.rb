@@ -18,7 +18,7 @@ module InstantRecord
       SyncScope.authenticate!(request)
       identity = SyncScope.identity(request)
       partition = SyncScope.partition(request, identity)
-      Rails.application.eager_load! unless Rails.application.config.eager_load
+      Rails.application.eager_load! if defined?(Rails) && Rails.application && !Rails.application.config.eager_load
       SyncScope.authorize_models!(SyncScope.models_for(partition), partition, identity, request)
 
       batch = params.require(:mutations)

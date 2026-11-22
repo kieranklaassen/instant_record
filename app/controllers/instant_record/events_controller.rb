@@ -70,7 +70,7 @@ module InstantRecord
       SyncScope.authenticate!(request)
       identity = SyncScope.identity(request)
       partition_spec = SyncScope.partition(request, identity)
-      Rails.application.eager_load! unless Rails.application.config.eager_load
+      Rails.application.eager_load! if defined?(Rails) && Rails.application && !Rails.application.config.eager_load
       models = SyncScope.models_for(partition_spec)
       SyncScope.authorize_models!(models, partition_spec, identity, request)
       change_partitions = SyncScope.change_partitions_for(models, partition_spec)

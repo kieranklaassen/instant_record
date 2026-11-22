@@ -42,7 +42,7 @@ module InstantRecord
     # SyncScope.models_for selects unpartitioned models by default, or matching
     # partitioned models when a partition is requested.
     def bootstrap_models(partition)
-      Rails.application.eager_load! unless Rails.application.config.eager_load
+      Rails.application.eager_load! if defined?(Rails) && Rails.application && !Rails.application.config.eager_load
       SyncScope.models_for(partition)
     end
 
