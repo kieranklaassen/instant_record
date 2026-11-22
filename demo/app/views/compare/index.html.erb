@@ -57,11 +57,11 @@
             <p><%= way.how %></p>
             <div class="ms" data-ms>&ndash; <small>ms</small></div>
             <div class="bar"><i data-bar></i></div>
-            <p class="facts"><span data-median>no action yet</span></p>
             <p class="facts">
-              <span data-answered>&nbsp;</span>
+              <span data-median>no action yet</span>
               <span><%= @sizes[way.key][:lines] %> lines, <%= @sizes[way.key][:files] %> files</span>
             </p>
+            <p class="facts"><span data-answered>&nbsp;</span></p>
           </div>
           <iframe src="<%= src %>" title="<%= way.name %>"></iframe>
         </article>

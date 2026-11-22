@@ -172,8 +172,17 @@ function redraw() {
   const turbo = window.Turbo?.session;
   if (!turbo?.refresh) return window.location.reload();
   if (turbo.navigator.currentVisit) return document.addEventListener("turbo:load", redraw, { once: true });
-  // Morphed, so a field being typed in and the scroll stay as they are.
+  // Morphed, so the scroll stays where it is, and the field being typed in is left out of the
+  // morph: the page as the app draws it has that field empty, and the letters are the person's.
+  redrawing = true;
+  setTimeout(() => { redrawing = false; }, 2000);
   turbo.refresh(document.baseURI, { method: "morph", scroll: "preserve" });
+}
+
+let redrawing = false;
+function keepTyping(event) {
+  const field = event.target;
+  if (redrawing && field === document.activeElement && field.matches?.("input, textarea, select, [contenteditable]")) event.preventDefault();
 }
 
 // The shell began compiling the module before this script loaded; pass it on, and ask for the
@@ -207,6 +216,8 @@ if (finalPath !== location.pathname + location.search) history.replaceState(null
 document.open();
 document.write(result.status === 200 ? result.body : `<pre>${result.status}\n${(result.errors || []).join("\n")}</pre>`);
 document.close();
+document.addEventListener("turbo:before-morph-element", keepTyping);
+document.addEventListener("turbo:render", () => { redrawing = false; });
 document.addEventListener("turbo:before-visit", event => {
   if (mailboxScope(event.detail.url) !== initialScope) {
     event.preventDefault();
