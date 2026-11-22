@@ -17,7 +17,8 @@ namespace :instant_record do
       toolchain: toolchain_path.call,
       endpoint: ENV.fetch("SYNC_ENDPOINT") { Rails.application.config.instant_record.mount_path || InstantRecord::DEFAULT_MOUNT_PATH },
       baseline: Rails.application.config.instant_record.compiled_migration_baseline,
-      migration_paths: Rails.application.config.paths["db/migrate"].existent
+      migration_paths: Rails.application.config.paths["db/migrate"].existent,
+      shell_snapshot: Rails.application.config.instant_record.shell_snapshot
     }
   end
 

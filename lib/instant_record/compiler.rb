@@ -29,9 +29,16 @@ module InstantRecord
       toolchain || ENV.fetch("INSTANT_RECORD_TOOLCHAIN") { gem_root.join("compiled/toolchain.env").to_s }
     end
 
-    def self.build(root:, models:, toolchain:, endpoint:, baseline: nil, migration_paths: nil)
+    def self.build(root:, models:, toolchain:, endpoint:, baseline: nil, migration_paths: nil, shell_snapshot: nil)
       with_workspace(root: root, toolchain: toolchain, stage_web: true) do |shared|
-        WasmBuild.new(**shared, models: models, endpoint: endpoint, baseline: baseline, migration_paths: migration_paths || shared[:migration_paths]).run
+        WasmBuild.new(
+          **shared,
+          models: models,
+          endpoint: endpoint,
+          baseline: baseline,
+          migration_paths: migration_paths || shared[:migration_paths],
+          shell_snapshot: shell_snapshot
+        ).run
       end
     end
 

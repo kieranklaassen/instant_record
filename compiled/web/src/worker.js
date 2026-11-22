@@ -4,6 +4,7 @@
 import { AppHost } from "./app-host.js";
 import { advance, fresh, held, query } from "./history-fill.js";
 import { mailboxScope } from "./mailbox-scope.js";
+import { isValidSqliteBytes, parseShellGrant, scopedUrl, shouldFetchShell, validateShellState } from "./shell.js";
 import { openSnapshot, withFiles } from "./snapshot-store.js";
 
 const publicEndpoint = import.meta.env.VITE_SYNC_ENDPOINT || "/instant_record";
@@ -46,8 +47,7 @@ async function fetchReply(method, path, body = "", endpoint = syncEndpoint) {
       options.headers = { "Content-Type": "application/json" };
       options.body = body;
     }
-    const scoped = syncScope ? url + (url.includes("?") ? "&" : "?") + "scope=" + encodeURIComponent(syncScope) : url;
-    const response = await fetch(scoped, options);
+    const response = await fetch(scopedUrl(url, syncScope), options);
     text = await response.text();
     outcome = status = response.status;
   } catch {
@@ -384,22 +384,28 @@ function navigate({ method, path, body, contentType }) {
   return { result: { ...result, ms: performance.now() - started }, redirected, finalPath };
 }
 
-// A browser with no database of its own asks for the inbox's shell. Anything short of a whole
-// SQLite file built for this schema is no shell, and the normal bootstrap runs as before.
+// A browser with no database of its own asks its sync endpoint for a prebuilt
+// SQLite shell matching this build's schema fingerprint. Anything short of a
+// whole SQLite file stamped with its cursor and identity falls back to bootstrap.
 async function fetchShell(scope, path) {
-  const asked = new URL(path || "/", self.location.origin).searchParams.get("shell") === "1";
-  if (!scope || !shellFingerprint || !(shellAlways || asked) || simulation.offline) return null;
+  if (!shouldFetchShell({ path, fingerprint: shellFingerprint, always: shellAlways, offline: simulation.offline, blocked: scope === "invalid/invalid" })) {
+    return null;
+  }
   const started = performance.now();
   try {
     if (await withFiles("readonly", get => get(DATABASE))) return null;
-    const grant = await fetchReply("GET", "/shell?fingerprint=" + shellFingerprint);
+    const grant = await fetchReply("GET", "/shell?fingerprint=" + encodeURIComponent(shellFingerprint));
     if (grant.status !== 200) return null;
-    const { path: file, cursor } = JSON.parse(grant.text);
-    const response = await fetch(syncEndpoint + file, { signal: AbortSignal.timeout(30000) });
+    const parsed = parseShellGrant(grant.text);
+    if (!parsed) return null;
+    const response = await fetch(scopedUrl(syncEndpoint + parsed.path, syncScope), {
+      signal: AbortSignal.timeout(30000),
+      cache: "no-store",
+    });
     if (!response.ok) return null;
     const bytes = new Uint8Array(await response.arrayBuffer());
-    if (new TextDecoder().decode(bytes.subarray(0, 15)) !== "SQLite format 3") return null;
-    return { bytes, cursor, ms: performance.now() - started };
+    if (!isValidSqliteBytes(bytes)) return null;
+    return { bytes, cursor: parsed.cursor, identity: parsed.identity, ms: performance.now() - started };
   } catch {
     return null;
   }
@@ -408,9 +414,10 @@ async function fetchShell(scope, path) {
 // A browser with no database of its own will ask for a first sync as soon as the app is up.
 // Nothing in the question depends on the app, so it is asked while the module compiles and the
 // answer is waiting when the app wants it. A build that loads a shell has no use for it.
-async function earlyBootstrap(path) {
-  const asked = new URL(path || "/", self.location.origin).searchParams.get("shell") === "1";
-  if (shellFingerprint && (shellAlways || asked)) return null;
+async function earlyBootstrap(scope, path) {
+  if (shouldFetchShell({ path, fingerprint: shellFingerprint, always: shellAlways, offline: simulation.offline, blocked: scope === "invalid/invalid" })) {
+    return null;
+  }
   try {
     if ((await withFiles("readonly", get => get(SCHEMA))) != null) return null;
     return await fetchReply("GET", "/bootstrap");
@@ -429,7 +436,7 @@ async function boot(payload = {}) {
   const started = performance.now();
   // The shell downloads while the module compiles.
   const shellFetch = fetchShell(scope, payload.path);
-  const bootstrapFetch = earlyBootstrap(payload.path);
+  const bootstrapFetch = earlyBootstrap(scope, payload.path);
   const module = payload.module || await WebAssembly.compileStreaming(fetch(import.meta.env.VITE_WASM_URL || "/app.wasm"));
   const compiled = performance.now();
   let storageMs, runtimeMs;
@@ -472,7 +479,7 @@ async function boot(payload = {}) {
     if (fromShell) {
       // The shell's cursor is its last write. One that did not arrive whole has none.
       const state = candidate.syncState();
-      if (!state.bootstrapped || state.cursor !== shell.cursor) throw new Error("The shell does not carry its cursor.");
+      if (!validateShellState(state, shell)) throw new Error("The shell does not match its grant.");
     } else {
       shell = null;
     }

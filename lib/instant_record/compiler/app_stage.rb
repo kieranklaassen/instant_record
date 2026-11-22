@@ -93,8 +93,6 @@ module InstantRecord
         # The session is the server's: the page asks Rails for it over the network.
         "app/controllers/auth/sessions_controller.rb",
         "app/controllers/slack/resets_controller.rb", "app/controllers/email/sync_controller.rb", "app/models/mailbox.rb",
-        # The shell snapshot is built on the server, from the server's Mailbox.
-        "app/models/mail_shell.rb", "app/jobs/email/shell_build_job.rb",
         "app/views/source", "app/views/pwa",
         "app/helpers/source_helper.rb",
         "test", "db/v2_migrate", "db/seeds.rb", "config/routes", "script", "lib/tasks"

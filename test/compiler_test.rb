@@ -273,7 +273,8 @@ class CompilerTest < ActiveSupport::TestCase
         demo: false,
         models: ["Note"],
         migration_plan: plan,
-        pipeline_dir: PIPELINE_DIR
+        pipeline_dir: PIPELINE_DIR,
+        shell_fingerprint: "abc123fingerprint"
       )
 
       wasm_main = File.read(File.join(emit, "main_wasm.rb"))
@@ -283,13 +284,15 @@ class CompilerTest < ActiveSupport::TestCase
       assert_includes wasm_main, '\#{x}\#@y\#$z'
       assert_includes wasm_main, "InstantRecord.sync(Note)"
       assert_includes wasm_main, "InstantRecord::Client.streaming = true"
+      assert_includes wasm_main, 'fingerprint: "abc123fingerprint"'
 
       screens = InstantRecord::Compiler::EntryBuilder.write_native_entry(
         tree_dir: emit,
         app_dir: app,
         demo: false,
         models: ["Note"],
-        migration_plan: plan
+        migration_plan: plan,
+        shell_fingerprint: "abc123fingerprint"
       )
 
       assert_equal ["inbox_list"], screens
@@ -298,6 +301,7 @@ class CompilerTest < ActiveSupport::TestCase
       assert_includes native_main, 'when "inbox_list" then InboxListScreen.new(params)'
       assert_includes native_main, 'InstantRecord::SyncMetadata.set("schema_version", "00000020261120000001")'
       assert_includes native_main, "InstantRecord::Client.streaming = false"
+      assert_includes native_main, 'fingerprint: "abc123fingerprint"'
 
       transport = File.read(File.join(emit, "app/models/instant_record/client/transport.rb"))
       assert_includes transport, 'NativeHost.ir_host_give("request", body)'

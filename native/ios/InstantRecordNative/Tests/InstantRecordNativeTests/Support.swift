@@ -71,6 +71,10 @@ final class FakeEngine: Engine {
     var bootstrapped = true
     var boots = true
     var syncs = true
+    var shellFingerprint = ""
+    var cursorValue = 7
+    var identityValue = ""
+    var onOpen: ((String) -> Bool)?
     private var last = ""
     private var endpoint = ""
     private var answer: (String) -> String = { _ in Transport.offline }
@@ -82,6 +86,7 @@ final class FakeEngine: Engine {
 
     func open(database: String) -> Bool {
         note("open " + database)
+        if let onOpen { return onOpen(database) }
         guard !database.contains("locked") else { return false }
         rows = database.contains("billing") ? ["b1"] : ["m2", "m1"]
         return true
@@ -109,9 +114,10 @@ final class FakeEngine: Engine {
         case "sync_plan":
             note("sync_plan")
             if raises.contains(entry) { return nil }
-            return "{\"push\":\(FakeEngine.quoted(push)),\"bootstrap\":\(!bootstrapped)}"
+            let fp = shellFingerprint.isEmpty ? "" : ",\"fingerprint\":\(FakeEngine.quoted(shellFingerprint))"
+            return "{\"push\":\(FakeEngine.quoted(push)),\"bootstrap\":\(!bootstrapped)\(fp)}"
         case "cursor":
-            return "cursor=7 pending=\(push.isEmpty ? 0 : 1) bootstrap=\(bootstrapped ? "ready" : "needed") identity="
+            return "cursor=\(cursorValue) pending=\(push.isEmpty ? 0 : 1) bootstrap=\(bootstrapped ? "ready" : "needed") identity=\(identityValue)"
         case "sync":
             note("sync " + input)
             if raises.contains(entry) { return nil }
@@ -119,7 +125,8 @@ final class FakeEngine: Engine {
                 let reply = ask("POST \(input)/mutations\n\(push)")
                 if reply.hasPrefix("2") { push = "" } else { return "unchanged" }
             }
-            if ask(bootstrapped ? "GET \(input)/events?after=7&window=0\n" : "GET \(input)/bootstrap\n").hasPrefix("2") { bootstrapped = true }
+            let who = identityValue.isEmpty ? "" : "&identity=\(identityValue)"
+            if ask(bootstrapped ? "GET \(input)/events?after=\(cursorValue)&window=0\(who)\n" : "GET \(input)/bootstrap\n").hasPrefix("2") { bootstrapped = true }
             return "changed"
         default:
             note(entry + " " + input)

@@ -1,5 +1,6 @@
 require "instant_record/sync_scope"
 require "instant_record/files"
+require "instant_record/shell"
 
 module InstantRecord
   class Engine < ::Rails::Engine
@@ -8,6 +9,7 @@ module InstantRecord
     config.instant_record = ActiveSupport::OrderedOptions.new
     config.instant_record.mount_path = DEFAULT_MOUNT_PATH
     config.instant_record.build_on_precompile = false
+    config.instant_record.shell_snapshot = nil
     # Serve a native app's screens over HTTP for development (NativeScreensController).
     config.instant_record.native_dev = false
 

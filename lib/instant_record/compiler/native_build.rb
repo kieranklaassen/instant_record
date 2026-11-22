@@ -117,7 +117,8 @@ module InstantRecord
           app_dir: app,
           demo: @demo,
           models: @models,
-          migration_plan: plan
+          migration_plan: plan,
+          shell_fingerprint: emitted[:shell_fingerprint]
         )
         @out.puts "wrote main_native.rb with screens: #{screens.empty? ? 'none' : screens.join(', ')}"
 

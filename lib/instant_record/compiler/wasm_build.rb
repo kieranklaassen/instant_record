@@ -10,6 +10,7 @@ require_relative "runner"
 require_relative "source_pages"
 require_relative "toolchain"
 require_relative "wasm_tree"
+require_relative "../shell"
 
 module InstantRecord
   class Compiler
@@ -17,7 +18,7 @@ module InstantRecord
     class WasmBuild
       WASM_OPT_LEVEL = "-Oz"
       WASM_OPT_PASS = "-Oz"
-      SHELL_FORMAT = 1
+      SHELL_FORMAT = InstantRecord::Shell::FORMAT
       DEFAULT_SYNC_ENDPOINT = "http://127.0.0.1:3210/instant_record"
       SPINEL_PACKAGES = %w[json stringio zlib].freeze
       HOTWIRE_ASSETS = %w[turbo.min.js stimulus.min.js stimulus-loading.js].freeze
@@ -163,6 +164,11 @@ module InstantRecord
         version_controller_urls(app, emit)
         disable_jemalloc(emit)
 
+        shell_fingerprint = InstantRecord::Shell.fingerprint(
+          models: EntryBuilder.app_models(demo: @demo, models: @models),
+          schema_path: File.join(app, "db/schema.rb")
+        )
+
         tree = File.join(@build_dir, "wasm-tree")
         clean(tree)
         EntryBuilder.write_wasm_entry(
@@ -170,11 +176,12 @@ module InstantRecord
           demo: @demo,
           models: @models,
           migration_plan: plan,
-          pipeline_dir: @pipeline_dir
+          pipeline_dir: @pipeline_dir,
+          shell_fingerprint: shell_fingerprint
         )
         WasmTree.build(source: emit, target: tree, demo: @demo)
 
-        { app: app, emit: emit, tree: tree, plan: plan }
+        { app: app, emit: emit, tree: tree, plan: plan, shell_fingerprint: shell_fingerprint }
       end
 
       def input_digest
@@ -467,9 +474,7 @@ module InstantRecord
         digest = Digest::SHA256.file(final_wasm).hexdigest[0, 10]
         dist = File.join(@build_dir, "site")
 
-        model_set = EntryBuilder.app_models(demo: @demo, models: @models).sort.join(",")
-        schema_source = File.read(File.join(app, "db/schema.rb"))
-        shell_fingerprint = Digest::SHA256.hexdigest([SHELL_FORMAT.to_s, model_set, schema_source].join("\n"))
+        shell_fingerprint = emitted[:shell_fingerprint]
         schema_digest = Digest::SHA256.file(File.join(emit, "config/schema.rb")).hexdigest
 
         @runner.run(

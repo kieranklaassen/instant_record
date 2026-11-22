@@ -8,7 +8,7 @@ class MailShellTest < ActionDispatch::IntegrationTest
     MailEntry.delete_all
     Mailbox.delete_all
     @shells = Pathname(Dir.mktmpdir("mail_shells"))
-    @root, MailShell.root = MailShell.root, @shells
+    @root, InstantRecord::Shell.root = InstantRecord::Shell.root, @shells
     @mailbox = Mailbox.create!(id: "support")
     Mailbox.create!(id: "billing")
     @first = write("First request")
@@ -18,7 +18,7 @@ class MailShellTest < ActionDispatch::IntegrationTest
   end
 
   teardown do
-    MailShell.root = @root
+    InstantRecord::Shell.root = @root
     FileUtils.rm_rf(@shells)
   end
 
@@ -30,7 +30,11 @@ class MailShellTest < ActionDispatch::IntegrationTest
     @mailbox.append!(id: SecureRandom.uuid, author: "maya", attributes: { kind: kind, parent_id: parent.id, body: body })
   end
 
-  def grant(member = "maya", inbox = "support", fingerprint: MailShell.fingerprint)
+  def build_inbox(id = @mailbox.id)
+    InstantRecord::Shell.build_source(:mailbox, id)
+  end
+
+  def grant(member = "maya", inbox = "support", fingerprint: InstantRecord::Shell.fingerprint)
     get "/email/sync/#{member}/#{inbox}/shell", params: { fingerprint: fingerprint }
   end
 
@@ -38,8 +42,11 @@ class MailShellTest < ActionDispatch::IntegrationTest
   def download(member = "maya")
     grant(member)
     assert_response :success
+    assert_equal "private, no-store", response.headers["cache-control"]
     get "/email/sync/#{member}/support#{response.parsed_body.fetch("path")}"
     assert_response :success
+    assert_equal "private, no-store", response.headers["cache-control"]
+    assert_equal "nosniff", response.headers["x-content-type-options"]
     file = @shells.join("client-#{SecureRandom.hex(4)}.sqlite3")
     file.binwrite(response.body)
     database = SQLite3::Database.new(file.to_s, results_as_hash: true)
@@ -48,7 +55,7 @@ class MailShellTest < ActionDispatch::IntegrationTest
 
   # A wire row as the compiled runtime stores it: its datetimes in the runtime's form.
   def stored(attributes)
-    attributes.merge(%w[created_at updated_at].to_h { |name| [name, Time.iso8601(attributes[name]).utc.strftime(MailShell::DB_TIME)] })
+    attributes.merge(%w[created_at updated_at].to_h { |name| [name, Time.iso8601(attributes[name]).utc.strftime(InstantRecord::Shell::DB_TIME)] })
   end
 
   # The feed from a cursor, applied as the client applies it: an upsert by id.
@@ -76,7 +83,7 @@ class MailShellTest < ActionDispatch::IntegrationTest
   end
 
   test "a missing shell sends the browser to the bootstrap and is built for the next one" do
-    assert_enqueued_with(job: Email::ShellBuildJob, args: ["support"]) { grant }
+    assert_enqueued_with(job: InstantRecord::ShellBuildJob, args: [{ source: "mailbox", arg: "support" }]) { grant }
     assert_response :no_content
 
     perform_enqueued_jobs
@@ -86,23 +93,24 @@ class MailShellTest < ActionDispatch::IntegrationTest
   end
 
   test "a shell holds what the bootstrap sends, stamped with the revision it was read at" do
-    MailShell.build(@mailbox)
+    build_inbox
     database, cursor = download
 
     assert_equal @mailbox.reload.revision, cursor
     assert_equal bootstrap_rows, rows(database)
     assert_equal ["synced"], database.execute("SELECT DISTINCT sync_state FROM mail_entries").map { |row| row["sync_state"] }
     saved = database.execute("SELECT key, value FROM instant_record_sync_metadata").to_h { |row| [row["key"], row["value"]] }
-    assert_equal MailShell::MODELS.join(","), saved["compiled_models"]
-    assert_equal MailShell.fingerprint, saved["shell_fingerprint"]
+    assert_equal InstantRecord::Shell.models.sort.join(","), saved["compiled_models"]
+    assert_equal InstantRecord::Shell.fingerprint, saved["shell_fingerprint"]
+    assert_match(/\A\d{20}\z/, saved["schema_version"])
     # Every table the browser's schema has, so its own queries find them.
     tables = database.execute("SELECT name FROM sqlite_master WHERE type = 'table'").map { |row| row["name"] }
     assert_empty %w[issues messages notes channels chat_users instant_record_outbox mail_entries] - tables
   end
 
   test "an old shell and the feed after its stamp arrive where a fresh bootstrap does" do
-    MailShell.build(@mailbox)
-    stamp = MailShell.latest("support").cursor
+    build_inbox
+    stamp = InstantRecord::Shell.latest("support").cursor
     later = write("Arrived after the shell")
     act("reply", later, body: "Welcome")
     act("read", @first)
@@ -118,7 +126,7 @@ class MailShellTest < ActionDispatch::IntegrationTest
   end
 
   test "the address is one person's, for one inbox, for a short while" do
-    MailShell.build(@mailbox)
+    build_inbox
     grant("maya")
     path = response.parsed_body.fetch("path")
 
@@ -131,37 +139,37 @@ class MailShellTest < ActionDispatch::IntegrationTest
     grant("jo")
     assert_response :forbidden
 
-    travel MailShell::URL_LIFETIME + 1.second do
+    travel InstantRecord::Shell::URL_LIFETIME + 1.second do
       get "/email/sync/maya/support#{path}"
       assert_response :not_found
     end
   end
 
   test "a browser built against another schema is not offered the shell" do
-    MailShell.build(@mailbox)
+    build_inbox
     assert_no_enqueued_jobs { grant(fingerprint: "0" * 64) }
     assert_response :no_content
   end
 
   test "a shell that is behind is still served and rebuilt, and one too far behind is not served" do
-    MailShell.build(@mailbox)
-    stamp = MailShell.latest("support").cursor
+    build_inbox
+    stamp = InstantRecord::Shell.latest("support").cursor
 
-    @mailbox.update!(revision: stamp + MailShell::REBUILD_AFTER_CHANGES + 1)
-    assert_enqueued_with(job: Email::ShellBuildJob) { grant }
+    @mailbox.update!(revision: stamp + InstantRecord::Shell::REBUILD_AFTER_CHANGES + 1)
+    assert_enqueued_with(job: InstantRecord::ShellBuildJob) { grant }
     assert_response :success
     assert_equal stamp, response.parsed_body["cursor"]
 
-    @mailbox.update!(revision: stamp + MailShell::SERVE_WITHIN_CHANGES + 1)
+    @mailbox.update!(revision: stamp + InstantRecord::Shell::SERVE_WITHIN_CHANGES + 1)
     grant
     assert_response :no_content
 
     @mailbox.update!(revision: stamp)
-    travel MailShell::REBUILD_AFTER + 1.minute do
-      assert_enqueued_with(job: Email::ShellBuildJob) { grant }
+    travel InstantRecord::Shell::REBUILD_AFTER + 1.minute do
+      assert_enqueued_with(job: InstantRecord::ShellBuildJob) { grant }
       assert_response :success
     end
-    travel MailShell::SERVE_WITHIN + 1.minute do
+    travel InstantRecord::Shell::SERVE_WITHIN + 1.minute do
       grant
       assert_response :no_content
     end
@@ -169,18 +177,18 @@ class MailShellTest < ActionDispatch::IntegrationTest
 
   test "the browser build computes the fingerprint from the same format and model list" do
     require "instant_record/compiler"
-    assert_equal MailShell::FORMAT, InstantRecord::Compiler::WasmBuild::SHELL_FORMAT
-    assert_equal MailShell::MODELS, InstantRecord::Compiler::EntryBuilder::DEMO_MODELS.sort
+    assert_equal InstantRecord::Shell::FORMAT, InstantRecord::Compiler::WasmBuild::SHELL_FORMAT
+    assert_equal InstantRecord::Shell.models.sort, InstantRecord::Compiler::EntryBuilder::DEMO_MODELS.sort
   end
 
   test "a rebuild replaces the file once its addresses have run out" do
-    old = MailShell.build(@mailbox)
-    assert_equal old.path, MailShell.build(@mailbox).path
+    old = build_inbox
+    assert_equal old.path, build_inbox.path
 
     write("One more")
-    @mailbox.update!(revision: @mailbox.reload.revision + MailShell::REBUILD_AFTER_CHANGES)
-    travel MailShell::URL_LIFETIME + 1.second do
-      fresh = MailShell.build(@mailbox)
+    @mailbox.update!(revision: @mailbox.reload.revision + InstantRecord::Shell::REBUILD_AFTER_CHANGES)
+    travel InstantRecord::Shell::URL_LIFETIME + 1.second do
+      fresh = build_inbox
       assert_operator fresh.cursor, :>, old.cursor
       assert_equal [fresh.path], Dir.glob(@shells.join("support.*.sqlite3").to_s)
     end
