@@ -14,6 +14,7 @@ export async function runDrain({
   report = () => {},
   setCursor = () => {},
   onRecordsChanged = () => {},
+  onSyncNotices = () => {},
   scheduleRetry,
   retryState,
 }) {
@@ -38,6 +39,9 @@ export async function runDrain({
     if (push || snapshot) report({ kind: "sync-pass", path: `${applied.pending} pending` });
     // After a bootstrap the next poll reads the cursor and the identity afresh.
     setCursor(plan.bootstrap ? null : applied.cursor);
+    const syncNotices = applied.notices?.length && typeof host.notices === "function"
+      ? host.notices({ action: "list" }).notices
+      : null;
     if (applied.changed || applied.notified) {
       save();
     }
@@ -53,9 +57,10 @@ export async function runDrain({
     } else {
       retryState.delayMs = retryState.baseMs;
     }
-    return applied;
+    return { ...applied, syncNotices };
   });
 
+  if (result.syncNotices) onSyncNotices(result.syncNotices);
   if (!initial && result.notified) onRecordsChanged(result.changes);
   return result;
 }

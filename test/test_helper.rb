@@ -71,6 +71,7 @@ module InstantRecordTestHelpers
     ActiveRecord::Base.connection.execute("DELETE FROM items")
     InstantRecord::OutboxMutation.delete_all
     InstantRecord::SyncMetadata.delete_all
+    InstantRecord::SyncNotice.delete_all
     InstantRecord::Change.delete_all
     InstantRecord::AppliedMutation.delete_all
     InstantRecord::Client.forget_database

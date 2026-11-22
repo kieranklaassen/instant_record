@@ -61,20 +61,26 @@ module InstantRecord
         evicted = evict_beyond_windows
         drained, reconciled = drain_outbox
         pulled = bootstrapped? ? poll_changes : bootstrap
-        notify_changed if evicted || reconciled || pulled
+        notify_changed if evicted || reconciled || pulled || recorded_notices.any?
         evicted || drained || pulled
       end
 
       # Which records changed since the page was last told, as "Type:id"
-      # lines after the notice itself. The notice alone means anything may have.
+      # lines after the notice itself, followed by any quarantined sync notices
+      # as "sync_notice:<json>" lines. The notice alone means anything may have.
       def changes_notice
-        return "records_changed" if @unlisted_changes || changed_records.empty?
-
-        "records_changed\n" + changed_records.join("\n")
+        lines = ["records_changed"]
+        lines.concat(changed_records) unless @unlisted_changes || changed_records.empty?
+        recorded_notices.each { |notice| lines << "sync_notice:#{JSON.generate(notice)}" }
+        lines.join("\n")
       end
 
       def changed_records
         @changed_records ||= []
+      end
+
+      def recorded_notices
+        @recorded_notices ||= []
       end
 
       def unlisted_changes
@@ -92,6 +98,7 @@ module InstantRecord
       def notify_changed
         notifier.records_changed
         changed_records.clear
+        recorded_notices.clear
         @unlisted_changes = false
       end
 
@@ -220,6 +227,9 @@ module InstantRecord
           end
         end
         Rebaser.reset_types(types)
+        SyncNotice.all.each do |notice|
+          notice.destroy if types.include?(notice.record_type)
+        end
         # The rows that stay were last brought up to date at this cursor. The
         # bootstrap to come only adds and changes rows, so the poll after it
         # starts here again and a destroy made in between is not missed.
@@ -348,7 +358,7 @@ module InstantRecord
           end
         end
 
-        notify_changed if evicted || reconciled || bootstrapped_now
+        notify_changed if evicted || reconciled || bootstrapped_now || recorded_notices.any?
 
         { changed: changed, progressed: progressed, failed: failed, quarantined: quarantined }
       end
@@ -390,6 +400,7 @@ module InstantRecord
         reset_stream
         history_marks.clear
         changed_records.clear
+        recorded_notices.clear
         @unlisted_changes = false
         @eviction_pending = false
         nil
@@ -579,31 +590,56 @@ module InstantRecord
           mutation = OutboxMutation.find_by(id: result["mutation_id"])
           next unless mutation
 
-          SyncMetadata.delete("#{RETRY_PREFIX}#{mutation.id}")
-          if mutation.mutator?
-            changed_visible = applying_remote do
-              moved =
-                case result["status"]
-                when "applied"
-                  reconcile_applied_mutator(mutation, result)
-                when "rejected"
-                  reconcile_rejected_mutator(mutation, result)
-                else
-                  false
-                end
-              mutation.destroy!
-              moved
-            end
-            reconciled = true if changed_visible
-          else
-            changed_visible = applying_remote do
-              Rebaser.reconcile_mutation_result(mutation, result)
-            end
-            if changed_visible
-              note_change(mutation.record_type, mutation.record_id)
-              reconciled = true
+          notice = nil
+          OutboxMutation.transaction do
+            SyncMetadata.delete("#{RETRY_PREFIX}#{mutation.id}")
+            if mutation.mutator?
+              changed_visible = applying_remote do
+                moved =
+                  case result["status"]
+                  when "applied"
+                    reconcile_applied_mutator(mutation, result)
+                  when "rejected"
+                    notice = quarantine_mutation(
+                      mutation,
+                      kind: "rejected",
+                      reason: result["reason"].to_s.presence || "Rejected by server",
+                      result: result
+                    )
+                    reconcile_rejected_mutator(mutation, result)
+                  else
+                    false
+                  end
+                mutation.destroy!
+                moved
+              end
+              reconciled = true if changed_visible
+            else
+              if result["status"] == "applied" && result["skipped"]
+                notice = quarantine_mutation(
+                  mutation,
+                  kind: "conflict",
+                  reason: result["reason"].to_s.presence || "Overwritten by a newer server change",
+                  result: result
+                )
+              elsif result["status"] == "rejected"
+                notice = quarantine_mutation(
+                  mutation,
+                  kind: "rejected",
+                  reason: result["reason"].to_s.presence || "Rejected by server",
+                  result: result
+                )
+              end
+              changed_visible = applying_remote do
+                Rebaser.reconcile_mutation_result(mutation, result)
+              end
+              if changed_visible
+                note_change(mutation.record_type, mutation.record_id)
+                reconciled = true
+              end
             end
           end
+          announce_notice(notice) if notice
           resolved += 1
         end
         [resolved, reconciled]
@@ -650,7 +686,7 @@ module InstantRecord
         threshold = [InstantRecord.config.max_server_error_retries.to_i, 1].max
 
         if attempts >= threshold
-          reconciled = quarantine_mutation(mutation, status: status, error: error, attempts: attempts)
+          reconciled = isolate_poison_pill(mutation, status: status, error: error, attempts: attempts)
           SyncMetadata.delete(retry_key)
           clear_adaptive_batch_limit
           { quarantined: 1, reconciled: reconciled, bisected: false }
@@ -660,7 +696,7 @@ module InstantRecord
         end
       end
 
-      def quarantine_mutation(mutation, status:, error:, attempts:)
+      def isolate_poison_pill(mutation, status:, error:, attempts:)
         payload = {
           "mutation_id" => mutation.id,
           "record_type" => mutation.record_type,
@@ -933,6 +969,8 @@ module InstantRecord
 
         incoming_at = attributes["updated_at"] && Time.parse(attributes["updated_at"].to_s)
         local_at = record.persisted? ? record.updated_at : nil
+        prior_pending = !authoritative && record.persisted? && record.sync_state == "pending"
+        prior_attributes = prior_pending ? InstantRecord.wire_attributes(record.attributes) : nil
 
         record.assign_attributes(attributes.except("id", "server_version"))
 
@@ -945,17 +983,63 @@ module InstantRecord
           return false
         end
 
+        inbound_conflict = prior_pending && (record.changed - BOOKKEEPING_COLUMNS).any? &&
+          OutboxMutation.find_by(record_type: model.name, record_id: record.id).nil?
+
         record.server_version = version || attributes["server_version"] || 0
         record.sync_state = "synced"
         return false unless record.changed?
 
         data_changed = !record.persisted? || (record.changed - BOOKKEEPING_COLUMNS).any?
-        if data_changed
+        quarantined = nil
+        if inbound_conflict && data_changed
+          OutboxMutation.transaction do
+            quarantined = SyncNotice.record!(
+              kind: "conflict",
+              record_type: model.name,
+              record_id: record.id,
+              operation: "update",
+              reason: "Overwritten by a newer server change",
+              attempted_changes: prior_attributes,
+              server_attributes: InstantRecord.wire_attributes(attributes),
+              server_version: record.server_version
+            )
+            record.save!(validate: false)
+          end
+          announce_notice(quarantined) if quarantined
+        elsif data_changed
           record.save!(validate: false)
         else
           record.update_columns(sync_state: record.sync_state, server_version: record.server_version)
         end
         data_changed
+      end
+
+      def quarantine_mutation(mutation, kind:, reason:, result:)
+        return nil if SyncNotice.find_by(mutation_id: mutation.id)
+
+        SyncNotice.record!(
+          mutation_id: mutation.id,
+          kind: kind,
+          record_type: mutation.record_type,
+          record_id: mutation.record_id,
+          operation: mutation.operation,
+          reason: reason,
+          attempted_changes: mutation.changes_payload || {},
+          server_attributes: result["server_attributes"] || {},
+          server_version: result["version"].to_i
+        )
+      end
+
+      def announce_notice(notice)
+        recorded_notices << notice.as_notice
+        instrument("notice",
+          id: notice.id,
+          kind: notice.kind,
+          record_type: notice.record_type,
+          record_id: notice.record_id,
+          operation: notice.operation,
+          reason: notice.reason)
       end
 
       def log_failure(phase, error)

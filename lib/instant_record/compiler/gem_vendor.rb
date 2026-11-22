@@ -18,6 +18,7 @@ module InstantRecord
         lib/instant_record/syncable.rb
         lib/instant_record/outbox_mutation.rb
         lib/instant_record/sync_metadata.rb
+        lib/instant_record/sync_notice.rb
         lib/instant_record/sync_window.rb
         lib/instant_record/client.rb
         lib/instant_record/client/rebaser.rb
@@ -130,6 +131,17 @@ module InstantRecord
           File.join(@gem, "app/models/instant_record/change.rb"),
           File.join(@app, "app/models/instant_record/change.rb")
         )
+        copy_optional_gem_file("app/helpers/instant_record/sync_notices_helper.rb")
+        copy_optional_gem_file("app/views/instant_record/sync_notices/_notices.html.erb")
+      end
+
+      def copy_optional_gem_file(rel)
+        source = File.join(@gem, rel)
+        return unless File.file?(source)
+
+        target = File.join(@app, rel)
+        FileUtils.mkdir_p(File.dirname(target))
+        FileUtils.cp(source, target)
       end
 
       def apply_core_seams

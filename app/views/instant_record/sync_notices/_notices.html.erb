@@ -1,0 +1,63 @@
+<section id="<%= dom_id %>"
+         class="ir-sync-notices"
+         data-instant-record-sync-notices="true"
+         data-notice-count="<%= notices.size %>"
+         aria-live="polite"
+         <%= "hidden" if notices.empty? %>>
+  <% notices.each do |notice| %>
+    <% diffs = instant_record_notice_diff(notice) %>
+    <article class="ir-sync-notice ir-sync-notice--<%= notice.kind %>"
+             data-sync-notice-id="<%= notice.id %>"
+             data-sync-notice-kind="<%= notice.kind %>"
+             data-sync-notice-record-type="<%= notice.record_type %>"
+             data-sync-notice-record-id="<%= notice.record_id %>">
+      <header class="ir-sync-notice__header">
+        <span class="ir-sync-notice__badge"><%= notice.conflict? ? "Conflict" : "Rejected" %></span>
+        <strong class="ir-sync-notice__target"><%= notice.record_type %> (<%= notice.operation %>)</strong>
+        <p class="ir-sync-notice__reason"><%= notice.reason %></p>
+      </header>
+
+      <% if diffs.any? %>
+        <dl class="ir-sync-notice__diffs">
+          <% diffs.each do |diff| %>
+            <div class="ir-sync-notice__diff">
+              <dt><%= diff["field"] %></dt>
+              <dd>
+                <span class="ir-sync-notice__local" data-side="local"><%= diff["local"].nil? ? "(removed)" : diff["local"].to_s %></span>
+                <% unless diff["server"].nil? %>
+                  <span class="ir-sync-notice__server" data-side="server"><%= diff["server"].to_s %></span>
+                <% end %>
+              </dd>
+            </div>
+          <% end %>
+        </dl>
+      <% end %>
+
+      <div class="ir-sync-notice__actions">
+        <form action="<%= base_path %>/<%= notice.id %>/retry" method="post" data-sync-notice-action="retry">
+          <% if respond_to?(:form_authenticity_token) && respond_to?(:protect_against_forgery?) && protect_against_forgery? %>
+            <input type="hidden" name="authenticity_token" value="<%= form_authenticity_token %>">
+          <% end %>
+          <input type="hidden" name="return_to" value="<%= return_to %>">
+          <button type="submit" class="ir-sync-notice__btn ir-sync-notice__btn--retry">Retry</button>
+        </form>
+
+        <form action="<%= base_path %>/<%= notice.id %>/fork" method="post" data-sync-notice-action="fork">
+          <% if respond_to?(:form_authenticity_token) && respond_to?(:protect_against_forgery?) && protect_against_forgery? %>
+            <input type="hidden" name="authenticity_token" value="<%= form_authenticity_token %>">
+          <% end %>
+          <input type="hidden" name="return_to" value="<%= return_to %>">
+          <button type="submit" class="ir-sync-notice__btn ir-sync-notice__btn--fork">Fork as new</button>
+        </form>
+
+        <form action="<%= base_path %>/<%= notice.id %>/dismiss" method="post" data-sync-notice-action="dismiss">
+          <% if respond_to?(:form_authenticity_token) && respond_to?(:protect_against_forgery?) && protect_against_forgery? %>
+            <input type="hidden" name="authenticity_token" value="<%= form_authenticity_token %>">
+          <% end %>
+          <input type="hidden" name="return_to" value="<%= return_to %>">
+          <button type="submit" class="ir-sync-notice__btn ir-sync-notice__btn--dismiss">Dismiss</button>
+        </form>
+      </div>
+    </article>
+  <% end %>
+</section>

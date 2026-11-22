@@ -345,7 +345,12 @@ class SyncLoopTest < Minitest::Test
       assert_equal "server value", memo.reload.title
     end
 
-    assert_equal ["records_changed\nMemo:local-1"], @notifier.notices
+    lines = @notifier.notices.sole.split("\n")
+    assert_equal ["records_changed", "Memo:local-1"], lines[0, 2]
+    assert lines[2].start_with?("sync_notice:")
+    quarantined = JSON.parse(lines[2].delete_prefix("sync_notice:"))
+    assert_equal "rejected", quarantined["kind"]
+    assert_equal "not permitted", quarantined["reason"]
   end
 
   def test_a_skipped_lww_write_during_sync_pass_notifies_the_winning_record
@@ -365,7 +370,12 @@ class SyncLoopTest < Minitest::Test
       assert_equal "peer winner", memo.reload.title
     end
 
-    assert_equal ["records_changed\nMemo:local-1"], @notifier.notices
+    lines = @notifier.notices.sole.split("\n")
+    assert_equal ["records_changed", "Memo:local-1"], lines[0, 2]
+    assert lines[2].start_with?("sync_notice:")
+    quarantined = JSON.parse(lines[2].delete_prefix("sync_notice:"))
+    assert_equal "conflict", quarantined["kind"]
+    assert_equal "local-1", quarantined["record_id"]
   end
 
   def test_a_bootstrap_emits_an_unlisted_change_notice
@@ -464,11 +474,12 @@ class SyncLoopTest < Minitest::Test
           "attributes" => { "id" => "m-3", "title" => "concurrent peer", "updated_at" => Time.current.utc.iso8601(6) } }
       ]
       InstantRecord.tick
-      assert_equal [
-        "records_changed",
-        "records_changed\nMemo:m-2",
-        "records_changed\nMemo:m-1\nMemo:m-3"
-      ], @notifier.notices
+      assert_equal 3, @notifier.notices.size
+      assert_equal ["records_changed", "records_changed\nMemo:m-2"], @notifier.notices[0, 2]
+      final_lines = @notifier.notices[2].split("\n")
+      assert_equal ["records_changed", "Memo:m-1", "Memo:m-3"], final_lines[0, 3]
+      assert final_lines[3].start_with?("sync_notice:")
+      assert_equal "forbidden", JSON.parse(final_lines[3].delete_prefix("sync_notice:"))["reason"]
       assert_equal "my second edit", memo.reload.title
     end
   end
