@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { FileMissing, FileStore } from "./files.js"
+import { DEFAULT_CHUNK_SIZE, FileMissing, FileStore } from "./files.js"
 import { fakeDisk, fakeServer } from "./test/fake-disk.js"
 
 // A page's store: four bytes to a piece, so a short string is several.
@@ -404,6 +404,49 @@ test("who is asking goes with every request", async () => {
 
   assert.ok(server.requests.length > 0)
   assert.ok(server.requests.every((request) => request.scope === "token"))
+})
+
+test("default chunk size stays below 1 MB proxy limits and chunkSize is configurable", () => {
+  assert.equal(DEFAULT_CHUNK_SIZE, 512 * 1024)
+  assert.ok(DEFAULT_CHUNK_SIZE < 1024 * 1024)
+
+  const defaults = new FileStore({ storage: fakeDisk().storage, fetch: fakeServer().fetch, locks: null, channel: null })
+  assert.equal(defaults.chunkSize, DEFAULT_CHUNK_SIZE)
+  assert.equal(defaults.pieceSize, DEFAULT_CHUNK_SIZE)
+
+  const custom = new FileStore({ storage: fakeDisk().storage, fetch: fakeServer().fetch, locks: null, channel: null, chunkSize: 16384 })
+  assert.equal(custom.chunkSize, 16384)
+  assert.equal(custom.pieceSize, 16384)
+
+  assert.throws(() => new FileStore({ chunkSize: 0 }), RangeError)
+  assert.throws(() => new FileStore({ chunkSize: -4 }), RangeError)
+  assert.throws(() => new FileStore({ chunkSize: 1.5 }), RangeError)
+})
+
+test("uploads and downloads adapt to a smaller server-advertised chunk size", async () => {
+  const server = fakeServer({ records: ["Clip/one"], chunkSize: 3 })
+  const files = open(fakeDisk(), server, { chunkSize: 8, pieceSize: undefined })
+  await files.attach("Clip", "one", take("0123456789"))
+
+  assert.deepEqual(await files.sync(), { sent: 1, waiting: 0 })
+  assert.equal(await server.files.get("Clip/one").text(), "0123456789")
+  assert.deepEqual(server.asked("PUT").map((request) => request.offset), ["0", "3", "6", "9"])
+
+  // Download also respects x-instant-record-chunk-size from HEAD.
+  server.requests.length = 0
+  const other = open(fakeDisk(), server, { chunkSize: 8, pieceSize: undefined })
+  assert.equal(await text(await other.open("Clip", "one")), "0123456789")
+  assert.deepEqual(server.asked("GET").map((request) => request.range), ["bytes=0-2", "bytes=3-5", "bytes=6-8", "bytes=9-9"])
+})
+
+test("a 413 response with a smaller chunk_size shrinks upload pieces and succeeds", async () => {
+  const server = fakeServer({ records: ["Clip/one"], chunkSize: 3, advertiseChunkSize: false })
+  const files = open(fakeDisk(), server, { chunkSize: 8, pieceSize: undefined })
+  await files.attach("Clip", "one", take("01234567"))
+
+  assert.deepEqual(await files.sync(), { sent: 1, waiting: 0 })
+  assert.equal(await server.files.get("Clip/one").text(), "01234567")
+  assert.deepEqual(server.asked("PUT").map((request) => request.bodySize), [8, 3, 3, 2])
 })
 
 // The disk a store was opened on, for a second page over the same files.
