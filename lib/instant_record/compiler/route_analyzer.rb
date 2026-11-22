@@ -56,7 +56,16 @@ module InstantRecord
       def analyze
         routes_path = File.join(@source_root, "config/routes.rb")
         unless File.file?(routes_path)
-          raise BuildError, "Missing config/routes.rb in #{@source_root}"
+          raise BuildError, "Missing config/routes.rb in #{@source_root}" if @island
+
+          return Result.new(
+            has_local_first: false,
+            declared_islands: [],
+            local_routes: [],
+            server_routes: [],
+            overrides: @overrides,
+            local_routes_source: nil
+          )
         end
 
         source = File.read(routes_path)
