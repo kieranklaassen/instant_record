@@ -175,15 +175,36 @@ window.fetch = async (input, init) => {
 };
 
 // The gem's service worker posts records_changed to its clients; the demo's layout turns that
-// into this window event for pages that refresh in place, and reloads the rest.
+// into this window event for pages that refresh in place, and redraws the rest.
 // `changes` lists the records that changed as { type, id }, or is null when
 // the sync pass could not list them: then anything may have changed.
 function recordsChanged(changes) {
   if (document.querySelector("[data-instant-refresh]")) {
     window.dispatchEvent(new CustomEvent("instant-record:records-changed", { detail: { changes: changes || null } }));
   } else {
-    window.location.reload(); // what the demo's layout does for pages without an in-place refresh
+    redraw();
   }
+}
+
+// A page with no refresh of its own is drawn again from the local database. Where Turbo drew
+// the page, Turbo draws it again in place: a visit to the address it is on, answered by the
+// app in this browser. A whole reload would start the app again, after every write the page
+// itself made. Turbo refreshes nothing while a visit is under way, so this waits for its end.
+function redraw() {
+  const turbo = window.Turbo?.session;
+  if (!turbo?.refresh) return window.location.reload();
+  if (turbo.navigator.currentVisit) return document.addEventListener("turbo:load", redraw, { once: true });
+  // Morphed, so the scroll stays where it is, and the field being typed in is left out of the
+  // morph: the page as the app draws it has that field empty, and the letters are the person's.
+  redrawing = true;
+  setTimeout(() => { redrawing = false; }, 2000);
+  turbo.refresh(document.baseURI, { method: "morph", scroll: "preserve" });
+}
+
+let redrawing = false;
+function keepTyping(event) {
+  const field = event.target;
+  if (redrawing && field === document.activeElement && field.matches?.("input, textarea, select, [contenteditable]")) event.preventDefault();
 }
 
 // The shell began compiling the module before this script loaded; pass it on, and ask for the
@@ -224,6 +245,8 @@ if (finalPath !== location.pathname + location.search) history.replaceState(null
 document.open();
 document.write(result.status === 200 ? result.body : `<pre>${result.status}\n${(result.errors || []).join("\n")}</pre>`);
 document.close();
+document.addEventListener("turbo:before-morph-element", keepTyping);
+document.addEventListener("turbo:render", () => { redrawing = false; });
 document.addEventListener("turbo:before-visit", event => {
   if (mailboxScope(event.detail.url) !== initialScope) {
     event.preventDefault();
