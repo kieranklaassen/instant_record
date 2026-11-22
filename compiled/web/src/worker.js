@@ -1,7 +1,11 @@
 // Dedicated worker: owns the persistent WASI reactor app, a cached IndexedDB handle,
-// retry-only outbox draining, and non-blocking async change polling (window=0, so the
-// worker never blocks on network I/O during user clicks and Puma threads are never held).
+// retry-only outbox draining, non-blocking async change polling (window=0, so the
+// worker never blocks on network I/O during user clicks and Puma threads are never held),
+// fail-loud WASM fault telemetry with a circuit breaker, bridged Ruby notifications,
+// and an opt-in rolling `.irtrace` flight recorder.
 import { AppHost } from "./app-host.js";
+import { CircuitBreaker, WasmFaultError } from "./faults.js";
+import { FlightRecorder } from "./flight-recorder.js";
 import { advance, fresh, held, query } from "./history-fill.js";
 import { mailboxScope } from "./mailbox-scope.js";
 import { openSnapshot, withFiles } from "./snapshot-store.js";
@@ -19,11 +23,94 @@ let syncScope = "";
 let simulation = { offline: false, latencyMs: 0, report: false };
 const history = [];
 
+function parseTraceSchema() {
+  try {
+    return JSON.parse(import.meta.env.VITE_TRACE_SCHEMA || "{}");
+  } catch {
+    return {};
+  }
+}
+
 function report(entry) {
   const stamped = { ...entry, at: Date.now() };
   history.push(stamped);
   if (history.length > 150) history.shift();
   if (simulation.report) self.postMessage({ type: "instant_record.debug", entry: stamped });
+}
+
+function stopBackgroundTimers() {
+  clearTimeout(kickTimer);
+  kickTimer = null;
+  clearTimeout(fillTimer);
+  fillTimer = null;
+}
+
+const breaker = new CircuitBreaker({
+  maxConsecutiveFailures: 3,
+  onTrip: (snapshot) => {
+    stopBackgroundTimers();
+    console.error(`[instant_record] Circuit breaker OPEN (${snapshot.tripReason})`, snapshot);
+  },
+});
+
+const recorder = new FlightRecorder({
+  enabled: false,
+  schema: parseTraceSchema(),
+});
+
+function handleHostFault(fault) {
+  const { trippedNow, snapshot } = breaker.recordFault(fault);
+  console.error(
+    `[instant_record] WASM fault in ${fault.exportName} (exit=${fault.exit}, circuit=${snapshot.state}): ${fault.message}`,
+    fault.errors,
+  );
+  report({
+    kind: "fault",
+    path: `${fault.exportName}: ${fault.message}`,
+    status: "failed",
+    exit: fault.exit,
+    errors: fault.errors,
+    circuit: snapshot.state,
+  });
+  self.postMessage({
+    type: "instant_record.fault",
+    fault,
+    circuit: snapshot,
+    trippedNow,
+    traceAvailable: recorder.enabled,
+  });
+}
+
+function handleHostEvents(events, exportName) {
+  for (const event of events) {
+    const durationMs = typeof event.duration_ms === "number" ? Math.round(event.duration_ms) : undefined;
+    report({
+      kind: "ruby",
+      path: event.name || "instant_record",
+      status: event.payload?.exception ? "failed" : "ok",
+      ms: durationMs,
+      payload: event.payload || {},
+      exportName,
+    });
+    self.postMessage({
+      type: "instant_record.notification",
+      name: event.name,
+      payload: event.payload || {},
+      durationMs: event.duration_ms ?? null,
+      exportName,
+      at: Date.now(),
+    });
+  }
+}
+
+function createHost(module, env = {}) {
+  return new AppHost(module, {
+    env,
+    onFault: handleHostFault,
+    onEvents: handleHostEvents,
+    onSuccess: (exportName) => breaker.recordSuccess(exportName),
+    recorder,
+  });
 }
 
 async function fetchReply(method, path, body = "", endpoint = syncEndpoint) {
@@ -97,6 +184,7 @@ let drainDelayMs = DRAIN_RETRY_BASE_MS;
 
 // Keep each tab's hot reactor until a peer changes the durable revision.
 async function withSnapshot(mode, operation) {
+  breaker.assertClosed("withSnapshot");
   let wrote = false;
   try {
     const result = await withFiles(mode, async (get, put) => {
@@ -108,7 +196,7 @@ async function withSnapshot(mode, operation) {
         }
         const bytes = await get(DATABASE);
         const previous = host;
-        const restored = new AppHost(previous.module, { env: previous.env });
+        const restored = createHost(previous.module, previous.env);
         restored.cookies = previous.cookies;
         if (bytes) restored.restoreDatabase(bytes, targetSchema);
         restored.ensureBooted();
@@ -136,12 +224,14 @@ async function withSnapshot(mode, operation) {
 }
 
 function kickSync(delay = QUIET_MS) {
+  if (breaker.isOpen()) return;
   clearTimeout(kickTimer);
   kickTimer = setTimeout(syncPass, delay);
 }
 
 // The connection came back: send what is waiting now, not at the next retry.
 self.addEventListener("online", () => {
+  if (breaker.isOpen()) return;
   kickSync(0);
   if (mailScope && fillState && !fillState.done && !fillState.full) scheduleFill(0);
 });
@@ -149,11 +239,19 @@ self.addEventListener("online", () => {
 function syncPass() {
   clearTimeout(kickTimer);
   kickTimer = null;
+  if (breaker.isOpen()) {
+    return Promise.resolve({ changed: false, fault: breaker.lastFault, circuit: breaker.snapshot() });
+  }
   if (!draining) {
     const revision = localRevision;
-    draining = drain().finally(() => {
+    draining = drain().catch((error) => {
+      if (error instanceof WasmFaultError || breaker.isOpen()) {
+        return { changed: false, fault: error.fault || breaker.lastFault, circuit: breaker.snapshot() };
+      }
+      throw error;
+    }).finally(() => {
       draining = null;
-      if (revision !== localRevision) kickSync();
+      if (revision !== localRevision && !breaker.isOpen()) kickSync();
     });
   }
   return draining;
@@ -162,6 +260,7 @@ function syncPass() {
 // `early` is a bootstrap asked for before the app was up (earlyBootstrap). One that did not
 // arrive is asked for again here.
 async function drain(initial = false, early = null) {
+  if (breaker.isOpen()) return { changed: false, fault: breaker.lastFault, circuit: breaker.snapshot() };
   const { plan, revision } = await withSnapshot("readonly", () => ({ plan: host.syncPlan(), revision: snapshotRevision }));
   const push = plan.push ? await fetchReply("POST", "/mutations", plan.push) : null;
   const snapshot = plan.bootstrap ? (early?.status === 200 ? early : await fetchReply("GET", "/bootstrap")) : null;
@@ -180,7 +279,32 @@ async function drain(initial = false, early = null) {
       }
       return { status: reply.status, body: reply.text };
     });
-    const needsBootstrap = plan.bootstrap && !host.syncState().bootstrapped;
+
+    if (result.exit !== 0 || result.fault) {
+      // Never commit a failed sync pass, never overwrite currentCursor with 0, and
+      // never mistake `pending: -1` for "nothing pending". Discard uncommitted
+      // in-memory state and retry with backoff until the circuit breaker opens.
+      snapshotRevision = Symbol("reload");
+      if (!breaker.isOpen()) {
+        kickSync(drainDelayMs);
+        drainDelayMs = Math.min(drainDelayMs * 2, DRAIN_RETRY_CAP_MS);
+      }
+      return result;
+    }
+
+    let needsBootstrap = false;
+    if (plan.bootstrap) {
+      const state = host.syncState();
+      if (state.exit !== 0 || state.fault) {
+        if (!breaker.isOpen()) {
+          kickSync(drainDelayMs);
+          drainDelayMs = Math.min(drainDelayMs * 2, DRAIN_RETRY_CAP_MS);
+        }
+        return { ...result, exit: state.exit, errors: state.errors, fault: state.fault };
+      }
+      needsBootstrap = !state.bootstrapped;
+    }
+
     if (push || snapshot) report({ kind: "sync-pass", path: `${result.pending} pending` });
     // After a bootstrap the next poll reads the cursor and the identity afresh.
     currentCursor = plan.bootstrap ? null : result.cursor;
@@ -188,15 +312,17 @@ async function drain(initial = false, early = null) {
       save();
     }
 
-    if (result.pending > 0 || needsBootstrap) {
-      kickSync(drainDelayMs);
-      drainDelayMs = Math.min(drainDelayMs * 2, DRAIN_RETRY_CAP_MS);
+    if (result.pending > 0 || result.pending < 0 || needsBootstrap) {
+      if (!breaker.isOpen()) {
+        kickSync(drainDelayMs);
+        drainDelayMs = Math.min(drainDelayMs * 2, DRAIN_RETRY_CAP_MS);
+      }
     } else {
       drainDelayMs = DRAIN_RETRY_BASE_MS;
     }
     return result;
   });
-  if (!initial && result.notified) self.postMessage({ type: "records_changed", changes: result.changes });
+  if (!initial && result.notified && !result.fault) self.postMessage({ type: "records_changed", changes: result.changes });
   return result;
 }
 
@@ -204,12 +330,13 @@ async function drain(initial = false, early = null) {
 // async fetch keeps the worker event loop unblocked for user clicks, and an empty body
 // skips Wasm entirely.
 async function pollChanges() {
-  if (!host || pollInFlight || draining || kickTimer) return;
+  if (!host || pollInFlight || draining || kickTimer || breaker.isOpen()) return;
   const revision = snapshotRevision;
   pollInFlight = true;
   try {
     if (currentCursor === null) {
       const state = host.syncState();
+      if (state.exit !== 0 || state.fault) return;
       if (state.pending > 0 || !state.bootstrapped) {
         kickSync(0);
         return;
@@ -220,11 +347,15 @@ async function pollChanges() {
     const who = currentIdentity ? `&identity=${encodeURIComponent(currentIdentity)}` : "";
     const { status, text } = await fetchReply("GET", `/events?after=${currentCursor}&window=0${who}`);
     if (status !== 200) return;
-    if (!text.trim() || draining || kickTimer || revision !== snapshotRevision) return;
+    if (!text.trim() || draining || kickTimer || breaker.isOpen() || revision !== snapshotRevision) return;
 
     const changed = await withSnapshot("readwrite", save => {
-      if (draining || kickTimer || revision !== snapshotRevision) return;
+      if (draining || kickTimer || breaker.isOpen() || revision !== snapshotRevision) return;
       const consumed = host.consumeStream(text);
+      if (consumed.exit !== 0 || consumed.fault) {
+        snapshotRevision = Symbol("reload");
+        return;
+      }
       currentCursor = consumed.cursor;
       // The server said this browser synced as someone else, and the client dropped what it
       // held. Bootstrap as whoever is here now, at once, and never poll from zero.
@@ -238,8 +369,9 @@ async function pollChanges() {
       }
     });
     if (changed) self.postMessage({ type: "records_changed", changes: changed.changes });
-  } catch {
-    // offline: try again on the next interval
+  } catch (error) {
+    // Only network/offline errors are quiet; WASM faults already emitted instant_record.fault.
+    if (error instanceof WasmFaultError) return;
   } finally {
     pollInFlight = false;
   }
@@ -248,6 +380,7 @@ async function pollChanges() {
 // A page of older rows, or the rows matching `search`, brought into the local database.
 // Where the background fill already holds them, nothing is asked of the server.
 async function loadHistory(request) {
+  breaker.assertClosed("loadHistory");
   // The fill's own copy of the state is not touched here: another tab may have finished it.
   if (mailScope) {
     const state = fillState?.done ? fillState : await withFiles("readonly", get => get(FILL));
@@ -270,6 +403,7 @@ let fillTimer = null;
 let fillDelayMs = FILL_PAUSE_MS;
 
 function scheduleFill(delay = fillDelayMs) {
+  if (breaker.isOpen()) return;
   clearTimeout(fillTimer);
   fillTimer = setTimeout(runFill, delay);
 }
@@ -281,6 +415,7 @@ function announceFill() {
 
 // One page of the fill. Answers whether there is another to fetch.
 async function fillStep() {
+  if (breaker.isOpen()) return false;
   fillState = (await withFiles("readonly", get => get(FILL))) || fresh();
   announceFill();
   if (fillState.done || fillState.full) return false;
@@ -314,16 +449,21 @@ async function fillStep() {
 
 // One tab fills at a time. The others read what it saved.
 async function runFill() {
+  if (breaker.isOpen()) return;
   let more = true;
   try {
     const locks = self.navigator?.locks;
     more = locks
       ? await locks.request("instant-record-fill/" + mailScope, { ifAvailable: true }, lock => (lock ? fillStep() : true))
       : await fillStep();
-  } catch {
-    fillDelayMs = Math.min(Math.max(fillDelayMs, 1000) * 2, FILL_RETRY_CAP_MS);
+  } catch (error) {
+    if (breaker.isOpen() || error instanceof WasmFaultError) {
+      more = !breaker.isOpen();
+    } else {
+      fillDelayMs = Math.min(Math.max(fillDelayMs, 1000) * 2, FILL_RETRY_CAP_MS);
+    }
   }
-  if (more) scheduleFill(simulation.offline ? 2000 : fillDelayMs);
+  if (more && !breaker.isOpen()) scheduleFill(simulation.offline ? 2000 : fillDelayMs);
 }
 
 async function loadHistoryQuery(key) {
@@ -350,21 +490,31 @@ async function loadHistoryQuery(key) {
 function runRequest(method, render) {
   const writing = method !== "GET" && method !== "HEAD";
   return withSnapshot(writing ? "readwrite" : "readonly", save => {
-    const result = render();
-    if (writing) {
+    const output = render();
+    const fault = output?.fault ?? output?.result?.fault ?? null;
+    if (fault) {
+      snapshotRevision = Symbol("reload");
+    } else if (writing) {
       localRevision++;
       save();
       drainDelayMs = DRAIN_RETRY_BASE_MS;
       kickSync();
     }
-    return result;
+    return output;
   });
 }
 
 function localRequest(method, path, options) {
+  breaker.assertClosed("request");
   const started = performance.now();
   const result = host.request(method, path, options);
-  report({ kind: "local", method, path, status: result.status, ms: Math.round(performance.now() - started) });
+  report({
+    kind: "local",
+    method,
+    path,
+    status: result.fault ? "failed" : result.status,
+    ms: Math.round(performance.now() - started),
+  });
   return result;
 }
 
@@ -373,7 +523,7 @@ function navigate({ method, path, body, contentType }) {
   let result = localRequest(method, path, { body: body ?? "", contentType: contentType || "application/x-www-form-urlencoded" });
   let redirected = false;
   let finalPath = path;
-  for (let hops = 0; hops < 5 && result.status >= 300 && result.status < 400; hops++) {
+  for (let hops = 0; hops < 5 && !result.fault && result.status >= 300 && result.status < 400; hops++) {
     const location = result.headers.find(([name]) => name.toLowerCase() === "location")?.[1];
     if (!location) break;
     const next = new URL(location, self.location.origin);
@@ -419,9 +569,27 @@ async function earlyBootstrap(path) {
   }
 }
 
+function traceMeta() {
+  return {
+    sourceVersion: import.meta.env.VITE_SOURCE_VERSION || "",
+    schemaVersion: targetSchema || 0,
+    schemaDigest: schemaDigest || "",
+    wasmUrl: import.meta.env.VITE_WASM_URL || "/app.wasm",
+    syncEndpoint,
+    userAgent: self.navigator?.userAgent || "",
+  };
+}
+
 async function boot(payload = {}) {
   const scope = mailboxScope(payload.path || "/");
   syncScope = typeof payload.scope === "string" ? payload.scope : "";
+  if (payload.trace) {
+    recorder.configure({
+      enabled: true,
+      ...(typeof payload.trace === "object" ? payload.trace : {}),
+      meta: traceMeta(),
+    });
+  }
   openSnapshot(scope);
   changes = new BroadcastChannel("instant-record-spinel-changes" + (scope ? "/" + scope : ""));
   changes.onmessage = () => { if (host) self.postMessage({ type: "records_changed" }); };
@@ -461,7 +629,7 @@ async function boot(payload = {}) {
     }
     const secret = savedSecret || [...crypto.getRandomValues(new Uint8Array(64))].map(b => b.toString(16).padStart(2, "0")).join("");
     if (!savedSecret) put("secret_key_base", secret);
-    const candidate = new AppHost(module, { env: { SECRET_KEY_BASE: secret } });
+    const candidate = createHost(module, { SECRET_KEY_BASE: secret });
     // Another tab may have saved a database while the shell downloaded. That one wins.
     const fromShell = !bytes && !!shell;
     if (bytes) candidate.restoreDatabase(bytes, previous);
@@ -472,7 +640,9 @@ async function boot(payload = {}) {
     if (fromShell) {
       // The shell's cursor is its last write. One that did not arrive whole has none.
       const state = candidate.syncState();
-      if (!state.bootstrapped || state.cursor !== shell.cursor) throw new Error("The shell does not carry its cursor.");
+      if (state.exit !== 0 || state.fault || !state.bootstrapped || state.cursor !== shell.cursor) {
+        throw new Error("The shell does not carry its cursor.");
+      }
     } else {
       shell = null;
     }
@@ -486,6 +656,9 @@ async function boot(payload = {}) {
       put("schema_digest", schemaDigest);
     }
     host = candidate;
+    if (recorder.enabled && !bytes && !fromShell) {
+      recorder.captureCheckpoint(host.snapshotForRecorder());
+    }
     return !!bytes;
   });
   let restored;
@@ -497,6 +670,7 @@ async function boot(payload = {}) {
     if (!shell) throw error;
     report({ kind: "sync", method: "GET", path: "/shell", status: "rejected", ms: Math.round(shell.ms) });
     shell = null;
+    breaker.reset();
     restored = await open();
   }
   const bootstrapStart = performance.now();
@@ -506,7 +680,7 @@ async function boot(payload = {}) {
   if (shell) pollChanges();
   const bootstrapMs = performance.now() - bootstrapStart;
 
-  if (scope) {
+  if (scope && !breaker.isOpen()) {
     const url = new URL(payload.path, self.location.origin);
     for (const id of new Set([url.searchParams.get("before"), url.searchParams.get("thread")])) {
       if (id) await loadHistoryQuery(new URLSearchParams({ thread: id }).toString());
@@ -515,14 +689,17 @@ async function boot(payload = {}) {
     const at = url.searchParams.get("at");
     if (before && at) await loadHistory({ type: "MailEntry", before: { id: before, created_at: at }, limit: 50 });
   }
-  const first = payload.path ? await runRequest("GET", () => navigate({ method: "GET", path: payload.path })) : null;
+  const first = payload.path && !breaker.isOpen()
+    ? await runRequest("GET", () => navigate({ method: "GET", path: payload.path }))
+    : null;
   setInterval(pollChanges, POLL_EVERY_MS);
   // With the first page on screen, bring the rest of the inbox down behind it.
-  if (scope && scope !== "invalid/invalid") {
+  if (scope && scope !== "invalid/invalid" && !breaker.isOpen()) {
     mailScope = scope;
     scheduleFill(1000);
   }
   return { compileMs: compiled - started, restored, storageMs, runtimeMs, bootstrapMs, first,
+    circuit: breaker.snapshot(),
     shell: shell ? { ms: shell.ms, bytes: shell.bytes.length, cursor: shell.cursor } : null };
 }
 
@@ -533,13 +710,57 @@ self.onmessage = async (event) => {
       history.length = 0;
       return;
     }
+    if (type === "instant_record.reset_circuit") {
+      breaker.reset();
+      snapshotRevision = Symbol("reload");
+      currentCursor = null;
+      drainDelayMs = DRAIN_RETRY_BASE_MS;
+      const result = { ok: true, circuit: breaker.snapshot() };
+      self.postMessage({ type: "instant_record.circuit", circuit: result.circuit });
+      if (id != null) return self.postMessage({ id, result });
+      return;
+    }
+    if (type === "instant_record.trace.configure") {
+      const options = payload || event.data.options || {};
+      const wasEnabled = recorder.enabled;
+      const status = recorder.configure({ ...options, meta: traceMeta() });
+      if (!wasEnabled && recorder.enabled && host) {
+        recorder.captureCheckpoint(host.snapshotForRecorder());
+      }
+      if (id != null) return self.postMessage({ id, result: status });
+      return;
+    }
+    if (type === "instant_record.trace.status") {
+      const result = recorder.status();
+      if (id != null) return self.postMessage({ id, result });
+      return;
+    }
+    if (type === "instant_record.trace.clear") {
+      recorder.clear();
+      if (recorder.enabled && host) recorder.captureCheckpoint(host.snapshotForRecorder());
+      const result = recorder.status();
+      if (id != null) return self.postMessage({ id, result });
+      return;
+    }
+    if (type === "instant_record.trace.export") {
+      const options = payload || event.data.options || {};
+      const trace = recorder.exportTrace({
+        redact: options.redact !== false,
+        includeUnredactedDatabase: !!options.includeUnredactedDatabase,
+        meta: traceMeta(),
+        circuit: breaker.snapshot(),
+      });
+      if (id != null) return self.postMessage({ id, result: trace });
+      self.postMessage({ type: "instant_record.trace.exported", trace });
+      return;
+    }
     if (type === "instant_record.simulate") {
       const previous = simulation;
       simulation = event.data.settings;
       if (event.data.backlog) {
         self.postMessage({ type: "instant_record.debug_backlog", entries: history, streamOpen: false });
       }
-      if (host && previous.offline && !simulation.offline) {
+      if (host && previous.offline && !simulation.offline && !breaker.isOpen()) {
         drainDelayMs = DRAIN_RETRY_BASE_MS;
         kickSync(0);
       }

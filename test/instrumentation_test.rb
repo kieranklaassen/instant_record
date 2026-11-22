@@ -38,6 +38,8 @@ class InstrumentationTest < Minitest::Test
     ActiveSupport::Notifications.unsubscribe(@subscription)
     InstantRecord.sync
     InstantRecord::Client.transport = nil
+    InstantRecord::Client.notifier = nil
+    InstantRecord::Client.clear_events
   end
 
   def test_drain_announces_what_the_pass_did
@@ -79,5 +81,41 @@ class InstrumentationTest < Minitest::Test
     _, payload = @events.find { |n, _| n == "offline.instant_record" }
     assert_equal "drain", payload[:phase]
     assert_equal "offline", payload[:error]
+  end
+
+  def test_browser_notifications_are_buffered_and_bridged_through_notifier
+    emitted = []
+    bridge_notifier = Object.new
+    bridge_notifier.define_singleton_method(:records_changed) {}
+    bridge_notifier.define_singleton_method(:events_emitted) { |json| emitted << JSON.parse(json) }
+    InstantRecord::Client.notifier = bridge_notifier
+    InstantRecord::Client.clear_events
+
+    in_browser do
+      @model.create!(title: "bridged")
+      InstantRecord::Client.drain
+    end
+
+    assert_equal 1, InstantRecord::Client.recorded_events.size
+    event = InstantRecord::Client.recorded_events.first
+    assert_equal "drain.instant_record", event["name"]
+    assert_equal 1, event["payload"]["posted"]
+    assert_equal 0, event["payload"]["rejected"]
+    assert_kind_of Float, event["duration_ms"]
+    assert_equal 1, emitted.size
+    assert_equal "drain.instant_record", emitted.last.first["name"]
+
+    drained = InstantRecord::Client.drain_events
+    assert_equal 1, drained.size
+    assert_empty InstantRecord::Client.recorded_events
+  end
+
+  def test_server_runtime_does_not_accumulate_bridged_events
+    InstantRecord::Client.clear_events
+    on_server do
+      InstantRecord::Client.bootstrap
+    end
+
+    assert_empty InstantRecord::Client.recorded_events
   end
 end

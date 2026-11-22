@@ -10,6 +10,7 @@ require_relative "runner"
 require_relative "source_pages"
 require_relative "toolchain"
 require_relative "wasm_tree"
+require_relative "../trace/schema_extractor"
 
 module InstantRecord
   class Compiler
@@ -469,6 +470,7 @@ module InstantRecord
 
         model_set = EntryBuilder.app_models(demo: @demo, models: @models).sort.join(",")
         schema_source = File.read(File.join(app, "db/schema.rb"))
+        trace_schema = InstantRecord::Trace::SchemaExtractor.from_schema_rb(schema_source)
         shell_fingerprint = Digest::SHA256.hexdigest([SHELL_FORMAT.to_s, model_set, schema_source].join("\n"))
         schema_digest = Digest::SHA256.file(File.join(emit, "config/schema.rb")).hexdigest
 
@@ -485,7 +487,8 @@ module InstantRecord
             "VITE_SCHEMA_VERSION" => plan["version"].to_s,
             "VITE_SCHEMA_BASELINE" => plan["baseline"].nil? ? "" : plan["baseline"].to_s,
             "VITE_MIGRATION_HISTORY" => JSON.generate(plan["history"] || {}),
-            "VITE_SCHEMA_DIGEST" => schema_digest
+            "VITE_SCHEMA_DIGEST" => schema_digest,
+            "VITE_TRACE_SCHEMA" => JSON.generate(trace_schema)
           },
           log: "vite.log"
         )

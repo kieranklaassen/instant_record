@@ -30,6 +30,7 @@ module InstantRecord
 
         module <<bridge>>
           def self.handle_request
+            InstantRecord::Client.clear_events
             req = Tep::Parser.parse(<<read:in>>)
             res = Tep::Response.new
             Tep::APP.dispatch(req, res)
@@ -46,6 +47,7 @@ module InstantRecord
 
           # Capture the exact outgoing batch before the worker yields to browser requests.
           def self.sync_plan
+            InstantRecord::Client.clear_events
             mutations = InstantRecord::Client.pending_mutations
             push = mutations.empty? ? "" : JSON.generate(InstantRecord::Client.mutations_payload(mutations))
             <<write:out>>JSON.generate({ push: push, bootstrap: !InstantRecord::Client.bootstrapped? }))
@@ -53,6 +55,7 @@ module InstantRecord
           end
 
           def self.handle_sync
+            InstantRecord::Client.clear_events
             endpoint = <<read:in>>.strip
             InstantRecord.config.endpoint = endpoint if endpoint.length > 0
             changed = InstantRecord::Client.sync_pass
@@ -61,6 +64,7 @@ module InstantRecord
           end
 
           def self.handle_stream
+            InstantRecord::Client.clear_events
             applied = InstantRecord::Client.consume_stream(<<read:in>>)
             # A batch can be the server's reset, after which there is no cursor to report.
             <<write:out>>"applied=" + applied.to_s + " cursor=" + InstantRecord::Client.cursor.to_s + " bootstrap=" + (InstantRecord::Client.bootstrapped? ? "ready" : "needed"))
@@ -70,6 +74,7 @@ module InstantRecord
           # History has its own keyset and must not advance the live change cursor.
           # Keep the page receipt in the same SQLite transaction as its records.
           def self.history
+            InstantRecord::Client.clear_events
             input = JSON.parse(<<read:in>>)
             key = "history:" + input["key"].to_s
             response = input["response"].to_s
@@ -91,6 +96,7 @@ module InstantRecord
           end
 
           def self.cursor
+            InstantRecord::Client.clear_events
             key = InstantRecord::Client.identity_key
             <<write:out>>"cursor=" + InstantRecord::Client.cursor.to_s + " pending=" + InstantRecord::Client.pending_count.to_s + " bootstrap=" + (InstantRecord::Client.bootstrapped? ? "ready" : "needed") + " identity=" + (key.nil? ? "" : key))
             0
