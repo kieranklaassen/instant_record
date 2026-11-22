@@ -81,7 +81,7 @@ module InstantRecord
               records = Array(page["records"])
               more = page["has_more"] == true
               InstantRecord::OutboxMutation.transaction do
-                records.each { |record| InstantRecord::Client.apply_change(record) }
+                records.each { |record| InstantRecord::Client.apply_record(record) }
                 InstantRecord::SyncMetadata.set(key, more ? "more" : "end")
               end
               result = { ok: true, applied: records.size, has_more: more }
