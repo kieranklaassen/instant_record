@@ -2,6 +2,7 @@ require "fileutils"
 require "json"
 require "prism"
 require_relative "../native"
+require_relative "host_adapters"
 require_relative "runner"
 
 module InstantRecord
@@ -640,27 +641,22 @@ module InstantRecord
           )
 
         File.write(File.join(tree_dir, "main_native.rb"), head + entry)
-        rewrite_native_client_host(tree_dir)
+        install_native_host_adapter(tree_dir)
         found.map(&:first)
       end
 
-      def rewrite_native_client_host(tree_dir)
-        client_dir = File.join(tree_dir, "app/models/instant_record/client")
-        seams = 0
-        if File.directory?(client_dir)
-          Dir.glob("**/*.rb", base: client_dir).sort.each do |rel|
-            path = File.join(client_dir, rel)
-            text = File.read(path)
-            changed = text.gsub(/File\.read\("\/host\/(\w+)"\)/, 'NativeHost.ir_host_take("\1")')
-            changed = changed.gsub(/File\.write\("\/host\/(\w+)", /, 'NativeHost.ir_host_give("\1", ')
-            changed = changed.gsub(/File\.write\((?:[\w:]+::)?REQUEST, /, 'NativeHost.ir_host_give("request", ')
-            changed = changed.gsub(/File\.read\((?:[\w:]+::)?RESPONSE\)/, 'NativeHost.ir_host_take("response")')
-            File.write(path, changed) if changed != text
-            seams += 1 if changed.include?("NativeHost.")
-          end
+      def install_native_host_adapter(tree_dir)
+        candidates = [
+          File.join(tree_dir, "app/models/instant_record/host.rb"),
+          File.join(tree_dir, "lib/instant_record/host.rb")
+        ].select { |path| File.file?(path) }
+
+        if candidates.empty?
+          raise BuildError, "expected emitted InstantRecord::Host adapter in #{tree_dir}"
         end
-        unless seams == 2
-          raise BuildError, "expected the transport and the notifier to reach the host, found #{seams} file(s)"
+
+        candidates.each do |path|
+          File.write(path, HostAdapters::Native.host_source)
         end
       end
 

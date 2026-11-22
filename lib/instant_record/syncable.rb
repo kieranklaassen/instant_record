@@ -222,7 +222,7 @@ module InstantRecord
     end
 
     def assign_instant_record_uuid
-      return unless id.nil? || id == ""
+      return unless InstantRecord::Host.blank_id?(id)
 
       frame = InstantRecord::SyncActions.active_frame
       self.id = frame ? frame.next_uuid : SecureRandom.uuid

@@ -1,17 +1,20 @@
-require "digest"
 require "fileutils"
-require "pathname"
+require_relative "ast_lowerer"
+require_relative "host_adapters"
 require_relative "runner"
+require_relative "static_linter"
 
 module InstantRecord
   class Compiler
-    # Vendors the instant_record gem's Ruby into the staged app's lib/, then
-    # applies the ahead-of-time host seams where the gem talks to Rails or uses
-    # runtime metaprogramming.
+    # Vendors the instant_record gem's Ruby into the staged app's lib/, installs
+    # the target's swappable host-adapter module, and runs the Prism AST lowering
+    # pass (stripping `server_only`, unwrapping `browser_only`/`client_only`,
+    # folding `InstantRecord.browser?`, and unnesting `Syncable`).
     class GemVendor
       COPY = %w[
         lib/instant_record.rb
         lib/instant_record/version.rb
+        lib/instant_record/host.rb
         lib/instant_record/configuration.rb
         lib/instant_record/runtime_scoped.rb
         lib/instant_record/sync_actions.rb
@@ -28,62 +31,6 @@ module InstantRecord
         lib/instant_record/native/screen.rb
       ].freeze
 
-      SPINEL_SYNC_ACTIONS_STUB = <<~'RUBY'
-        def server_frame = nil
-        def enforcing_server_mutator? = false
-        def server_authorize_create!(_record) = nil
-        def server_finalize_create!(_record) = nil
-        def server_authorize_update_before!(_record) = nil
-        def server_finalize_update!(_record) = nil
-        def server_authorize_destroy!(_record) = nil
-        def server_finalize_destroy!(_record) = nil
-        def server_note_read(_record) = nil
-        def execute_on_server(_name, _args, _mutation_id) = nil
-        def register(_klass, _action_name, _block = nil) = nil
-
-        def dispatch(name, _args)
-          raise ArgumentError, "Unknown sync_action: " + name
-        end
-      RUBY
-
-      SPINEL_SAVEPOINT_SEAM = <<~'RUBY'
-        # Host seam (see GemVendor): native SQLite SAVEPOINT for compiled builds.
-        def with_savepoint(&block)
-          @savepoint_seq = (@savepoint_seq || 0) + 1
-          sp = "ir_sp_" + @savepoint_seq.to_s
-          Db.exec("SAVEPOINT " + sp)
-          begin
-            result = block.call
-            Db.exec("RELEASE SAVEPOINT " + sp)
-            result
-          rescue StandardError => error
-            Db.exec("ROLLBACK TO SAVEPOINT " + sp)
-            Db.exec("RELEASE SAVEPOINT " + sp)
-            raise error
-          end
-        end
-      RUBY
-
-      RUNTIME_SCOPED_SEAM = <<~RUBY
-        module InstantRecord
-          # Host seam (see GemVendor): the gem evaluates these blocks with class_eval, which cannot be
-          # compiled ahead of time. This build is the browser, so server_only never runs.
-          module RuntimeScoped
-            def server_only(&block)
-              nil
-            end
-
-            def browser_only(&block)
-              nil
-            end
-
-            def client_only(&block)
-              nil
-            end
-          end
-        end
-      RUBY
-
       SQLITE_DATABASE_YML = <<~YAML
         default: &default
           adapter: sqlite3
@@ -96,23 +43,28 @@ module InstantRecord
           <<: *default
       YAML
 
-      def self.vendor(gem_src:, app_dir:, demo: false)
-        new(gem_src: gem_src, app_dir: app_dir, demo: demo).run
+      attr_reader :adapter, :server_only_constants
+
+      def self.vendor(gem_src:, app_dir:, demo: false, target: :wasm, adapter: nil)
+        new(gem_src: gem_src, app_dir: app_dir, demo: demo, target: target, adapter: adapter).run
       end
 
-      def initialize(gem_src:, app_dir:, demo: false)
+      def initialize(gem_src:, app_dir:, demo: false, target: :wasm, adapter: nil)
         @gem = gem_src.to_s
         @app = app_dir.to_s
         @demo = demo
+        @adapter = HostAdapters.for(adapter || target)
+        @server_only_constants = {}
       end
 
       def run
         copy_gem_files
-        apply_core_seams
+        @adapter.install(gem_src: @gem, app_dir: @app)
         unnest_syncable_concern
         write_sqlite_database_yml
-        rewrite_scoped_blocks
-        apply_demo_seams if @demo
+        HostAdapters::Demo.apply(app_dir: @app) if @demo
+        @server_only_constants = StaticLinter.collect_server_only_constants(@app, staged: true)
+        lower_staged_ruby
         COPY.length + 1
       end
 
@@ -143,96 +95,15 @@ module InstantRecord
         FileUtils.cp(source, target)
       end
 
-      def apply_core_seams
-        # The staged source runs exclusively in the compiled runtime.
-        edit_all!("lib/instant_record.rb", {
-          "def browser? = false" => "def browser? = true",
-          "require \"instant_record/engine\" if defined?(Rails::Engine)\n" => "",
-          "  require \"instant_record/branch/sqlite_store\"\n" => "",
-          "      klass = record_type.to_s.safe_constantize\n      klass if klass.respond_to?(:instant_record_syncable?) && klass.instant_record_syncable?\n" => "      nil\n",
-          "    def mutate(mutator_name, args = nil, mutation_id: nil, **kwargs)\n      merged = args ? (kwargs.empty? ? args : args.merge(kwargs)) : kwargs\n      SyncActions.mutate(mutator_name, merged, mutation_id: mutation_id)\n    end\n" => "    def mutate(mutator_name, args = {}, mutation_id: nil)\n      SyncActions.mutate(mutator_name, args, mutation_id: mutation_id)\n    end\n",
-          "\nActiveSupport.on_load(:active_job) do\n  require \"instant_record/sync_actions\"\n  InstantRecord::SyncActions.install_active_job_guard!\nend\n" => "\n"
-        })
-
-        # Model discovery: ActiveRecord::Base.descendants has no AOT counterpart;
-        # the gem's explicit allowlist (InstantRecord.sync) takes its place.
-        cut!(
-          "lib/instant_record.rb",
-          "      ActiveRecord::Base.descendants.select do |model|",
-          "    end\n\n    # One record's attributes as they cross the wire",
-          "      []\n"
-        )
-
-        # Roundhouse's Rails.application.config has no instant_record option;
-        # EntryBuilder sets config.mount_path at boot instead.
-        cut!(
-          "lib/instant_record.rb",
-          "      configured =\n        if defined?(Rails)",
-          "    end\n\n    # The retry decision must survive",
-          "      DEFAULT_MOUNT_PATH\n"
-        )
-
-        # sync_actions: strip CRuby server-only frame, ActiveJob guard, and dynamic
-        # dispatch; EntryBuilder emits the static `case` dispatcher in main_*.rb.
-        cut!(
-          "lib/instant_record/sync_actions.rb",
-          "    # --- cruby-server-frame:start ---\n",
-          "    # --- cruby-server-frame:end ---\n",
-          ""
-        )
-        edit!("lib/instant_record/sync_actions.rb", "    # --- cruby-server-frame:end ---\n", "")
-        cut!(
-          "lib/instant_record/sync_actions.rb",
-          "      # --- cruby-only:start ---\n",
-          "      # --- cruby-only:end ---\n",
-          SPINEL_SYNC_ACTIONS_STUB.lines.map { |l| l.strip.empty? ? "\n" : "      #{l}" }.join
-        )
-        edit!("lib/instant_record/sync_actions.rb", "      # --- cruby-only:end ---\n", "")
-        edit_all!("lib/instant_record/sync_actions.rb", {
-          "      def perform_sync_action(action_name, args = nil, mutation_id: nil, **kwargs)\n        merged = args ? (kwargs.empty? ? args : args.merge(kwargs)) : kwargs\n        InstantRecord::SyncActions.mutate(\"\#{name}.\#{action_name}\", merged, mutation_id: mutation_id)\n      end\n" => "      def perform_sync_action(action_name, args = {}, mutation_id: nil)\n        InstantRecord::SyncActions.mutate(\"\#{name}.\#{action_name}\", args, mutation_id: mutation_id)\n      end\n",
-          "      def mutate(mutator_name, args = nil, mutation_id: nil, **kwargs)\n        name = mutator_name.to_s\n        merged = args ? (kwargs.empty? ? args : args.merge(kwargs)) : kwargs\n        normalized = normalize_args(merged)\n" => "      def mutate(mutator_name, args = {}, mutation_id: nil)\n        name = mutator_name.to_s\n        normalized = normalize_args(args)\n",
-          "      # GemVendor replaces this method in compiled builds with native SQLite SAVEPOINT.\n      def with_savepoint(&block)\n        ActiveRecord::Base.transaction(requires_new: true, &block)\n      end\n" => SPINEL_SAVEPOINT_SEAM.lines.map { |l| l.strip.empty? ? "\n" : "      #{l}" }.join
-        })
-
-        # Screens are found by name through a generated `case` (EntryBuilder), not constant lookup.
-        FileUtils.mkdir_p(File.join(@app, "sig/instant_record"))
-        FileUtils.cp(
-          File.join(@gem, "sig/instant_record/native.rbs"),
-          File.join(@app, "sig/instant_record/native.rbs")
-        )
-        File.write(
-          File.join(@app, "lib/instant_record/native.rb"),
-          "require \"instant_record/native/node\"\nrequire \"instant_record/native/screen\"\n"
-        )
-
-        # server_only / browser_only / client_only are unwrapped statically below.
-        File.write(File.join(@app, "lib/instant_record/runtime_scoped.rb"), RUNTIME_SCOPED_SEAM)
-      end
-
       def unnest_syncable_concern
         path = File.join(@app, "lib/instant_record/syncable.rb")
-        lines = File.read(path).sub(/\n+\z/, "").split("\n", -1)
-        start = lines.index("module InstantRecord")
-        raise BuildError, "Unexpected structure in #{path}" unless start && lines.last == "end"
-
-        inner = lines[(start + 1)...-1].map { |line| line.start_with?("  ") ? line[2..] : line }
-        body = lines[0...start] + inner
+        unnested = AstLowerer.unnest_syncable(File.read(path, encoding: Encoding::UTF_8))
 
         concerns_dir = File.join(@app, "app/models/concerns")
         FileUtils.mkdir_p(concerns_dir)
         FileUtils.rm_rf(File.join(concerns_dir, "instant_record"))
-        File.write(File.join(concerns_dir, "syncable.rb"), body.join("\n") + "\n")
+        File.write(File.join(concerns_dir, "syncable.rb"), unnested)
         File.delete(path)
-
-        models_dir = File.join(@app, "app/models")
-        if File.directory?(models_dir)
-          Dir.glob("**/*.rb", base: models_dir).sort.each do |rel|
-            target = File.join(models_dir, rel)
-            source = File.read(target)
-            adapted = source.gsub("include InstantRecord::Syncable", "include Syncable")
-            File.write(target, adapted) if adapted != source
-          end
-        end
       end
 
       def write_sqlite_database_yml
@@ -241,122 +112,24 @@ module InstantRecord
         File.write(File.join(config_dir, "database.yml"), SQLITE_DATABASE_YML)
       end
 
-      def rewrite_scoped_blocks
-        %w[app/models app/controllers app/helpers app/screens].each do |subdir|
-          root = File.join(@app, subdir)
-          next unless File.directory?(root)
-
-          Dir.glob("**/*.rb", base: root).sort.each do |rel|
-            target = File.join(root, rel)
-            source = File.read(target)
-            changed = strip_server_only(source)
-            changed = unwrap_client_only(changed)
-            File.write(target, changed) if changed != source
-          end
+      def lower_staged_ruby
+        lower_directory("app/models", rewrite_syncable_include: true)
+        %w[app/controllers app/helpers app/screens lib/instant_record].each do |subdir|
+          lower_directory(subdir, rewrite_syncable_include: false)
         end
       end
 
-      def apply_demo_seams
-        # Content-hash stylesheets so returning tabs pick up responsive fixes.
-        stylesheets_dir = File.join(@app, "app/assets/stylesheets")
-        if File.directory?(stylesheets_dir)
-          Dir.glob("*.css", base: stylesheets_dir).sort.each do |name|
-            sheet = File.join(stylesheets_dir, name)
-            digest = Digest::SHA256.file(sheet).hexdigest[0, 10]
-            ext = File.extname(sheet)
-            stem = File.basename(sheet, ext)
-            File.rename(sheet, File.join(stylesheets_dir, "#{stem}-#{digest}#{ext}"))
-          end
-        end
+      def lower_directory(subdir, rewrite_syncable_include:)
+        root = File.join(@app, subdir)
+        return unless File.directory?(root)
 
-        # Version the Inbox React bundle URL by its content digest.
-        bundle = File.join(@app, "app/assets/builds/inbox.js")
-        if File.file?(bundle)
-          digest = Digest::SHA256.file(bundle).hexdigest[0, 10]
-          edit!(
-            "app/views/email/mailboxes/index.html.erb",
-            '<%= asset_path("inbox.js") %>',
-            "/assets/inbox.js?v=#{digest}"
+        Dir.glob("**/*.rb", base: root).sort.each do |rel|
+          AstLowerer.lower_file(
+            File.join(root, rel),
+            runtime: :client,
+            rewrite_syncable_include: rewrite_syncable_include
           )
         end
-
-        # Adapt the demo layout for static source drawers and content_for(:demo_scope).
-        layout_path = File.join(@app, "app/views/layouts/application.html.erb")
-        source = File.read(layout_path)
-        source = source.gsub('<span class="micro-label">Local-first Rails demos —', '<span class="micro-label"><a href="/">All demos</a> ·')
-        source = source.gsub('<%= source_path(page: controller_path, view: action_name) %>', "/source")
-        source = source.gsub("Read live out of app.wasm — not a snippet", "View the source for this build")
-        source = source.gsub('demo-<%= controller_path.split("/").first %>', "demo-<%= content_for(:demo_scope) %>")
-        source = source.gsub('<% demo = controller_path.split("/").first %>', "<% demo = content_for(:demo_scope).to_s %>")
-        File.write(layout_path, source)
-
-        views_dir = File.join(@app, "app/views")
-        views_root = Pathname(views_dir)
-        Dir.glob("**/*.html.erb", base: views_dir).sort.each do |rel|
-          view = views_root.join(rel)
-          next if view.basename.to_s.start_with?("_") || view.parent.basename.to_s == "layouts"
-
-          scope = Pathname(rel).each_filename.first
-          view.write("<% content_for(:demo_scope, \"#{scope}\") %>\n" + view.read)
-        end
-
-        # Route server-only actions through the worker's network marker.
-        edit!("app/helpers/slack_helper.rb", "InstantRecord.server_url(slack_reset_path)", '"/slack/reset?instant_record_network=1"')
-        edit_all!("app/helpers/auth_helper.rb", {
-          "InstantRecord.server_url(auth_session_path)" => '"/auth/session?instant_record_network=1"',
-          "InstantRecord.server_url(auth_session_sign_out_path)" => '"/auth/session/sign_out?instant_record_network=1"',
-          'InstantRecord.server_url("/instant_record/bootstrap")' => '"/instant_record/bootstrap?instant_record_network=1"',
-          'InstantRecord.server_url("/instant_record/mutations")' => '"/instant_record/mutations?instant_record_network=1"'
-        })
-
-        # Compiled code needs a single type across both branches of the ternary.
-        edit!(
-          "app/controllers/slack/channels_controller.rb",
-          "@thread_parent.replies.includes(:chat_user).order(:created_at, :id) : []",
-          "@thread_parent.replies.includes(:chat_user).order(:created_at, :id).to_a : []"
-        )
-      end
-
-      def strip_server_only(source)
-        source.gsub(/(?<=\n|\A)( *)server_only do\n.*?\n\1end\n?/m, "")
-      end
-
-      def unwrap_client_only(source)
-        source.gsub(/(?<=\n|\A)( *)(?:browser|client)_only do\n(.*?)\n\1end(?=\n|\z)/m) do
-          indent = Regexp.last_match(1)
-          Regexp.last_match(2).split("\n", -1).map do |line|
-            line.start_with?("#{indent}  ") ? line[2..] : line
-          end.join("\n")
-        end
-      end
-
-      def edit!(rel, old, replacement)
-        edit_all!(rel, { old => replacement })
-      end
-
-      def edit_all!(rel, replacements)
-        path = File.join(@app, rel)
-        source = File.read(path)
-        updated = source
-        replacements.each do |old, replacement|
-          unless updated.include?(old)
-            next if !replacement.empty? && updated.include?(replacement)
-
-            raise BuildError, "seam did not apply: #{rel}: #{old[0, 60].inspect}"
-          end
-          updated = updated.sub(old) { replacement }
-        end
-        File.write(path, updated) if updated != source
-      end
-
-      def cut!(rel, start_marker, end_marker, replacement)
-        path = File.join(@app, rel)
-        source = File.read(path)
-        a = source.index(start_marker)
-        b = a && source.index(end_marker, a)
-        raise BuildError, "seam cut did not apply: #{rel}: #{start_marker[0, 60].inspect}" unless a && b
-
-        File.write(path, source[0...a] + replacement + source[b..])
       end
     end
   end
