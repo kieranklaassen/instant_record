@@ -1,0 +1,22 @@
+<% content_for(:title, "Todo") %>
+
+<main class="four">
+  <div class="card">
+    <%= form_with url: instant_todos_path, class: "four-form" do |f| %>
+      <%= f.text_field "issue[title]", placeholder: "Add a todo and press Enter", aria: { label: "New todo" }, required: true, autofocus: true %>
+      <%= f.submit "Add" %>
+    <% end %>
+
+    <ul class="four-list" data-controller="stopwatch">
+      <% @todos.each do |todo| %>
+        <li class="<%= todo.state %>" data-id="<%= todo.id %>">
+          <%= form_with url: instant_todo_path(todo), method: :patch, class: "four-toggle" do %>
+            <%= check_box_tag "done", "1", todo.state == "done", id: "todo-#{todo.id}", onchange: "this.form.requestSubmit()" %>
+            <%= label_tag "todo-#{todo.id}", todo.title %>
+          <% end %>
+          <%= button_to "×", instant_todo_path(todo), method: :delete, aria: { label: "Delete" } %>
+        </li>
+      <% end %>
+    </ul>
+  </div>
+</main>
