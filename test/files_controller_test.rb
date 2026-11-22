@@ -7,47 +7,39 @@ require "action_controller"
 require "rack/mock"
 require File.expand_path("../app/controllers/instant_record/files_controller", __dir__)
 
-ActiveRecord::Migration.suppress_messages do
-  ActiveRecord::Schema.define do
-    create_table :clips, id: :string, force: true do |t|
-      t.string :title
-      t.string :owner
-      t.string :content_type
-      t.integer :byte_size
-      t.integer :server_version, null: false, default: 0
-      t.string :sync_state, null: false, default: "synced"
-      t.timestamps
-    end
-  end
-end
-
 # The files endpoints, asked as a browser asks them: each action is called as
 # the Rack app the engine's routes hand a request to.
 class FilesControllerTest < Minitest::Test
   PIECE = 4
 
-  def setup
-    unless ActiveRecord::Base.connection.table_exists?(:clips)
-      ActiveRecord::Migration.suppress_messages do
-        ActiveRecord::Schema.define do
-          create_table :clips, id: :string, force: true do |t|
-            t.string :title
-            t.string :owner
-            t.string :content_type
-            t.integer :byte_size
-            t.integer :server_version, null: false, default: 0
-            t.string :sync_state, null: false, default: "synced"
-            t.timestamps
-          end
+  def ensure_clips_table!
+    return if ActiveRecord::Base.connection.table_exists?(:clips)
+
+    ActiveRecord::Migration.suppress_messages do
+      ActiveRecord::Schema.define do
+        create_table :clips, id: :string, force: true do |t|
+          t.string :title
+          t.string :owner
+          t.string :content_type
+          t.integer :byte_size
+          t.integer :server_version, null: false, default: 0
+          t.string :sync_state, null: false, default: "synced"
+          t.timestamps
         end
       end
     end
+  end
+
+  def setup
+    ensure_clips_table!
     reset_instant_record_tables!
     ActiveRecord::Base.connection.execute("DELETE FROM clips")
     @root = Dir.mktmpdir("instant-record-files")
     @previous_store = InstantRecord.config.file_store
     @previous_scope = InstantRecord.config.scope_from
+    @previous_chunk_size = InstantRecord.config.file_chunk_size
     InstantRecord.config.file_store = InstantRecord::FileStore.new(@root)
+    InstantRecord.config.file_chunk_size = nil
     # Who is asking is the request's `scope`, as a person.
     InstantRecord.config.scope_from = ->(request) { Person.new(request.params["scope"]) }
 
@@ -70,7 +62,8 @@ class FilesControllerTest < Minitest::Test
     InstantRecord.sync
     InstantRecord.config.file_store = @previous_store
     InstantRecord.config.scope_from = @previous_scope
-    FileUtils.remove_entry(@root)
+    InstantRecord.config.file_chunk_size = @previous_chunk_size
+    FileUtils.remove_entry(@root) if @root && Dir.exist?(@root)
   end
 
   Reply = Struct.new(:status, :headers, :body) do
@@ -103,18 +96,19 @@ class FilesControllerTest < Minitest::Test
   def test_a_file_sent_in_pieces_is_read_back_whole
     first = put("0123", at: 0)
     assert_equal 200, first.status
-    assert_equal({ "complete" => false, "offset" => 4 }, first.json)
+    assert_equal({ "complete" => false, "offset" => 4, "chunk_size" => InstantRecord::Files::DEFAULT_CHUNK_SIZE }, first.json)
     assert_equal 404, get(scope: "ada").status, "half a file is no file"
 
     put("4567", at: 4)
     last = put("89", at: 8)
-    assert_equal({ "complete" => true, "offset" => 10 }, last.json)
+    assert_equal({ "complete" => true, "offset" => 10, "chunk_size" => InstantRecord::Files::DEFAULT_CHUNK_SIZE }, last.json)
 
     read = get(scope: "ada")
     assert_equal 200, read.status
     assert_equal "0123456789", read.body
     assert_equal "audio/wav", read.headers["content-type"]
     assert_equal "10", read.headers["content-length"]
+    assert_equal InstantRecord::Files::DEFAULT_CHUNK_SIZE.to_s, read.headers["x-instant-record-chunk-size"]
   end
 
   def test_a_part_of_the_file_is_read_by_range
@@ -145,15 +139,16 @@ class FilesControllerTest < Minitest::Test
     put("0123", at: 0)
 
     standing = ask(:progress, "GET", upload: "u1", scope: "ada")
-    assert_equal({ "complete" => false, "offset" => 4 }, standing.json)
+    assert_equal({ "complete" => false, "offset" => 4, "chunk_size" => InstantRecord::Files::DEFAULT_CHUNK_SIZE }, standing.json)
 
     again = put("0123", at: 0)
     assert_equal 409, again.status
     assert_equal 4, again.json["offset"]
+    assert_equal InstantRecord::Files::DEFAULT_CHUNK_SIZE, again.json["chunk_size"]
 
     put("4567", at: 4)
     put("89", at: 8)
-    assert_equal({ "complete" => true, "offset" => 10 }, ask(:progress, "GET", upload: "u1", scope: "ada").json)
+    assert_equal({ "complete" => true, "offset" => 10, "chunk_size" => InstantRecord::Files::DEFAULT_CHUNK_SIZE }, ask(:progress, "GET", upload: "u1", scope: "ada").json)
   end
 
   def test_a_file_that_is_here_is_never_written_again
@@ -161,7 +156,7 @@ class FilesControllerTest < Minitest::Test
     again = put("XXXX", at: 0, upload: "u2")
 
     assert_equal 200, again.status
-    assert_equal({ "complete" => true, "offset" => 10 }, again.json)
+    assert_equal({ "complete" => true, "offset" => 10, "chunk_size" => InstantRecord::Files::DEFAULT_CHUNK_SIZE }, again.json)
     assert_equal "0123456789", get(scope: "ada").body
   end
 
@@ -269,5 +264,25 @@ class FilesControllerTest < Minitest::Test
 
     assert_equal 404, get(scope: "ada").status
     assert_empty Dir.glob(File.join(@root, "**", "*")).select { |path| File.file?(path) }
+  end
+
+  def test_a_piece_larger_than_configured_chunk_size_is_refused_with_the_limit
+    InstantRecord.config.file_chunk_size = 4
+
+    standing = ask(:progress, "GET", upload: "u1", scope: "ada")
+    assert_equal({ "complete" => false, "offset" => 0, "chunk_size" => 4 }, standing.json)
+
+    too_big = put("01234", at: 0)
+    assert_equal 413, too_big.status
+    assert_equal({ "error" => "piece larger than this server takes", "chunk_size" => 4 }, too_big.json)
+    assert_empty Dir.children(@root), "an oversized piece left nothing on disk"
+
+    assert_equal 200, put("0123", at: 0).status
+    assert_equal 200, put("4567", at: 4).status
+    assert_equal 200, put("89", at: 8).status
+
+    head = ask(:show, "HEAD", scope: "ada")
+    assert_equal "4", head.headers["x-instant-record-chunk-size"]
+    assert_includes head.headers["access-control-expose-headers"], "x-instant-record-chunk-size"
   end
 end

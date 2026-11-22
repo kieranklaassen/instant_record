@@ -15,6 +15,10 @@ module InstantRecord
     # configuration names a number: two gigabytes.
     MAX_SIZE = 2 * 1024 * 1024 * 1024
 
+    # Default upload/download piece size: 512 KiB, safely below common 1-2 MB
+    # reverse-proxy body ceilings.
+    DEFAULT_CHUNK_SIZE = FileStore::DEFAULT_CHUNK_SIZE
+
     class << self
       def store
         InstantRecord.config.file_store ||= FileStore.new(Rails.root.join("storage", "instant_record"))
@@ -41,6 +45,23 @@ module InstantRecord
       # The most bytes the server takes for one record of this model.
       def max_size(model)
         model.instant_record_file_max_size || InstantRecord.config.max_file_size || MAX_SIZE
+      end
+
+      # Maximum bytes accepted per upload piece (and advertised to clients).
+      # A model may choose a smaller chunk size, never one larger than the
+      # server's configured or store-enforced ceiling.
+      def chunk_size(model = nil)
+        model_size = model.respond_to?(:instant_record_file_chunk_size) ? model.instant_record_file_chunk_size : nil
+        server_limit = store.respond_to?(:chunk_size) ? store.chunk_size : (InstantRecord.config.file_chunk_size || DEFAULT_CHUNK_SIZE)
+        unless server_limit.is_a?(Integer) && server_limit.positive?
+          raise ArgumentError, "chunk_size must be a positive integer, got #{server_limit.inspect}"
+        end
+        return server_limit if model_size.nil?
+        unless model_size.is_a?(Integer) && model_size.positive?
+          raise ArgumentError, "chunk_size must be a positive integer, got #{model_size.inspect}"
+        end
+
+        [model_size, server_limit].min
       end
 
       # What the record says its file is, where the model has the columns.
