@@ -26,10 +26,12 @@ class ClientTest < Minitest::Test
     note = in_browser { @model.create!(title: "one") }
     mutation_id = InstantRecord::OutboxMutation.sole.id
 
-    in_browser do
+    reconciled = in_browser do
       InstantRecord::Client.apply_results([{ "mutation_id" => mutation_id, "status" => "applied", "version" => 1 }])
     end
 
+    refute reconciled, "a pure self-ack changes only bookkeeping, not visible row data"
+    assert_empty InstantRecord::Client.changed_records
     assert_equal 0, InstantRecord.pending_count
     note.reload
     assert_equal "synced", note.sync_state
@@ -52,7 +54,7 @@ class ClientTest < Minitest::Test
     assert_operator server_stamp, :<, note.reload.updated_at,
       "the server's row has to be older than the local write it refused for this to test anything"
 
-    in_browser do
+    reconciled = in_browser do
       InstantRecord::Client.apply_results([{
         mutation_id: mutation_id, status: "rejected", reason: "not allowed",
         server_attributes: { "id" => note.id, "title" => "server title", "updated_at" => server_stamp.iso8601(6) },
@@ -60,6 +62,8 @@ class ClientTest < Minitest::Test
       }])
     end
 
+    assert reconciled
+    assert_equal ["Note:#{note.id}"], InstantRecord::Client.changed_records
     note.reload
     assert_equal "server title", note.title
     assert_equal "synced", note.sync_state
@@ -67,16 +71,62 @@ class ClientTest < Minitest::Test
     assert_equal 0, InstantRecord.pending_count
   end
 
+  def test_rejected_update_whose_server_state_already_matches_local_data_stays_quiet_and_keeps_the_row
+    past = 1.minute.ago.change(usec: 123_456)
+    note = in_browser { @model.create!(title: "same title", updated_at: past) }
+    mutation_id = InstantRecord::OutboxMutation.sole.id
+
+    reconciled = in_browser do
+      InstantRecord::Client.apply_results([{
+        mutation_id: mutation_id, status: "rejected", reason: "not allowed",
+        server_attributes: InstantRecord.wire_attributes(note.attributes),
+        version: 5
+      }])
+    end
+
+    refute reconciled, "local data already matches server truth; only bookkeeping moved"
+    assert_empty InstantRecord::Client.changed_records
+    assert @model.exists?(note.id), "a row the server holds must never be destroyed on rejection"
+    note.reload
+    assert_equal "synced", note.sync_state
+    assert_equal 5, note.server_version
+    assert_equal past, note.updated_at, "bookkeeping-only reconciliation must not bump updated_at"
+  end
+
   def test_rejected_create_removes_local_record
     note = in_browser { @model.create!(title: "never accepted") }
     mutation_id = InstantRecord::OutboxMutation.sole.id
 
-    in_browser do
+    reconciled = in_browser do
       InstantRecord::Client.apply_results([{ "mutation_id" => mutation_id, "status" => "rejected", "reason" => "nope" }])
     end
 
+    assert reconciled
+    assert_equal ["Note:#{note.id}"], InstantRecord::Client.changed_records
     refute @model.exists?(note.id)
     assert_equal 0, InstantRecord.pending_count
+  end
+
+  def test_rejected_destroy_restores_record_and_notes_change
+    note = in_browser { @model.create!(title: "protected") }
+    saved_attributes = InstantRecord.wire_attributes(note.attributes)
+    InstantRecord::OutboxMutation.delete_all
+    in_browser { note.destroy! }
+    mutation_id = InstantRecord::OutboxMutation.sole.id
+
+    reconciled = in_browser do
+      InstantRecord::Client.apply_results([{
+        "mutation_id" => mutation_id, "status" => "rejected", "reason" => "not permitted",
+        "server_attributes" => saved_attributes, "version" => 3
+      }])
+    end
+
+    assert reconciled
+    assert_equal ["Note:#{note.id}"], InstantRecord::Client.changed_records
+    restored = @model.find(note.id)
+    assert_equal "protected", restored.title
+    assert_equal "synced", restored.sync_state
+    assert_equal 3, restored.server_version
   end
 
   def test_rejection_with_pending_later_mutation_keeps_it_queued
@@ -119,7 +169,7 @@ class ClientTest < Minitest::Test
     in_browser { note.update!(title: "my losing line") }
     mutation_id = InstantRecord::OutboxMutation.sole.id
 
-    in_browser do
+    reconciled = in_browser do
       InstantRecord::Client.apply_results([{
         "mutation_id" => mutation_id, "status" => "applied", "version" => 7, "skipped" => true,
         "server_attributes" => { "id" => note.id, "title" => "the line that won",
@@ -127,11 +177,32 @@ class ClientTest < Minitest::Test
       }])
     end
 
+    assert reconciled
+    assert_equal ["Note:#{note.id}"], InstantRecord::Client.changed_records
     note.reload
     assert_equal "the line that won", note.title,
       "a row cannot be synced against a value the server threw away"
     assert_equal 7, note.server_version
     assert_equal 0, InstantRecord.pending_count, "a skipped write is resolved, never retried"
+  end
+
+  def test_a_skipped_write_already_converged_to_server_state_stays_quiet
+    past = 1.minute.ago.change(usec: 123_456)
+    note = in_browser { @model.create!(title: "already won", updated_at: past) }
+    mutation_id = InstantRecord::OutboxMutation.sole.id
+
+    reconciled = in_browser do
+      InstantRecord::Client.apply_results([{
+        "mutation_id" => mutation_id, "status" => "applied", "version" => 7, "skipped" => true,
+        "server_attributes" => InstantRecord.wire_attributes(note.attributes)
+      }])
+    end
+
+    refute reconciled
+    assert_empty InstantRecord::Client.changed_records
+    assert_equal "synced", note.reload.sync_state
+    assert_equal 7, note.server_version
+    assert_equal past, note.updated_at, "bookkeeping-only reconciliation must not bump updated_at"
   end
 
   # Schema skew, client behind the server: the change carries a column this
