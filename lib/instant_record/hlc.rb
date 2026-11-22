@@ -71,8 +71,14 @@ module InstantRecord
         "#{pt_str}-#{format('%04X', counter)}-#{node}"
       end
 
+      # -1, 0 or 1, and never nil: the browser's compiler will not compare what `<=>` may
+      # give with a number, and two strings always have an order.
       def compare(a, b)
-        a.to_s <=> b.to_s
+        left = a.to_s
+        right = b.to_s
+        return 0 if left == right
+
+        left < right ? -1 : 1
       end
 
       def physical_time(hlc)
