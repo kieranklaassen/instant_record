@@ -197,12 +197,39 @@ class CompilerTest < ActiveSupport::TestCase
     end
   end
 
-  test "GemVendor unwraps browser_only and client_only blocks and strips server_only blocks" do
+  test "GemVendor unwraps browser_only and client_only blocks and strips server_only blocks across models, controllers, helpers, and screens" do
     Dir.mktmpdir do |dir|
       app = File.join(dir, "app")
       FileUtils.mkdir_p(File.join(app, "app/controllers"))
       FileUtils.mkdir_p(File.join(app, "app/screens"))
       FileUtils.mkdir_p(File.join(app, "app/models"))
+      FileUtils.mkdir_p(File.join(app, "app/helpers"))
+
+      File.write(File.join(app, "app/models/item.rb"), <<~RUBY)
+        class Item < ApplicationRecord
+          include InstantRecord::Syncable
+          server_only do
+            validate :quota_check
+          end
+          browser_only do
+            after_commit :flash_confetti
+          end
+          client_only do
+            def local_label = title
+          end
+        end
+      RUBY
+
+      File.write(File.join(app, "app/helpers/items_helper.rb"), <<~RUBY)
+        module ItemsHelper
+          server_only do
+            def secret_banner = "server"
+          end
+          browser_only do
+            def local_banner = "browser"
+          end
+        end
+      RUBY
 
       File.write(File.join(app, "app/controllers/items_controller.rb"), <<~RUBY)
         class ItemsController < ApplicationController
@@ -227,6 +254,18 @@ class CompilerTest < ActiveSupport::TestCase
 
       InstantRecord::Compiler::GemVendor.vendor(gem_src: GEM_ROOT, app_dir: app, demo: false)
 
+      model = File.read(File.join(app, "app/models/item.rb"))
+      refute_includes model, "quota_check"
+      refute_includes model, "browser_only"
+      refute_includes model, "client_only"
+      assert_includes model, "  after_commit :flash_confetti\n"
+      assert_includes model, "  def local_label = title\n"
+
+      helper = File.read(File.join(app, "app/helpers/items_helper.rb"))
+      refute_includes helper, "secret_banner"
+      refute_includes helper, "browser_only"
+      assert_includes helper, "  def local_banner = \"browser\"\n"
+
       controller = File.read(File.join(app, "app/controllers/items_controller.rb"))
       refute_includes controller, "require_server_secret"
       refute_includes controller, "browser_only"
@@ -235,6 +274,109 @@ class CompilerTest < ActiveSupport::TestCase
       screen = File.read(File.join(app, "app/screens/items_screen.rb"))
       refute_includes screen, "client_only"
       assert_includes screen, "  def fast_path\n    true\n  end\n"
+
+      vendored_core = File.read(File.join(app, "lib/instant_record.rb"))
+      refute_includes vendored_core, "Rails.application.config.instant_record"
+    end
+  end
+
+  test "EntryBuilder emits consumer sync_windows, endpoint, and mount_path and validates identifiers" do
+    Dir.mktmpdir do |dir|
+      emit = File.join(dir, "emit")
+      app = File.join(dir, "app")
+      FileUtils.mkdir_p(File.join(emit, "app/models/instant_record/client"))
+      FileUtils.mkdir_p(File.join(app, "app/screens"))
+
+      File.write(File.join(emit, "main.rb"), "require_relative \"boot\"\nif ARGV.length > 0 && ARGV[0] == \"sidekiq\"\nend\n")
+      File.write(File.join(emit, "app/models/instant_record/client/transport.rb"), "File.write(REQUEST, body)\nFile.read(RESPONSE)\n")
+      File.write(File.join(emit, "app/models/instant_record/client/notifier.rb"), "File.write(\"/host/notify\", body)\n")
+
+      plan = { "version" => 1, "baseline" => nil, "migrations" => {} }
+      windows = {
+        "Event" => { limit: 100, partition_by: nil },
+        "Message" => { limit: 25, partition_by: "room_id" }
+      }
+
+      InstantRecord::Compiler::EntryBuilder.write_wasm_entry(
+        emit_dir: emit,
+        demo: false,
+        models: %w[Event Message],
+        sync_windows: windows,
+        endpoint: "https://api.example.test/sync",
+        mount_path: "/sync",
+        migration_plan: plan,
+        pipeline_dir: PIPELINE_DIR
+      )
+
+      wasm_main = File.read(File.join(emit, "main_wasm.rb"))
+      assert_includes wasm_main, 'InstantRecord.config.endpoint = "https://api.example.test/sync"'
+      assert_includes wasm_main, 'InstantRecord.config.mount_path = "/sync"'
+      assert_includes wasm_main, "Event.sync_window(limit: 100)"
+      assert_includes wasm_main, "Message.sync_window(limit: 25, partition_by: :room_id)"
+
+      InstantRecord::Compiler::EntryBuilder.write_native_entry(
+        tree_dir: emit,
+        app_dir: app,
+        demo: false,
+        models: %w[Event Message],
+        sync_windows: windows,
+        endpoint: "https://api.example.test/sync",
+        mount_path: "/sync",
+        migration_plan: plan
+      )
+
+      native_main = File.read(File.join(emit, "main_native.rb"))
+      assert_includes native_main, "Event.sync_window(limit: 100)"
+      assert_includes native_main, "Message.sync_window(limit: 25, partition_by: :room_id)"
+
+      assert_raises(InstantRecord::Compiler::BuildError) do
+        InstantRecord::Compiler::EntryBuilder.sync_windows_code(
+          demo: false,
+          sync_windows: { "Message" => { limit: 10, partition_by: "bad col!" } }
+        )
+      end
+      assert_raises(InstantRecord::Compiler::BuildError) do
+        InstantRecord::Compiler::EntryBuilder.sync_windows_code(
+          demo: false,
+          sync_windows: { "bad_model" => { limit: 10 } }
+        )
+      end
+    end
+  end
+
+  test "WasmBuild input_digest tracks sync_windows and mount_path and fails cleanly when WEB_NODE_MODULES is missing" do
+    Dir.mktmpdir do |dir|
+      fake = create_fake_toolchain(dir)
+      app_root = File.join(dir, "my_app")
+      create_consumer_app(app_root)
+      workspace = File.join(app_root, "tmp/instant_record/compiled")
+      FileUtils.mkdir_p(File.join(workspace, "web"))
+
+      base = InstantRecord::Compiler::WasmBuild.new(
+        workspace: workspace, gem_root: GEM_ROOT, toolchain: fake[:toolchain_file],
+        app_source: app_root, models: ["Task"], endpoint: "/instant_record"
+      )
+      with_window = InstantRecord::Compiler::WasmBuild.new(
+        workspace: workspace, gem_root: GEM_ROOT, toolchain: fake[:toolchain_file],
+        app_source: app_root, models: ["Task"], sync_windows: { "Task" => { limit: 20 } }, endpoint: "/instant_record"
+      )
+      with_mount = InstantRecord::Compiler::WasmBuild.new(
+        workspace: workspace, gem_root: GEM_ROOT, toolchain: fake[:toolchain_file],
+        app_source: app_root, models: ["Task"], endpoint: "/sync", mount_path: "/sync"
+      )
+
+      refute_equal base.input_digest, with_window.input_digest
+      refute_equal base.input_digest, with_mount.input_digest
+
+      File.write(fake[:toolchain_file], File.read(fake[:toolchain_file]).sub(/WEB_NODE_MODULES=.*/, "WEB_NODE_MODULES=#{dir}/missing_modules"))
+      broken = InstantRecord::Compiler::WasmBuild.new(
+        workspace: workspace, gem_root: GEM_ROOT, toolchain: fake[:toolchain_file],
+        app_source: app_root, models: ["Task"], endpoint: "/instant_record"
+      )
+      error = assert_raises(InstantRecord::Compiler::BuildError) do
+        broken.send(:ensure_web_node_modules, File.join(workspace, "web"))
+      end
+      assert_match(/npm ci/, error.message)
     end
   end
 

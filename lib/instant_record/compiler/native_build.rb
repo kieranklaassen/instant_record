@@ -62,7 +62,9 @@ module InstantRecord
         toolchain:,
         app_source: nil,
         models: [],
+        sync_windows: nil,
         endpoint: nil,
+        mount_path: nil,
         target: nil,
         baseline: nil,
         migration_paths: nil,
@@ -75,7 +77,9 @@ module InstantRecord
         @app_source = app_source ? File.expand_path(app_source.to_s) : nil
         @demo = @app_source.nil?
         @models = models
+        @sync_windows = sync_windows
         @endpoint = endpoint
+        @mount_path = mount_path
         @target = target.nil? || target.to_s.empty? ? nil : target.to_s
         if @target && !TARGETS.include?(@target)
           raise ArgumentError, "Unknown target #{@target}. Leave it out for this machine, or use #{TARGETS.join(' or ')}."
@@ -101,7 +105,9 @@ module InstantRecord
           toolchain: @toolchain,
           app_source: @app_source,
           models: @models,
+          sync_windows: @sync_windows,
           endpoint: @endpoint,
+          mount_path: @mount_path,
           baseline: @baseline,
           migration_paths: @migration_paths,
           build_dir: @build_dir,
@@ -117,6 +123,9 @@ module InstantRecord
           app_dir: app,
           demo: @demo,
           models: @models,
+          sync_windows: @sync_windows,
+          endpoint: @endpoint,
+          mount_path: @mount_path,
           migration_plan: plan
         )
         @out.puts "wrote main_native.rb with screens: #{screens.empty? ? 'none' : screens.join(', ')}"
