@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>One todo list, four ways</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,400;6..72,500&family=JetBrains+Mono:wght@400;500&display=swap">
+    <style>
+      :root { --paper: #FBF8F2; --card: #FFFFFF; --ink: #302B26; --muted: #6E6456; --hairline: #E2D9CC; --green: #3E6B4F; --wait: #B07A2A; }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--paper); color: var(--ink); font: 15px/1.5 Figtree, system-ui, sans-serif; }
+      header { padding: 28px 28px 8px; display: flex; flex-wrap: wrap; gap: 16px 32px; align-items: end; }
+      h1 { margin: 0; font: 500 34px/1.1 Newsreader, Georgia, serif; }
+      header p { margin: 4px 0 0; color: var(--muted); max-width: 60ch; }
+      .press { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+      .press input { height: 38px; width: 220px; padding: 0 12px; border: 1px solid var(--hairline); border-radius: 10px; background: var(--card); font: inherit; }
+      button { height: 38px; padding: 0 14px; border: 0; border-radius: 10px; background: var(--ink); color: var(--paper); font: 600 14px Figtree, sans-serif; cursor: pointer; }
+      button.quiet { background: transparent; color: var(--muted); box-shadow: inset 0 0 0 1px var(--hairline); }
+      .ways { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; padding: 20px 28px 28px; }
+      .way { background: var(--card); border-radius: 16px; box-shadow: 0 0 0 1px rgba(10,10,10,.06); overflow: hidden; display: flex; flex-direction: column; }
+      .way-head { padding: 18px 18px 14px; border-bottom: 1px solid var(--hairline); }
+      .way-head h2 { margin: 0; font-size: 17px; }
+      .way-head p { margin: 2px 0 0; color: var(--muted); font-size: 13px; min-height: 2.9em; }
+      .ms { margin-top: 10px; font: 500 46px/1 Newsreader, Georgia, serif; font-variant-numeric: tabular-nums; }
+      .ms small { font: 500 14px Figtree, sans-serif; color: var(--muted); }
+      .ms.waiting { color: var(--wait); }
+      .bar { height: 6px; margin-top: 10px; border-radius: 3px; background: #F0E9DE; overflow: hidden; }
+      .bar i { display: block; height: 100%; width: 0; background: var(--green); transition: width .2s; }
+      .facts { margin: 10px 0 0; display: flex; justify-content: space-between; gap: 8px; font: 12px "JetBrains Mono", monospace; color: var(--muted); }
+      iframe { border: 0; width: 100%; height: 58vh; min-height: 360px; background: var(--paper); }
+      footer { padding: 0 28px 28px; color: var(--muted); font-size: 13px; }
+      @media (max-width: 1000px) { .ways { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>One todo list, four ways</h1>
+        <p>The same todo list, built four ways. Each number is the time from the press to the frame that shows the change, measured in the pane itself.</p>
+      </div>
+      <form class="press" id="press">
+        <input type="text" id="title" placeholder="Type a todo for all four" aria-label="A todo for all four" required>
+        <button>Add in all four</button>
+        <button type="button" class="quiet" data-do="toggle">Tick the first</button>
+        <button type="button" class="quiet" data-do="delete">Delete the first</button>
+        <button type="button" class="quiet" data-do="reset">Start over</button>
+      </form>
+    </header>
+
+    <section class="ways">
+      <% @ways.each do |way| %>
+        <% src = way.key == "instant" && @instant_url ? @instant_url : "/#{way.key}" %>
+        <article class="way" data-way="<%= way.key %>">
+          <div class="way-head">
+            <h2><%= way.name %></h2>
+            <p><%= way.how %></p>
+            <div class="ms" data-ms>&ndash; <small>ms</small></div>
+            <div class="bar"><i data-bar></i></div>
+            <p class="facts">
+              <span data-median>no action yet</span>
+              <span><%= @sizes[way.key][:lines] %> lines, <%= @sizes[way.key][:files] %> files</span>
+            </p>
+          </div>
+          <iframe src="<%= src %>" title="<%= way.name %>"></iframe>
+        </article>
+      <% end %>
+    </section>
+
+    <footer>
+      <span id="trip">Measuring the trip to this server…</span>
+      <% unless @instant_url %>
+        The fourth pane is served by Rails here, so it behaves as the first does. It is itself in a compiled build: start this server with COMPARE_INSTANT_URL set to that build's /instant.
+      <% end %>
+    </footer>
+
+    <script>
+      const panes = [...document.querySelectorAll(".way")]
+      const times = Object.fromEntries(panes.map((pane) => [pane.dataset.way, []]))
+      const median = (values) => [...values].sort((a, b) => a - b)[Math.floor((values.length - 1) / 2)]
+      const send = (message) => panes.forEach((pane) => pane.querySelector("iframe").contentWindow.postMessage(message, "*"))
+
+      const waiting = () => panes.forEach((pane) => {
+        pane.querySelector("[data-ms]").classList.add("waiting")
+        pane.querySelector("[data-bar]").style.width = "0"
+      })
+
+      const draw = () => {
+        const lasts = panes.map((pane) => times[pane.dataset.way].at(-1)?.ms ?? 0)
+        const slowest = Math.max(...lasts, 1)
+        panes.forEach((pane, at) => {
+          const all = times[pane.dataset.way]
+          if (!all.length) {
+            pane.querySelector("[data-ms]").innerHTML = "&ndash; <small>ms</small>"
+            pane.querySelector("[data-median]").textContent = "no action yet"
+            return
+          }
+          pane.querySelector("[data-bar]").style.width = `${Math.max(2, (lasts[at] / slowest) * 100)}%`
+          pane.querySelector("[data-median]").textContent = `median ${median(all.map((time) => time.ms))} ms of ${all.length}`
+        })
+      }
+
+      window.addEventListener("message", (event) => {
+        if (event.data?.type !== "four.time" || !times[event.data.way]) return
+        times[event.data.way].push(event.data)
+        const pane = panes.find((each) => each.dataset.way === event.data.way)
+        const ms = pane.querySelector("[data-ms]")
+        ms.classList.remove("waiting")
+        ms.innerHTML = `${event.data.ms} <small>ms to ${event.data.action}</small>`
+        draw()
+      })
+
+      document.getElementById("press").addEventListener("submit", (event) => {
+        event.preventDefault()
+        const title = document.getElementById("title")
+        waiting()
+        send({ type: "four.do", action: "add", title: title.value })
+        title.value = ""
+      })
+
+      document.querySelectorAll("[data-do]").forEach((button) => button.addEventListener("click", () => {
+        if (button.dataset.do === "reset") return reset()
+        waiting()
+        send({ type: "four.do", action: button.dataset.do })
+      }))
+
+      // Empty lists and no times, in all four.
+      const reset = async () => {
+        await fetch("/compare/reset", { method: "POST", headers: { "X-CSRF-Token": "<%= form_authenticity_token %>" } })
+        Object.values(times).forEach((all) => (all.length = 0))
+        send({ type: "four.clear" })
+        draw()
+        panes.forEach((pane) => {
+          const frame = pane.querySelector("iframe")
+          // The fourth pane may be another origin, which hears of the deletes by sync.
+          try { frame.contentWindow.location.reload() } catch {}
+        })
+      }
+
+      // What a request to this server costs from this browser, right now.
+      const trip = async () => {
+        const samples = []
+        for (let at = 0; at < 5; at++) {
+          const from = performance.now()
+          await fetch("/up", { cache: "no-store" })
+          samples.push(performance.now() - from)
+        }
+        document.getElementById("trip").textContent = `A request to this server and back takes ${Math.round(median(samples))} ms from this browser.`
+      }
+      trip()
+    </script>
+  </body>
+</html>
