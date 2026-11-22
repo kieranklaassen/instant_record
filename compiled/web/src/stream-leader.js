@@ -39,12 +39,14 @@ export class SseFrameBuffer {
     this.pending += text.replace(/\r\n?/g, "\n");
 
     const frames = [];
+    let start = 0;
     let cut;
-    while ((cut = this.pending.indexOf("\n\n")) !== -1) {
-      const block = this.pending.slice(0, cut);
-      this.pending = this.pending.slice(cut + 2);
+    while ((cut = this.pending.indexOf("\n\n", start)) !== -1) {
+      const block = this.pending.slice(start, cut);
+      start = cut + 2;
       if (/^data:/m.test(block)) frames.push(block + "\n\n");
     }
+    if (start > 0) this.pending = this.pending.slice(start);
     return { framesText: frames.join(""), count: frames.length };
   }
 
@@ -68,7 +70,9 @@ export function eventsUrl(endpoint, { cursor = 0, identity = "", scope = "" } = 
 export function createStreamLeader(options) {
   const config = { ...DEFAULTS, ...options };
   const tabId = config.tabId || globalThis.crypto.randomUUID();
-  const scopeKey = streamScopeKey(config.mailboxScope, config.syncScope);
+  const getEndpoint = typeof config.getEndpoint === "function" ? config.getEndpoint : () => config.endpoint;
+  const getSyncScope = typeof config.getSyncScope === "function" ? config.getSyncScope : () => config.syncScope || "";
+  const scopeKey = streamScopeKey(config.mailboxScope, getSyncScope());
   const lockName = `instant-record-stream/${scopeKey}`;
   const channelName = `instant-record-spinel-stream/${scopeKey}`;
 
@@ -81,18 +85,17 @@ export function createStreamLeader(options) {
   const random = config.random || (() => Math.random());
   const isOnlineFn = config.isOnline || (() => (typeof navigator === "undefined" ? true : navigator.onLine !== false));
   const getLatencyMs = config.getLatencyMs || (() => 0);
-  const getEndpoint = typeof config.getEndpoint === "function" ? config.getEndpoint : () => config.endpoint;
-  const getSyncScope = typeof config.getSyncScope === "function" ? config.getSyncScope : () => config.syncScope || "";
   const onReport = config.onReport || (() => {});
   const onStreamStateChange = config.onStreamStateChange || (() => {});
 
   let channel = null;
   let started = false;
   let stopped = false;
-  let electing = false;
+  let suspended = false;
   let isLeader = false;
   let lockAbortController = null;
   let releaseLeadership = null;
+  let activeLoop = null;
 
   let selfVisible = config.initialVisible !== false;
   let online = isOnlineFn();
@@ -105,11 +108,12 @@ export function createStreamLeader(options) {
   let abortReason = null;
   let hiddenGraceTimer = null;
   let wakeResolve = null;
-  let loopPromise = null;
-  let pruningPeers = null;
 
   // peer tabId -> { visible: boolean, seenAt: number }
   const peers = new Map();
+
+  const canElect = () => started && !stopped && !suspended && !offlineSimulated;
+  const activeLeader = () => isLeader && !stopped && !suspended && !offlineSimulated;
 
   function eventsPathname() {
     try {
@@ -118,6 +122,17 @@ export function createStreamLeader(options) {
     } catch {
       return getEndpoint() + "/events";
     }
+  }
+
+  function reportStream(status, ms, open) {
+    onReport({
+      kind: "stream",
+      method: "GET",
+      path: eventsPathname(),
+      status,
+      ms,
+      streamOpen: open,
+    });
   }
 
   function postCoord(message) {
@@ -176,7 +191,7 @@ export function createStreamLeader(options) {
   }
 
   function waitInterruptible(ms) {
-    if (!isLeader || stopped || offlineSimulated) return Promise.resolve();
+    if (!activeLeader()) return Promise.resolve();
     return new Promise(resolve => {
       let timer = null;
       const done = () => {
@@ -193,20 +208,21 @@ export function createStreamLeader(options) {
   }
 
   function evaluateVisibility() {
-    if (!isLeader || stopped || offlineSimulated) return;
+    if (!activeLeader()) return;
     if (anyVisible()) {
+      const wasHiddenOrGrace = pausedForHidden || hiddenGraceTimer !== null;
       clearHiddenGrace();
       if (pausedForHidden) {
         pausedForHidden = false;
         backoffMs = config.backoffBaseMs;
-        wakeLoop();
       }
+      if (wasHiddenOrGrace) wakeLoop();
       return;
     }
     if (!pausedForHidden && hiddenGraceTimer === null) {
       hiddenGraceTimer = setTimer(() => {
         hiddenGraceTimer = null;
-        if (!isLeader || stopped || offlineSimulated || anyVisible()) return;
+        if (!activeLeader() || anyVisible()) return;
         pausedForHidden = true;
         abortCurrentFetch("hidden");
       }, config.hiddenGraceMs);
@@ -214,18 +230,12 @@ export function createStreamLeader(options) {
   }
 
   async function pruneStalePeers() {
-    if (pruningPeers) return pruningPeers;
     const pingStartedAt = now();
-    pruningPeers = (async () => {
-      postCoord({ type: "ping", tabId });
-      await new Promise(resolve => setTimer(resolve, config.peerPingWaitMs));
-      for (const [peerId, peer] of peers) {
-        if (peer.visible && peer.seenAt < pingStartedAt) peers.delete(peerId);
-      }
-    })().finally(() => {
-      pruningPeers = null;
-    });
-    return pruningPeers;
+    postCoord({ type: "ping", tabId });
+    await new Promise(resolve => setTimer(resolve, config.peerPingWaitMs));
+    for (const [peerId, peer] of peers) {
+      if (peer.visible && peer.seenAt < pingStartedAt) peers.delete(peerId);
+    }
   }
 
   function jitteredDelay(baseMs) {
@@ -239,7 +249,7 @@ export function createStreamLeader(options) {
 
   function handleCoordMessage(event) {
     const msg = event.data;
-    if (!msg || typeof msg !== "object" || msg.tabId === tabId || stopped) return;
+    if (!msg || typeof msg !== "object" || msg.tabId === tabId || stopped || suspended) return;
 
     if (msg.type === "hello" || msg.type === "visibility") {
       peers.set(msg.tabId, { visible: !!msg.visible, seenAt: now() });
@@ -292,7 +302,7 @@ export function createStreamLeader(options) {
     const latency = getLatencyMs();
     if (latency > 0) {
       await waitInterruptible(latency);
-      if (!isLeader || stopped || offlineSimulated || !online || pausedForHidden) return;
+      if (!activeLeader() || !online || pausedForHidden) return;
     }
 
     const url = eventsUrl(getEndpoint(), {
@@ -324,6 +334,7 @@ export function createStreamLeader(options) {
     const openedAt = now();
     let receivedEvents = 0;
     let wasReset = false;
+    let failureStatus = null;
     let reader = null;
 
     try {
@@ -335,94 +346,51 @@ export function createStreamLeader(options) {
       });
 
       if (!response || response.status !== 200) {
-        clearIdleWatchdog();
-        updateStreamOpen(false, true);
-        const status = response ? response.status : "failed";
-        onReport({
-          kind: "stream",
-          method: "GET",
-          path: eventsPathname(),
-          status,
-          ms: Math.round(now() - openedAt),
-          streamOpen: false,
-        });
-        const delay = jitteredDelay(backoffMs);
-        backoffMs = Math.min(backoffMs * 2, config.backoffCapMs);
-        await waitInterruptible(delay);
-        return;
-      }
-
-      backoffMs = config.backoffBaseMs;
-      updateStreamOpen(true, true);
-
-      const frameBuffer = new SseFrameBuffer();
-      const consumeText = async text => {
-        const { framesText, count } = frameBuffer.feed(text);
-        if (count === 0) return false;
-        receivedEvents += count;
-        const applied = await config.applyFrames(framesText);
-        onReport({
-          kind: "stream",
-          method: "GET",
-          path: eventsPathname(),
-          status: 200,
-          ms: Math.round(now() - openedAt),
-          streamOpen: true,
-        });
-        if (applied?.reset) {
-          wasReset = true;
-          return true;
-        }
-        return false;
-      };
-
-      if (response.body && typeof response.body.getReader === "function") {
-        reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        while (true) {
-          armIdleWatchdog();
-          const { value, done } = await reader.read();
-          if (done) {
-            const tail = decoder.decode();
-            if (tail) await consumeText(tail);
-            break;
-          }
-          const chunk = typeof value === "string" ? value : decoder.decode(value, { stream: true });
-          const resetNow = await consumeText(chunk);
-          if (resetNow) {
-            abortReason = "reset";
-            controller.abort();
-            break;
-          }
-        }
+        failureStatus = response ? response.status : "failed";
       } else {
-        const text = await response.text();
-        await consumeText(text);
+        backoffMs = config.backoffBaseMs;
+        updateStreamOpen(true, true);
+
+        const frameBuffer = new SseFrameBuffer();
+        const consumeText = async text => {
+          const { framesText, count } = frameBuffer.feed(text);
+          if (count === 0) return false;
+          receivedEvents += count;
+          const applied = await config.applyFrames(framesText);
+          if (activeLeader() && online && !pausedForHidden) {
+            reportStream(200, Math.round(now() - openedAt), true);
+          }
+          if (applied?.reset) {
+            wasReset = true;
+            return true;
+          }
+          return false;
+        };
+
+        if (response.body && typeof response.body.getReader === "function") {
+          reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          while (true) {
+            armIdleWatchdog();
+            const { value, done } = await reader.read();
+            if (done) {
+              const tail = decoder.decode();
+              if (tail) await consumeText(tail);
+              break;
+            }
+            const chunk = typeof value === "string" ? value : decoder.decode(value, { stream: true });
+            if (await consumeText(chunk)) {
+              abortReason = "reset";
+              controller.abort();
+              break;
+            }
+          }
+        } else {
+          await consumeText(await response.text());
+        }
       }
     } catch {
-      if (!isLeader || stopped || offlineSimulated) return;
-      const reason = abortReason;
-      if (reason === "reconnect" || reason === "reset") {
-        updateStreamOpen(false, true);
-        return;
-      }
-      if (reason === "hidden" || reason === "offline" || !online || pausedForHidden) {
-        updateStreamOpen(false, true);
-        return;
-      }
-      updateStreamOpen(false, true);
-      onReport({
-        kind: "stream",
-        method: "GET",
-        path: eventsPathname(),
-        status: "failed",
-        ms: Math.round(now() - openedAt),
-        streamOpen: false,
-      });
-      const delay = jitteredDelay(backoffMs);
-      backoffMs = Math.min(backoffMs * 2, config.backoffCapMs);
-      await waitInterruptible(delay);
-      return;
+      failureStatus = "failed";
     } finally {
       clearIdleWatchdog();
       if (reader) {
@@ -431,7 +399,7 @@ export function createStreamLeader(options) {
       if (fetchAbort === controller) fetchAbort = null;
     }
 
-    if (!isLeader || stopped || offlineSimulated) return;
+    if (!activeLeader()) return;
 
     const reason = abortReason;
     abortReason = null;
@@ -439,6 +407,14 @@ export function createStreamLeader(options) {
 
     if (wasReset || reason === "reconnect" || reason === "reset") return;
     if (reason === "hidden" || reason === "offline" || !online || pausedForHidden) return;
+
+    if (failureStatus !== null) {
+      reportStream(failureStatus, Math.round(now() - openedAt), false);
+      const delay = jitteredDelay(backoffMs);
+      backoffMs = Math.min(backoffMs * 2, config.backoffCapMs);
+      await waitInterruptible(delay);
+      return;
+    }
 
     const elapsed = now() - openedAt;
     if (elapsed >= config.minStreamDurationMs) {
@@ -449,7 +425,7 @@ export function createStreamLeader(options) {
   }
 
   async function runLeaderLoop() {
-    while (isLeader && !stopped && !offlineSimulated) {
+    while (activeLeader()) {
       if (!online) {
         updateStreamOpen(false, true);
         await waitInterruptible(null);
@@ -458,16 +434,12 @@ export function createStreamLeader(options) {
 
       if (!selfVisible && hasStaleVisiblePeer()) {
         await pruneStalePeers();
-        if (!isLeader || stopped || offlineSimulated) break;
+        if (!activeLeader()) break;
       }
 
       if (!anyVisible()) {
-        if (!pausedForHidden) {
-          evaluateVisibility();
-          await waitInterruptible(null);
-          continue;
-        }
-        updateStreamOpen(false, true);
+        if (!pausedForHidden) evaluateVisibility();
+        else updateStreamOpen(false, true);
         await waitInterruptible(null);
         continue;
       }
@@ -481,7 +453,7 @@ export function createStreamLeader(options) {
       } catch {
         params = null;
       }
-      if (!isLeader || stopped || offlineSimulated) break;
+      if (!activeLeader()) break;
 
       if (!params || !params.ready) {
         updateStreamOpen(false, true);
@@ -494,7 +466,7 @@ export function createStreamLeader(options) {
   }
 
   async function assumeLeadership() {
-    if (stopped || offlineSimulated) return;
+    if (!canElect()) return;
     isLeader = true;
     peers.clear();
     pausedForHidden = !anyVisible();
@@ -503,7 +475,8 @@ export function createStreamLeader(options) {
     const released = new Promise(resolve => {
       releaseLeadership = resolve;
     });
-    loopPromise = runLeaderLoop();
+    const loop = runLeaderLoop();
+    activeLoop = loop;
     await released;
 
     isLeader = false;
@@ -512,39 +485,42 @@ export function createStreamLeader(options) {
     abortCurrentFetch(offlineSimulated ? "offline" : "release");
     wakeLoop();
     try {
-      await loopPromise;
+      await loop;
     } finally {
-      loopPromise = null;
+      if (activeLoop === loop) activeLoop = null;
+      if (canElect() && !isLeader && !lockAbortController) requestLeadership();
     }
   }
 
   function requestLeadership() {
-    if (stopped || !started || offlineSimulated || isLeader || electing) return;
+    if (!canElect() || isLeader || lockAbortController || activeLoop) return;
     if (!locks) {
       assumeLeadership();
       return;
     }
-    electing = true;
     const abortController = new AbortController();
     lockAbortController = abortController;
     locks
       .request(lockName, { mode: "exclusive", signal: abortController.signal }, async () => {
-        electing = false;
         if (lockAbortController === abortController) lockAbortController = null;
         await assumeLeadership();
       })
       .catch(() => {
-        electing = false;
         if (lockAbortController === abortController) lockAbortController = null;
+      })
+      .finally(() => {
+        if (canElect() && !isLeader && !lockAbortController && !activeLoop) {
+          requestLeadership();
+        }
       });
   }
 
   function releaseCurrentLeadership() {
     clearHiddenGrace();
-    if (electing && lockAbortController) {
-      lockAbortController.abort();
+    if (lockAbortController) {
+      const pending = lockAbortController;
       lockAbortController = null;
-      electing = false;
+      pending.abort();
     }
     if (isLeader) {
       abortCurrentFetch(offlineSimulated ? "offline" : "release");
@@ -570,14 +546,7 @@ export function createStreamLeader(options) {
       if (channel) channel.onmessage = handleCoordMessage;
       postCoord({ type: "hello", tabId, visible: selfVisible });
       if (offlineSimulated) {
-        onReport({
-          kind: "stream",
-          method: "GET",
-          path: eventsPathname(),
-          status: "offline",
-          ms: 0,
-          streamOpen: false,
-        });
+        reportStream("offline", 0, false);
         return;
       }
       requestLeadership();
@@ -587,6 +556,7 @@ export function createStreamLeader(options) {
       const next = !!visible;
       if (next === selfVisible) return;
       selfVisible = next;
+      if (suspended || stopped) return;
       postCoord({ type: "visibility", tabId, visible: selfVisible });
       if (selfVisible) {
         clearHiddenGrace();
@@ -624,18 +594,11 @@ export function createStreamLeader(options) {
       offlineSimulated = normalized;
       if (offlineSimulated) {
         updateStreamOpen(false, false);
-        onReport({
-          kind: "stream",
-          method: "GET",
-          path: eventsPathname(),
-          status: "offline",
-          ms: 0,
-          streamOpen: false,
-        });
+        reportStream("offline", 0, false);
         releaseCurrentLeadership();
       } else {
         backoffMs = config.backoffBaseMs;
-        if (started && !stopped) {
+        if (canElect()) {
           postCoord({ type: "hello", tabId, visible: selfVisible });
           postCoord({ type: "wake", tabId, visible: selfVisible, reason: "online" });
           requestLeadership();
@@ -644,14 +607,14 @@ export function createStreamLeader(options) {
     },
 
     wake() {
-      if (stopped || offlineSimulated) return;
+      if (!canElect()) return;
       backoffMs = config.backoffBaseMs;
       if (isLeader) wakeLoop();
       else postCoord({ type: "wake", tabId, visible: selfVisible, reason: "sync" });
     },
 
     reconnect() {
-      if (stopped || offlineSimulated) return;
+      if (!canElect()) return;
       backoffMs = config.backoffBaseMs;
       if (isLeader) {
         if (fetchAbort) abortCurrentFetch("reconnect");
@@ -661,9 +624,32 @@ export function createStreamLeader(options) {
       }
     },
 
+    // BFCache suspension: release the Web Lock and pause without permanently closing
+    // the coordinator, so a subsequent pageshow (persisted) can resume cleanly.
+    suspend() {
+      if (stopped || suspended) return;
+      suspended = true;
+      selfVisible = false;
+      postCoord({ type: "bye", tabId });
+      updateStreamOpen(false, false);
+      releaseCurrentLeadership();
+    },
+
+    resume(visible = true) {
+      if (stopped || !suspended) return;
+      suspended = false;
+      selfVisible = !!visible;
+      backoffMs = config.backoffBaseMs;
+      if (started) {
+        postCoord({ type: "hello", tabId, visible: selfVisible });
+        if (!offlineSimulated) requestLeadership();
+      }
+    },
+
     stop() {
       if (stopped) return;
       stopped = true;
+      suspended = false;
       postCoord({ type: "bye", tabId });
       updateStreamOpen(false, false);
       releaseCurrentLeadership();

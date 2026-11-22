@@ -28,7 +28,6 @@ function report(entry) {
 async function fetchReply(method, path, body = "", endpoint = syncEndpoint) {
   const url = endpoint + path;
   const started = performance.now();
-  const poll = path.startsWith("/events?");
   let status = 0;
   let text = "";
   let outcome = "failed";
@@ -52,11 +51,8 @@ async function fetchReply(method, path, body = "", endpoint = syncEndpoint) {
   } catch {
     // A failed exchange stays in the durable outbox for retry.
   } finally {
-    // Empty successful catch-up polls would bury the actions being inspected.
-    if (!poll || status !== 200 || text.trim()) {
-      report({ kind: poll ? "stream" : "sync", method, path: new URL(url, self.location.origin).pathname,
-        status: outcome, ms: Math.round(performance.now() - started) });
-    }
+    report({ kind: "sync", method, path: new URL(url, self.location.origin).pathname,
+      status: outcome, ms: Math.round(performance.now() - started) });
   }
   return { method, url, body, status, text };
 }
@@ -84,10 +80,6 @@ let snapshotRevision;
 let changes;
 
 let host = null;
-let currentCursor = null;
-// Read with the cursor, and sent with each stream so the server can say when the
-// person behind this browser has changed.
-let currentIdentity = "";
 let kickTimer = null;
 let draining = null;
 let localRevision = 0;
@@ -96,11 +88,13 @@ let streamLeader = null;
 let streamOpen = false;
 let pageVisible = true;
 let pageTornDown = false;
+let pageSuspended = false;
 
 // Keep each tab's hot reactor until a peer changes the durable revision.
 async function withSnapshot(mode, operation) {
   let wrote = false;
   let wroteChanges = null;
+  let wroteSilent = false;
   try {
     const result = await withFiles(mode, async (get, put) => {
       const revision = await get(REVISION);
@@ -118,9 +112,8 @@ async function withSnapshot(mode, operation) {
         host = restored;
         snapshotRevision = revision;
         localRevision++;
-        currentCursor = null;
       }
-      return operation((changeList = null) => {
+      return operation((changeList = null, options = {}) => {
         const bytes = host.databaseBytes();
         if (!bytes) throw new Error("SQLite did not produce a database snapshot");
         snapshotRevision = (revision ?? 0) + 1;
@@ -128,9 +121,10 @@ async function withSnapshot(mode, operation) {
         put(REVISION, snapshotRevision);
         wrote = true;
         wroteChanges = changeList ?? null;
+        wroteSilent = !!options.silent;
       }, put);
     });
-    if (wrote) changes.postMessage({ revision: snapshotRevision, changes: wroteChanges });
+    if (wrote && !wroteSilent) changes.postMessage({ revision: snapshotRevision, changes: wroteChanges });
     return result;
   } catch (error) {
     // Discard uncommitted in-memory changes before the next operation.
@@ -160,10 +154,20 @@ function syncPass() {
   kickTimer = null;
   if (!draining) {
     const revision = localRevision;
-    draining = drain().finally(() => {
-      draining = null;
-      if (revision !== localRevision) kickSync();
-    });
+    let drainOutcome = null;
+    draining = drain()
+      .then(result => {
+        drainOutcome = result;
+        return result;
+      })
+      .finally(() => {
+        draining = null;
+        if (revision !== localRevision) kickSync();
+        if (drainOutcome && !drainOutcome.retried) {
+          if (drainOutcome.bootstrappedNow) streamLeader?.reconnect();
+          else if (drainOutcome.pending === 0) streamLeader?.wake();
+        }
+      });
   }
   return draining;
 }
@@ -191,8 +195,6 @@ async function drain(initial = false, early = null) {
     });
     const needsBootstrap = plan.bootstrap && !host.syncState().bootstrapped;
     if (push || snapshot) report({ kind: "sync-pass", path: `${result.pending} pending` });
-    // After a bootstrap the next stream reads the cursor and the identity afresh.
-    currentCursor = plan.bootstrap ? null : result.cursor;
     if (result.changed || result.notified) {
       save(result.changes);
     }
@@ -203,13 +205,9 @@ async function drain(initial = false, early = null) {
     } else {
       drainDelayMs = DRAIN_RETRY_BASE_MS;
     }
-    return { ...result, needsBootstrap };
+    return { ...result, bootstrappedNow: plan.bootstrap && !needsBootstrap };
   });
   if (!initial && result.notified) self.postMessage({ type: "records_changed", changes: result.changes });
-  if (!result.retried) {
-    if (plan.bootstrap && !result.needsBootstrap) streamLeader?.reconnect();
-    else if (result.pending === 0) streamLeader?.wake();
-  }
   return result;
 }
 
@@ -222,8 +220,6 @@ async function readStreamParams() {
     if (!draining && !kickTimer) kickSync(0);
     return { ready: false };
   }
-  currentCursor = state.cursor;
-  currentIdentity = state.identity;
   return { ready: true, cursor: state.cursor, identity: state.identity };
 }
 
@@ -231,23 +227,22 @@ async function readStreamParams() {
 // IndexedDB, and notify this tab (followers learn through the `changes` channel).
 async function applyStreamFrames(framesText) {
   if (draining) await draining.catch(() => {});
-  if (!host) return { applied: 0, cursor: currentCursor || 0, reset: false };
+  if (!host) return { applied: 0, cursor: 0, reset: false };
   const outcome = await withSnapshot("readwrite", save => {
+    const previousCursor = host.syncState().cursor;
     const consumed = host.consumeStream(framesText);
-    currentCursor = consumed.cursor;
     const reset = !consumed.bootstrapped;
-    // The server said this browser synced as someone else, and the client dropped what it
-    // held. Bootstrap as whoever is here now, at once, and never stream from zero.
-    if (reset) {
-      currentCursor = null;
-      currentIdentity = "";
-    }
-    if (consumed.applied > 0 || consumed.notified || reset) {
+    const notify = consumed.applied > 0 || consumed.notified || reset;
+    if (notify) {
       save(consumed.changes);
-      return { applied: consumed.applied, cursor: consumed.cursor, reset, changes: consumed.changes, notify: true };
+    } else if (consumed.cursor > previousCursor) {
+      // Persist cursor advances on echoed or filtered frames without triggering UI refreshes.
+      save(null, { silent: true });
     }
-    return { applied: consumed.applied, cursor: consumed.cursor, reset, changes: null, notify: false };
+    return { applied: consumed.applied, cursor: consumed.cursor, reset, changes: notify ? consumed.changes : null, notify };
   });
+  // The server said this browser synced as someone else, and the client dropped what it
+  // held. Bootstrap as whoever is here now, at once, and never stream from zero.
   if (outcome.reset) kickSync(0);
   if (outcome.notify) self.postMessage({ type: "records_changed", changes: outcome.changes });
   return outcome;
@@ -532,7 +527,7 @@ async function boot(payload = {}) {
   if (!restored && !shell) await drain(true, await bootstrapFetch);
   // The shell is as old as its cursor. Start the leader stream now so catch-up
   // begins immediately without holding the first page render.
-  if (shell && !pageTornDown) streamLeader.start();
+  if (shell && !pageTornDown && !pageSuspended) streamLeader.start();
   const bootstrapMs = performance.now() - bootstrapStart;
 
   if (scope) {
@@ -545,7 +540,10 @@ async function boot(payload = {}) {
     if (before && at) await loadHistory({ type: "MailEntry", before: { id: before, created_at: at }, limit: 50 });
   }
   const first = payload.path ? await runRequest("GET", () => navigate({ method: "GET", path: payload.path })) : null;
-  if (!pageTornDown) streamLeader.start();
+  if (!pageTornDown) {
+    streamLeader.start();
+    if (pageSuspended) streamLeader.suspend();
+  }
   // With the first page on screen, bring the rest of the inbox down behind it.
   if (scope && scope !== "invalid/invalid") {
     mailScope = scope;
@@ -564,9 +562,20 @@ self.onmessage = async (event) => {
       return;
     }
     if (type === "instant_record.pagehide") {
-      pageTornDown = true;
       pageVisible = false;
-      streamLeader?.stop();
+      if (event.data.persisted) {
+        pageSuspended = true;
+        streamLeader?.suspend();
+      } else {
+        pageTornDown = true;
+        streamLeader?.stop();
+      }
+      return;
+    }
+    if (type === "instant_record.pageshow") {
+      pageSuspended = false;
+      pageVisible = !!event.data.visible;
+      streamLeader?.resume(pageVisible);
       return;
     }
     if (type === "instant_record.clear_log") {

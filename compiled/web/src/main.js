@@ -204,12 +204,18 @@ document.close();
 function reportVisibility() {
   worker.postMessage({ type: "instant_record.visibility", visible: document.visibilityState !== "hidden" });
 }
-function reportPageHide() {
-  worker.postMessage({ type: "instant_record.pagehide" });
+function reportPageHide(event) {
+  worker.postMessage({ type: "instant_record.pagehide", persisted: !!event.persisted });
+}
+function reportPageShow(event) {
+  if (event.persisted) {
+    worker.postMessage({ type: "instant_record.pageshow", visible: document.visibilityState !== "hidden" });
+  }
 }
 function bindVisibility() {
   document.addEventListener("visibilitychange", reportVisibility);
   window.addEventListener("pagehide", reportPageHide);
+  window.addEventListener("pageshow", reportPageShow);
   reportVisibility();
 }
 bindVisibility();
@@ -242,22 +248,15 @@ async function submitLocalForm(event) {
     return;
   }
   const response = await appRequest(method, url.pathname + url.search, encodeFormData(fields), "application/x-www-form-urlencoded");
-  if (response.result.status >= 400) {
-    document.open();
-    document.write(response.result.body || "<p>Request failed</p>");
-    document.close();
-    window.addEventListener("submit", submitLocalForm);
-    bindVisibility();
+  if (response.result.status < 400 && response.redirected) {
+    location.assign(response.finalPath);
     return;
   }
-  if (response.redirected) location.assign(response.finalPath);
-  else {
-    document.open();
-    document.write(response.result.body);
-    document.close();
-    window.addEventListener("submit", submitLocalForm);
-    bindVisibility();
-  }
+  document.open();
+  document.write(response.result.status >= 400 ? (response.result.body || "<p>Request failed</p>") : response.result.body);
+  document.close();
+  window.addEventListener("submit", submitLocalForm);
+  bindVisibility();
 }
 window.addEventListener("submit", submitLocalForm);
 releaseRequired = watchRelease(networkFetch, import.meta.env.VITE_SOURCE_VERSION, () => waiting.size > 0);

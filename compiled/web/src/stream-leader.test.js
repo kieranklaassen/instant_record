@@ -613,3 +613,143 @@ test("hidden follower promoted after leader disappears stays paused until a tab 
 
   b.stop();
 });
+
+test("getSyncScope getter isolates lockName and channelName across distinct scopes", () => {
+  const a = createStreamLeader({
+    endpoint: "/instant_record",
+    getSyncScope: () => "scope-a",
+    getStreamParams: async () => ({ ready: false }),
+    applyFrames: async () => ({ applied: 0, cursor: 0, reset: false }),
+  });
+  const b = createStreamLeader({
+    endpoint: "/instant_record",
+    getSyncScope: () => "scope-b",
+    getStreamParams: async () => ({ ready: false }),
+    applyFrames: async () => ({ applied: 0, cursor: 0, reset: false }),
+  });
+  assert.notEqual(a.lockName, b.lockName);
+  assert.notEqual(a.channelName, b.channelName);
+  assert.match(a.lockName, /scope-a$/);
+  assert.match(b.lockName, /scope-b$/);
+});
+
+test("rapid simulated offline -> online toggle on leader re-acquires leadership without stranding", async () => {
+  const locks = createFakeLocks();
+  const createChannel = createFakeChannelHub();
+  const streams = [];
+
+  const fakeFetch = async (_url, init) => {
+    const stream = createControllableStream(init.signal);
+    streams.push(stream);
+    return stream.response;
+  };
+
+  const a = createStreamLeader({
+    tabId: "tab-a",
+    endpoint: "/instant_record",
+    getSyncScope: () => "s1",
+    locks,
+    createChannel,
+    fetch: fakeFetch,
+    getStreamParams: async () => ({ ready: true, cursor: 1, identity: "" }),
+    applyFrames: async () => ({ applied: 0, cursor: 1, reset: false }),
+  });
+
+  a.start();
+  await waitFor(() => a.isLeader() && streams.length === 1);
+
+  // Synchronous offline -> online toggle before leadership release microtask runs
+  a.setOfflineSimulated(true);
+  a.setOfflineSimulated(false);
+  await waitFor(() => a.isLeader() && streams.length === 2 && a.isStreamOpen());
+
+  a.stop();
+});
+
+test("new visible tab arriving during hidden grace period wakes leader immediately", async () => {
+  const locks = createFakeLocks();
+  const createChannel = createFakeChannelHub();
+  const streams = [];
+
+  const fakeFetch = async (_url, init) => {
+    const stream = createControllableStream(init.signal);
+    streams.push(stream);
+    return stream.response;
+  };
+
+  const a = createStreamLeader({
+    tabId: "tab-a",
+    endpoint: "/instant_record",
+    getSyncScope: () => "s1",
+    locks,
+    createChannel,
+    fetch: fakeFetch,
+    hiddenGraceMs: 500,
+    minStreamDurationMs: 0,
+    reconnectJitterMinMs: 5,
+    reconnectJitterMaxMs: 5,
+    getStreamParams: async () => ({ ready: true, cursor: 1, identity: "" }),
+    applyFrames: async () => ({ applied: 0, cursor: 1, reset: false }),
+  });
+
+  a.start();
+  await waitFor(() => streams.length === 1 && a.isStreamOpen());
+
+  // Leader hides and its current window closes while still inside the 500ms grace period.
+  a.setVisible(false);
+  streams[0].close();
+  await new Promise(r => setTimeout(r, 30));
+
+  // A new visible tab boots and sends hello (no explicit wake): leader must wake immediately.
+  const b = createStreamLeader({
+    tabId: "tab-b",
+    endpoint: "/instant_record",
+    getSyncScope: () => "s1",
+    locks,
+    createChannel,
+    fetch: fakeFetch,
+    initialVisible: true,
+    getStreamParams: async () => ({ ready: true, cursor: 1, identity: "" }),
+    applyFrames: async () => ({ applied: 0, cursor: 1, reset: false }),
+  });
+  b.start();
+
+  await waitFor(() => streams.length === 2 && a.isStreamOpen());
+
+  a.stop();
+  b.stop();
+});
+
+test("suspend and resume support BFCache without permanently killing leadership", async () => {
+  const locks = createFakeLocks();
+  const createChannel = createFakeChannelHub();
+  const streams = [];
+
+  const fakeFetch = async (_url, init) => {
+    const stream = createControllableStream(init.signal);
+    streams.push(stream);
+    return stream.response;
+  };
+
+  const a = createStreamLeader({
+    tabId: "tab-a",
+    endpoint: "/instant_record",
+    getSyncScope: () => "s1",
+    locks,
+    createChannel,
+    fetch: fakeFetch,
+    getStreamParams: async () => ({ ready: true, cursor: 1, identity: "" }),
+    applyFrames: async () => ({ applied: 0, cursor: 1, reset: false }),
+  });
+
+  a.start();
+  await waitFor(() => a.isLeader() && streams.length === 1);
+
+  a.suspend();
+  await waitFor(() => !a.isLeader() && streams[0].isClosed());
+
+  a.resume(true);
+  await waitFor(() => a.isLeader() && streams.length === 2 && a.isStreamOpen());
+
+  a.stop();
+});
