@@ -1,5 +1,6 @@
 import { mailboxScope } from "./mailbox-scope.js";
 import { watchRelease } from "./release-updates.js";
+import { isLocalUrl } from "./server-request.js";
 let releaseRequired;
 const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
 const waiting = new Map();
@@ -51,13 +52,9 @@ try {
   });
 } catch { /* Storage may be unavailable. */ }
 
-// A record's file is bytes for the sync server. They never pass through the app in the worker,
-// which holds its whole database in memory and takes no upload.
-const filesPath = new URL(syncEndpoint + "/files/", location.href);
-const isFile = (url) => url.origin === filesPath.origin && url.pathname.startsWith(filesPath.pathname);
-
-const isLocal = (url) => url.origin === location.origin && !isFile(url) &&
-  !url.pathname.startsWith("/assets/") && !url.pathname.startsWith("/harness/") && !/^\/app[-.\w]*\.wasm$/.test(url.pathname);
+// Static assets, service worker, release manifest, and same-origin sync/file
+// endpoints go straight to the network rather than the in-worker Wasm app.
+const isLocal = (url) => isLocalUrl(url, location.origin, syncEndpoint);
 
 // One page request; the worker follows the app's redirects and returns the final answer.
 const appRequest = (method, path, body, contentType) => call("navigate", { method, path, body, contentType });
@@ -86,9 +83,15 @@ window.fetch = async (input, init) => {
   const isUrlInput = typeof input === "string" || input instanceof URL;
   const url = isUrlInput ? new URL(input, location.href) : new URL(input.url);
   if (url.origin === location.origin && url.searchParams.has("instant_record_network")) {
-    const response = await call("serverRequest", { path: url.pathname + url.search, method: init?.method || "GET", body: init?.body });
+    const method = (isUrlInput ? init?.method : init?.method || input.method) || "GET";
+    const contentType = isUrlInput
+      ? headerValue(init?.headers, "content-type")
+      : (init?.headers ? headerValue(init.headers, "content-type") : input.headers.get("content-type") || undefined);
+    const body = isUrlInput ? init?.body : (init?.body ?? (method.toUpperCase() !== "GET" && method.toUpperCase() !== "HEAD" ? await input.clone().text() : undefined));
+    const response = await call("serverRequest", { path: url.pathname + url.search, method, body, contentType });
     if (!response.status) throw new TypeError("Sync server unreachable");
-    return new Response(response.text || null, { status: response.status });
+    const responseHeaders = response.contentType ? { "Content-Type": response.contentType } : {};
+    return new Response(response.text || null, { status: response.status, headers: responseHeaders });
   }
   if (!isLocal(url)) return networkFetch(input, init);
 
