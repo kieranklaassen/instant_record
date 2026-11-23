@@ -7,9 +7,9 @@
     <link rel="icon" href="data:,">
     <script>
       // Start compiling the app from the first line of the shell. The worker that will run it
-      // only starts once the page's own script has loaded; the compiled module is handed to it.
+      // starts from the end of this head in a built shell; the compiled module is handed to it.
       window.__wasmStart = performance.now();
-      window.__wasm = WebAssembly.compileStreaming(fetch("%VITE_WASM_URL%", { cache: location.search.includes("instant_record_cold_boot=1") ? "reload" : "default" })).then(
+      window.__wasm = WebAssembly.compileStreaming(fetch("%VITE_WASM_URL%", { priority: "high", cache: location.search.includes("instant_record_cold_boot=1") ? "reload" : "default" })).then(
         function (module) { window.__wasmMs = performance.now() - window.__wasmStart; return module; },
         function () { return null; });
     </script>

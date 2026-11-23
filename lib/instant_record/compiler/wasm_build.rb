@@ -6,8 +6,10 @@ require_relative "app_stage"
 require_relative "browser_migrations"
 require_relative "entry_builder"
 require_relative "gem_vendor"
+require_relative "manifest"
 require_relative "runner"
 require_relative "source_pages"
+require_relative "static_linter"
 require_relative "toolchain"
 require_relative "wasm_tree"
 
@@ -21,6 +23,7 @@ module InstantRecord
       DEFAULT_SYNC_ENDPOINT = "http://127.0.0.1:3210/instant_record"
       SPINEL_PACKAGES = %w[json stringio zlib].freeze
       HOTWIRE_ASSETS = %w[turbo.min.js stimulus.min.js stimulus-loading.js].freeze
+      CORE_PRELOAD_STYLES = %w[base ui mail].freeze
 
       REACTOR_EXPORTS = [
         "WasmBridge.handle_request",
@@ -28,7 +31,10 @@ module InstantRecord
         "WasmBridge.sync_plan",
         "WasmBridge.handle_stream",
         "WasmBridge.cursor",
-        "WasmBridge.history"
+        "WasmBridge.history",
+        "WasmBridge.notices",
+        "WasmBridge.branch_outbox",
+        "WasmBridge.branch_replay"
       ].join(",").freeze
 
       SQLITE_CFLAGS = %w[
@@ -38,6 +44,7 @@ module InstantRecord
         -DSQLITE_OMIT_UTF16 -DSQLITE_OMIT_AUTHORIZATION -DSQLITE_OMIT_COMPLETE
         -DSQLITE_OMIT_TRACE -DSQLITE_OMIT_TCL_VARIABLE -DSQLITE_OMIT_COMPILEOPTION_DIAGS
         -DSQLITE_OMIT_AUTOVACUUM -DSQLITE_OMIT_BLOB_LITERAL
+        -DSQLITE_ENABLE_FTS5
       ].freeze
 
       WASI_CFLAGS = %w[
@@ -74,9 +81,13 @@ module InstantRecord
         toolchain:,
         app_source: nil,
         models: [],
+        sync_windows: nil,
         endpoint: nil,
+        mount_path: nil,
         baseline: nil,
         migration_paths: nil,
+        island: nil,
+        overrides: nil,
         shell_snapshot: nil,
         build_dir: nil,
         out: $stdout
@@ -90,9 +101,13 @@ module InstantRecord
         @demo = @app_source.nil?
         @source_root = @app_source || File.join(@gem_root, "demo")
         @models = models
+        @sync_windows = sync_windows
         @endpoint = (endpoint || ENV.fetch("SYNC_ENDPOINT", DEFAULT_SYNC_ENDPOINT)).to_s.sub(%r{/+\z}, "")
+        @mount_path = (mount_path && !mount_path.to_s.empty?) ? mount_path.to_s.sub(%r{/+\z}, "") : "/instant_record"
         @baseline = baseline
         @migration_paths = migration_paths
+        @island = island
+        @overrides = overrides
         @shell_snapshot = shell_snapshot.nil? ? ENV.fetch("INSTANT_RECORD_SHELL_SNAPSHOT", "") : shell_snapshot.to_s
         @runner = Runner.new(build_dir: @build_dir)
         @out = out
@@ -135,26 +150,41 @@ module InstantRecord
       def emit_tree(native: false)
         FileUtils.mkdir_p(@build_dir)
         app = File.join(@build_dir, "app-src")
+        manifest_path = File.join(@build_dir, Manifest::FILENAME)
+
+        stage = AppStage.stage(
+          source: @source_root,
+          target: app,
+          native: native,
+          island: @island,
+          overrides: @overrides,
+          models: @demo ? nil : @models,
+          migration_paths: @migration_paths,
+          overlay_dir: @demo ? File.join(@pipeline_dir, "demo") : nil,
+          manifest_path: manifest_path
+        )
+        manifest = stage.manifest
 
         if @demo
           plan = DEMO_MIGRATION_PLAN
-          DemoCarver.carve(
-            gem_src: @gem_root,
-            target: app,
-            overlay_dir: File.join(@pipeline_dir, "demo"),
-            native: native
-          )
         else
           plan = BrowserMigrations.plan(
             root: @app_source,
             baseline: @baseline,
-            migration_paths: @migration_paths
+            migration_paths: @migration_paths,
+            only_files: manifest.island? ? stage.trace.migrations : nil
           )
           File.write(File.join(@build_dir, "browser-migrations.json"), JSON.generate(plan))
-          AppStage.stage(source: @app_source, target: app, native: native)
         end
 
-        GemVendor.vendor(gem_src: @gem_root, app_dir: app, demo: @demo)
+        vendor = GemVendor.new(
+          gem_src: @gem_root,
+          app_dir: app,
+          demo: @demo,
+          target: native ? :native : :wasm
+        )
+        vendor.run
+        StaticLinter.check!(app, staged: true, server_only_constants: vendor.server_only_constants)
 
         emit = File.join(@build_dir, "emit")
         clean(emit)
@@ -168,13 +198,18 @@ module InstantRecord
         EntryBuilder.write_wasm_entry(
           emit_dir: emit,
           demo: @demo,
+          manifest: manifest,
           models: @models,
+          sync_windows: @sync_windows,
+          endpoint: @endpoint,
+          mount_path: @mount_path,
           migration_plan: plan,
-          pipeline_dir: @pipeline_dir
+          pipeline_dir: @pipeline_dir,
+          app_dir: app
         )
         WasmTree.build(source: emit, target: tree, demo: @demo)
 
-        { app: app, emit: emit, tree: tree, plan: plan }
+        { app: app, emit: emit, tree: tree, plan: plan, manifest: manifest }
       end
 
       def input_digest
@@ -204,13 +239,32 @@ module InstantRecord
           digest.update(@baseline.to_s)
         end
 
-        AppStage::FILES.each do |name|
+        (AppStage::FILES + [Manifest::CONFIG_FILE]).each do |name|
           candidate = File.join(@source_root, name)
           paths << candidate if File.file?(candidate)
         end
 
-        digest.update(@demo ? "" : JSON.generate(@models))
+        config_overrides = Manifest.merge_overrides(
+          Manifest.load_config(@source_root, island: @island),
+          @overrides
+        )
+        config_overrides[:include]["files"].each do |rel|
+          candidate = File.expand_path(rel.delete_prefix("/"), @source_root)
+          paths << candidate if candidate.start_with?("#{@source_root}#{File::SEPARATOR}") && File.file?(candidate)
+        end
+
+        digest.update(@demo ? "" : JSON.generate(Array(@models)))
+        digest.update("\0")
+        digest.update(JSON.generate(@sync_windows || {}))
+        digest.update("\0")
+        digest.update(@mount_path)
+        digest.update("\0")
+        digest.update(@island.to_s)
+        digest.update("\0")
+        digest.update(JSON.generate(@overrides || {}))
+        digest.update("\0")
         digest.update(@shell_snapshot)
+        digest.update("\0")
 
         inputs.each do |base_root, folders|
           folders.each do |folder|
@@ -258,9 +312,17 @@ module InstantRecord
         links
       end
 
-      def warm_scripts(assets_dir)
+      def warm_scripts(assets_dir, deferred_css: [])
         urls = []
         seen = Digest::SHA256.new
+        deferred_css.each do |name|
+          path = File.join(assets_dir, name)
+          next unless File.file?(path)
+
+          digest = Digest::SHA256.file(path).hexdigest[0, 10]
+          seen.update(name + digest)
+          urls << "/assets/#{name}"
+        end
         [
           [assets_dir, "/assets/"],
           [File.join(assets_dir, "controllers"), "/assets/controllers/"]
@@ -293,19 +355,28 @@ module InstantRecord
         if File.directory?(harness_dir)
           Dir.children(harness_dir).sort.each do |name|
             if name.start_with?("worker-") && name.end_with?(".js")
-              links << %(    <link rel="modulepreload" href="/harness/#{name}">)
+              # Started here, not preloaded: a modulepreload is a module load in the page, after
+              # which Firefox refuses the import map of the app's own page (compiled/web/vite.config.js).
+              links << %(    <script>try { window.__worker = new Worker("/harness/#{name}", { type: "module" }); } catch (error) {}</script>)
             end
           end
         end
 
         assets_dir = File.join(dist, "assets")
+        deferred_css = []
         if File.directory?(assets_dir)
-          Dir.children(assets_dir).sort.each do |name|
-            links << %(    <link rel="preload" as="style" href="/assets/#{name}">) if name.end_with?(".css")
+          css_files = Dir.children(assets_dir).sort.select { |name| name.end_with?(".css") }
+          css_files.each do |name|
+            stem = File.basename(name, ".css").sub(/-[0-9a-f]{8,}\z/, "")
+            if css_files.length <= 3 || CORE_PRELOAD_STYLES.include?(stem)
+              links << %(    <link rel="preload" as="style" fetchpriority="low" href="/assets/#{name}">)
+            else
+              deferred_css << name
+            end
           end
         end
 
-        links.concat(warm_scripts(assets_dir))
+        links.concat(warm_scripts(assets_dir, deferred_css: deferred_css))
         return if links.empty?
 
         index_path = File.join(dist, "index.html")
@@ -448,11 +519,20 @@ module InstantRecord
         configured = @toolchain["WEB_NODE_MODULES"]
         if File.symlink?(modules)
           if configured && !configured.empty? && File.readlink(modules) != configured
+            unless File.directory?(configured)
+              raise BuildError, "WEB_NODE_MODULES does not exist at #{configured}. Install the web dependencies with `npm ci` and run `bin/rails instant_record:doctor`."
+            end
             File.delete(modules)
             File.symlink(configured, modules)
           end
+          unless File.directory?(modules)
+            raise BuildError, "WEB_NODE_MODULES symlink target does not exist (#{File.readlink(modules)}). Install the web dependencies with `npm ci` and run `bin/rails instant_record:doctor`."
+          end
         elsif !File.exist?(modules)
-          File.symlink(@toolchain.fetch("WEB_NODE_MODULES"), modules)
+          if configured.nil? || configured.empty? || !File.directory?(configured)
+            raise BuildError, "WEB_NODE_MODULES is missing (#{configured || 'unset'}). Install the web dependencies from compiled/web/package.json with `npm ci` and set WEB_NODE_MODULES in #{@toolchain.path}."
+          end
+          File.symlink(configured, modules)
         end
       end
 
@@ -460,6 +540,7 @@ module InstantRecord
         app = emitted[:app]
         emit = emitted[:emit]
         plan = emitted[:plan]
+        manifest = emitted[:manifest]
 
         web = File.join(@workspace, "web")
         ensure_web_node_modules(web)
@@ -467,7 +548,7 @@ module InstantRecord
         digest = Digest::SHA256.file(final_wasm).hexdigest[0, 10]
         dist = File.join(@build_dir, "site")
 
-        model_set = EntryBuilder.app_models(demo: @demo, models: @models).sort.join(",")
+        model_set = EntryBuilder.app_models(manifest: manifest, models: @models).sort.join(",")
         schema_source = File.read(File.join(app, "db/schema.rb"))
         shell_fingerprint = Digest::SHA256.hexdigest([SHELL_FORMAT.to_s, model_set, schema_source].join("\n"))
         schema_digest = Digest::SHA256.file(File.join(emit, "config/schema.rb")).hexdigest
@@ -481,16 +562,19 @@ module InstantRecord
             "VITE_SHELL_SNAPSHOT" => @shell_snapshot,
             "VITE_SHARED_INBOX_DEMO" => @demo ? "1" : "",
             "VITE_SYNC_ENDPOINT" => @endpoint,
+            "VITE_MOUNT_PATH" => @mount_path,
             "VITE_SOURCE_VERSION" => wanted[0, 12],
             "VITE_SCHEMA_VERSION" => plan["version"].to_s,
             "VITE_SCHEMA_BASELINE" => plan["baseline"].nil? ? "" : plan["baseline"].to_s,
             "VITE_MIGRATION_HISTORY" => JSON.generate(plan["history"] || {}),
-            "VITE_SCHEMA_DIGEST" => schema_digest
+            "VITE_SCHEMA_DIGEST" => schema_digest,
+            "VITE_MANIFEST" => manifest ? manifest.to_compact_json : "{}"
           },
           log: "vite.log"
         )
 
         File.write(File.join(dist, "instant-record-release.json"), JSON.generate("version" => wanted))
+        File.write(File.join(dist, Manifest::FILENAME), manifest.to_json) if manifest
         FileUtils.cp(final_wasm, File.join(dist, "app-#{digest}.wasm"))
 
         assets = File.join(dist, "assets")
@@ -520,7 +604,7 @@ module InstantRecord
         shell_worker = File.join(@source_root, "app/views/pwa/service-worker.js")
         FileUtils.cp(shell_worker, File.join(dist, "service-worker.js")) if File.file?(shell_worker)
 
-        inject_preloads(dist, @source_root)
+        inject_preloads(dist, app)
         [dist, digest]
       end
 

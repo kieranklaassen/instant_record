@@ -1,33 +1,48 @@
-// Undo for a page's writes: hold a write for a few seconds, show that it can
-// be taken back, and send it when the time passes or the reader leaves.
+// Undo for a page's writes:
+// - On compiled local-SQLite pages that pass `durable` (held OutboxMutation
+//   descriptors with `release_at`) and `onCancel`, tracks durable SQLite holds
+//   across reloads without flushing on pagehide.
+// - On non-compiled server-rendered pages (or when `durable` is omitted), holds
+//   writes in memory for `ms` and flushes with `{ keepalive: true }` on leave.
 import { useEffect, useMemo, useRef, useState } from "react"
-import { heldActions } from "./held.js"
+import { durableHeldActions, heldActions } from "./held.js"
+import { local } from "./window.js"
 
 const NOTHING = { pending: [], held: new Set() }
 
-// useUndoable({ ms }) answers { pending, held, hold, undo, flush }: held.js
-// says what each is. `held` is the ids to leave out of what is drawn.
-//
-// Leaving the page flushes with { keepalive: true }, which a commit hands to
-// its request so the browser may finish it after the page is gone.
-export function useUndoable({ ms = 5000 } = {}) {
+// useUndoable({ ms, durable, onCancel }) answers { pending, held, hold, undo, flush }:
+// held.js says what each is. `held` is the ids to leave out of what is drawn.
+export function useUndoable({ ms = 5000, durable, onCancel } = {}) {
+  const isDurable = local() && Array.isArray(durable)
   const [state, setState] = useState(NOTHING)
-  const actions = useRef(null)
-  actions.current ||= heldActions({ ms, onChange: setState })
+  const cancelRef = useRef(onCancel)
+  cancelRef.current = onCancel
+
+  const volatile = useRef(null)
+  const persistent = useRef(null)
+  if (!isDurable) volatile.current ||= heldActions({ ms, onChange: setState })
+  if (isDurable) persistent.current ||= durableHeldActions({ onChange: setState, onCancel: (entry) => cancelRef.current?.(entry) })
 
   useEffect(() => {
-    const leave = () => actions.current.flush({ keepalive: true })
+    if (!isDurable) return
+    persistent.current.sync(durable)
+    return () => persistent.current.dispose()
+  }, [isDurable, durable])
+
+  useEffect(() => {
+    if (isDurable) return
+    const leave = () => volatile.current.flush({ keepalive: true })
     window.addEventListener("pagehide", leave)
     return () => {
       window.removeEventListener("pagehide", leave)
       leave()
     }
-  }, [])
+  }, [isDurable])
 
   return useMemo(() => ({
     ...state,
-    hold: (action) => actions.current.hold(action),
-    undo: () => actions.current.undo(),
-    flush: (options) => actions.current.flush(options),
-  }), [state])
+    hold: (action) => (isDurable ? action?.commit?.() : volatile.current.hold(action)),
+    undo: () => (isDurable ? persistent.current.undo() : volatile.current.undo()),
+    flush: (options) => (isDurable ? persistent.current.flush(options) : volatile.current.flush(options)),
+  }), [state, isDurable])
 }

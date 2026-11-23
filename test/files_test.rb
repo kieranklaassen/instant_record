@@ -46,12 +46,36 @@ class FilesTest < Minitest::Test
     InstantRecord.config.max_file_size = nil
   end
 
+  def test_chunk_size_defaults_safely_and_respects_model_config_and_store_limits
+    assert_equal 512 * 1024, InstantRecord::Files.chunk_size(@clip)
+
+    custom_model = syncable_model("SmallChunk") { sync_file chunk_size: 65_536 }
+    large_model = syncable_model("LargeChunk") { sync_file chunk_size: 2 * 1024 * 1024 }
+    assert_equal 65_536, InstantRecord::Files.chunk_size(custom_model)
+    assert_equal 512 * 1024, InstantRecord::Files.chunk_size(large_model), "a model cannot exceed the server chunk ceiling"
+
+    InstantRecord.config.file_chunk_size = 262_144
+    assert_equal 262_144, InstantRecord::Files.chunk_size(@clip)
+    assert_equal 65_536, InstantRecord::Files.chunk_size(custom_model)
+    assert_equal 262_144, InstantRecord::Files.chunk_size(large_model)
+
+    InstantRecord.config.file_chunk_size = 1024 * 1024
+    assert_equal 1024 * 1024, InstantRecord::Files.chunk_size(large_model)
+
+    InstantRecord.config.file_store = InstantRecord::FileStore.new(@root, chunk_size: 32_768)
+    assert_equal 32_768, InstantRecord::Files.chunk_size(@clip)
+    assert_equal 32_768, InstantRecord::Files.chunk_size(custom_model)
+  ensure
+    InstantRecord.config.file_chunk_size = nil
+  end
+
   # configuration.rb and syncable.rb are compiled for the browser, where an
   # integer has 32 bits: a number past that raised a RangeError in the first
   # sync of a compiled app and no bootstrap was ever applied.
   def test_what_the_browser_compiles_holds_no_number_past_32_bits
     assert_nil InstantRecord::Configuration.new.max_file_size
-    %w[configuration.rb syncable.rb].each do |file|
+    assert_nil InstantRecord::Configuration.new.file_chunk_size
+    %w[configuration.rb syncable.rb hlc.rb].each do |file|
       source = File.read(File.expand_path("../lib/instant_record/#{file}", __dir__), encoding: "UTF-8")
       refute_match(/\d\s*\*\s*\d|\*\*|\d{10,}/, source.gsub(/^\s*#.*$/, ""), "#{file} computes a number the browser may not hold")
     end
