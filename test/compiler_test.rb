@@ -207,12 +207,14 @@ class CompilerTest < ActiveSupport::TestCase
       assert_equal manifest.to_h, staged.manifest.to_h
 
       count = InstantRecord::Compiler::GemVendor.vendor(gem_src: GEM_ROOT, app_dir: app, demo: true)
-      assert_equal 21, count
+      assert_equal 22, count
       assert File.file?(File.join(app, "lib/instant_record/client/rebaser.rb"))
+      assert File.file?(File.join(app, "lib/instant_record/inertia.rb"))
       assert File.file?(File.join(app, "lib/instant_record/read_tracker.rb"))
       assert File.file?(File.join(app, "lib/instant_record/sync_notice.rb"))
       assert File.file?(File.join(app, "lib/instant_record/hlc.rb"))
       assert_includes File.read(File.join(app, "lib/instant_record/host.rb")), "def browser? = true"
+      assert_includes File.read(File.join(app, "lib/instant_record/host.rb")), "def load_inertia_renderer = nil"
       assert_includes File.read(File.join(app, "lib/instant_record/host.rb")), "id.blank?"
       assert_includes File.read(File.join(app, "lib/instant_record/host.rb")), 'Db.exec("SAVEPOINT "'
       assert_includes File.read(File.join(app, "lib/instant_record.rb")), "def browser? = Host.browser?"
@@ -231,6 +233,9 @@ class CompilerTest < ActiveSupport::TestCase
       vendored_code = vendored_actions.lines.reject { |l| l.lstrip.start_with?("#") }.join
       refute_match(/\b(?:public_send|send|constantize)\b/, vendored_code)
       assert File.file?(File.join(app, "sig/instant_record/native.rbs"))
+      assert File.file?(File.join(app, "sig/instant_record/inertia.rbs"))
+      assert File.file?(File.join(app, "lib/instant_record/inertia.rb"))
+      refute_includes File.read(File.join(app, "lib/instant_record/inertia.rb")), "instant_record/inertia/renderer"
       assert_includes File.read(File.join(app, "app/views/todo/issues/index.html.erb")), '<% content_for(:demo_scope, "todo") %>'
       assert_includes File.read(File.join(app, "app/helpers/slack_helper.rb")), '"/slack/reset?instant_record_network=1"'
       assert_includes File.read(File.join(app, "app/helpers/auth_helper.rb")), '"/instant_record/bootstrap?instant_record_network=1"'

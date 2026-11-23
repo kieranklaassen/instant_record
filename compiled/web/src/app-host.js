@@ -10,6 +10,7 @@
 // Works the same in Node (tests) and in a browser worker; only `exchange` differs.
 import { WASI, File, OpenFile, Directory, PreopenDirectory, ConsoleStdout } from "@bjorn3/browser_wasi_shim";
 import { parseReads, readNotice } from "./changes.js";
+import { buildHttpRequest } from "./http-headers.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -159,22 +160,8 @@ export class AppHost {
   }
 
   // One HTTP request through the app's own router and controllers.
-  request(method, path, { body = "", contentType = "application/x-www-form-urlencoded" } = {}) {
-    // Rails forms send PATCH and DELETE as POST plus a _method field. The socket server applies
-    // that override while reading the request; the reactor entry skips that reader, so do it here.
-    if (method === "POST" && contentType.startsWith("application/x-www-form-urlencoded")) {
-      const text = typeof body === "string" ? body : decoder.decode(body);
-      const override = new URLSearchParams(text).get("_method");
-      if (override && /^(patch|put|delete)$/i.test(override)) method = override.toUpperCase();
-    }
-    const payload = typeof body === "string" ? encoder.encode(body) : body;
-    const cookie = [...this.cookies].map(([name, value]) => `${name}=${value}`).join("; ");
-    const head = `${method} ${path} HTTP/1.1\r\nHost: localhost\r\n` +
-      (cookie ? `Cookie: ${cookie}\r\n` : "") +
-      (payload.length ? `Content-Type: ${contentType}\r\nContent-Length: ${payload.length}\r\n` : "") + "\r\n";
-    const input = new Uint8Array(head.length + payload.length);
-    input.set(encoder.encode(head));
-    input.set(payload, head.length);
+  request(method, path, { body = "", contentType, headers = {} } = {}) {
+    const input = buildHttpRequest(method, path, { body, contentType, headers, cookies: this.cookies });
 
     this.notifyFile.data = new Uint8Array();
     this.hostDir.contents.set("notify", this.notifyFile);
@@ -182,7 +169,7 @@ export class AppHost {
     const text = decoder.decode(result.out);
     const split = text.indexOf("\n\n");
     const lines = (split < 0 ? text : text.slice(0, split)).split("\n");
-    const headers = [];
+    const responseHeaders = [];
     let reads = null;
     for (const line of lines.slice(1)) {
       const colon = line.indexOf(": ");
@@ -197,14 +184,14 @@ export class AppHost {
         else this.cookies.set(pair.slice(0, equals), pair.slice(equals + 1));
       } else {
         if (lower === "x-instant-record-reads") reads = parseReads(value);
-        headers.push([name, value]);
+        responseHeaders.push([name, value]);
       }
     }
     const status = Number(lines[0]) || 500;
     const notifyEntry = this.hostDir.contents.get("notify") || this.notifyFile;
     return {
       status,
-      headers,
+      headers: responseHeaders,
       body: split < 0 ? "" : text.slice(split + 2),
       reads,
       ...readNotice(decoder.decode(notifyEntry.data)),

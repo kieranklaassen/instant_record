@@ -115,15 +115,21 @@ class ScopedInboxTest < ActionDispatch::IntegrationTest
 
   # What the page is given: its Inertia props on a first visit, and one of
   # them again on a partial reload, which is how a live prop is refreshed.
-  def page_props
+  def initial_page
     assert_response :success
-    JSON.parse(css_select("script[data-page=app]").first.text).fetch("props")
+    JSON.parse(css_select("#app[data-page]").first["data-page"])
+  end
+
+  def page_props
+    initial_page.fetch("props")
   end
 
   def live(member, prop, extra = {})
     get "/email", params: { member: member, inbox: "support" }.merge(extra),
       headers: { "X-Inertia" => "true", "X-Inertia-Partial-Component" => "Email/Inbox", "X-Inertia-Partial-Data" => prop }
     assert_response :success
+    assert_equal "true", response.headers["X-Inertia"]
+    assert_equal "X-Inertia", response.headers["Vary"]
     assert_equal [prop, "errors"].sort, response.parsed_body["props"].keys.sort
     response.parsed_body.dig("props", prop)
   end
@@ -134,7 +140,7 @@ class ScopedInboxTest < ActionDispatch::IntegrationTest
     entry = Mailbox.find("support").generate_incoming!
     get "/email", params: { member: "maya", inbox: "support" }
     assert_select "script[type='module'][src*='inbox']"
-    page = JSON.parse(css_select("script[data-page=app]").first.text)
+    page = initial_page
     assert_equal "Email/Inbox", page["component"]
     props = page["props"]
     assert_equal %w[support billing], props["inboxes"]
@@ -145,8 +151,7 @@ class ScopedInboxTest < ActionDispatch::IntegrationTest
     # local database changed.
     assert_equal %w[mail thread], page["liveProps"].keys
     assert_equal [{ "channel" => { "name" => "instant_record", "type" => "local" }, "events" => ["MailEntry"] }], page.dig("liveProps", "mail", "listeners")
-    # The compiled runtime spells the same hash out by hand.
-    assert_equal Email::MailboxesController::LIVE_PROPS.as_json, page["liveProps"]
+    assert_equal InstantRecord::Inertia.live_props(mail: MailEntry, thread: MailEntry).as_json, page["liveProps"]
     assert_equal page["liveProps"], response.parsed_body["liveProps"]
   end
 

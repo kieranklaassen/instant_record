@@ -18,6 +18,7 @@ module InstantRecord
         lib/instant_record/host.rb
         lib/instant_record/configuration.rb
         lib/instant_record/runtime_scoped.rb
+        lib/instant_record/inertia.rb
         lib/instant_record/read_tracker.rb
         lib/instant_record/sync_actions.rb
         lib/instant_record/syncable.rb

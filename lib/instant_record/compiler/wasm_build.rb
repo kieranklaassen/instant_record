@@ -228,7 +228,8 @@ module InstantRecord
           File.join(@workspace, "web/package.json"),
           File.join(@workspace, "web/package-lock.json"),
           File.join(@gem_root, "lib/instant_record.rb"),
-          File.join(@gem_root, "sig/instant_record/native.rbs")
+          File.join(@gem_root, "sig/instant_record/native.rbs"),
+          File.join(@gem_root, "sig/instant_record/inertia.rbs")
         ].select { |p| File.file?(p) }
 
         inputs = [
