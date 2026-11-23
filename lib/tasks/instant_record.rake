@@ -188,6 +188,76 @@ namespace :instant_record do
     end
   end
 
+  desc "Replay a recorded .irtrace flight recorder file deterministically in Node AppHost"
+  task :replay, [:file, :wasm] => :environment do |_task, args|
+    require "instant_record/trace"
+
+    # Support `rails instant_record:replay path/to/file.irtrace`,
+    # `rails "instant_record:replay[path/to/file.irtrace]"`, and `TRACE=...`.
+    extra = ARGV.drop_while { |arg| !arg.start_with?("instant_record:replay") }.drop(1)
+    positional = []
+    wasm_opt = args[:wasm].to_s.empty? ? ENV["WASM"] : args[:wasm]
+    db_opt = ENV["DB"]
+    json_opt = ENV["JSON"] == "1"
+    allow_mismatch = ENV["ALLOW_DIGEST_MISMATCH"] == "1"
+    stop_on_fault = ENV["STOP_ON_FAULT"] == "1"
+    max_steps = ENV["MAX_STEPS"]
+
+    i = 0
+    while i < extra.length
+      arg = extra[i]
+      if arg == "--wasm" && extra[i + 1]
+        wasm_opt = extra[i + 1]
+        i += 2
+      elsif arg == "--db" && extra[i + 1]
+        db_opt = extra[i + 1]
+        i += 2
+      elsif arg == "--max-steps" && extra[i + 1]
+        max_steps = extra[i + 1]
+        i += 2
+      elsif arg == "--json"
+        json_opt = true
+        i += 1
+      elsif arg == "--allow-digest-mismatch"
+        allow_mismatch = true
+        i += 1
+      elsif arg == "--stop-on-fault"
+        stop_on_fault = true
+        i += 1
+      elsif !arg.start_with?("-")
+        positional << arg
+        i += 1
+      else
+        i += 1
+      end
+    end
+
+    extra.each { |arg| Rake::Task.define_task(arg.to_sym) {} unless Rake::Task.task_defined?(arg) }
+
+    trace_file = args[:file].to_s.empty? ? (positional[0] || ENV["TRACE"]) : args[:file]
+    if trace_file.nil? || trace_file.empty?
+      abort "Usage: bin/rails instant_record:replay <file.irtrace> [--wasm <app.wasm>] [--db <file.sqlite3>] [--json]"
+    end
+
+    wasm_opt ||= positional[1]
+    result = InstantRecord::Trace.replay(
+      trace_path: trace_file,
+      wasm_path: wasm_opt,
+      db_path: db_opt,
+      root: defined?(Rails) && Rails.respond_to?(:root) ? Rails.root : nil,
+      toolchain: defined?(Rails) && Rails.respond_to?(:root) ? toolchain_path.call : nil,
+      json: json_opt,
+      allow_digest_mismatch: allow_mismatch,
+      stop_on_fault: stop_on_fault,
+      max_steps: max_steps
+    )
+    puts result.stdout unless result.stdout.empty?
+    warn result.stderr unless result.stderr.empty?
+    abort "Replay failed (exit #{result.status})" unless result.ok?
+  rescue InstantRecord::Trace::Error => e
+    abort e.message
+  end
+
   namespace :files do
     desc "Remove uploads of sync_file records that were given up: partials no piece has reached for DAYS days (default 2)"
     task sweep: :environment do

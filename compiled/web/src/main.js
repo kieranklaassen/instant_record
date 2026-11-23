@@ -14,11 +14,126 @@ const waiting = new Map();
 let nextId = 1;
 let historyFill = null;
 let syncNotices = [];
+const faults = [];
+const notifications = [];
+let circuitState = { state: "closed" };
+
+function renderFaultBanner(detail) {
+  if (typeof document === "undefined" || !document.body) return;
+  const { fault, circuit, traceAvailable } = detail;
+  const isDev = import.meta.env.DEV || location.hostname === "localhost" || location.hostname === "127.0.0.1";
+  if (!isDev && circuit?.state !== "open") return;
+
+  let banner = document.getElementById("instant-record-fault-banner");
+  if (!banner) {
+    banner = document.createElement("div");
+    banner.id = "instant-record-fault-banner";
+    banner.setAttribute("role", "alert");
+    banner.style.cssText =
+      "position:fixed;bottom:12px;right:12px;z-index:2147483647;max-width:480px;background:#1f1113;color:#fde8e8;" +
+      "border:1px solid #f87171;border-radius:8px;padding:12px 14px;font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;" +
+      "box-shadow:0 8px 24px rgba(0,0,0,0.45);";
+    document.body.appendChild(banner);
+  }
+
+  const stderrLines = (fault?.errors || []).slice(0, 6).join("\n");
+  const title = circuit?.state === "open"
+    ? `InstantRecord circuit breaker OPEN (${fault?.exportName || "wasm"})`
+    : `InstantRecord WASM fault (${fault?.exportName || "wasm"})`;
+
+  banner.replaceChildren();
+  const heading = document.createElement("div");
+  heading.style.cssText = "font-weight:700;color:#fca5a5;margin-bottom:6px;";
+  heading.textContent = title;
+  banner.appendChild(heading);
+
+  const summary = document.createElement("div");
+  summary.textContent = `${fault?.message || "Unknown fault"} (exit=${fault?.exit})`;
+  banner.appendChild(summary);
+
+  if (stderrLines) {
+    const pre = document.createElement("pre");
+    pre.style.cssText = "margin:8px 0 0;padding:8px;background:#11090a;border-radius:4px;overflow:auto;max-height:140px;white-space:pre-wrap;font-size:12px;";
+    pre.textContent = stderrLines;
+    banner.appendChild(pre);
+  }
+
+  const actions = document.createElement("div");
+  actions.style.cssText = "display:flex;gap:8px;margin-top:10px;";
+
+  if (circuit?.state === "open") {
+    const resetBtn = document.createElement("button");
+    resetBtn.type = "button";
+    resetBtn.textContent = "Reset runtime";
+    resetBtn.style.cssText = "background:#dc2626;color:#fff;border:0;border-radius:4px;padding:4px 10px;cursor:pointer;font:inherit;";
+    resetBtn.onclick = () => {
+      window.__spinel.resetCircuit().then(() => banner.remove());
+    };
+    actions.appendChild(resetBtn);
+  }
+
+  if (traceAvailable) {
+    const traceBtn = document.createElement("button");
+    traceBtn.type = "button";
+    traceBtn.textContent = "Download .irtrace";
+    traceBtn.style.cssText = "background:#374151;color:#fff;border:0;border-radius:4px;padding:4px 10px;cursor:pointer;font:inherit;";
+    traceBtn.onclick = () => window.__spinel.trace.download();
+    actions.appendChild(traceBtn);
+  }
+
+  const dismissBtn = document.createElement("button");
+  dismissBtn.type = "button";
+  dismissBtn.textContent = "Dismiss";
+  dismissBtn.style.cssText = "background:transparent;color:#fca5a5;border:1px solid #7f1d1d;border-radius:4px;padding:4px 10px;cursor:pointer;font:inherit;margin-left:auto;";
+  dismissBtn.onclick = () => banner.remove();
+  actions.appendChild(dismissBtn);
+
+  banner.appendChild(actions);
+}
+
 worker.onmessage = (event) => {
   const { id, result, error, type } = event.data;
   if (type === "release_required") return releaseRequired?.();
   if (type === "storage_upgrade_blocked") {
     document.body.textContent = "Close or reload other tabs running the previous version of this app. Your saved changes will be kept.";
+    return;
+  }
+  if (type === "instant_record.fault") {
+    const detail = {
+      fault: event.data.fault,
+      circuit: event.data.circuit,
+      trippedNow: !!event.data.trippedNow,
+      traceAvailable: !!event.data.traceAvailable,
+    };
+    circuitState = detail.circuit || circuitState;
+    faults.push(detail.fault);
+    if (faults.length > 50) faults.shift();
+    if (window.__spinel) {
+      window.__spinel.lastFault = detail.fault;
+      window.__spinel.circuit = circuitState;
+    }
+    console.error("[instant_record] WASM fault:", detail.fault, detail.circuit);
+    window.dispatchEvent(new CustomEvent("instant-record:fault", { detail }));
+    renderFaultBanner(detail);
+    return;
+  }
+  if (type === "instant_record.circuit") {
+    circuitState = event.data.circuit || circuitState;
+    if (window.__spinel) window.__spinel.circuit = circuitState;
+    window.dispatchEvent(new CustomEvent("instant-record:circuit", { detail: circuitState }));
+    return;
+  }
+  if (type === "instant_record.notification") {
+    const note = {
+      name: event.data.name,
+      payload: event.data.payload,
+      durationMs: event.data.durationMs,
+      exportName: event.data.exportName,
+      at: event.data.at,
+    };
+    notifications.push(note);
+    if (notifications.length > 150) notifications.shift();
+    window.dispatchEvent(new CustomEvent("instant-record:notification", { detail: note }));
     return;
   }
   if (type === "instant_record.role") {
@@ -61,6 +176,38 @@ const call = (type, payload) => new Promise((resolve, reject) => {
   worker.postMessage({ id, type, payload });
 });
 
+const traceApi = {
+  enable(options = {}) {
+    try { sessionStorage.setItem("instant_record.trace", "1"); } catch {}
+    return call("instant_record.trace.configure", { ...options, enabled: true });
+  },
+  disable() {
+    try { sessionStorage.removeItem("instant_record.trace"); } catch {}
+    return call("instant_record.trace.configure", { enabled: false });
+  },
+  status() {
+    return call("instant_record.trace.status");
+  },
+  clear() {
+    return call("instant_record.trace.clear");
+  },
+  export(options = {}) {
+    return call("instant_record.trace.export", options);
+  },
+  async download(filename = null, options = {}) {
+    const trace = await traceApi.export(options);
+    const name = filename || `instant-record-${new Date().toISOString().replace(/[:.]/g, "-")}.irtrace`;
+    const blob = new Blob([JSON.stringify(trace, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return trace;
+  },
+};
+
 const initialContext = resolveSyncContext(location.href);
 const initialStorageKey = initialContext ? initialContext.storageKey : "";
 const marks = { start: performance.now() };
@@ -73,8 +220,26 @@ const branchApi = {
   approve: (options = {}) => call("branch.approve", options),
   discard: () => call("branch.discard"),
 };
-window.__spinel = { marks, call, worker, history: historyFill, reads: null, notices: syncNotices, sourceVersion: import.meta.env.VITE_SOURCE_VERSION,
-  endpoint: syncEndpoint, scope: syncScope(), manifest, branch: branchApi, branchState: { active: false } };
+window.__spinel = {
+  marks,
+  call,
+  worker,
+  history: historyFill,
+  reads: null,
+  notices: syncNotices,
+  sourceVersion: import.meta.env.VITE_SOURCE_VERSION,
+  endpoint: syncEndpoint,
+  scope: syncScope(),
+  manifest,
+  branch: branchApi,
+  branchState: { active: false },
+  faults,
+  lastFault: null,
+  circuit: circuitState,
+  notifications,
+  resetCircuit: () => call("instant_record.reset_circuit"),
+  trace: traceApi,
+};
 
 // Restore the switches before even the first bootstrap can reach Rails.
 try {
@@ -84,6 +249,15 @@ try {
     settings: { offline: !!ui.offline, latencyMs: ui.slow ? 2000 : 0 },
   });
 } catch { /* Storage may be unavailable. */ }
+
+function traceOptIn() {
+  try {
+    if (new URLSearchParams(location.search).get("irtrace") === "1") return true;
+    return sessionStorage.getItem("instant_record.trace") === "1";
+  } catch {
+    return false;
+  }
+}
 
 // Static assets, service worker, release/island manifests, same-origin sync/file
 // endpoints, and non-island routes go straight to the network rather than Wasm.
@@ -329,6 +503,7 @@ async function openApp() {
     scope: syncScope(),
     visible: document.visibilityState !== "hidden",
     headers: defaultBrowserHeaders({ referrer: document.referrer }),
+    trace: traceOptIn(),
   }).catch(error => {
     document.body.textContent = "The app could not open this release. Your saved database was kept. " + error.message;
     throw error;
@@ -336,22 +511,27 @@ async function openApp() {
   if (window.__spinel) {
     window.__spinel.role = boot.role;
     window.__spinel.storage = boot.storageMode;
+    if (boot.circuit) window.__spinel.circuit = circuitState = boot.circuit;
   }
   marks.booted = performance.now();
   marks.compileMs = window.__wasmMs ?? boot.compileMs;
-  const { result, finalPath } = boot.first;
-  if (result.reads) window.__spinel.reads = result.reads;
-  marks.firstResponse = performance.now();
-  marks.firstRequestMs = result.ms;
-  if (finalPath !== location.pathname + location.search) history.replaceState(null, "", finalPath);
-  // Hand the document to the app's own page: its importmap, Turbo and Stimulus take over from here.
-  document.open();
-  document.write(result.status === 200 ? result.body : `<pre>${result.status}\n${(result.errors || []).join("\n")}</pre>`);
-  document.close();
-  bindVisibility();
-  document.addEventListener("turbo:before-morph-element", keepTyping);
-  document.addEventListener("turbo:render", () => { redrawing = false; });
-  document.addEventListener("submit", submitInPlace);
+  if (boot.first) {
+    const { result, finalPath } = boot.first;
+    if (result.reads) window.__spinel.reads = result.reads;
+    marks.firstResponse = performance.now();
+    marks.firstRequestMs = result.ms;
+    if (finalPath !== location.pathname + location.search) history.replaceState(null, "", finalPath);
+    // Hand the document to the app's own page: its importmap, Turbo and Stimulus take over from here.
+    document.open();
+    document.write(result.status === 200 ? result.body : `<pre>${result.status}\n${(result.errors || []).join("\n")}</pre>`);
+    document.close();
+    bindVisibility();
+    document.addEventListener("turbo:before-morph-element", keepTyping);
+    document.addEventListener("turbo:render", () => { redrawing = false; });
+    document.addEventListener("submit", submitInPlace);
+  } else if (window.__spinel.lastFault) {
+    renderFaultBanner({ fault: window.__spinel.lastFault, circuit: window.__spinel.circuit, traceAvailable: traceOptIn() });
+  }
   document.addEventListener("turbo:before-visit", event => {
     const destination = new URL(event.detail.url, location.href);
     const next = resolveSyncContext(event.detail.url);
@@ -362,7 +542,9 @@ async function openApp() {
   });
 
   marks.rendered = performance.now();
-
+  if (window.__spinel.lastFault) {
+    renderFaultBanner({ fault: window.__spinel.lastFault, circuit: window.__spinel.circuit, traceAvailable: traceOptIn() });
+  }
 
   // Turbo and Stimulus handle their own forms first. An ordinary Rails form still
   // submits locally in apps without either library.
@@ -408,15 +590,15 @@ async function openApp() {
   // Resource Timing distinguishes a cached module from a network response and gives
   // compressed and decoded byte counts without downloading the module a second time.
   const resource = performance.getEntriesByName(new URL(import.meta.env.VITE_WASM_URL, location.origin).href).at(-1);
-  if (resource?.decodedBodySize) {
+  if (resource?.decodedBodySize && boot.first) {
     const cached = resource.transferSize === 0;
     const compileEnd = window.__wasmStart + marks.compileMs;
-    const ledger = { at: Date.now(), totalMs: marks.rendered - result.ms, entries: [
+    const ledger = { at: Date.now(), totalMs: marks.rendered - boot.first.result.ms, entries: [
       { phase: "bundle", ms: resource.responseEnd - resource.startTime, bytes: resource.decodedBodySize,
         wireBytes: cached ? 0 : resource.encodedBodySize, cached },
       { phase: "compile", ms: Math.max(0, compileEnd - resource.responseEnd) },
       { phase: "sqlite", ms: boot.storageMs }, { phase: "vm", ms: boot.runtimeMs },
-      { phase: "schema", ms: boot.bootstrapMs }, { phase: "render", ms: result.ms },
+      { phase: "schema", ms: boot.bootstrapMs }, { phase: "render", ms: boot.first.result.ms },
       ...(boot.shell ? [{ phase: "shell", ms: boot.shell.ms, bytes: boot.shell.bytes }] : []),
     ] };
     window.__spinel.ledger = ledger;

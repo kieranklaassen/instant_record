@@ -1,8 +1,10 @@
 // Dedicated worker: elects a single leader per (origin, partition) via navigator.locks.
 // The leader mounts OPFS page-level WASI storage (PagedSyncOPFSFile) at
 // /storage/development.sqlite3 (with clean IndexedDB fallback), runs the single hot
-// AppHost, outbox drain, visibility-aware SSE change stream, and server-directed background history fill,
-// and serves peer tabs over dedicated channels with crash-safe failover.
+// AppHost, outbox drain, visibility-aware SSE change stream, server-directed background
+// history fill, fail-loud WASM fault telemetry with a circuit breaker, bridged Ruby
+// notifications, and an opt-in rolling `.irtrace` flight recorder, and serves peer tabs
+// over dedicated channels with crash-safe failover.
 import { AppHost } from "./app-host.js";
 import { PagedSyncOPFSFile } from "./opfs-wasi-file.js";
 import { createWorkerRuntime } from "./reactor-runtime.js";
@@ -22,6 +24,7 @@ const runtime = createWorkerRuntime({
     VITE_SOURCE_VERSION: import.meta.env.VITE_SOURCE_VERSION,
     VITE_WASM_URL: import.meta.env.VITE_WASM_URL,
     VITE_SYNC_PARTITIONS: import.meta.env.VITE_SYNC_PARTITIONS,
+    VITE_TRACE_SCHEMA: import.meta.env.VITE_TRACE_SCHEMA,
   },
   AppHost,
   PagedSyncOPFSFile,

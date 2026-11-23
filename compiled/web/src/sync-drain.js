@@ -54,7 +54,21 @@ export async function runDrain({
       push: preparedPush,
       bootstrap: preparedBootstrap,
     });
-    const needsBootstrap = plan.bootstrap && !host.syncState().bootstrapped;
+    if (applied.fault || (applied.exit !== undefined && applied.exit !== 0)) {
+      scheduleRetry(retryState.delayMs);
+      retryState.delayMs = Math.min(retryState.delayMs * 2, retryState.capMs);
+      return applied;
+    }
+    let needsBootstrap = false;
+    if (plan.bootstrap) {
+      const state = host.syncState();
+      if (state.fault || (state.exit !== undefined && state.exit !== 0)) {
+        scheduleRetry(retryState.delayMs);
+        retryState.delayMs = Math.min(retryState.delayMs * 2, retryState.capMs);
+        return { ...applied, exit: state.exit, errors: state.errors, fault: state.fault };
+      }
+      needsBootstrap = !state.bootstrapped;
+    }
     if (push || snapshot) report({ kind: "sync-pass", path: `${applied.pending} pending` });
     // After a bootstrap the next poll reads the cursor and the identity afresh.
     setCursor(plan.bootstrap ? null : applied.cursor);
@@ -66,8 +80,8 @@ export async function runDrain({
       save();
     }
 
-    if (applied.pending > 0 || needsBootstrap) {
-      if (!applied.failed && (applied.progressed || (!push && !snapshot))) {
+    if (applied.pending > 0 || applied.pending < 0 || needsBootstrap) {
+      if (!applied.failed && applied.pending >= 0 && (applied.progressed || (!push && !snapshot))) {
         retryState.delayMs = retryState.baseMs;
         scheduleRetry(0);
       } else {
@@ -85,6 +99,6 @@ export async function runDrain({
   });
 
   if (result.syncNotices) onSyncNotices(result.syncNotices);
-  if (!initial && result.notified) onRecordsChanged(result.changes);
+  if (!initial && result.notified && !result.fault) onRecordsChanged(result.changes);
   return result;
 }

@@ -33,6 +33,7 @@ module InstantRecord
 
         module <<bridge>>
           def self.handle_request
+            InstantRecord::Client.clear_events
             req = Tep::Parser.parse(<<read:in>>)
             res = Tep::Response.new
             reads = InstantRecord::ReadTracker.track do
@@ -55,6 +56,7 @@ module InstantRecord
 
           # Capture the next bounded outgoing batch before the worker yields to browser requests.
           def self.sync_plan
+            InstantRecord::Client.clear_events
             mutations = InstantRecord::Client.plan_drain
             push = mutations.empty? ? "" : JSON.generate(InstantRecord::Client.mutations_payload(mutations))
             headers = InstantRecord::Client.request_headers
@@ -72,6 +74,7 @@ module InstantRecord
           end
 
           def self.handle_sync
+            InstantRecord::Client.clear_events
             raw = <<read:in>>.strip
             if raw.start_with?("{")
               input = JSON.parse(raw)
@@ -104,6 +107,7 @@ module InstantRecord
           end
 
           def self.handle_stream
+            InstantRecord::Client.clear_events
             applied = InstantRecord::Client.consume_stream(<<read:in>>)
             # A batch can be the server's reset, after which there is no cursor to report.
             <<write:out>>"applied=" + applied.to_s + " cursor=" + InstantRecord::Client.cursor.to_s + " bootstrap=" + (InstantRecord::Client.bootstrapped? ? "ready" : "needed"))
@@ -114,6 +118,7 @@ module InstantRecord
           # Route through Client's durable SQLite history ledger so CRuby, WASM,
           # and Native share one contiguity model and eviction invalidates it.
           def self.history
+            InstantRecord::Client.clear_events
             input = JSON.parse(<<read:in>>)
             result = InstantRecord::Client.handle_history(
               key: input["key"].to_s,
@@ -124,6 +129,7 @@ module InstantRecord
           end
 
           def self.cursor
+            InstantRecord::Client.clear_events
             key = InstantRecord::Client.identity_key
             next_ms = InstantRecord::Client.next_release_ms
             out = "cursor=" + InstantRecord::Client.cursor.to_s + " pending=" + InstantRecord::Client.pending_count.to_s + " bootstrap=" + (InstantRecord::Client.bootstrapped? ? "ready" : "needed") + " identity=" + (key.nil? ? "" : key) + " notices=" + InstantRecord::SyncNotice.active.count.to_s + " held=" + InstantRecord::Client.held_count.to_s
@@ -134,6 +140,7 @@ module InstantRecord
 
           # List or resolve quarantined sync notices ("list", "retry", "fork", "dismiss").
           def self.notices
+            InstantRecord::Client.clear_events
             raw = <<read:in>>.to_s.strip
             input = raw.empty? ? {} : JSON.parse(raw)
             action = input["action"].to_s
@@ -159,6 +166,7 @@ module InstantRecord
           # Extract pending outbox rows directly from SQLite so a drifted or
           # unmigratable database can be rebuilt cleanly without losing offline writes.
           def self.export_outbox
+            InstantRecord::Client.clear_events
             rows = []
             begin
               SqliteAdapter.each_row("SELECT id, record_type, record_id, operation, changes_payload, base_version, created_at, updated_at FROM instant_record_outbox ORDER BY created_at, id") do |row|
@@ -184,6 +192,7 @@ module InstantRecord
           # Re-insert preserved outbox rows into a freshly rebuilt database in
           # one atomic SQLite transaction, keeping original ids and order.
           def self.import_outbox
+            InstantRecord::Client.clear_events
             rows = JSON.parse(<<read:in>>)
             inserted = 0
             Db.exec("BEGIN IMMEDIATE")
@@ -217,6 +226,7 @@ module InstantRecord
 
           # Staging branch diff: OutboxMutations recorded after `exclude_ids`.
           def self.branch_outbox
+            InstantRecord::Client.clear_events
             raw = <<read:in>>.strip
             input = raw.empty? ? {} : JSON.parse(raw)
             summary = InstantRecord::Branch.summary(since_ids: Array(input["exclude_ids"]))
@@ -226,6 +236,7 @@ module InstantRecord
 
           # Safely replay extracted staging branch OutboxMutations onto current `main`.
           def self.branch_replay
+            InstantRecord::Client.clear_events
             raw = <<read:in>>.strip
             input = raw.empty? ? {} : JSON.parse(raw)
             conflict = input["conflict"].to_s

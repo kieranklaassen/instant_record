@@ -3,6 +3,8 @@
 // leader-elected visibility-aware SSE change stream, server-directed background history fill,
 // and multi-tab RPC routing.
 import { BranchManager } from "./branch-manager.js";
+import { CircuitBreaker, WasmFaultError } from "./faults.js";
+import { FlightRecorder } from "./flight-recorder.js";
 import { advance, fresh, held, query } from "./history-fill.js";
 import { redirectHeaders } from "./http-headers.js";
 import { createLeaderCoordinator } from "./leader-election.js";
@@ -32,6 +34,14 @@ function randomHex(bytes) {
   const buf = new Uint8Array(bytes);
   globalThis.crypto.getRandomValues(buf);
   return [...buf].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+function parseTraceSchema(raw) {
+  try {
+    return JSON.parse(raw || "{}");
+  } catch {
+    return {};
+  }
 }
 
 export function createWorkerRuntime({
@@ -143,11 +153,103 @@ export function createWorkerRuntime({
 
   function emitSyncNotices(notices) {
     const msg = { type: "instant_record.sync_notices", notices: Array.isArray(notices) ? notices : [] };
+    emitToTabs(msg);
+  }
+
+  function emitToTabs(msg) {
     if (coordinator && coordinator.role === "leader") {
       coordinator.broadcast(msg);
     } else {
       postMessage(msg);
     }
+  }
+
+  function stopBackgroundTimers() {
+    clearTimeout(kickTimer);
+    kickTimer = null;
+    kickHeld = false;
+    clearTimeout(fillTimer);
+    fillTimer = null;
+    streamLeader?.setCanLead?.(false);
+  }
+
+  const breaker = new CircuitBreaker({
+    maxConsecutiveFailures: 3,
+    onTrip: snapshot => {
+      stopBackgroundTimers();
+      console.error(`[instant_record] Circuit breaker OPEN (${snapshot.tripReason})`, snapshot);
+    },
+  });
+
+  const recorder = new FlightRecorder({
+    enabled: false,
+    schema: parseTraceSchema(env.VITE_TRACE_SCHEMA),
+  });
+
+  function traceMeta() {
+    return {
+      sourceVersion,
+      schemaVersion: targetSchema || 0,
+      schemaDigest,
+      wasmUrl,
+      syncEndpoint,
+      userAgent: globalThis.navigator?.userAgent || "",
+    };
+  }
+
+  function handleHostFault(fault) {
+    const { trippedNow, snapshot } = breaker.recordFault(fault);
+    console.error(
+      `[instant_record] WASM fault in ${fault.exportName} (exit=${fault.exit}, circuit=${snapshot.state}): ${fault.message}`,
+      fault.errors,
+    );
+    report({
+      kind: "fault",
+      path: `${fault.exportName}: ${fault.message}`,
+      status: "failed",
+      exit: fault.exit,
+      errors: fault.errors,
+      circuit: snapshot.state,
+    });
+    emitToTabs({
+      type: "instant_record.fault",
+      fault,
+      circuit: snapshot,
+      trippedNow,
+      traceAvailable: recorder.enabled,
+    });
+  }
+
+  function handleHostEvents(events, exportName) {
+    for (const event of events) {
+      const durationMs = typeof event.duration_ms === "number" ? Math.round(event.duration_ms) : undefined;
+      report({
+        kind: "ruby",
+        path: event.name || "instant_record",
+        status: event.payload?.exception ? "failed" : "ok",
+        ms: durationMs,
+        payload: event.payload || {},
+        exportName,
+      });
+      emitToTabs({
+        type: "instant_record.notification",
+        name: event.name,
+        payload: event.payload || {},
+        durationMs: event.duration_ms ?? null,
+        exportName,
+        at: Date.now(),
+      });
+    }
+  }
+
+  function makeHost(mod, hostEnv = {}) {
+    return new AppHost(mod, {
+      env: hostEnv,
+      onFault: handleHostFault,
+      onEvents: handleHostEvents,
+      onSuccess: exportName => breaker.recordSuccess(exportName),
+      recorder,
+    });
   }
 
   async function runNoticeAction(payload = { action: "list" }) {
@@ -257,6 +359,7 @@ export function createWorkerRuntime({
 
   async function withDb(mode, operation) {
     return serializeDb(async () => {
+      breaker.assertClosed("withDb");
       if (!host) throw new Error("AppHost is not booted");
 
       if (storage?.mode === "opfs") {
@@ -296,7 +399,7 @@ export function createWorkerRuntime({
               savedSchema,
               targetSchema,
               createHost: () => {
-                const next = new AppHost(previous.module, { env: previous.env });
+                const next = makeHost(previous.module, previous.env);
                 next.cookies = previous.cookies;
                 return next;
               },
@@ -304,6 +407,7 @@ export function createWorkerRuntime({
               onReport: report,
             });
             host = recovered.host;
+            if (recovered.rehydrated) breaker.reset();
             localRevision++;
             if (recovered.rehydrated) {
               needsSync = true;
@@ -416,7 +520,7 @@ export function createWorkerRuntime({
   }
 
   function kickSync(delay = QUIET_MS, { held = false } = {}) {
-    if (!isLeaderOrStandalone() || branches.isActive()) return;
+    if (!isLeaderOrStandalone() || breaker.isOpen() || branches.isActive()) return;
     clearTimeout(kickTimer);
     kickHeld = held;
     kickTimer = setTimeout(syncPass, delay);
@@ -431,14 +535,15 @@ export function createWorkerRuntime({
   }
 
   function applySyncSchedule(action) {
+    if (breaker.isOpen()) return;
     if (action.kind === "immediate") kickSync(action.delay);
     else if (action.kind === "held") kickSync(action.delay, { held: true });
     else clearHeldKick();
   }
 
   function handleOnline() {
-    streamLeader?.setOnline(true);
-    if (!isLeaderOrStandalone()) return;
+    if (!breaker.isOpen()) streamLeader?.setOnline(true);
+    if (!isLeaderOrStandalone() || breaker.isOpen()) return;
     kickSync(0);
     if (fillState && fillState.type && !fillState.done && !fillState.full) scheduleFill(0);
   }
@@ -452,6 +557,9 @@ export function createWorkerRuntime({
     clearTimeout(kickTimer);
     kickTimer = null;
     kickHeld = false;
+    if (breaker.isOpen()) {
+      return Promise.resolve({ changed: false, fault: breaker.lastFault, circuit: breaker.snapshot() });
+    }
     if (branches.isActive()) return Promise.resolve({ skipped: true, reason: "branched" });
     if (!draining) {
       const revision = localRevision;
@@ -461,10 +569,17 @@ export function createWorkerRuntime({
           drainOutcome = result;
           return result;
         })
+        .catch(error => {
+          if (error instanceof WasmFaultError || breaker.isOpen()) {
+            drainOutcome = { changed: false, fault: error.fault || breaker.lastFault, circuit: breaker.snapshot() };
+            return drainOutcome;
+          }
+          throw error;
+        })
         .finally(() => {
           draining = null;
-          if (revision !== localRevision && !kickTimer) kickSync();
-          if (drainOutcome && !drainOutcome.skipped) {
+          if (!breaker.isOpen() && revision !== localRevision && !kickTimer) kickSync();
+          if (!breaker.isOpen() && drainOutcome && !drainOutcome.skipped && !drainOutcome.fault) {
             if (drainOutcome.bootstrappedNow) streamLeader?.reconnect();
             else if (drainOutcome.pending === 0) streamLeader?.wake();
           }
@@ -474,6 +589,7 @@ export function createWorkerRuntime({
   }
 
   async function drain(initial = false, early = null) {
+    if (breaker.isOpen()) return { changed: false, fault: breaker.lastFault, circuit: breaker.snapshot() };
     if (branches.isActive()) return { changed: false, skipped: true };
     let hadBootstrap = false;
     const result = await runDrain({
@@ -494,18 +610,19 @@ export function createWorkerRuntime({
       },
       onRecordsChanged: changedRecords => emitRecordsChanged(changedRecords),
       onSyncNotices: notices => emitSyncNotices(notices),
-      scheduleRetry: delay => kickSync(delay),
-      scheduleHeld: delay => applySyncSchedule({ kind: "held", delay }),
+      scheduleRetry: delay => { if (!breaker.isOpen()) kickSync(delay); },
+      scheduleHeld: delay => { if (!breaker.isOpen()) applySyncSchedule({ kind: "held", delay }); },
       onIdle: () => applySyncSchedule({ kind: "idle" }),
       retryState: drainRetry,
     });
-    const bootstrappedNow = hadBootstrap && !!host?.syncState?.().bootstrapped;
+    const bootstrappedNow = hadBootstrap && !breaker.isOpen() && !result.fault && !!host?.syncState?.().bootstrapped;
     return { ...result, bootstrappedNow };
   }
 
   async function readStreamParams() {
-    if (!isLeaderOrStandalone() || !host || draining || (kickTimer && !kickHeld)) return { ready: false };
+    if (!isLeaderOrStandalone() || !host || breaker.isOpen() || draining || (kickTimer && !kickHeld)) return { ready: false };
     const state = await withDb("readonly", () => host.syncState());
+    if (state.fault || (state.exit !== undefined && state.exit !== 0)) return { ready: false };
     const action = nextSyncAction(state, 0);
     if (action.kind === "immediate") {
       if (!draining && (!kickTimer || kickHeld)) kickSync(0);
@@ -517,10 +634,18 @@ export function createWorkerRuntime({
 
   async function applyStreamFrames(framesText) {
     if (draining) await draining.catch(() => {});
-    if (!isLeaderOrStandalone() || !host) return { applied: 0, cursor: 0, reset: false };
+    if (!isLeaderOrStandalone() || !host || breaker.isOpen()) return { applied: 0, cursor: 0, reset: false };
     const outcome = await withDb("readwrite", save => {
-      const previousCursor = host.syncState().cursor;
+      const previousState = host.syncState();
+      if (previousState.fault || (previousState.exit !== undefined && previousState.exit !== 0)) {
+        return { applied: 0, cursor: 0, reset: false, changes: null, notify: false, syncNotices: null, fault: previousState.fault };
+      }
+      const previousCursor = previousState.cursor;
       const consumed = host.consumeStream(framesText);
+      if (consumed.fault || (consumed.exit !== undefined && consumed.exit !== 0)) {
+        if (coordinator?.role === "standalone") snapshotRevision = Symbol("reload");
+        return { applied: 0, cursor: previousCursor, reset: false, changes: null, notify: false, syncNotices: null, fault: consumed.fault };
+      }
       const reset = !consumed.bootstrapped;
       const notify = consumed.applied > 0 || consumed.notified || reset;
       const syncNotices = consumed.notices?.length && typeof host.notices === "function"
@@ -532,8 +657,9 @@ export function createWorkerRuntime({
       }
       return { applied: consumed.applied, cursor: consumed.cursor, reset, changes: notify ? consumed.changes : null, notify, syncNotices };
     });
+    if (outcome.fault) return outcome;
     if (outcome.syncNotices) emitSyncNotices(outcome.syncNotices);
-    if (outcome.reset) kickSync(0);
+    if (outcome.reset && !breaker.isOpen()) kickSync(0);
     if (outcome.notify) {
       if (branches.isActive()) {
         emitBranchState(branches.noteMainDelta(outcome.applied || 1));
@@ -579,6 +705,7 @@ export function createWorkerRuntime({
   }
 
   async function loadHistory(request) {
+    breaker.assertClosed("loadHistory");
     const state = fillState?.done ? fillState : await withFiles("readonly", get => get(FILL));
     if (held(state) && (!state.type || !request.type || state.type === request.type)) {
       return { ok: true, applied: 0, has_more: false };
@@ -596,12 +723,13 @@ export function createWorkerRuntime({
   }
 
   function scheduleFill(delay = fillDelayMs) {
-    if (!isLeaderOrStandalone()) return;
+    if (!isLeaderOrStandalone() || breaker.isOpen()) return;
     clearTimeout(fillTimer);
     fillTimer = setTimeout(runFill, delay);
   }
 
   async function fillStep() {
+    if (breaker.isOpen()) return false;
     fillState = await withFiles("readonly", get => get(FILL));
     if (!fillState || !fillState.type) return false;
     announceFill();
@@ -636,17 +764,21 @@ export function createWorkerRuntime({
   }
 
   async function runFill() {
-    if (!isLeaderOrStandalone() || fillInFlight) return;
+    if (!isLeaderOrStandalone() || fillInFlight || breaker.isOpen()) return;
     fillInFlight = true;
     let more = true;
     try {
       more = await fillStep();
-    } catch {
-      fillDelayMs = Math.min(Math.max(fillDelayMs, 1000) * 2, FILL_RETRY_CAP_MS);
+    } catch (error) {
+      if (breaker.isOpen() || error instanceof WasmFaultError) {
+        more = !breaker.isOpen();
+      } else {
+        fillDelayMs = Math.min(Math.max(fillDelayMs, 1000) * 2, FILL_RETRY_CAP_MS);
+      }
     } finally {
       fillInFlight = false;
     }
-    if (more && isLeaderOrStandalone()) {
+    if (more && isLeaderOrStandalone() && !breaker.isOpen()) {
       scheduleFill(effectiveSimulation().offline ? 2000 : fillDelayMs);
     }
   }
@@ -675,12 +807,16 @@ export function createWorkerRuntime({
     const writing = method !== "GET" && method !== "HEAD";
     if (branches.isActive()) {
       const result = render(branches.host());
-      if (writing) emitBranchState(branches.inspect());
+      const fault = result?.fault ?? result?.result?.fault ?? null;
+      if (writing && !fault) emitBranchState(branches.inspect());
       return result;
     }
     const result = await withDb(writing ? "readwrite" : "readonly", save => {
       const rendered = render(host);
-      if (writing) {
+      const fault = rendered?.fault ?? rendered?.result?.fault ?? null;
+      if (fault) {
+        if (coordinator?.role === "standalone") snapshotRevision = Symbol("reload");
+      } else if (writing) {
         localRevision++;
         save();
         drainRetry.delayMs = DRAIN_RETRY_BASE_MS;
@@ -688,7 +824,8 @@ export function createWorkerRuntime({
       }
       return rendered;
     });
-    if (writing) {
+    const fault = result?.fault ?? result?.result?.fault ?? null;
+    if (writing && !fault) {
       // Peer tabs receive typed row deltas when the write recorded them,
       // degrading cleanly to null (wildcard) when unlisted.
       const deltaChanges = result?.notified ? result.changes : null;
@@ -698,6 +835,7 @@ export function createWorkerRuntime({
   }
 
   function localRequest(method, path, options, targetHost = host) {
+    breaker.assertClosed("request");
     const started = now();
     const noticeRoute = matchSyncNoticeRoute(method, path, options?.body, options?.contentType);
     const result = noticeRoute
@@ -706,7 +844,7 @@ export function createWorkerRuntime({
     if (result.noticeResult && Array.isArray(result.noticeResult.notices)) {
       emitSyncNotices(result.noticeResult.notices);
     }
-    report({ kind: "local", method, path, status: result.status, ms: Math.round(now() - started) });
+    report({ kind: "local", method, path, status: result.fault ? "failed" : result.status, ms: Math.round(now() - started) });
     return result;
   }
 
@@ -723,7 +861,7 @@ export function createWorkerRuntime({
     let redirected = false;
     let finalPath = path;
     const followHeaders = redirectHeaders(headers);
-    for (let hops = 0; hops < 5 && result.status >= 300 && result.status < 400; hops++) {
+    for (let hops = 0; hops < 5 && !result.fault && result.status >= 300 && result.status < 400; hops++) {
       const location = result.headers.find(([name]) => name.toLowerCase() === "location")?.[1];
       if (!location) break;
       const next = new URL(location, origin);
@@ -836,7 +974,7 @@ export function createWorkerRuntime({
 
         const existing = opfsHasBytes;
         const secret = meta.savedSecret || randomHex(64);
-        const createHost = () => new AppHost(module, { env: { SECRET_KEY_BASE: secret } });
+        const createHost = () => makeHost(module, { SECRET_KEY_BASE: secret });
         const drift = detectSchemaDrift({
           bytes: existing ? new Uint8Array([1]) : null,
           version,
@@ -953,7 +1091,7 @@ export function createWorkerRuntime({
           previousDigest,
           schemaDigest,
           shell,
-          createHost: () => new AppHost(module, { env: { SECRET_KEY_BASE: secret } }),
+          createHost: () => makeHost(module, { SECRET_KEY_BASE: secret }),
           onReport: report,
         });
         const candidate = outcome.host;
@@ -995,6 +1133,7 @@ export function createWorkerRuntime({
         if (!shell) throw error;
         report({ kind: "sync", method: "GET", path: "/shell", status: "rejected", ms: Math.round(shell.ms) });
         shell = null;
+        breaker.reset();
         opened = await openOnce();
       }
     } catch (error) {
@@ -1005,14 +1144,23 @@ export function createWorkerRuntime({
     }
 
     const { restored, rehydrated } = opened;
+    if (rehydrated) breaker.reset();
+    if (recorder.enabled && !restored && !shell && host && typeof host.snapshotForRecorder === "function") {
+      recorder.captureCheckpoint(host.snapshotForRecorder());
+    }
     const bootstrapStart = now();
-    if (!restored && !shell) await drain(true, rehydrated ? null : await bootstrapFetch);
-    if (restored) applySyncSchedule(nextSyncAction(host.syncState(), 0));
+    if (!restored && !shell && !breaker.isOpen()) await drain(true, rehydrated ? null : await bootstrapFetch);
+    if (restored && !breaker.isOpen()) {
+      const state = host.syncState();
+      if (!state.fault && (state.exit === undefined || state.exit === 0)) {
+        applySyncSchedule(nextSyncAction(state, 0));
+      }
+    }
     ensureStreamLeader();
-    streamLeader?.setCanLead(true);
+    if (!breaker.isOpen()) streamLeader?.setCanLead(true);
     const bootstrapMs = now() - bootstrapStart;
 
-    if (fillState && fillState.type && !fillState.done && !fillState.full) {
+    if (!breaker.isOpen() && fillState && fillState.type && !fillState.done && !fillState.full) {
       scheduleFill(fillInitialDelayMs);
     } else if (fillState) {
       announceFill();
@@ -1078,15 +1226,26 @@ export function createWorkerRuntime({
       if (payload?.syncHeaders && typeof payload.syncHeaders === "object") {
         syncHeaders = { ...syncHeaders, ...payload.syncHeaders };
       }
+      if (payload?.trace && !recorder.enabled) {
+        recorder.configure({
+          enabled: true,
+          ...(typeof payload.trace === "object" ? payload.trace : {}),
+          meta: traceMeta(),
+        });
+        if (host && typeof host.snapshotForRecorder === "function") {
+          recorder.captureCheckpoint(host.snapshotForRecorder());
+        }
+      }
       const tabContext = payload?.path ? contextOf(payload.path) : syncContext;
-      await preloadPathHistory(tabContext);
-      const first = payload?.path
+      if (!breaker.isOpen()) await preloadPathHistory(tabContext);
+      const first = payload?.path && !breaker.isOpen()
         ? await runRequest("GET", target => navigate({ method: "GET", path: payload.path, headers: payload.headers }, target), { tabId })
         : null;
       return {
         first,
         storageMode: storage?.mode || "indexeddb",
         fillState: fillState ? { done: fillState.done, full: fillState.full, rows: fillState.rows } : null,
+        circuit: breaker.snapshot(),
       };
     }
     if (method === "configure_headers") {
@@ -1117,7 +1276,7 @@ export function createWorkerRuntime({
         mainHost: host,
         schemaVersion: targetSchema,
         createHost: (bytes, version, branchName) => {
-          const staged = new AppHost(host.module, { env: { ...host.env, INSTANT_RECORD_BRANCH: branchName } });
+          const staged = makeHost(host.module, { ...host.env, INSTANT_RECORD_BRANCH: branchName });
           staged.cookies = new Map(host.cookies);
           staged.restoreDatabase(bytes, version);
           return staged;
@@ -1182,6 +1341,63 @@ export function createWorkerRuntime({
     if (method === "wipe") {
       return wipeLocalStorage();
     }
+    if (method === "reset_circuit") {
+      breaker.reset();
+      if (coordinator?.role === "standalone") snapshotRevision = Symbol("reload");
+      drainRetry.delayMs = DRAIN_RETRY_BASE_MS;
+      if (host?.poisoned) {
+        const previous = host;
+        if (storage?.mode === "opfs" && storage.file) {
+          const fresh = makeHost(previous.module, previous.env);
+          fresh.cookies = previous.cookies;
+          fresh.mountDatabase(storage.file, targetSchema);
+          fresh.ensureBooted();
+          host = fresh;
+        } else {
+          const bytes = await withFiles("readonly", get => get(DATABASE));
+          const fresh = makeHost(previous.module, previous.env);
+          fresh.cookies = previous.cookies;
+          if (bytes) fresh.restoreDatabase(bytes, targetSchema);
+          fresh.ensureBooted();
+          host = fresh;
+        }
+      }
+      if (isLeaderOrStandalone()) {
+        streamLeader?.setCanLead?.(true);
+        streamLeader?.wake?.();
+      }
+      const result = { ok: true, circuit: breaker.snapshot() };
+      emitToTabs({ type: "instant_record.circuit", circuit: result.circuit });
+      return result;
+    }
+    if (method === "trace.configure") {
+      const options = payload || {};
+      const wasEnabled = recorder.enabled;
+      const status = recorder.configure({ ...options, meta: traceMeta() });
+      if (!wasEnabled && recorder.enabled && host && typeof host.snapshotForRecorder === "function") {
+        recorder.captureCheckpoint(host.snapshotForRecorder());
+      }
+      return status;
+    }
+    if (method === "trace.status") {
+      return recorder.status();
+    }
+    if (method === "trace.clear") {
+      recorder.clear();
+      if (recorder.enabled && host && typeof host.snapshotForRecorder === "function") {
+        recorder.captureCheckpoint(host.snapshotForRecorder());
+      }
+      return recorder.status();
+    }
+    if (method === "trace.export") {
+      const options = payload || {};
+      return recorder.exportTrace({
+        redact: options.redact !== false,
+        includeUnredactedDatabase: !!options.includeUnredactedDatabase,
+        meta: traceMeta(),
+        circuit: breaker.snapshot(),
+      });
+    }
     throw new Error("Unknown leader RPC method: " + method);
   }
 
@@ -1195,6 +1411,13 @@ export function createWorkerRuntime({
       ...(payload.syncHeaders && typeof payload.syncHeaders === "object" ? payload.syncHeaders : {}),
     };
     if (typeof payload.visible === "boolean") pageVisible = payload.visible;
+    if (payload.trace) {
+      recorder.configure({
+        enabled: true,
+        ...(typeof payload.trace === "object" ? payload.trace : {}),
+        meta: traceMeta(),
+      });
+    }
 
     const started = now();
     savedModule = payload.module || await compileWasm(wasmUrl);
@@ -1226,7 +1449,7 @@ export function createWorkerRuntime({
       },
       onLeaderSimulationChange: (next, prev) => {
         streamLeader?.setOfflineSimulated(!!next.offline);
-        if (host && prev.offline && !next.offline) {
+        if (host && prev.offline && !next.offline && !breaker.isOpen()) {
           drainRetry.delayMs = DRAIN_RETRY_BASE_MS;
           kickSync(0);
           if (fillState && fillState.type && !fillState.done && !fillState.full) scheduleFill(0);
@@ -1237,7 +1460,7 @@ export function createWorkerRuntime({
       },
       onRoleChange: nextRole => {
         postMessage({ type: "instant_record.role", role: nextRole });
-        if (nextRole === "leader" || nextRole === "standalone") streamLeader?.wake();
+        if ((nextRole === "leader" || nextRole === "standalone") && !breaker.isOpen()) streamLeader?.wake();
       },
     });
 
@@ -1248,12 +1471,15 @@ export function createWorkerRuntime({
 
     if (startedRole.role === "leader" || startedRole.role === "standalone") {
       const bootInfo = startedRole.bootResult;
-      await preloadPathHistory(syncContext);
-      const first = payload.path
+      if (!breaker.isOpen()) await preloadPathHistory(syncContext);
+      const first = payload.path && !breaker.isOpen()
         ? await runRequest("GET", target => navigate({ method: "GET", path: payload.path, headers: payload.headers }, target), { tabId: coordinator.workerId })
         : null;
-      if (host && typeof host.notices === "function" && host.syncState().notices > 0) {
-        emitSyncNotices(host.notices({ action: "list" }).notices);
+      if (!breaker.isOpen() && host && typeof host.notices === "function") {
+        const state = host.syncState();
+        if (!state.fault && (state.exit === undefined || state.exit === 0) && state.notices > 0) {
+          emitSyncNotices(host.notices({ action: "list" }).notices);
+        }
       }
       return {
         compileMs: compiled - started,
@@ -1263,6 +1489,7 @@ export function createWorkerRuntime({
         runtimeMs: bootInfo.runtimeMs,
         bootstrapMs: bootInfo.bootstrapMs,
         first,
+        circuit: breaker.snapshot(),
         shell: bootInfo.shell,
         role: startedRole.role,
         storageMode: bootInfo.storageMode,
@@ -1270,7 +1497,7 @@ export function createWorkerRuntime({
     }
 
     // Follower path: leader already owns the hot AppHost and storage.
-    const tabBoot = await coordinator.call("boot_tab", { path: payload.path, syncScope, syncHeaders, headers: payload.headers }, { idempotent: true });
+    const tabBoot = await coordinator.call("boot_tab", { path: payload.path, syncScope, syncHeaders, headers: payload.headers, trace: payload.trace }, { idempotent: true });
     if (tabBoot.fillState) {
       postMessage({ type: "instant_record.history", state: tabBoot.fillState });
     }
@@ -1281,6 +1508,7 @@ export function createWorkerRuntime({
       runtimeMs: 0,
       bootstrapMs: 0,
       first: tabBoot.first,
+      circuit: tabBoot.circuit || breaker.snapshot(),
       shell: null,
       role: "follower",
       storageMode: tabBoot.storageMode,
@@ -1337,6 +1565,44 @@ export function createWorkerRuntime({
         coordinator?.clearLog();
         return;
       }
+      if (type === "instant_record.reset_circuit") {
+        const result = coordinator
+          ? await coordinator.call("reset_circuit", null, { idempotent: true })
+          : await handleLeaderRpc("reset_circuit", null, { tabId: null });
+        if (id != null) return postMessage({ id, result });
+        return;
+      }
+      if (type === "instant_record.trace.configure") {
+        const options = payload || event.data.options || {};
+        const result = coordinator
+          ? await coordinator.call("trace.configure", options, { idempotent: true })
+          : await handleLeaderRpc("trace.configure", options, { tabId: null });
+        if (id != null) return postMessage({ id, result });
+        return;
+      }
+      if (type === "instant_record.trace.status") {
+        const result = coordinator
+          ? await coordinator.call("trace.status", null, { idempotent: true })
+          : await handleLeaderRpc("trace.status", null, { tabId: null });
+        if (id != null) return postMessage({ id, result });
+        return;
+      }
+      if (type === "instant_record.trace.clear") {
+        const result = coordinator
+          ? await coordinator.call("trace.clear", null, { idempotent: true })
+          : await handleLeaderRpc("trace.clear", null, { tabId: null });
+        if (id != null) return postMessage({ id, result });
+        return;
+      }
+      if (type === "instant_record.trace.export") {
+        const options = payload || event.data.options || {};
+        const trace = coordinator
+          ? await coordinator.call("trace.export", options, { idempotent: true })
+          : await handleLeaderRpc("trace.export", options, { tabId: null });
+        if (id != null) return postMessage({ id, result: trace });
+        postMessage({ type: "instant_record.trace.exported", trace });
+        return;
+      }
       if (type === "instant_record.configure_headers") {
         if (payload && typeof payload === "object") {
           syncHeaders = { ...syncHeaders, ...payload };
@@ -1359,7 +1625,7 @@ export function createWorkerRuntime({
           postMessage({ type: "instant_record.debug_backlog", entries: history, streamOpen });
         }
         streamLeader?.setOfflineSimulated(!!effectiveSimulation().offline);
-        if (isLeaderOrStandalone() && host && previous.offline && !localSimulation.offline && !effectiveSimulation().offline) {
+        if (isLeaderOrStandalone() && host && previous.offline && !localSimulation.offline && !effectiveSimulation().offline && !breaker.isOpen()) {
           drainRetry.delayMs = DRAIN_RETRY_BASE_MS;
           kickSync(0);
         }
@@ -1420,5 +1686,7 @@ export function createWorkerRuntime({
     get storageMode() { return storage?.mode || coordinator?.storageMode || null; },
     get fillState() { return fillState; },
     get streamOpen() { return streamOpen; },
+    get breaker() { return breaker; },
+    get recorder() { return recorder; },
   };
 }

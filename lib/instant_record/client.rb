@@ -17,6 +17,10 @@ module InstantRecord
     # More changes than this in one notice are not listed one by one.
     MAX_LISTED_CHANGES = 200
 
+    # Cap buffered ActiveSupport::Notifications per host call so a runaway loop
+    # cannot exhaust the browser VM's heap.
+    MAX_RECORDED_EVENTS = 200
+
     # SyncMetadata key prefixes for durable history tracking. Windowed models
     # store per-partition contiguity low-water marks under HISTORY_WINDOW_PREFIX;
     # non-windowed / opaque bridge keys live directly under HISTORY_KEY_PREFIX.
@@ -264,6 +268,27 @@ module InstantRecord
         changed_index.clear
         recorded_notices.clear
         @unlisted_changes = false
+      end
+
+      # Bridged notifications captured during the current host call so the JS
+      # worker receives ActiveSupport::Notifications across the WASI boundary.
+      def recorded_events
+        @recorded_events ||= []
+      end
+
+      def clear_events
+        recorded_events.clear
+        nil
+      end
+
+      def events_notice
+        JSON.generate(recorded_events)
+      end
+
+      def drain_events
+        snapshot = recorded_events.dup
+        recorded_events.clear
+        snapshot
       end
 
       # Arm the boot-time trim; InstantRecord.start sets this on cold boots
@@ -676,6 +701,7 @@ module InstantRecord
       def forget_database
         reset_stream
         changed_records.clear
+        recorded_events.clear
         changed_index.clear
         recorded_notices.clear
         @unlisted_changes = false
@@ -1805,14 +1831,65 @@ module InstantRecord
 
       # Every meaningful sync outcome is announced through
       # ActiveSupport::Notifications — the seam a host app subscribes to for
-      # logging or metrics, and the one the browser runtime's forwarder turns
-      # for server-side subscribers. The compiled worker reports to the inspector.
-      # narrative because Ruby is what knows: the worker can only say it made a
-      # request; this side knows what the pass actually did. Free-standing
-      # events (no block) fire instantly; wrapped ones carry duration and, on a
-      # raise, the exception in the payload.
+      # logging or metrics, and the one the browser runtime bridges to the JS
+      # worker through /host/events. Ruby is what knows: the worker can only say
+      # it made a request; this side knows what the pass actually did.
       def instrument(name, payload = {}, &block)
-        ActiveSupport::Notifications.instrument("#{name}.instant_record", payload, &block)
+        full_name = "#{name}.instant_record"
+        started = Time.now.to_f
+        raised = nil
+        begin
+          ActiveSupport::Notifications.instrument(full_name, payload, &block)
+        rescue StandardError => e
+          raised = e
+          raise
+        ensure
+          if InstantRecord.browser?
+            duration_ms = (Time.now.to_f - started) * 1000.0
+            record_bridged_event(full_name, payload, duration_ms, raised)
+          end
+        end
+      end
+
+      def record_bridged_event(name, payload, duration_ms, error = nil)
+        clean = normalize_event_payload(payload)
+        clean["exception"] = [error.class.name, error.message.to_s] if error
+        recorded_events.shift if recorded_events.size >= MAX_RECORDED_EVENTS
+        recorded_events << {
+          "name" => name,
+          "payload" => clean,
+          "duration_ms" => duration_ms
+        }
+        notifier.events_emitted(events_notice) if notifier.respond_to?(:events_emitted)
+        nil
+      end
+
+      def normalize_event_payload(payload)
+        result = {}
+        return result unless payload.is_a?(Hash)
+
+        payload.each do |key, value|
+          name = key.to_s
+          next if name == "exception_object"
+
+          result[name] = normalize_event_value(value)
+        end
+        result
+      end
+
+      def normalize_event_value(value)
+        case value
+        when String, Integer, Float, TrueClass, FalseClass, NilClass
+          value
+        when Symbol
+          value.to_s
+        when Array
+          value.map { |item| normalize_event_value(item) }
+        when Hash
+          normalize_event_payload(value)
+        else
+          value.to_s
+        end
       end
     end
   end
