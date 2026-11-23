@@ -735,18 +735,29 @@ class CompilerTest < ActiveSupport::TestCase
       end
       assert_equal new_modules, File.readlink(Pathname(app_root).realpath.join("tmp/instant_record/compiled/web/node_modules"))
 
-      # Native host build runs end-to-end and outputs libinstant_record_app.a + host.
+      # Native host build runs end-to-end and outputs libinstant_record_app.a + host + typed contracts.
+      custom_swift = File.join(dir, "exported/Contracts.swift")
       native_out = with_path(fake[:bin_dir]) do
         InstantRecord::Compiler.build_native(
           root: app_root,
           models: ["Task"],
           toolchain: fake[:toolchain_file],
-          endpoint: "/instant_record"
+          endpoint: "/instant_record",
+          swift_out: custom_swift,
+          kotlin: true,
+          kotlin_package: "com.acme.tasks"
         )
       end
       assert File.file?(native_out.join("libinstant_record_app.a"))
       assert File.file?(native_out.join("host"))
       assert File.file?(native_out.join(InstantRecord::Compiler::NativeBuild.shared_library_name))
+      assert File.file?(native_out.join("generated/InstantRecordContracts.swift"))
+      assert File.file?(native_out.join("generated/InstantRecordContracts.kt"))
+      assert File.file?(custom_swift)
+      assert_includes native_out.join("generated/InstantRecordContracts.swift").read, "public struct TasksViewProps"
+      assert_includes native_out.join("generated/InstantRecordContracts.kt").read, "package com.acme.tasks"
+      assert_includes native_out.join("generated/InstantRecordContracts.kt").read, "data class TasksViewProps"
+      refute_includes native_out.join("app-src/app/screens/tasks_screen.rb").read, "contract"
 
       # Both WasmBuild and NativeBuild compile sqlite3.c with FTS5 enabled.
       calls = File.read(fake[:call_log]).lines
@@ -829,7 +840,22 @@ class CompilerTest < ActiveSupport::TestCase
     File.write(File.join(app_root, "Gemfile"), "source 'https://rubygems.org'\n")
     File.write(File.join(app_root, "config/routes.rb"), "Rails.application.routes.draw { root 'tasks#index' }\n")
     File.write(File.join(app_root, "app/models/task.rb"), "class Task < ApplicationRecord\n  include InstantRecord::Syncable\nend\n")
-    File.write(File.join(app_root, "app/screens/tasks_screen.rb"), "class TasksScreen < InstantRecord::Native::Screen\n  def body; navigation(title: 'Tasks') {}; end\nend\n")
+    File.write(File.join(app_root, "app/screens/tasks_screen.rb"), <<~RUBY)
+      class TasksScreen < InstantRecord::Native::Screen
+        contract "TasksView" do |c|
+          c.string :heading
+          c.int :count
+          c.action :refresh
+        end
+
+        def body
+          swift "TasksView" do
+            prop "heading", "Tasks"
+            number "count", 0
+          end
+        end
+      end
+    RUBY
     File.write(File.join(app_root, "app/views/layouts/application.html.erb"), <<~HTML)
       <html><head>
         <link rel="preconnect" href="https://fonts.example.test">

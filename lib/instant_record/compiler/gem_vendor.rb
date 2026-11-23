@@ -1,4 +1,5 @@
 require "fileutils"
+require "prism"
 require_relative "ast_lowerer"
 require_relative "host_adapters"
 require_relative "runner"
@@ -127,11 +128,63 @@ module InstantRecord
         return unless File.directory?(root)
 
         Dir.glob("**/*.rb", base: root).sort.each do |rel|
+          path = File.join(root, rel)
           AstLowerer.lower_file(
-            File.join(root, rel),
+            path,
             runtime: :client,
             rewrite_syncable_include: rewrite_syncable_include
           )
+          strip_native_contracts_file(path) if subdir == "app/screens"
+        end
+      end
+
+      # Remove class-level `contract ... do ... end` declarations from staged
+      # app/screens files before Roundhouse/Spinel compile them, preserving line
+      # counts so `#line` diagnostics in generated C remain exact.
+      def strip_native_contracts_file(path)
+        source = File.read(path, encoding: Encoding::UTF_8)
+        stripped = strip_native_contracts(source)
+        File.write(path, stripped) if stripped != source
+      end
+
+      def strip_native_contracts(source)
+        parsed = Prism.parse(source)
+        return source unless parsed.success?
+
+        ranges = []
+        collect_contract_ranges(parsed.value, ranges)
+        return source if ranges.empty?
+
+        output = source.b
+        ranges.sort_by { |start_off, _| -start_off }.each do |start_off, end_off|
+          slice = output.byteslice(start_off...end_off)
+          output[start_off...end_off] = "\n" * slice.count("\n")
+        end
+        output.force_encoding(source.encoding)
+      end
+
+      def collect_contract_ranges(node, ranges)
+        return unless node
+
+        case node
+        when Prism::ProgramNode
+          collect_contract_ranges(node.statements, ranges)
+        when Prism::StatementsNode
+          node.body.each { |stmt| collect_contract_ranges(stmt, ranges) }
+        when Prism::ModuleNode
+          collect_contract_ranges(node.body, ranges)
+        when Prism::ClassNode
+          if node.body.is_a?(Prism::StatementsNode)
+            node.body.body.each do |stmt|
+              if stmt.is_a?(Prism::CallNode) && stmt.receiver.nil? && stmt.name == :contract
+                ranges << [stmt.location.start_offset, stmt.location.end_offset]
+              else
+                collect_contract_ranges(stmt, ranges)
+              end
+            end
+          else
+            collect_contract_ranges(node.body, ranges)
+          end
         end
       end
     end
