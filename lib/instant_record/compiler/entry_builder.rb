@@ -57,6 +57,7 @@ module InstantRecord
           def self.sync_plan
             mutations = InstantRecord::Client.plan_drain
             push = mutations.empty? ? "" : JSON.generate(InstantRecord::Client.mutations_payload(mutations))
+            headers = InstantRecord::Client.request_headers
             next_ms = InstantRecord::Client.next_release_ms
             plan = {
               push: push,
@@ -64,6 +65,7 @@ module InstantRecord
               bootstrap: !InstantRecord::Client.bootstrapped?,
               fingerprint: "<<shell_fingerprint>>"
             }
+            plan[:headers] = headers unless headers.empty?
             plan[:next_release_ms] = next_ms unless next_ms.nil?
             <<write:out>>JSON.generate(plan))
             0

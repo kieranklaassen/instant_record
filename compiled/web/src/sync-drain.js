@@ -13,6 +13,7 @@ export async function runDrain({
   early = null,
   report = () => {},
   setCursor = () => {},
+  onBootstrapFill = () => {},
   onRecordsChanged = () => {},
   onSyncNotices = () => {},
   scheduleRetry,
@@ -28,10 +29,19 @@ export async function runDrain({
     else onIdle();
     return { changed: false, notified: false, pending: 0, nextReleaseMs };
   }
-  const push = plan.push ? await fetchReply("POST", "/mutations", plan.push) : null;
-  const snapshot = plan.bootstrap ? (!plan.push && early?.status === 200 ? early : await fetchReply("GET", "/bootstrap")) : null;
+  const extra = plan.headers || {};
+  const push = plan.push ? await fetchReply("POST", "/mutations", plan.push, syncEndpoint, extra) : null;
+  const snapshot = plan.bootstrap ? (!plan.push && early?.status === 200 ? early : await fetchReply("GET", "/bootstrap", "", syncEndpoint, extra)) : null;
 
-  const result = await withSnapshot("readwrite", save => {
+  let bootstrapFill = null;
+  if (snapshot?.status === 200) {
+    try {
+      const parsed = JSON.parse(snapshot.text);
+      if (Array.isArray(parsed.fill) && parsed.fill.length > 0) bootstrapFill = parsed.fill[0];
+    } catch { /* ignore malformed JSON; Ruby handles it below */ }
+  }
+
+  const result = await withSnapshot("readwrite", (save, put) => {
     const host = getHost();
     const preparedPush = push
       ? { status: push.status, body: push.text, mutation_ids: plan.mutation_ids || [] }
@@ -51,7 +61,8 @@ export async function runDrain({
     const syncNotices = applied.notices?.length && typeof host.notices === "function"
       ? host.notices({ action: "list" }).notices
       : null;
-    if (applied.changed || applied.notified) {
+    if (bootstrapFill) onBootstrapFill(bootstrapFill, put);
+    if (applied.changed || applied.notified || bootstrapFill) {
       save();
     }
 

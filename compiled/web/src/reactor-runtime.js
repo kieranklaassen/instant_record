@@ -1,18 +1,18 @@
-// Core worker runtime: coordinates leader election per (origin, scope), OPFS page-level
+// Core worker runtime: coordinates leader election per (origin, partition), OPFS page-level
 // WASI SQLite storage (with IndexedDB fallback), non-blocking outbox draining, a
-// leader-elected visibility-aware SSE change stream, background history fill, and
-// multi-tab RPC routing.
+// leader-elected visibility-aware SSE change stream, server-directed background history fill,
+// and multi-tab RPC routing.
 import { BranchManager } from "./branch-manager.js";
 import { advance, fresh, held, query } from "./history-fill.js";
 import { redirectHeaders } from "./http-headers.js";
-import { mailboxScope } from "./mailbox-scope.js";
-import { isServerAllowed, parseManifest } from "./manifest.js";
 import { createLeaderCoordinator } from "./leader-election.js";
+import { isServerAllowed, parseManifest } from "./manifest.js";
 import { detectSchemaDrift, openOrRehydrate, rehydrateFromBytes, reloadOrRehydrateSnapshot } from "./schema-recovery.js";
 import { resolveServerRequest, serverRoot } from "./server-request.js";
-import { isValidSqliteBytes, parseShellGrant, scopedUrl, shouldFetchShell, validateShellState } from "./shell.js";
+import { isValidSqliteBytes, parseShellGrant, shouldFetchShell, validateShellState } from "./shell.js";
 import { openDatabaseStorage } from "./storage-backend.js";
 import { createStreamLeader } from "./stream-leader.js";
+import { parseRules, resolveSyncContext } from "./sync-context.js";
 import { runDrain } from "./sync-drain.js";
 import { nextSyncAction } from "./sync-schedule.js";
 
@@ -22,7 +22,6 @@ const DRAIN_RETRY_CAP_MS = 10000;
 
 const DATABASE = "development.sqlite3";
 const FILL = "history_fill";
-const FILL_PAGE = 200;
 const FILL_PAUSE_MS = 300;
 const FILL_RETRY_CAP_MS = 60000;
 const REVISION = "snapshot_revision";
@@ -54,13 +53,12 @@ export function createWorkerRuntime({
   streamEnabled = pollIntervalMs !== 0,
   streamOptions = {},
   fillInitialDelayMs = 1000,
-  scopeOf = path => mailboxScope(path, !!env.VITE_SHARED_INBOX_DEMO),
+  contextOf = path => resolveSyncContext(path, parseRules(env.VITE_SYNC_PARTITIONS)),
   now = () => performance.now(),
 } = {}) {
   const manifest = parseManifest(env.VITE_MANIFEST);
-  const publicEndpoint = env.VITE_SYNC_ENDPOINT || "/instant_record";
+  const syncEndpoint = env.VITE_SYNC_ENDPOINT || "/instant_record";
   const mountPath = env.VITE_MOUNT_PATH || "/instant_record";
-  let syncEndpoint = publicEndpoint;
   const targetSchema = Number(env.VITE_SCHEMA_VERSION);
   const legacySchema = env.VITE_SCHEMA_BASELINE;
   const migrationHistory = JSON.parse(env.VITE_MIGRATION_HISTORY || "{}");
@@ -70,7 +68,10 @@ export function createWorkerRuntime({
   const sourceVersion = env.VITE_SOURCE_VERSION || "";
   const wasmUrl = env.VITE_WASM_URL || "/app.wasm";
 
+  // Client-side sync scope & pluggable headers (partition, auth, custom headers).
   let syncScope = "";
+  let syncHeaders = {};
+  let syncContext = null;
   let currentScope = "";
   let localSimulation = { offline: false, latencyMs: 0, report: false };
   const history = [];
@@ -91,8 +92,6 @@ export function createWorkerRuntime({
   let pageVisible = true;
   let pageTornDown = false;
   let pageSuspended = false;
-
-  let mailScope = "";
   let fillState = null;
   let fillTimer = null;
   let fillInFlight = false;
@@ -175,7 +174,7 @@ export function createWorkerRuntime({
 
   function matchSyncNoticeRoute(method, path, body = "", contentType = "") {
     const url = new URL(path, origin);
-    const base = new URL(publicEndpoint, origin).pathname.replace(/\/+$/, "") + "/sync_notices";
+    const base = new URL(syncEndpoint, origin).pathname.replace(/\/+$/, "") + "/sync_notices";
     const pathname = url.pathname.replace(/\.json$/, "");
     let verb = method.toUpperCase();
     if (verb === "POST" && (!contentType || contentType.startsWith("application/x-www-form-urlencoded"))) {
@@ -365,7 +364,19 @@ export function createWorkerRuntime({
     });
   }
 
-  async function fetchReply(method, path, body = "", endpoint = syncEndpoint, contentType = undefined) {
+  function buildHeaders(method, extra = {}, contentType = undefined) {
+    const headers = { ...syncHeaders, ...extra };
+    if (syncScope && !headers["X-Instant-Record-Scope"]) {
+      headers["X-Instant-Record-Scope"] = syncScope;
+    }
+    if (method !== "GET" && method !== "HEAD") {
+      const headerType = contentType === undefined ? "application/json" : contentType;
+      if (headerType && !headers["Content-Type"]) headers["Content-Type"] = headerType;
+    }
+    return headers;
+  }
+
+  async function fetchReply(method, path, body = "", endpoint = syncEndpoint, extraHeaders = {}, contentType = undefined) {
     const url = endpoint + path;
     const started = now();
     let status = 0;
@@ -382,13 +393,11 @@ export function createWorkerRuntime({
         outcome = "offline";
         return { method, url, body, status, text, contentType: responseContentType };
       }
+      const headers = buildHeaders(method, extraHeaders, contentType);
       const options = { method, signal: AbortSignal.timeout(30000) };
-      if (method !== "GET" && method !== "HEAD") {
-        const headerType = contentType === undefined ? "application/json" : contentType;
-        if (headerType) options.headers = { "Content-Type": headerType };
-        options.body = body;
-      }
-      const response = await fetchImpl(scopedUrl(url, syncScope), options);
+      if (Object.keys(headers).length > 0) options.headers = headers;
+      if (method !== "GET" && method !== "HEAD") options.body = body;
+      const response = await fetchImpl(url, options);
       text = await response.text();
       responseContentType = response.headers?.get?.("content-type") || "";
       outcome = status = response.status;
@@ -431,7 +440,7 @@ export function createWorkerRuntime({
     streamLeader?.setOnline(true);
     if (!isLeaderOrStandalone()) return;
     kickSync(0);
-    if (mailScope && fillState && !fillState.done && !fillState.full) scheduleFill(0);
+    if (fillState && fillState.type && !fillState.done && !fillState.full) scheduleFill(0);
   }
 
   function handleOffline() {
@@ -468,10 +477,10 @@ export function createWorkerRuntime({
     if (branches.isActive()) return { changed: false, skipped: true };
     let hadBootstrap = false;
     const result = await runDrain({
-      withSnapshot: (mode, op) => withDb(mode, save => op(() => {
+      withSnapshot: (mode, op) => withDb(mode, (save, put) => op(() => {
         localRevision++;
         save();
-      })),
+      }, put)),
       fetchReply,
       getHost: () => host,
       syncEndpoint,
@@ -479,6 +488,10 @@ export function createWorkerRuntime({
       early,
       report,
       setCursor: cursor => { if (cursor === null) hadBootstrap = true; },
+      onBootstrapFill: (descriptor, put) => {
+        fillState = fresh(descriptor);
+        put?.(FILL, fillState);
+      },
       onRecordsChanged: changedRecords => emitRecordsChanged(changedRecords),
       onSyncNotices: notices => emitSyncNotices(notices),
       scheduleRetry: delay => kickSync(delay),
@@ -538,6 +551,7 @@ export function createWorkerRuntime({
       getEndpoint: () => syncEndpoint,
       mailboxScope: currentScope,
       getSyncScope: () => syncScope,
+      getHeaders: () => buildHeaders("GET"),
       initialVisible: pageVisible,
       canLead: false,
       locks,
@@ -565,11 +579,13 @@ export function createWorkerRuntime({
   }
 
   async function loadHistory(request) {
-    if (mailScope) {
-      const state = fillState?.done ? fillState : await withFiles("readonly", get => get(FILL));
-      if (held(state)) return { ok: true, applied: 0, has_more: false };
+    const state = fillState?.done ? fillState : await withFiles("readonly", get => get(FILL));
+    if (held(state) && (!state.type || !request.type || state.type === request.type)) {
+      return { ok: true, applied: 0, has_more: false };
     }
-    const params = new URLSearchParams(request.search ? { search: request.search } : { type: request.type });
+    const params = new URLSearchParams();
+    if (request.type) params.set("type", request.type);
+    if (request.search) params.set("search", request.search);
     if (request.before) {
       params.set("before_created_at", request.before.created_at);
       params.set("before_id", request.before.id);
@@ -586,12 +602,13 @@ export function createWorkerRuntime({
   }
 
   async function fillStep() {
-    fillState = (await withFiles("readonly", get => get(FILL))) || fresh();
+    fillState = await withFiles("readonly", get => get(FILL));
+    if (!fillState || !fillState.type) return false;
     announceFill();
     if (fillState.done || fillState.full) return false;
     if (effectiveSimulation().offline || draining || (kickTimer && !kickHeld) || branches.isActive()) return true;
 
-    const key = query(fillState, FILL_PAGE);
+    const key = query(fillState, fillState.pageSize);
     const revision = localRevision;
     const reply = await fetchReply("GET", "/records?" + key);
     if (reply.status !== 200) {
@@ -717,42 +734,45 @@ export function createWorkerRuntime({
     return { result: { ...result, ms: now() - started }, redirected, finalPath, notified, changes: writeChanges };
   }
 
-  async function fetchShell(scope, path, hasExistingDb) {
+  async function fetchShell(context, path, hasExistingDb) {
     if (hasExistingDb || !shouldFetchShell({
       path,
       fingerprint: shellFingerprint,
       always: shellAlways,
       offline: effectiveSimulation().offline,
-      blocked: scope === "invalid/invalid",
+      blocked: context ? !context.valid : false,
     })) {
       return null;
     }
     const started = now();
     try {
-      const grant = await fetchReply("GET", "/shell?fingerprint=" + encodeURIComponent(shellFingerprint));
+      const root = context?.shellPath ? serverRoot(syncEndpoint, mountPath) : syncEndpoint;
+      const grantPath = `${context?.shellPath || "/shell"}?fingerprint=${encodeURIComponent(shellFingerprint)}`;
+      const grant = await fetchReply("GET", grantPath, "", root);
       if (grant.status !== 200) return null;
       const parsed = parseShellGrant(grant.text);
       if (!parsed) return null;
-      const response = await fetchImpl(scopedUrl(syncEndpoint + parsed.path, syncScope), {
+      const response = await fetchImpl(root + parsed.path, {
+        headers: buildHeaders("GET"),
         signal: AbortSignal.timeout(30000),
         cache: "no-store",
       });
       if (!response.ok) return null;
       const bytes = new Uint8Array(await response.arrayBuffer());
       if (!isValidSqliteBytes(bytes)) return null;
-      return { bytes, cursor: parsed.cursor, identity: parsed.identity, ms: now() - started };
+      return { bytes, cursor: parsed.cursor, identity: parsed.identity, fill: parsed.fill, ms: now() - started };
     } catch {
       return null;
     }
   }
 
-  async function earlyBootstrap(scope, path, hasExistingMeta) {
+  async function earlyBootstrap(context, path, hasExistingMeta) {
     if (hasExistingMeta || shouldFetchShell({
       path,
       fingerprint: shellFingerprint,
       always: shellAlways,
       offline: effectiveSimulation().offline,
-      blocked: scope === "invalid/invalid",
+      blocked: context ? !context.valid : false,
     })) {
       return null;
     }
@@ -763,7 +783,7 @@ export function createWorkerRuntime({
     }
   }
 
-  async function openLeaderDatabase(module, { scope, path, promoted }) {
+  async function openLeaderDatabase(module, { context, scope, path, promoted }) {
     ensureSnapshotOpen(scope);
     const storageStart = now();
     storage = await openStorage(scope, {
@@ -772,11 +792,11 @@ export function createWorkerRuntime({
     });
 
     const meta = await withFiles("readonly", async get => {
-      const [legacyBytes, version, revision, savedSecret, savedHistory, previousDigest, savedBackend] = await Promise.all([
+      const [legacyBytes, version, revision, savedSecret, savedHistory, previousDigest, savedBackend, savedFill] = await Promise.all([
         get(DATABASE), get(SCHEMA), get(REVISION), get("secret_key_base"),
-        get("migration_history"), get("schema_digest"), get(STORAGE_BACKEND),
+        get("migration_history"), get("schema_digest"), get(STORAGE_BACKEND), get(FILL),
       ]);
-      return { legacyBytes, version, revision, savedSecret, savedHistory, previousDigest, savedBackend };
+      return { legacyBytes, version, revision, savedSecret, savedHistory, previousDigest, savedBackend, savedFill };
     });
     const storageMs = now() - storageStart;
 
@@ -789,8 +809,8 @@ export function createWorkerRuntime({
       : !!meta.legacyBytes;
 
     // On failover promotion, the DB already exists — never fetch a fresh shell or bootstrap.
-    const shellFetch = promoted ? Promise.resolve(null) : fetchShell(scope, path, hasExistingDb);
-    const bootstrapFetch = promoted ? Promise.resolve(null) : earlyBootstrap(scope, path, hasExistingDb || meta.version != null);
+    const shellFetch = promoted ? Promise.resolve(null) : fetchShell(context, path, hasExistingDb);
+    const bootstrapFetch = promoted ? Promise.resolve(null) : earlyBootstrap(context, path, hasExistingDb || meta.version != null);
 
     let shell = await shellFetch;
     let runtimeMs = 0;
@@ -871,8 +891,10 @@ export function createWorkerRuntime({
               if (!validateShellState(state, shell)) {
                 throw new Error("The shell does not match its grant.");
               }
+              if (shell.fill) fillState = fresh(shell.fill);
             } else {
               shell = null;
+              if (meta.savedFill) fillState = meta.savedFill;
             }
           } catch (error) {
             if (existing) {
@@ -898,6 +920,7 @@ export function createWorkerRuntime({
           snapshotRevision = (meta.revision ?? 0) + 1;
           await withFiles("readwrite", async (_get, put, del) => {
             if (!meta.savedSecret) put("secret_key_base", secret);
+            if (fromShell && shell.fill) put(FILL, fillState);
             put(REVISION, snapshotRevision);
             put(SCHEMA, targetSchema);
             put("migration_history", migrationHistory);
@@ -914,9 +937,9 @@ export function createWorkerRuntime({
 
       // IndexedDB fallback path (whole-file transaction).
       return withFiles("readwrite", async (get, put) => {
-        const [bytes, version, revision, savedSecret, savedHistory, previousDigest] = await Promise.all([
+        const [bytes, version, revision, savedSecret, savedHistory, previousDigest, savedFill] = await Promise.all([
           get(DATABASE), get(SCHEMA), get(REVISION), get("secret_key_base"),
-          get("migration_history"), get("schema_digest"),
+          get("migration_history"), get("schema_digest"), get(FILL),
         ]);
         const secret = savedSecret || randomHex(64);
         if (!savedSecret) put("secret_key_base", secret);
@@ -940,8 +963,13 @@ export function createWorkerRuntime({
           if (!validateShellState(state, shell)) {
             throw new Error("The shell does not match its grant.");
           }
+          if (shell.fill) {
+            fillState = fresh(shell.fill);
+            put(FILL, fillState);
+          }
         } else {
           shell = null;
+          if (savedFill) fillState = savedFill;
         }
         snapshotRevision = revision;
         if (outcome.fromShell || outcome.rehydrated || version !== targetSchema || !previousDigest) {
@@ -984,9 +1012,10 @@ export function createWorkerRuntime({
     streamLeader?.setCanLead(true);
     const bootstrapMs = now() - bootstrapStart;
 
-    if (scope && scope !== "invalid/invalid") {
-      mailScope = scope;
+    if (fillState && fillState.type && !fillState.done && !fillState.full) {
       scheduleFill(fillInitialDelayMs);
+    } else if (fillState) {
+      announceFill();
     }
 
     return {
@@ -1000,16 +1029,13 @@ export function createWorkerRuntime({
     };
   }
 
-  async function preloadPathHistory(scope, path) {
-    if (!scope || !path) return;
-    const url = new URL(path, origin);
-    for (const id of new Set([url.searchParams.get("before"), url.searchParams.get("thread")])) {
-      if (id) await loadHistoryQuery(new URLSearchParams({ thread: id }).toString());
+  async function preloadPathHistory(context) {
+    if (!context?.valid) return;
+    for (const id of context.lookupIds) {
+      await loadHistoryQuery(new URLSearchParams({ id }).toString());
     }
-    const before = url.searchParams.get("before");
-    const at = url.searchParams.get("at");
-    if (before && at) {
-      await loadHistory({ type: "MailEntry", before: { id: before, created_at: at }, limit: 50 });
+    if (context.preloadBefore) {
+      await loadHistory(context.preloadBefore);
     }
   }
 
@@ -1017,12 +1043,12 @@ export function createWorkerRuntime({
     const targetPath = resolveServerRequest(payload.path, origin);
     const method = (payload.method || "GET").toUpperCase();
     const pathname = new URL(targetPath, origin).pathname;
-    if (manifest.mode === "island" && !isServerAllowed(manifest, method, pathname, publicEndpoint)) {
+    if (manifest.mode === "island" && !isServerAllowed(manifest, method, pathname, syncEndpoint)) {
       throw new Error(`Disallowed server action: ${method} ${pathname}`);
     }
-    const root = serverRoot(publicEndpoint, mountPath);
+    const root = serverRoot(syncEndpoint, mountPath);
     const body = typeof payload.body === "string" ? payload.body : "";
-    const reply = await fetchReply(method, targetPath, body, root, payload.contentType ?? "");
+    const reply = await fetchReply(method, targetPath, body, root, {}, payload.contentType ?? "");
     if (method !== "GET" && method !== "HEAD" && reply.status >= 200 && reply.status < 400) {
       streamLeader?.reconnect();
     }
@@ -1049,7 +1075,11 @@ export function createWorkerRuntime({
   async function handleLeaderRpc(method, payload, { tabId }) {
     if (method === "boot_tab") {
       if (payload?.syncScope && !syncScope) syncScope = payload.syncScope;
-      await preloadPathHistory(currentScope, payload?.path);
+      if (payload?.syncHeaders && typeof payload.syncHeaders === "object") {
+        syncHeaders = { ...syncHeaders, ...payload.syncHeaders };
+      }
+      const tabContext = payload?.path ? contextOf(payload.path) : syncContext;
+      await preloadPathHistory(tabContext);
       const first = payload?.path
         ? await runRequest("GET", target => navigate({ method: "GET", path: payload.path, headers: payload.headers }, target), { tabId })
         : null;
@@ -1058,6 +1088,12 @@ export function createWorkerRuntime({
         storageMode: storage?.mode || "indexeddb",
         fillState: fillState ? { done: fillState.done, full: fillState.full, rows: fillState.rows } : null,
       };
+    }
+    if (method === "configure_headers") {
+      if (payload && typeof payload === "object") {
+        syncHeaders = { ...syncHeaders, ...payload };
+      }
+      return { ok: true };
     }
     if (method === "navigate") {
       return runRequest(payload.method, target => navigate(payload, target), { tabId });
@@ -1151,12 +1187,14 @@ export function createWorkerRuntime({
 
   async function boot(payload = {}) {
     savedBootPayload = payload;
-    currentScope = scopeOf(payload.path || "/");
+    syncContext = contextOf(payload.path || "/");
+    currentScope = syncContext ? syncContext.storageKey : "";
     syncScope = typeof payload.scope === "string" ? payload.scope : "";
+    syncHeaders = {
+      ...(syncContext?.headers || {}),
+      ...(payload.syncHeaders && typeof payload.syncHeaders === "object" ? payload.syncHeaders : {}),
+    };
     if (typeof payload.visible === "boolean") pageVisible = payload.visible;
-    if (currentScope) {
-      syncEndpoint = serverRoot(publicEndpoint, mountPath) + "/email/sync/" + currentScope;
-    }
 
     const started = now();
     savedModule = payload.module || await compileWasm(wasmUrl);
@@ -1172,6 +1210,7 @@ export function createWorkerRuntime({
       ...(createChannel ? { createChannel } : {}),
       onBecomeLeader: async ({ promoted }) => {
         return openLeaderDatabase(savedModule, {
+          context: syncContext,
           scope: currentScope,
           path: savedBootPayload?.path || "/",
           promoted,
@@ -1190,7 +1229,7 @@ export function createWorkerRuntime({
         if (host && prev.offline && !next.offline) {
           drainRetry.delayMs = DRAIN_RETRY_BASE_MS;
           kickSync(0);
-          if (mailScope && fillState && !fillState.done && !fillState.full) scheduleFill(0);
+          if (fillState && fillState.type && !fillState.done && !fillState.full) scheduleFill(0);
         }
       },
       onFollowerPush: msg => {
@@ -1209,7 +1248,7 @@ export function createWorkerRuntime({
 
     if (startedRole.role === "leader" || startedRole.role === "standalone") {
       const bootInfo = startedRole.bootResult;
-      await preloadPathHistory(currentScope, payload.path);
+      await preloadPathHistory(syncContext);
       const first = payload.path
         ? await runRequest("GET", target => navigate({ method: "GET", path: payload.path, headers: payload.headers }, target), { tabId: coordinator.workerId })
         : null;
@@ -1231,7 +1270,7 @@ export function createWorkerRuntime({
     }
 
     // Follower path: leader already owns the hot AppHost and storage.
-    const tabBoot = await coordinator.call("boot_tab", { path: payload.path, syncScope, headers: payload.headers }, { idempotent: true });
+    const tabBoot = await coordinator.call("boot_tab", { path: payload.path, syncScope, syncHeaders, headers: payload.headers }, { idempotent: true });
     if (tabBoot.fillState) {
       postMessage({ type: "instant_record.history", state: tabBoot.fillState });
     }
@@ -1296,6 +1335,15 @@ export function createWorkerRuntime({
       if (type === "instant_record.clear_log") {
         history.length = 0;
         coordinator?.clearLog();
+        return;
+      }
+      if (type === "instant_record.configure_headers") {
+        if (payload && typeof payload === "object") {
+          syncHeaders = { ...syncHeaders, ...payload };
+          if (coordinator && coordinator.role === "follower") {
+            await coordinator.call("configure_headers", payload, { idempotent: true });
+          }
+        }
         return;
       }
       if (type === "instant_record.simulate") {

@@ -24,6 +24,7 @@ module InstantRecord
         lib/instant_record/syncable.rb
         lib/instant_record/outbox_mutation.rb
         lib/instant_record/sync_metadata.rb
+        lib/instant_record/sync_partition.rb
         lib/instant_record/hlc.rb
         lib/instant_record/sync_notice.rb
         lib/instant_record/sync_window.rb

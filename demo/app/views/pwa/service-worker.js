@@ -17,7 +17,7 @@
 const CACHE = "instant-record-shell-v1"
 const SHELL = "/"
 const FONT_HOSTS = ["fonts.googleapis.com", "fonts.gstatic.com"]
-const SYNC_PATHS = [/(^|\/)instant_record(\/|$)/, /^\/email\/sync\//]
+const SYNC_PATHS = [/(^|\/)instant_record(\/|$)/]
 const ASSET_PATHS = [/^\/assets\//, /^\/harness\//, /\.wasm$/]
 const IMMUTABLE_PATHS = [/^\/harness\//, /\.wasm$/, /-[0-9a-f]{8,}\.\w+$/]
 const MODULES_KEPT = 2

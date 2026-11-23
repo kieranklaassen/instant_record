@@ -1,8 +1,9 @@
 // Version 3 fences out older workers that do not check the persisted schema.
 let opened;
-export function openSnapshot(scope) {
+export function openSnapshot(partitionKey) {
   opened = new Promise((resolve, reject) => {
-    const request = indexedDB.open(scope ? "instant-record-spinel/mail/" + scope : "instant-record-spinel", 3);
+    const name = partitionKey ? "instant-record-spinel/partition/" + partitionKey : "instant-record-spinel";
+    const request = indexedDB.open(name, 3);
     request.onupgradeneeded = event => {
       if (event.oldVersion === 0) request.result.createObjectStore("files");
     };

@@ -294,10 +294,16 @@ function createTestEnvironment({ opfsUnavailable = false, seedIdbBytes = null, s
       }
       return { status: 200, headers: [], body: JSON.stringify(this.state.items), notified: false, changes: null, exit: 0, errors: [] };
     }
-    syncPlan() { return { push: "", mutation_ids: [], bootstrap: false }; }
+    syncPlan() { return { push: "", mutation_ids: [], bootstrap: !this.state.bootstrapped }; }
     sync() { return { changed: false, pending: 0, cursor: this.state.cursor, notified: false, changes: null }; }
-    applySync() { return { changed: false, pending: 0, cursor: this.state.cursor, progressed: false, failed: false, quarantined: 0, notified: false, changes: null }; }
-    syncState() { return { bootstrapped: true, cursor: this.state.cursor, pending: 0, identity: "" }; }
+    applySync(_endpoint, { bootstrap } = {}) {
+      if (!this.state.bootstrapped && bootstrap && bootstrap.status === 200) {
+        this._persist({ ...this.state, bootstrapped: true });
+        return { changed: true, pending: 0, cursor: this.state.cursor, progressed: true, failed: false, quarantined: 0, notified: false, changes: null };
+      }
+      return { changed: false, pending: 0, cursor: this.state.cursor, progressed: false, failed: false, quarantined: 0, notified: false, changes: null };
+    }
+    syncState() { return { bootstrapped: this.state.bootstrapped, cursor: this.state.cursor, pending: 0, identity: "" }; }
     consumeStream(chunk) {
       const applied = [];
       let cursor = this.state.cursor;
@@ -332,7 +338,21 @@ function createTestEnvironment({ opfsUnavailable = false, seedIdbBytes = null, s
         VITE_MIGRATION_HISTORY: JSON.stringify({ "1": "h1", "2": "h2" }),
         VITE_SCHEMA_DIGEST: "digest-v2",
         VITE_SOURCE_VERSION: "v2",
-        VITE_SHARED_INBOX_DEMO: "1",
+        VITE_SYNC_PARTITIONS: JSON.stringify([
+          {
+            path: "/email",
+            partitionParam: "inbox",
+            partitionDefault: "support",
+            partitionKey: "mailbox_id",
+            scopeParam: "member",
+            scopeDefault: "maya",
+            scopeHeader: "X-Instant-Record-Member",
+            valid: "^[a-z]{1,32}$",
+            lookupParams: ["before", "thread"],
+            preloadBefore: { idParam: "before", atParam: "at", type: "MailEntry", limit: 50 },
+            shellPath: "/email/shell",
+          },
+        ]),
         ...envOverrides,
       },
       AppHost: FakeAppHost,
@@ -510,14 +530,25 @@ test("schema drift in OPFS auto-rehydrates onto a clean database while preservin
 });
 
 test("Safari Private Mode falls back cleanly to IndexedDB and keeps 24 MB fill cap while OPFS exceeds 24 MB", async () => {
+  const bootstrapPayload = JSON.stringify({
+    cursor: 1,
+    records: [],
+    fill: [{ type: "MailEntry", partition: "mailbox_id:support", page_size: 200 }],
+  });
   const pagePayload = JSON.stringify({
     has_more: true,
+    next_before: { created_at: "2026-11-01T00:00:00.000000Z", id: "m1" },
     records: [{ id: "m1", attributes: { kind: "message", created_at: "2026-11-01T00:00:00.000000Z" } }],
   });
-  const fetchPage = async () => ({ status: 200, ok: true, text: async () => pagePayload });
+  const seenRequests = [];
+  const fetchPage = async (url, options = {}) => {
+    seenRequests.push({ url, headers: options.headers || {} });
+    const body = url.includes("/bootstrap") ? bootstrapPayload : pagePayload;
+    return { status: 200, ok: true, text: async () => body };
+  };
 
-  // OPFS mode: DB > 24 MB does NOT stop history fill.
-  const opfsEnv = createTestEnvironment();
+  // OPFS mode: DB > 24 MB does NOT stop history fill, and partition headers route via core engine.
+  const opfsEnv = createTestEnvironment({ seedMeta: { history_fill: { type: "MailEntry", pageSize: 200, before: { created_at: "9999-12-31T00:00:00.000000Z", id: "~" }, rows: 0, done: false, full: false } } });
   opfsEnv.hostMetrics.simulatedDbSize = 40 * 1024 * 1024; // 40 MB
   const opfsTab = opfsEnv.spawnWorker({ fetchImpl: fetchPage });
   const opfsBoot = await opfsTab.rpc("boot", { module: {}, path: "/email?member=maya&inbox=support", scope: "s1" });
@@ -526,10 +557,16 @@ test("Safari Private Mode falls back cleanly to IndexedDB and keeps 24 MB fill c
   assert.equal(opfsMore, true);
   assert.equal(opfsTab.runtime.fillState.full, false, "OPFS lifts the 24 MB history fill cap");
   assert.equal(opfsEnv.hostMetrics.databaseBytesCalls, 0, "OPFS fillStep reads O(1) size, never databaseBytes()");
+  const recordsReq = seenRequests.find(r => r.url.includes("/records?"));
+  assert.ok(recordsReq, "fillStep fetches /records on the core engine");
+  assert.ok(!recordsReq.url.includes("/email/sync/"), "never uses legacy /email/sync/ path");
+  assert.equal(recordsReq.headers["X-Instant-Record-Partition"], "mailbox_id:support");
+  assert.equal(recordsReq.headers["X-Instant-Record-Member"], "maya");
+  assert.equal(recordsReq.headers["X-Instant-Record-Scope"], "s1");
   opfsTab.runtime.shutdown();
 
   // Safari Private Mode fallback: DB > 24 MB stops fill at the whole-file cap.
-  const idbEnv = createTestEnvironment({ opfsUnavailable: true });
+  const idbEnv = createTestEnvironment({ opfsUnavailable: true, seedMeta: { history_fill: { type: "MailEntry", pageSize: 200, before: { created_at: "9999-12-31T00:00:00.000000Z", id: "~" }, rows: 0, done: false, full: false } } });
   idbEnv.hostMetrics.simulatedDbSize = 40 * 1024 * 1024;
   const idbTab = idbEnv.spawnWorker({ fetchImpl: fetchPage });
   const idbBoot = await idbTab.rpc("boot", { module: {}, path: "/email?member=maya&inbox=support", scope: "s1" });

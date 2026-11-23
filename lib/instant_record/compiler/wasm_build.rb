@@ -77,6 +77,22 @@ module InstantRecord
         "history" => { "1" => "add-mail-tables" }
       }.freeze
 
+      DEMO_SYNC_PARTITIONS = [
+        {
+          "path" => "/email",
+          "partitionParam" => "inbox",
+          "partitionDefault" => "support",
+          "partitionKey" => "mailbox_id",
+          "scopeParam" => "member",
+          "scopeDefault" => "maya",
+          "scopeHeader" => "X-Instant-Record-Member",
+          "valid" => "^[a-z]{1,32}$",
+          "lookupParams" => %w[before thread],
+          "preloadBefore" => { "idParam" => "before", "atParam" => "at", "type" => "MailEntry", "limit" => 50 },
+          "shellPath" => "/email/shell"
+        }
+      ].freeze
+
       attr_reader :workspace, :gem_root, :pipeline_dir, :build_dir, :toolchain, :runner
 
       def initialize(
@@ -588,7 +604,7 @@ module InstantRecord
             "VITE_WASM_URL" => "/app-#{digest}.wasm",
             "VITE_SHELL_FINGERPRINT" => shell_fingerprint,
             "VITE_SHELL_SNAPSHOT" => @shell_snapshot,
-            "VITE_SHARED_INBOX_DEMO" => @demo ? "1" : "",
+            "VITE_SYNC_PARTITIONS" => @demo ? JSON.generate(DEMO_SYNC_PARTITIONS) : "[]",
             "VITE_SYNC_ENDPOINT" => @endpoint,
             "VITE_MOUNT_PATH" => @mount_path,
             "VITE_SOURCE_VERSION" => wanted[0, 12],

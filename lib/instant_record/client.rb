@@ -93,6 +93,45 @@ module InstantRecord
         @notifier ||= Notifier::Worker.new
       end
 
+      # Pluggable client-side headers sent on every outbound sync request
+      # (bootstrap, mutations, events, history). Merges:
+      #   1. X-Instant-Record-Scope      (from config.sync_scope)
+      #   2. X-Instant-Record-Partition  (from config.sync_partition)
+      #   3. Authorization               (from config.auth_token)
+      #   4. Custom headers              (from config.headers — Hash or callable)
+      def request_headers
+        result = {}
+        config = InstantRecord.config
+        scope = config.sync_scope
+        result["X-Instant-Record-Scope"] = scope.to_s if scope && !scope.to_s.empty?
+
+        partition = config.sync_partition
+        formatted = format_partition_header(partition)
+        result["X-Instant-Record-Partition"] = formatted if formatted
+
+        token = config.auth_token
+        if token && !token.to_s.empty?
+          str = token.to_s
+          result["Authorization"] = str.include?(" ") ? str : "Bearer #{str}"
+        end
+
+        extra = config.headers.respond_to?(:call) ? config.headers.call : config.headers
+        if extra.is_a?(Hash)
+          extra.each do |name, value|
+            result[name.to_s] = value.to_s if value && !value.to_s.empty?
+          end
+        end
+        result
+      end
+
+      # Background history-fill targets declared by the server's bootstrap response.
+      def fill_targets
+        raw = SyncMetadata.get("history_fill_targets")
+        raw ? JSON.parse(raw) : []
+      rescue JSON::ParserError
+        []
+      end
+
       # One full pass: outbox up, changes down, tabs notified when visible rows
       # moved. Called under InstantRecord.tick's single-flight guard. A client
       # that has never synced hydrates from the bootstrap snapshot instead of
@@ -491,7 +530,7 @@ module InstantRecord
         return false if InstantRecord.branched?
 
         instrument("bootstrap") do |event|
-          body = transport.get_json("/bootstrap")
+          body = transport_get_json("/bootstrap")
           event[:records] = apply_bootstrap_body(body)
           true
         end
@@ -701,7 +740,7 @@ module InstantRecord
         path += "&identity=#{key}" unless key.nil?
 
         instrument("poll") do |note|
-          transport.each_event(path) do |event|
+          transport_each_event(path) do |event|
             event = event.deep_stringify_keys
             next if was_reset
             observe_server_time(event["server_time"])
@@ -754,7 +793,7 @@ module InstantRecord
         end
 
         instrument("fetch_history") do |event|
-          body = transport.get_json(history_path(model, partition, before_at, before_id, limit))
+          body = transport_get_json(history_path(model, partition, before_at, before_id, limit))
           observe_server_time(body["server_time"])
           result = apply_history_page(model, partition, Array(body["records"]), has_more: !!body["has_more"])
           event[:applied] = result[:applied]
@@ -979,6 +1018,9 @@ module InstantRecord
         # tick re-bootstraps; upserts make the retry idempotent. A failure
         # never falls through to a cursor-0 poll of the full change log.
         SyncMetadata.set("identity", body["identity"]) if body["identity"]
+        if body["fill"].is_a?(Array) && body["fill"].any?
+          SyncMetadata.set("history_fill_targets", JSON.generate(body["fill"]))
+        end
         replay = SyncMetadata.get("replay_from")
         if replay.nil? || replay.to_i > body["cursor"].to_i
           self.cursor = body["cursor"]
@@ -1057,6 +1099,35 @@ module InstantRecord
           attempts: attempts,
           error: reason)
         changed_visible
+      end
+
+      def transport_get_json(path)
+        headers = request_headers
+        headers.empty? ? transport.get_json(path) : transport.get_json(path, headers: headers)
+      end
+
+      def transport_post_json(path, payload)
+        headers = request_headers
+        headers.empty? ? transport.post_json(path, payload) : transport.post_json(path, payload, headers: headers)
+      end
+
+      def transport_each_event(path, &block)
+        headers = request_headers
+        headers.empty? ? transport.each_event(path, &block) : transport.each_event(path, headers: headers, &block)
+      end
+
+      def format_partition_header(partition)
+        return nil if partition.nil?
+
+        if partition.is_a?(Hash)
+          partition.each do |key, value|
+            text = value.to_s
+            return "#{key}:#{text}" unless text.empty?
+          end
+          return nil
+        end
+        text = partition.to_s.strip
+        text.empty? ? nil : text
       end
 
       # Where the parser drops finished events, drained by consume_stream.
@@ -1409,7 +1480,7 @@ module InstantRecord
             break if mutations.empty?
 
             begin
-              body = transport.post_json("/mutations", mutations_payload(mutations))
+              body = transport_post_json("/mutations", mutations_payload(mutations))
               observe_server_time(body["server_time"])
               results = Array(body["results"]).map { |r| r.deep_stringify_keys }
               resolved, batch_reconciled = apply_results_with_counts(results)

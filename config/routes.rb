@@ -2,12 +2,15 @@ InstantRecord::Engine.routes.draw do
   post "mutations", to: "mutations#create"
   match "mutations", to: "mutations#preflight", via: :options
   get "events", to: "events#index"
+  match "events", to: "events#preflight", via: :options
   get "bootstrap", to: "bootstraps#show"
+  match "bootstrap", to: "bootstraps#preflight", via: :options
   get "shell", to: "shells#show"
   get "shell/file", to: "shells#file"
   match "shell", to: "shells#preflight", via: :options
   match "shell/file", to: "shells#preflight", via: :options
   get "records", to: "records#index"
+  match "records", to: "records#preflight", via: :options
   # The bytes of a record that declares sync_file. A type may be namespaced
   # and an id may hold a dot, so neither is cut at one.
   constraints type: %r{[^/]+}, id: %r{[^/]+} do

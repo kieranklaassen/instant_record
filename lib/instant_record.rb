@@ -4,13 +4,20 @@ require "base64"
 module InstantRecord
   DEFAULT_MOUNT_PATH = "/instant_record".freeze
 
+  # Raised by `config.authenticate_request`, `config.scope_from`,
+  # `config.partition_from`, or `authorize_partition` to reject a sync request
+  # with HTTP 401 or 403.
+  Unauthorized = Class.new(StandardError)
+  Forbidden = Class.new(StandardError)
+
   # Engine endpoints allow cross-origin reads and JSON writes so a separately
   # hosted compiled site or Vite dev server can reach Rails. Access control is
-  # enforced per model via `sync_scope`, `syncable_to`, and `writable_by`.
+  # enforced per model via `sync_scope`, `sync_partition`, `syncable_to`, and
+  # `writable_by`.
   CORS_HEADERS = {
     "access-control-allow-origin" => "*",
     "access-control-allow-methods" => "GET, POST, OPTIONS",
-    "access-control-allow-headers" => "content-type, last-event-id"
+    "access-control-allow-headers" => "content-type, last-event-id, authorization, x-instant-record-scope, x-instant-record-partition, x-instant-record-member"
   }.freeze
 
   # Every timestamp crossing the wire carries microseconds, in both directions.
@@ -99,6 +106,13 @@ module InstantRecord
     def scope_of(record)
       column = record.class.instant_record_sync_scope
       record[column].presence if column
+    end
+
+    # The partition key-value a record belongs to (e.g. "mailbox_id:support"),
+    # or nil for an unpartitioned model.
+    def partition_of(record)
+      partition = record.class.instant_record_sync_partition
+      partition&.change_partition_for(record)
     end
 
     # The wire shape for one record, shared by the bootstrap and records
@@ -397,6 +411,7 @@ end
 
 ActiveSupport.on_load(:active_record) do
   require "instant_record/sync_window"
+  require "instant_record/sync_partition"
   require "instant_record/sync_metadata"
   require "instant_record/hlc"
   require "instant_record/sync_actions"

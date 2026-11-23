@@ -103,9 +103,9 @@ function fakeCreateFile(handle) {
   };
 }
 
-test("opfsDirectorySegments isolates default and scoped mailbox databases", () => {
+test("opfsDirectorySegments isolates default and partitioned databases", () => {
   assert.deepEqual(opfsDirectorySegments(""), ["instant-record-spinel", "default"]);
-  assert.deepEqual(opfsDirectorySegments("maya/support"), ["instant-record-spinel", "mail", "maya", "support"]);
+  assert.deepEqual(opfsDirectorySegments("maya/support"), ["instant-record-spinel", "partition", "maya", "support"]);
 });
 
 test("openDatabaseStorage mounts OPFS with unbounded history fill budget and supports wipe", async () => {
@@ -126,7 +126,7 @@ test("openDatabaseStorage mounts OPFS with unbounded history fill budget and sup
 
   await backend.wipe();
   assert.equal(backend.hasDatabase(), false);
-  assert.equal(opfs.tree.get("instant-record-spinel").get("mail").get("maya").get("support").has("development.sqlite3"), false);
+  assert.equal(opfs.tree.get("instant-record-spinel").get("partition").get("maya").get("support").has("development.sqlite3"), false);
 });
 
 test("openDatabaseStorage retries transient NoModificationAllowedError during leader failover", async () => {

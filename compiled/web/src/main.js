@@ -1,10 +1,10 @@
 import { mountBranchPreview } from "./branch-preview.js";
 import { affectsReads, mergeReads } from "./changes.js";
 import { extractHeaders, hasHeader, headerValue } from "./http-headers.js";
-import { mailboxScope } from "./mailbox-scope.js";
 import { isLocalRoute, parseManifest } from "./manifest.js";
 import { watchRelease } from "./release-updates.js";
 import { isLocalUrl } from "./server-request.js";
+import { resolveSyncContext } from "./sync-context.js";
 import workerUrl from "./worker.js?worker&url";
 const manifest = parseManifest(import.meta.env.VITE_MANIFEST);
 let releaseRequired;
@@ -61,7 +61,8 @@ const call = (type, payload) => new Promise((resolve, reject) => {
   worker.postMessage({ id, type, payload });
 });
 
-const initialScope = mailboxScope(location.href);
+const initialContext = resolveSyncContext(location.href);
+const initialStorageKey = initialContext ? initialContext.storageKey : "";
 const marks = { start: performance.now() };
 // Where the sync server is and who this browser is to it, for a page that asks it for
 // something itself: the bytes of a record that declares sync_file (frontend/files.js).
@@ -353,7 +354,8 @@ async function openApp() {
   document.addEventListener("submit", submitInPlace);
   document.addEventListener("turbo:before-visit", event => {
     const destination = new URL(event.detail.url, location.href);
-    if (mailboxScope(event.detail.url) !== initialScope || !isLocal(destination, "GET")) {
+    const next = resolveSyncContext(event.detail.url);
+    if ((next ? next.storageKey : "") !== initialStorageKey || !isLocal(destination, "GET")) {
       event.preventDefault();
       location.assign(event.detail.url);
     }

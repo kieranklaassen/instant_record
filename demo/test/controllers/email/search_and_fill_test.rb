@@ -1,12 +1,17 @@
 require "test_helper"
 
-# Search and the background fill, as the sync server and the Rails page answer them.
+# Search and the background fill, as InstantRecord::Engine and the Rails page answer them.
 class MailSearchAndFillTest < ActionDispatch::IntegrationTest
   setup do
+    InstantRecord::Change.delete_all
     MailEntry.delete_all
     Mailbox.delete_all
     @mailbox = Mailbox.create!(id: "support")
     Mailbox.create!(id: "billing")
+  end
+
+  def inbox_headers(member = "maya", inbox = "support")
+    { "X-Instant-Record-Partition" => "mailbox_id:#{inbox}", "X-Instant-Record-Member" => member }
   end
 
   def write(subject, body: "Can you help?", author: "Rae", mailbox: @mailbox)
@@ -14,7 +19,7 @@ class MailSearchAndFillTest < ActionDispatch::IntegrationTest
   end
 
   def records(params)
-    get "/email/sync/maya/support/records", params: params
+    get "/instant_record/records", params: params, headers: inbox_headers
     assert_response :success
     response.parsed_body
   end
@@ -39,8 +44,9 @@ class MailSearchAndFillTest < ActionDispatch::IntegrationTest
       loop do
         page = records(type: "MailEntry", before_created_at: before[:created_at], before_id: before[:id], limit: 3)
         seen.concat(page["records"])
-        last = page["records"].select { |record| record.dig("attributes", "kind") == "message" }.last
-        before = { created_at: last.dig("attributes", "created_at"), id: last["id"] } if last
+        if page["next_before"]
+          before = { created_at: page["next_before"]["created_at"], id: page["next_before"]["id"] }
+        end
         break unless page["has_more"]
       end
     end
@@ -83,29 +89,32 @@ class MailSearchAndFillTest < ActionDispatch::IntegrationTest
     with_page_size(2) do
       first = records(search: "invoice")
       assert_equal true, first["has_more"]
-      last = first["records"].last
-      rest = records(search: "invoice", before_created_at: last.dig("attributes", "created_at"), before_id: last["id"])
+      last = first["next_before"]
+      rest = records(search: "invoice", before_created_at: last["created_at"], before_id: last["id"])
       assert_equal [old.id], rest["records"].pluck("id")
       assert_equal false, rest["has_more"]
     end
   end
 
   test "a search is one inbox's and its member's" do
-    get "/email/sync/jo/support/records", params: { search: "invoice" }
+    get "/instant_record/records", params: { search: "invoice" }, headers: inbox_headers("jo", "support")
     assert_response :forbidden
-    get "/email/sync/maya/support/records"
+    get "/instant_record/records", headers: inbox_headers("maya", "support")
     assert_response :bad_request
   end
 
   private
 
   def with_page_size(size)
-    page, fill = MailEntry::PAGE_SIZE, MailEntry::FILL_PAGE_SIZE
-    MailEntry.send(:remove_const, :PAGE_SIZE); MailEntry.const_set(:PAGE_SIZE, size)
-    MailEntry.send(:remove_const, :FILL_PAGE_SIZE); MailEntry.const_set(:FILL_PAGE_SIZE, size)
+    shape = MailEntry.instant_record_sync_shape
+    old_limit, old_min, old_max = shape.limit, shape.min_limit, shape.max_limit
+    shape.instance_variable_set(:@limit, size)
+    shape.instance_variable_set(:@min_limit, size)
+    shape.instance_variable_set(:@max_limit, size)
     yield
   ensure
-    MailEntry.send(:remove_const, :PAGE_SIZE); MailEntry.const_set(:PAGE_SIZE, page)
-    MailEntry.send(:remove_const, :FILL_PAGE_SIZE); MailEntry.const_set(:FILL_PAGE_SIZE, fill)
+    shape.instance_variable_set(:@limit, old_limit)
+    shape.instance_variable_set(:@min_limit, old_min)
+    shape.instance_variable_set(:@max_limit, old_max)
   end
 end

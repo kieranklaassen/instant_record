@@ -1,7 +1,7 @@
-// Dedicated worker: elects a single leader per (origin, scope) via navigator.locks.
+// Dedicated worker: elects a single leader per (origin, partition) via navigator.locks.
 // The leader mounts OPFS page-level WASI storage (PagedSyncOPFSFile) at
 // /storage/development.sqlite3 (with clean IndexedDB fallback), runs the single hot
-// AppHost, outbox drain, visibility-aware SSE change stream, and background history fill,
+// AppHost, outbox drain, visibility-aware SSE change stream, and server-directed background history fill,
 // and serves peer tabs over dedicated channels with crash-safe failover.
 import { AppHost } from "./app-host.js";
 import { PagedSyncOPFSFile } from "./opfs-wasi-file.js";
@@ -21,7 +21,7 @@ const runtime = createWorkerRuntime({
     VITE_SHELL_SNAPSHOT: import.meta.env.VITE_SHELL_SNAPSHOT,
     VITE_SOURCE_VERSION: import.meta.env.VITE_SOURCE_VERSION,
     VITE_WASM_URL: import.meta.env.VITE_WASM_URL,
-    VITE_SHARED_INBOX_DEMO: import.meta.env.VITE_SHARED_INBOX_DEMO,
+    VITE_SYNC_PARTITIONS: import.meta.env.VITE_SYNC_PARTITIONS,
   },
   AppHost,
   PagedSyncOPFSFile,

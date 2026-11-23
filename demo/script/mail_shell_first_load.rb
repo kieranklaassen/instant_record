@@ -10,15 +10,16 @@
 require "bundler/setup"
 require "active_record"; require "instant_record"; require "net/http"; require "json"; require "sqlite3"; require "tmpdir"
 require "active_support/core_ext/time"; Time.zone = "UTC"
-BASE = URI("http://127.0.0.1:3999/email/sync/maya/support"); FP = ARGV[0]; RUNS = 30
+BASE = URI("http://127.0.0.1:3999"); FP = ARGV[0]; RUNS = 30
+HEADERS = { "X-Instant-Record-Partition" => "mailbox_id:support", "X-Instant-Record-Member" => "maya" }.freeze
 InstantRecord.singleton_class.define_method(:browser?) { true }
 class MailEntry < ActiveRecord::Base; include InstantRecord::Syncable; end
 HTTP = Net::HTTP.start(BASE.host, BASE.port)
-def get(path) = HTTP.get(BASE.path + path)
+def get(path) = HTTP.get(path, HEADERS)
 dir = Dir.mktmpdir
 # An empty browser database: the shell's schema with nothing in it.
 template = File.join(dir, "empty.sqlite3")
-grant = JSON.parse(get("/shell?fingerprint=#{FP}").body)
+grant = JSON.parse(get("/email/shell?fingerprint=#{FP}").body)
 File.binwrite(File.join(dir, "seed.sqlite3"), get(grant["path"]).body)
 ddl = SQLite3::Database.new(File.join(dir, "seed.sqlite3")).execute("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'").flatten
 SQLite3::Database.new(template).tap { |db| ddl.each { |sql| db.execute(sql) } }.close
@@ -32,7 +33,7 @@ a = { net: [], apply: [], total: [] }; b = { net: [], open: [], tail: [], total:
   # As the browser runs it: no journal file and no fsync.
   ActiveRecord::Base.connection.execute("PRAGMA journal_mode = MEMORY"); ActiveRecord::Base.connection.execute("PRAGMA synchronous = OFF")
   body = nil
-  net = ms.call { body = get("/bootstrap").body }
+  net = ms.call { body = get("/instant_record/bootstrap").body }
   apply = ms.call do
     payload = JSON.parse(body)
     payload["records"].each { |record| InstantRecord::Client.send(:apply_change, record) }
@@ -46,7 +47,7 @@ a = { net: [], apply: [], total: [] }; b = { net: [], open: [], tail: [], total:
 end
 (RUNS + 3).times do |i|
   db = File.join(dir, "b#{i}.sqlite3"); bytes = nil; cursor = nil
-  net = ms.call { g = JSON.parse(get("/shell?fingerprint=#{FP}").body); bytes = get(g["path"]).body }
+  net = ms.call { g = JSON.parse(get("/email/shell?fingerprint=#{FP}").body); bytes = get(g["path"]).body }
   open = ms.call do
     File.binwrite(db, bytes)
     ActiveRecord::Base.establish_connection(adapter: "sqlite3", database: db)
@@ -54,7 +55,7 @@ end
     raise "not bootstrapped" unless InstantRecord::Client.bootstrapped?
     first_page.call
   end
-  tail = ms.call { raise "behind" unless get("/events?after=#{cursor}").body.empty? }
+  tail = ms.call { raise "behind" unless get("/instant_record/events?after=#{cursor}&window=0").body.empty? }
   sizes[:shell] = bytes.bytesize
   next if i < 3
   b[:net] << net; b[:open] << open; b[:tail] << tail; b[:total] << net + open

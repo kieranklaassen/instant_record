@@ -10,15 +10,17 @@ import Foundation
 /// another queue, and only then hands the answers over, so a tap made
 /// meanwhile is performed and drawn first.
 public final class AppHost: ObservableObject {
-    /// Where a first screen keeps its data: the SQLite file, and the sync
-    /// address the app's server gives for it. One file syncs with one address.
+    /// Where a first screen keeps its data: the SQLite file, the sync endpoint,
+    /// and any per-store headers (e.g. X-Instant-Record-Partition).
     public struct Store: Equatable {
         public let database: String
         public let endpoint: String
+        public let headers: [String: String]
 
-        public init(database: String, endpoint: String) {
+        public init(database: String, endpoint: String, headers: [String: String] = [:]) {
             self.database = database
             self.endpoint = endpoint
+            self.headers = headers
         }
     }
 
@@ -246,7 +248,7 @@ public final class AppHost: ObservableObject {
         thread.run {
             guard let store = self.open else { return self.paged(key, failed: true) }
             self.network.async {
-                let reply = Reply(self.exchange("GET \(store.endpoint)/records?\(query)\n"))
+                let reply = Reply(self.exchange(Self.withHeaders("GET \(store.endpoint)/records?\(query)\n", store.headers)))
                 self.thread.run {
                     guard reply.ok, self.open == store else { return self.paged(key, failed: true) }
                     let input = (try? JSONSerialization.data(withJSONObject: ["key": key, "response": reply.body])).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
@@ -401,7 +403,7 @@ public final class AppHost: ObservableObject {
             var replies: [String: String] = [:]
             var outcome = Outcome()
             for request in wanted {
-                let answer = self.exchange(request)
+                let answer = self.exchange(Self.withHeaders(request, store.headers))
                 replies[request] = answer
                 let reply = Reply(answer)
                 if reply.status == 0 {
@@ -692,5 +694,13 @@ public final class AppHost: ObservableObject {
 
     private static func object(_ json: String) -> [String: Any]? {
         (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any]
+    }
+
+    private static func withHeaders(_ request: String, _ headers: [String: String]) -> String {
+        guard !headers.isEmpty, let newline = request.firstIndex(of: "\n") else { return request }
+        let line = request[..<newline]
+        let body = request[request.index(after: newline)...]
+        let block = headers.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }.joined(separator: "\n")
+        return "\(line)\n\(block)\n\n\(body)"
     }
 }

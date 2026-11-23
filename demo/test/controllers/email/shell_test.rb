@@ -5,6 +5,7 @@ class MailShellTest < ActionDispatch::IntegrationTest
   include ActiveJob::TestHelper
 
   setup do
+    InstantRecord::Change.delete_all
     MailEntry.delete_all
     Mailbox.delete_all
     @shells = Pathname(Dir.mktmpdir("mail_shells"))
@@ -22,6 +23,10 @@ class MailShellTest < ActionDispatch::IntegrationTest
     FileUtils.rm_rf(@shells)
   end
 
+  def inbox_headers(member = "maya", inbox = "support")
+    { "X-Instant-Record-Partition" => "mailbox_id:#{inbox}", "X-Instant-Record-Member" => member }
+  end
+
   def write(subject, mailbox: @mailbox)
     mailbox.append!(id: SecureRandom.uuid, author: "Rae", attributes: { kind: "message", address: "rae@example.test", subject: subject, body: "Can you help?" })
   end
@@ -35,7 +40,7 @@ class MailShellTest < ActionDispatch::IntegrationTest
   end
 
   def grant(member = "maya", inbox = "support", fingerprint: InstantRecord::Shell.fingerprint)
-    get "/email/sync/#{member}/#{inbox}/shell", params: { fingerprint: fingerprint }
+    get "/email/shell", params: { fingerprint: fingerprint }, headers: inbox_headers(member, inbox)
   end
 
   # A browser's first load from a shell: fetch it, open it, read the stamp.
@@ -43,7 +48,7 @@ class MailShellTest < ActionDispatch::IntegrationTest
     grant(member)
     assert_response :success
     assert_equal "private, no-store", response.headers["cache-control"]
-    get "/email/sync/#{member}/support#{response.parsed_body.fetch("path")}"
+    get response.parsed_body.fetch("path"), headers: inbox_headers(member, "support")
     assert_response :success
     assert_equal "private, no-store", response.headers["cache-control"]
     assert_equal "nosniff", response.headers["x-content-type-options"]
@@ -61,25 +66,27 @@ class MailShellTest < ActionDispatch::IntegrationTest
   # The feed from a cursor, applied as the client applies it: an upsert by id.
   def catch_up(database, cursor)
     loop do
-      get "/email/sync/maya/support/events?after=#{cursor}"
-      events = response.body.split("\n\n").map { |frame| JSON.parse(frame[/^data: (.*)$/, 1]) }
-      return cursor if events.empty?
+      get "/instant_record/events?after=#{cursor}&window=0", headers: inbox_headers
+      frames = response.body.split("\n\n").reject(&:blank?)
+      return cursor if frames.empty?
 
-      events.each do |event|
+      frames.each do |frame|
+        id = frame[/^id: (\d+)$/, 1].to_i
+        event = JSON.parse(frame[/^data: (.*)$/, 1])
         row = stored(event["attributes"]).merge("server_version" => event["version"], "sync_state" => "synced")
         database.execute(%(INSERT OR REPLACE INTO mail_entries (#{row.keys.join(", ")}) VALUES (#{(["?"] * row.size).join(", ")})), row.values)
-        cursor = event["version"]
+        cursor = id
       end
     end
   end
 
   def rows(database)
-    database.execute("SELECT * FROM mail_entries ORDER BY server_version").map { |row| row.except("sync_state") }
+    database.execute("SELECT * FROM mail_entries ORDER BY id").map { |row| row.except("sync_state") }
   end
 
   def bootstrap_rows
-    get "/email/sync/maya/support/bootstrap"
-    response.parsed_body["records"].map { |record| stored(record["attributes"]) }.sort_by { |row| row["server_version"] }
+    get "/instant_record/bootstrap", headers: inbox_headers
+    response.parsed_body["records"].map { |record| stored(record["attributes"]) }.sort_by { |row| row["id"] }
   end
 
   test "a missing shell sends the browser to the bootstrap and is built for the next one" do
@@ -89,14 +96,14 @@ class MailShellTest < ActionDispatch::IntegrationTest
     perform_enqueued_jobs
     assert_no_enqueued_jobs { grant }
     assert_response :success
-    assert_equal @mailbox.reload.revision, response.parsed_body["cursor"]
+    assert_equal InstantRecord::Change.maximum(:id), response.parsed_body["cursor"]
   end
 
-  test "a shell holds what the bootstrap sends, stamped with the revision it was read at" do
+  test "a shell holds what the bootstrap sends, stamped with the cursor it was read at" do
     build_inbox
     database, cursor = download
 
-    assert_equal @mailbox.reload.revision, cursor
+    assert_equal InstantRecord::Change.maximum(:id), cursor
     assert_equal bootstrap_rows, rows(database)
     assert_equal ["synced"], database.execute("SELECT DISTINCT sync_state FROM mail_entries").map { |row| row["sync_state"] }
     saved = database.execute("SELECT key, value FROM instant_record_sync_metadata").to_h { |row| [row["key"], row["value"]] }
@@ -117,7 +124,7 @@ class MailShellTest < ActionDispatch::IntegrationTest
 
     database, cursor = download
     assert_equal stamp, cursor
-    assert_equal @mailbox.reload.revision, catch_up(database, cursor)
+    assert_equal InstantRecord::Change.maximum(:id), catch_up(database, cursor)
     assert_equal bootstrap_rows, rows(database)
 
     # Starting a change early applies it twice, and the second time changes nothing.
@@ -128,19 +135,19 @@ class MailShellTest < ActionDispatch::IntegrationTest
   test "the address is one person's, for one inbox, for a short while" do
     build_inbox
     grant("maya")
-    path = response.parsed_body.fetch("path")
+    token = URI.decode_www_form(URI(response.parsed_body.fetch("path")).query).to_h["token"]
 
-    get "/email/sync/theo/support#{path}"
+    get "/email/shell/file", params: { token: token }, headers: inbox_headers("theo", "support")
     assert_response :not_found
-    get "/email/sync/maya/billing#{path}"
+    get "/email/shell/file", params: { token: token }, headers: inbox_headers("maya", "billing")
     assert_response :not_found
-    get "/email/sync/maya/support/shell/file", params: { token: "forged" }
+    get "/email/shell/file", params: { token: "forged" }, headers: inbox_headers("maya", "support")
     assert_response :not_found
     grant("jo")
     assert_response :forbidden
 
     travel InstantRecord::Shell::URL_LIFETIME + 1.second do
-      get "/email/sync/maya/support#{path}"
+      get "/email/shell/file", params: { token: token }, headers: inbox_headers("maya", "support")
       assert_response :not_found
     end
   end
@@ -155,16 +162,16 @@ class MailShellTest < ActionDispatch::IntegrationTest
     build_inbox
     stamp = InstantRecord::Shell.latest("support").cursor
 
-    @mailbox.update!(revision: stamp + InstantRecord::Shell::REBUILD_AFTER_CHANGES + 1)
+    InstantRecord::Change.create!(id: stamp + InstantRecord::Shell::REBUILD_AFTER_CHANGES + 1, record_type: "MailEntry", record_id: "r1", operation: "create", version: 1, attributes_payload: {}, partition: "mailbox_id:support")
     assert_enqueued_with(job: InstantRecord::ShellBuildJob) { grant }
     assert_response :success
     assert_equal stamp, response.parsed_body["cursor"]
 
-    @mailbox.update!(revision: stamp + InstantRecord::Shell::SERVE_WITHIN_CHANGES + 1)
+    InstantRecord::Change.create!(id: stamp + InstantRecord::Shell::SERVE_WITHIN_CHANGES + 1, record_type: "MailEntry", record_id: "r2", operation: "create", version: 1, attributes_payload: {}, partition: "mailbox_id:support")
     grant
     assert_response :no_content
 
-    @mailbox.update!(revision: stamp)
+    InstantRecord::Change.where("id > ?", stamp).delete_all
     travel InstantRecord::Shell::REBUILD_AFTER + 1.minute do
       assert_enqueued_with(job: InstantRecord::ShellBuildJob) { grant }
       assert_response :success
@@ -187,7 +194,7 @@ class MailShellTest < ActionDispatch::IntegrationTest
     assert_equal old.path, build_inbox.path
 
     write("One more")
-    @mailbox.update!(revision: @mailbox.reload.revision + InstantRecord::Shell::REBUILD_AFTER_CHANGES)
+    InstantRecord::Change.create!(id: old.cursor + InstantRecord::Shell::REBUILD_AFTER_CHANGES + 1, record_type: "MailEntry", record_id: "r3", operation: "create", version: 1, attributes_payload: {}, partition: "mailbox_id:support")
     travel InstantRecord::Shell::URL_LIFETIME + 1.second do
       fresh = build_inbox
       assert_operator fresh.cursor, :>, old.cursor

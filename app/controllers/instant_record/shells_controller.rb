@@ -13,18 +13,20 @@ module InstantRecord
   #   Marked `private, no-store` so private shells never enter shared caches.
   class ShellsController < ActionController::API
     HEADERS = InstantRecord::CORS_HEADERS.merge(
-      "access-control-allow-headers" => "content-type, last-event-id, authorization",
       "cache-control" => "private, no-store",
       "vary" => "Authorization, Cookie"
     ).freeze
 
     before_action { headers.merge!(HEADERS) }
+    rescue_from InstantRecord::Unauthorized, with: -> { head :unauthorized }
+    rescue_from InstantRecord::Forbidden, with: -> { head :forbidden }
 
     def preflight
       head :no_content
     end
 
     def show
+      SyncScope.authenticate!(request)
       expected = Shell.fingerprint
       return head :no_content unless params[:fingerprint].to_s == expected
 
@@ -49,6 +51,7 @@ module InstantRecord
     end
 
     def file
+      SyncScope.authenticate!(request)
       identity = SyncScope.identity(request)
       partition = Shell.partition_key(identity)
       shell = Shell.find_signed(params[:token].to_s, partition: partition, holder: partition)

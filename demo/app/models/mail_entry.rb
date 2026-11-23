@@ -1,9 +1,5 @@
 class MailEntry < ApplicationRecord
-  extend InstantRecord::RuntimeScoped
-
-  browser_only do
-    include InstantRecord::Syncable
-  end
+  include InstantRecord::Syncable
 
   PAGE_SIZE = 50
   FILL_PAGE_SIZE = 200
@@ -23,6 +19,8 @@ class MailEntry < ApplicationRecord
   # Postgres lowers it, so a match on an accented capital is the server's alone.
   MATCHING = "(LOWER(mail_entries.subject) LIKE :q OR LOWER(mail_entries.body) LIKE :q OR LOWER(mail_entries.author) LIKE :q OR LOWER(mail_entries.address) LIKE :q)"
 
+  sync_partition :mailbox_id
+
   def self.pattern(term)
     "%" + term.to_s.strip.downcase + "%"
   end
@@ -30,4 +28,51 @@ class MailEntry < ApplicationRecord
   validates :kind, inclusion: { in: %w[message reply archive read unread] }
   validates :subject, length: { maximum: 180 }
   validates :body, length: { maximum: 5000 }
+
+  server_only do
+    # First-sync bootstrap, keyset paging, search widening, thread lookup, and
+    # background history-fill — declared on the model so InstantRecord::Engine
+    # serves the Inbox with no custom sync controller.
+    sync_shape limit: PAGE_SIZE,
+               min_limit: PAGE_SIZE,
+               max_limit: FILL_PAGE_SIZE,
+               roots: -> { open_messages },
+               include: ->(roots) { where(parent_id: roots.map(&:id), kind: ACTIONS).order(:created_at, :server_version, :id) },
+               search: ->(term) { where(MATCHING, q: pattern(term)) },
+               lookup: ->(id) { where(id: id, kind: "message") },
+               background_fill: true
+
+    authorize_partition do |inbox, asker|
+      next false unless asker&.member && MailDirectory.inboxes(asker.member).include?(inbox)
+
+      Mailbox.open_demo(inbox)
+      true
+    end
+
+    # Entries are append-only and must be authored by the requesting member.
+    writable_by(only: :create) do |asker|
+      asker&.member ? where(author: asker.member) : none
+    end
+
+    validate :valid_entry_payload, on: :create
+
+    def valid_entry_payload
+      unless id.to_s.match?(/\A[\w-]{1,80}\z/)
+        errors.add(:id, "is invalid")
+      end
+
+      case kind
+      when "message"
+        unless address.to_s.match?(URI::MailTo::EMAIL_REGEXP) && address.to_s.size <= 254
+          errors.add(:address, "is not a valid email address")
+        end
+        errors.add(:base, "Enter a subject and message") if subject.blank? || body.blank? || parent_id.present?
+      when "archive", "reply", "read", "unread"
+        unless MailEntry.exists?(id: parent_id, mailbox_id: mailbox_id, kind: "message")
+          errors.add(:parent_id, "conversation unavailable")
+        end
+        errors.add(:body, "can't be blank") if kind == "reply" && body.blank?
+      end
+    end
+  end
 end

@@ -20,13 +20,13 @@ const PERMANENT_UNAVAILABLE_ERRORS = new Set([
   "TypeError",
 ]);
 
-export function opfsDirectorySegments(scope) {
-  if (!scope) return [OPFS_ROOT_DIR, "default"];
-  const parts = String(scope)
+export function opfsDirectorySegments(partitionKey) {
+  if (!partitionKey) return [OPFS_ROOT_DIR, "default"];
+  const parts = String(partitionKey)
     .split("/")
     .filter(Boolean)
     .map(part => part.replace(/[^a-zA-Z0-9._-]/g, "_"));
-  return [OPFS_ROOT_DIR, "mail", ...parts];
+  return [OPFS_ROOT_DIR, "partition", ...parts];
 }
 
 function sleep(ms) {

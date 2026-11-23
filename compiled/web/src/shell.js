@@ -24,10 +24,16 @@ export function parseShellGrant(text) {
   try {
     const parsed = JSON.parse(text);
     if (!parsed || typeof parsed !== "object") return null;
-    const { path, cursor, identity } = parsed;
-    if (typeof path !== "string" || !path.startsWith("/shell/file")) return null;
+    const { path, cursor, identity, fill } = parsed;
+    if (typeof path !== "string" || !path.startsWith("/") || !path.includes("/shell/file")) return null;
     if (!Number.isInteger(cursor) || cursor < 0) return null;
-    return { path, cursor, identity: typeof identity === "string" ? identity : "" };
+    const grant = {
+      path,
+      cursor,
+      identity: typeof identity === "string" ? identity : "",
+    };
+    if (Array.isArray(fill) && fill.length > 0) grant.fill = fill[0];
+    return grant;
   } catch {
     return null;
   }

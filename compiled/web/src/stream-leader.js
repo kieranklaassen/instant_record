@@ -72,6 +72,7 @@ export function createStreamLeader(options) {
   const tabId = config.tabId || globalThis.crypto.randomUUID();
   const getEndpoint = typeof config.getEndpoint === "function" ? config.getEndpoint : () => config.endpoint;
   const getSyncScope = typeof config.getSyncScope === "function" ? config.getSyncScope : () => config.syncScope || "";
+  const getHeaders = typeof config.getHeaders === "function" ? config.getHeaders : () => ({});
   const scopeKey = streamScopeKey(config.mailboxScope, getSyncScope());
   const lockName = `instant-record-stream/${scopeKey}`;
   const channelName = `instant-record-spinel-stream/${scopeKey}`;
@@ -342,7 +343,7 @@ export function createStreamLeader(options) {
       armIdleWatchdog();
       const response = await fetchFn(url, {
         method: "GET",
-        headers: { Accept: "text/event-stream" },
+        headers: { ...getHeaders(), Accept: "text/event-stream" },
         signal: controller.signal,
       });
 

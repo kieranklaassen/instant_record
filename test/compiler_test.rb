@@ -207,10 +207,11 @@ class CompilerTest < ActiveSupport::TestCase
       assert_equal manifest.to_h, staged.manifest.to_h
 
       count = InstantRecord::Compiler::GemVendor.vendor(gem_src: GEM_ROOT, app_dir: app, demo: true)
-      assert_equal 22, count
+      assert_equal 23, count
       assert File.file?(File.join(app, "lib/instant_record/client/rebaser.rb"))
       assert File.file?(File.join(app, "lib/instant_record/inertia.rb"))
       assert File.file?(File.join(app, "lib/instant_record/read_tracker.rb"))
+      assert File.file?(File.join(app, "lib/instant_record/sync_partition.rb"))
       assert File.file?(File.join(app, "lib/instant_record/sync_notice.rb"))
       assert File.file?(File.join(app, "lib/instant_record/hlc.rb"))
       assert_includes File.read(File.join(app, "lib/instant_record/host.rb")), "def browser? = true"
@@ -224,6 +225,8 @@ class CompilerTest < ActiveSupport::TestCase
       assert File.file?(File.join(app, "app/models/concerns/syncable.rb"))
       assert_includes File.read(File.join(app, "app/models/concerns/syncable.rb")), "InstantRecord::Host.blank_id?(id)"
       assert_includes File.read(File.join(app, "app/models/mail_entry.rb")), "include Syncable"
+      assert_includes File.read(File.join(app, "app/models/mail_entry.rb")), "sync_partition :mailbox_id"
+      refute_includes File.read(File.join(app, "app/models/mail_entry.rb")), "authorize_partition"
       refute_includes File.read(File.join(app, "app/models/slack/seeds.rb")), "apply_backfill"
       vendored_actions = File.read(File.join(app, "lib/instant_record/sync_actions.rb"))
       assert Prism.parse(vendored_actions).success?, "vendored sync_actions.rb must remain valid Ruby"

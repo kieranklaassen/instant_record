@@ -162,12 +162,13 @@ module InstantRecord
     # Server-only execution frame used by MutationApplier during authoritative
     # replay (and direct server calls with deterministic mutation_id).
     class ServerFrame
-      attr_reader :mutation_id, :identity, :scope, :enforcing
+      attr_reader :mutation_id, :identity, :scope, :partition, :enforcing
 
-      def initialize(mutation_id:, identity: nil, scope: nil, enforcing: false)
+      def initialize(mutation_id:, identity: nil, scope: nil, partition: nil, enforcing: false)
         @mutation_id = mutation_id
         @identity = identity
         @scope = scope
+        @partition = partition
         @enforcing = enforcing
         @seq = 0
         @touched_refs = []
@@ -210,6 +211,17 @@ module InstantRecord
         model = record.class
         note_ref(model.name, record.id)
 
+        if (part = model.instant_record_sync_partition)
+          part_value = part.extract(@partition)
+          raise MutationApplier::NotPermitted, "a partition is required" unless part_value
+
+          col = part.column
+          given = record[col].presence
+          raise MutationApplier::NotPermitted, "record not in active partition" if given && given.to_s != part_value
+
+          record[col] = part_value
+        end
+
         if (column = model.instant_record_sync_scope)
           raise MutationApplier::NotPermitted, "a scope is required" unless @scope
 
@@ -241,6 +253,15 @@ module InstantRecord
         model = record.class
         note_ref(model.name, record.id)
 
+        if (part = model.instant_record_sync_partition)
+          part_value = part.extract(@partition)
+          raise MutationApplier::NotPermitted, "a partition is required" unless part_value
+
+          col = part.column
+          existing_part = record.attribute_in_database(col)
+          raise MutationApplier::NotPermitted, "record not in active partition" if existing_part.to_s != part_value || record[col].to_s != part_value
+        end
+
         if (column = model.instant_record_sync_scope)
           raise MutationApplier::NotPermitted, "a scope is required" unless @scope
 
@@ -269,6 +290,12 @@ module InstantRecord
         model = record.class
         note_ref(model.name, record.id)
 
+        if (part = model.instant_record_sync_partition)
+          part_value = part.extract(@partition)
+          raise MutationApplier::NotPermitted, "a partition is required" unless part_value
+          raise MutationApplier::NotPermitted, "record not in active partition" if record[part.column].to_s != part_value
+        end
+
         if (column = model.instant_record_sync_scope)
           raise MutationApplier::NotPermitted, "a scope is required" unless @scope
           raise MutationApplier::NotPermitted if record[column] != @scope
@@ -286,7 +313,8 @@ module InstantRecord
           operation: "destroy",
           version: 0,
           attributes_payload: {},
-          scope: InstantRecord.scope_of(record)
+          scope: InstantRecord.scope_of(record),
+          partition: InstantRecord.partition_of(record)
         )
         record_applied(model.name, record.id, {
           type: model.name,
@@ -301,13 +329,13 @@ module InstantRecord
 
       def hidden?(model, id)
         model.instant_record_visibility && model.exists?(id: id) &&
-          !SyncScope.visible(model, @identity).exists?(id: id)
+          !SyncScope.visible(model, @identity, partition: @partition).exists?(id: id)
       end
 
       def permit_writable!(model, id)
         return unless model.instant_record_writability
 
-        raise MutationApplier::NotPermitted unless SyncScope.writable(model, @identity).exists?(id: id)
+        raise MutationApplier::NotPermitted unless SyncScope.writable(model, @identity, partition: @partition).exists?(id: id)
       end
 
       def log_change(record, operation)
@@ -317,7 +345,8 @@ module InstantRecord
           operation: operation,
           version: record[:server_version],
           attributes_payload: InstantRecord.wire_attributes(record.attributes),
-          scope: InstantRecord.scope_of(record)
+          scope: InstantRecord.scope_of(record),
+          partition: InstantRecord.partition_of(record)
         )
       end
 

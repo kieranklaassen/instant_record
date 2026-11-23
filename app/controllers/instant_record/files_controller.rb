@@ -11,7 +11,7 @@ module InstantRecord
   class FilesController < ActionController::API
     CORS = InstantRecord::CORS_HEADERS.merge(
       "access-control-allow-methods" => "GET, HEAD, PUT, OPTIONS",
-      "access-control-allow-headers" => "content-type, range",
+      "access-control-allow-headers" => "content-type, range, authorization, x-instant-record-scope, x-instant-record-partition, x-instant-record-member",
       "access-control-expose-headers" => "accept-ranges, content-length, content-range, x-instant-record-chunk-size"
     ).freeze
 
@@ -26,6 +26,8 @@ module InstantRecord
 
     before_action { headers.merge!(CORS) }
     before_action :find_model, except: :preflight
+    rescue_from InstantRecord::Unauthorized, with: -> { head :unauthorized }
+    rescue_from InstantRecord::Forbidden, with: -> { head :forbidden }
 
     def preflight
       head :no_content
@@ -33,7 +35,8 @@ module InstantRecord
 
     # The file, or the part of it a Range header names.
     def show
-      record = SyncScope.visible(@model, identity).find_by(id: params[:id])
+      SyncScope.authenticate!(request)
+      record = SyncScope.visible(@model, identity, partition: partition).find_by(id: params[:id])
       key = record && Files.key(@model, record.id)
       return head :not_found unless key && store.exist?(key)
 
@@ -87,7 +90,8 @@ module InstantRecord
 
     def store = Files.store
     def chunk_size = Files.chunk_size(@model)
-    def identity = SyncScope.identity(request)
+    def identity = @identity ||= SyncScope.identity(request)
+    def partition = @partition ||= SyncScope.partition(request, identity)
     def upload? = FileStore::UPLOAD.match?(params[:upload].to_s)
 
     def find_model
@@ -97,7 +101,8 @@ module InstantRecord
 
     # Where the file of a record the sender may write is kept.
     def writable_key
-      record = SyncScope.writable(@model, identity).find_by(id: params[:id])
+      SyncScope.authenticate!(request)
+      record = SyncScope.writable(@model, identity, partition: partition).find_by(id: params[:id])
       return unless record
 
       @declared = Files.declared_size(record)

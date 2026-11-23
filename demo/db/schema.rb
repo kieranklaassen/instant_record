@@ -113,10 +113,12 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_22_000100) do
     t.text "attributes_payload"
     t.datetime "created_at", null: false
     t.string "operation", null: false
+    t.string "partition"
     t.string "record_id", null: false
     t.string "record_type", null: false
     t.string "scope"
     t.integer "version", default: 0, null: false
+    t.index ["partition", "id"], name: "index_instant_record_changes_on_partition_and_id"
     t.index ["record_type", "record_id"], name: "index_instant_record_changes_on_record_type_and_record_id"
   end
 
