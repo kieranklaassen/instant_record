@@ -48,7 +48,15 @@ try {
           tx.oncomplete = resolve;
           tx.onabort = () => reject(tx.error);
         });
-        const [bytes, revision, savedVersion] = requests.map(request => request.result);
+        const [idbBytes, revision, savedVersion] = requests.map(request => request.result);
+        let bytes = idbBytes;
+        if (!bytes && navigator.storage?.getDirectory) {
+          const root = await navigator.storage.getDirectory();
+          const appDir = await root.getDirectoryHandle("instant-record-spinel");
+          const scopeDir = await appDir.getDirectoryHandle("default");
+          const fileHandle = await scopeDir.getFileHandle("development.sqlite3");
+          bytes = new Uint8Array(await (await fileHandle.getFile()).arrayBuffer());
+        }
         const hash = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))];
         return { hash, revision, version: savedVersion };
       } finally { db.close(); }
@@ -69,23 +77,31 @@ try {
   await page.waitForFunction(() => window.__spinel?.marks.rendered);
   assert.deepEqual(await snapshot(), upgraded);
 
+  // Rolling back to an older release auto-rehydrates onto old.version cleanly
+  // (extracting and preserving any pending outbox rows) instead of white-screening.
   root = resolve(oldDist);
   await page.reload();
-  await page.getByText(/cannot migrate the saved schema version/).waitFor();
-  assert.deepEqual(await snapshot(), upgraded);
+  await page.waitForFunction(() => window.__spinel?.marks.rendered);
+  const rolledBack = await snapshot();
+  assert.equal(rolledBack.version, old.version);
+  assert.ok(rolledBack.revision > upgraded.revision);
 
   // Simulate a legacy image whose declared version is older than its actual
-  // tables. Reapplying the fixture's ALTER TABLE must fail without a commit.
+  // tables. Reapplying the fixture's ALTER TABLE fails atomically and triggers
+  // outbox-preserving auto-rehydration onto newDist's clean schema.
   root = resolve(newDist);
-  const inconsistent = await snapshot(old.version);
-  await page.reload();
-  await page.getByText(/could not open this release/).waitFor();
-  assert.deepEqual(await snapshot(), inconsistent);
-  await snapshot(upgraded.version);
   await page.reload();
   await page.waitForFunction(() => window.__spinel?.marks.rendered);
-  assert.deepEqual(await snapshot(), upgraded);
-  console.log("PASS open-tab upgrade, idempotent restart, downgrade refusal, failed migration preserves the SQLite image");
+  const reUpgraded = await snapshot();
+  assert.equal(reUpgraded.version, upgraded.version);
+
+  const inconsistent = await snapshot(old.version);
+  await page.reload();
+  await page.waitForFunction(() => window.__spinel?.marks.rendered);
+  const selfHealed = await snapshot();
+  assert.equal(selfHealed.version, upgraded.version);
+  assert.ok(selfHealed.revision > inconsistent.revision);
+  console.log("PASS open-tab upgrade, idempotent restart, rollback auto-rehydration, failed migration self-heal");
 } finally {
   await browser?.close();
   server.close();

@@ -1,9 +1,10 @@
 // Core AppHost factory (zero external dependencies) so both the browser bundle
 // (via @bjorn3/browser_wasi_shim in app-host.js) and Node replay/tests share
-// the exact same WASI host, fault detection, notification bridge, and flight
-// recorder integration.
-import { readNotice } from "./changes.js";
+// the exact same WASI host, OPFS/IndexedDB storage mount, fault detection,
+// notification bridge, and flight recorder integration.
+import { parseReads, readNotice } from "./changes.js";
 import { WasmFaultError, buildFault, isTrapExit, readEvents } from "./faults.js";
+import { buildHttpRequest } from "./http-headers.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -20,30 +21,44 @@ export function createAppHostClass({ WASI, File, OpenFile, Directory, PreopenDir
       const text = decoder.decode(reqFile.data);
       const newline = text.indexOf("\n");
       const firstLine = newline < 0 ? text : text.slice(0, newline);
-      const requestBody = newline < 0 ? "" : text.slice(newline + 1);
       const [method, url] = firstLine.split(" ");
+      let rest = newline < 0 ? "" : text.slice(newline + 1);
+      const headers = {};
+      const split = rest.indexOf("\n\n");
+      if (split >= 0) {
+        const candidate = rest.slice(0, split).split("\n");
+        if (candidate.every(line => /^[A-Za-z0-9-]+: /.test(line))) {
+          for (const line of candidate) {
+            const colon = line.indexOf(": ");
+            headers[line.slice(0, colon)] = line.slice(colon + 2);
+          }
+          rest = rest.slice(split + 2);
+        }
+      }
       let status = 0;
       let body = "";
       try {
-        ({ status, body } = this.host.exchange(method, url, requestBody));
+        ({ status, body } = this.host.exchange(method, url, rest, headers));
       } catch {
         status = 0; // offline: the gem's transport raises Transport::Error and the outbox keeps the write
       }
       this.host.exchanges.push(`${method} ${url} -> ${status}`);
-      this.host.exchangeRecords.push({
+      const record = {
         method,
         url,
-        requestBody,
+        requestBody: rest,
         status,
         responseBody: body == null ? "" : String(body),
-      });
+      };
+      if (Object.keys(headers).length > 0) record.requestHeaders = headers;
+      this.host.exchangeRecords.push(record);
       this.data = encoder.encode(`${status}\n${body ?? ""}`);
       return super.path_open(oflags, rights, fdFlags);
     }
   }
 
   return class AppHost {
-    // exchange(method, url, body) -> { status, body }, synchronous.
+    // exchange(method, url, body, headers) -> { status, body }, synchronous.
     constructor(module, { exchange, env = {}, onFault = null, onEvents = null, onSuccess = null, recorder = null, clock = () => Date.now() } = {}) {
       this.module = module;
       this.exchange = exchange;
@@ -88,10 +103,38 @@ export function createAppHostClass({ WASI, File, OpenFile, Directory, PreopenDir
       this.lastFault = null;
     }
 
+    // The SQLite file's byte length without copying its contents.
+    databaseSize() {
+      const file = this.storage.contents.get("development.sqlite3");
+      if (!file) return 0;
+      if (typeof file.byteLength === "function") return file.byteLength();
+      if (file.data) return file.data.byteLength;
+      if (file.size !== undefined) return Number(file.size);
+      return 0;
+    }
+
     // The SQLite file's bytes, for persisting between page loads (null before the first run).
     databaseBytes() {
       const file = this.storage.contents.get("development.sqlite3");
-      return file ? file.data : null;
+      if (!file) return null;
+      if (typeof file.readAll === "function") return file.readAll();
+      return file.data ?? null;
+    }
+
+    // Flush dirty pages when backed by a page-level OPFS sync handle.
+    flushDatabase() {
+      const file = this.storage.contents.get("development.sqlite3");
+      if (file && typeof file.flush === "function") file.flush();
+    }
+
+    // Mount an existing WASI Inode (such as PagedSyncOPFSFile) at /storage/development.sqlite3.
+    mountDatabase(inode, schemaVersion = 0) {
+      this.schemaVersion = Number(schemaVersion) || 0;
+      this.storage.contents.set("development.sqlite3", inode);
+      this.hostDir.contents.set("schema_version", new File(encoder.encode(String(this.schemaVersion).padStart(20, "0"))));
+      if (this.recorder?.enabled) {
+        this.recorder.captureCheckpoint(this.snapshotForRecorder());
+      }
     }
 
     // Independent copy-on-write snapshot of the live SQLite bytes for staging branches.
@@ -101,12 +144,38 @@ export function createAppHostClass({ WASI, File, OpenFile, Directory, PreopenDir
     }
 
     restoreDatabase(bytes, schemaVersion = 0) {
-      this.schemaVersion = Number(schemaVersion) || 0;
-      this.storage.contents.set("development.sqlite3", new File(bytes instanceof Uint8Array ? bytes.slice() : new Uint8Array(bytes)));
-      this.hostDir.contents.set("schema_version", new File(encoder.encode(String(this.schemaVersion).padStart(20, "0"))));
-      if (this.recorder?.enabled) {
-        this.recorder.captureCheckpoint(this.snapshotForRecorder());
+      const copy = bytes instanceof Uint8Array ? bytes.slice() : new Uint8Array(bytes);
+      this.mountDatabase(new File(copy), schemaVersion);
+    }
+
+    restoreForOutboxExtraction(bytes) {
+      const copy = bytes instanceof Uint8Array ? bytes.slice() : new Uint8Array(bytes);
+      this.storage.contents.set("development.sqlite3", new File(copy));
+      this.hostDir.contents.set("recovery", new File(encoder.encode("extract_outbox")));
+    }
+
+    extractOutbox(bytes) {
+      if (!bytes || !bytes.length) return [];
+      this.restoreForOutboxExtraction(bytes);
+      const result = this.call("wasm_export_outbox", new Uint8Array());
+      if (result.exit !== 0) {
+        throw new WasmFaultError(
+          result.fault || buildFault({ exportName: "wasm_export_outbox", exit: result.exit, errors: result.errors, at: this.clock() }),
+        );
       }
+      const parsed = JSON.parse(decoder.decode(result.out) || "[]");
+      return Array.isArray(parsed) ? parsed : [];
+    }
+
+    importOutbox(rows) {
+      if (!Array.isArray(rows) || rows.length === 0) return { imported: 0 };
+      const result = this.call("wasm_import_outbox", encoder.encode(JSON.stringify(rows)));
+      if (result.exit !== 0) {
+        throw new WasmFaultError(
+          result.fault || buildFault({ exportName: "wasm_import_outbox", exit: result.exit, errors: result.errors, at: this.clock() }),
+        );
+      }
+      return JSON.parse(decoder.decode(result.out) || '{"imported":0}');
     }
 
     snapshotForRecorder() {
@@ -118,8 +187,8 @@ export function createAppHostClass({ WASI, File, OpenFile, Directory, PreopenDir
       };
     }
 
-    // Lazily instantiate and boot the WASI reactor once (after restoreDatabase has placed any saved
-    // SQLite file into /storage).
+    // Lazily instantiate and boot the WASI reactor once (after restoreDatabase/mountDatabase
+    // has placed any saved SQLite file into /storage).
     ensureBooted() {
       if (this.instance) return;
       if (this.poisoned) {
@@ -251,47 +320,41 @@ export function createAppHostClass({ WASI, File, OpenFile, Directory, PreopenDir
     }
 
     // One HTTP request through the app's own router and controllers.
-    request(method, path, { body = "", contentType = "application/x-www-form-urlencoded" } = {}) {
-      // Rails forms send PATCH and DELETE as POST plus a _method field. The socket server applies
-      // that override while reading the request; the reactor entry skips that reader, so do it here.
-      if (method === "POST" && contentType.startsWith("application/x-www-form-urlencoded")) {
-        const text = typeof body === "string" ? body : decoder.decode(body);
-        const override = new URLSearchParams(text).get("_method");
-        if (override && /^(patch|put|delete)$/i.test(override)) method = override.toUpperCase();
-      }
-      const payload = typeof body === "string" ? encoder.encode(body) : body;
-      const cookie = [...this.cookies].map(([name, value]) => `${name}=${value}`).join("; ");
-      const head = `${method} ${path} HTTP/1.1\r\nHost: localhost\r\n` +
-        (cookie ? `Cookie: ${cookie}\r\n` : "") +
-        (payload.length ? `Content-Type: ${contentType}\r\nContent-Length: ${payload.length}\r\n` : "") + "\r\n";
-      const input = new Uint8Array(head.length + payload.length);
-      input.set(encoder.encode(head));
-      input.set(payload, head.length);
+    request(method, path, { body = "", contentType, headers = {} } = {}) {
+      const input = buildHttpRequest(method, path, { body, contentType, headers, cookies: this.cookies });
 
+      this.notifyFile.data = new Uint8Array();
+      this.hostDir.contents.set("notify", this.notifyFile);
       const result = this.call("wasm_request", input);
       const text = decoder.decode(result.out);
       const split = text.indexOf("\n\n");
       const lines = (split < 0 ? text : text.slice(0, split)).split("\n");
-      const headers = [];
+      const responseHeaders = [];
+      let reads = null;
       for (const line of lines.slice(1)) {
         const colon = line.indexOf(": ");
         if (colon < 0) continue;
         const name = line.slice(0, colon);
         const value = line.slice(colon + 2);
-        if (name.toLowerCase() === "set-cookie") {
+        const lower = name.toLowerCase();
+        if (lower === "set-cookie") {
           const pair = value.split(";")[0];
           const equals = pair.indexOf("=");
           if (/max-age=0/i.test(value)) this.cookies.delete(pair.slice(0, equals));
           else this.cookies.set(pair.slice(0, equals), pair.slice(equals + 1));
         } else {
-          headers.push([name, value]);
+          if (lower === "x-instant-record-reads") reads = parseReads(value);
+          responseHeaders.push([name, value]);
         }
       }
       const status = Number(lines[0]) || 500;
+      const notifyEntry = this.hostDir.contents.get("notify") || this.notifyFile;
       return {
         status,
-        headers,
+        headers: responseHeaders,
         body: split < 0 ? "" : text.slice(split + 2),
+        reads,
+        ...readNotice(decoder.decode(notifyEntry.data)),
         exit: result.exit,
         errors: result.errors,
         events: result.events,
@@ -324,10 +387,51 @@ export function createAppHostClass({ WASI, File, OpenFile, Directory, PreopenDir
       }
       const text = decoder.decode(result.out);
       const notifyEntry = this.hostDir.contents.get("notify") || this.notifyFile;
+      const nextRelease = /next_release_ms=(\d+)/.exec(text);
       return {
         changed: result.exit === 0 && text.startsWith("changed"),
         pending: result.exit === 0 ? Number(/pending=(\d+)/.exec(text)?.[1] ?? -1) : -1,
+        held: result.exit === 0 ? Number(/held=(\d+)/.exec(text)?.[1] ?? 0) : 0,
+        nextReleaseMs: result.exit === 0 && nextRelease ? Number(nextRelease[1]) : null,
         cursor: result.exit === 0 ? Number(/cursor=(\d+)/.exec(text)?.[1] ?? 0) : 0,
+        ...readNotice(decoder.decode(notifyEntry.data)),
+        exchanges: this.exchanges,
+        exit: result.exit,
+        errors: result.errors,
+        events: result.events,
+        fault: result.fault,
+      };
+    }
+
+    // Merge pre-fetched push/bootstrap responses into SQLite by mutation_id
+    // without discarding acks when newer local edits landed during the fetch.
+    applySync(endpoint, { push = null, bootstrap = null } = {}) {
+      this.notifyFile.data = new Uint8Array();
+      this.hostDir.contents.set("notify", this.notifyFile);
+      this.exchanges = [];
+      const payload = JSON.stringify({
+        endpoint: endpoint || "",
+        push,
+        bootstrap,
+      });
+      const result = this.call("wasm_sync", encoder.encode(payload));
+      if (result.exit !== 0) {
+        throw new WasmFaultError(
+          result.fault || buildFault({ exportName: "wasm_sync", exit: result.exit, errors: result.errors, at: this.clock() }),
+        );
+      }
+      const text = decoder.decode(result.out);
+      const notifyEntry = this.hostDir.contents.get("notify") || this.notifyFile;
+      const nextRelease = /next_release_ms=(\d+)/.exec(text);
+      return {
+        changed: text.startsWith("changed"),
+        pending: Number(/pending=(\d+)/.exec(text)?.[1] ?? -1),
+        held: Number(/held=(\d+)/.exec(text)?.[1] ?? 0),
+        nextReleaseMs: nextRelease ? Number(nextRelease[1]) : null,
+        cursor: Number(/cursor=(\d+)/.exec(text)?.[1] ?? 0),
+        progressed: /progressed=1\b/.test(text),
+        failed: /failed=1\b/.test(text),
+        quarantined: Number(/quarantined=(\d+)/.exec(text)?.[1] ?? 0),
         ...readNotice(decoder.decode(notifyEntry.data)),
         exchanges: this.exchanges,
         exit: result.exit,
@@ -366,6 +470,26 @@ export function createAppHostClass({ WASI, File, OpenFile, Directory, PreopenDir
       return JSON.parse(decoder.decode(result.out));
     }
 
+    notices(request = { action: "list" }) {
+      this.notifyFile.data = new Uint8Array();
+      this.hostDir.contents.set("notify", this.notifyFile);
+      const result = this.call("wasm_notices", encoder.encode(JSON.stringify(request)));
+      if (result.exit !== 0) {
+        throw new WasmFaultError(
+          result.fault || buildFault({ exportName: "wasm_notices", exit: result.exit, errors: result.errors, at: this.clock() }),
+        );
+      }
+      const notifyEntry = this.hostDir.contents.get("notify") || this.notifyFile;
+      return {
+        ...JSON.parse(decoder.decode(result.out)),
+        ...readNotice(decoder.decode(notifyEntry.data)),
+        exit: result.exit,
+        errors: result.errors,
+        events: result.events,
+        fault: result.fault,
+      };
+    }
+
     // Extract OutboxMutations recorded after `excludeIds` on the active SQLite database.
     branchOutbox(excludeIds = []) {
       const result = this.call("wasm_branch_outbox", encoder.encode(JSON.stringify({ exclude_ids: excludeIds })));
@@ -402,10 +526,14 @@ export function createAppHostClass({ WASI, File, OpenFile, Directory, PreopenDir
     syncState() {
       const result = this.call("wasm_cursor", new Uint8Array());
       const text = decoder.decode(result.out);
+      const nextRelease = /next_release_ms=(\d+)/.exec(text);
       return {
         bootstrapped: result.exit === 0 && text.includes("bootstrap=ready"),
         cursor: result.exit === 0 ? Number(/cursor=(\d+)/.exec(text)?.[1] ?? 0) : 0,
         pending: result.exit === 0 ? Number(/pending=(\d+)/.exec(text)?.[1] ?? 0) : -1,
+        held: result.exit === 0 ? Number(/held=(\d+)/.exec(text)?.[1] ?? 0) : 0,
+        nextReleaseMs: result.exit === 0 && nextRelease ? Number(nextRelease[1]) : null,
+        notices: result.exit === 0 ? Number(/notices=(\d+)/.exec(text)?.[1] ?? 0) : 0,
         // The name the server gave whoever this browser synced as, when it tells people apart.
         identity: result.exit === 0 ? (/identity=(\S+)/.exec(text)?.[1] ?? "") : "",
         exit: result.exit,

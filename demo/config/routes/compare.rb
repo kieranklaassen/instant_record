@@ -7,8 +7,15 @@
 #   /instant  the plain app again, compiled to run in the browser by InstantRecord
 #
 # /compare puts the four next to each other with a stopwatch on each.
-%i[plain hotwire inertia instant].each do |way|
+%i[plain hotwire inertia].each do |way|
   namespace way do
+    resources :todos, only: [:create, :update, :destroy]
+    root "todos#index"
+  end
+end
+
+local_first do
+  namespace :instant do
     resources :todos, only: [:create, :update, :destroy]
     root "todos#index"
   end

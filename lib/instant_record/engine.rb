@@ -1,5 +1,8 @@
+require "instant_record/routing"
 require "instant_record/sync_scope"
 require "instant_record/files"
+require "instant_record/outbox_upcaster"
+require "instant_record/shell"
 
 module InstantRecord
   class Engine < ::Rails::Engine
@@ -8,19 +11,38 @@ module InstantRecord
     config.instant_record = ActiveSupport::OrderedOptions.new
     config.instant_record.mount_path = DEFAULT_MOUNT_PATH
     config.instant_record.build_on_precompile = false
+    config.instant_record.shell_snapshot = nil
     # Serve a native app's screens over HTTP for development (NativeScreensController).
     config.instant_record.native_dev = false
+    # Optional island name (for monoliths declaring multiple local_first(:name) blocks)
+    # and explicit manifest include overrides for dynamic Ruby patterns.
+    config.instant_record.island = nil
+    config.instant_record.include = nil
+
+    initializer "instant_record.routing", before: :add_routing_paths do
+      require "action_dispatch/routing/mapper"
+      unless ::ActionDispatch::Routing::Mapper.include?(InstantRecord::Routing)
+        ::ActionDispatch::Routing::Mapper.include(InstantRecord::Routing)
+      end
+    end
 
     # `render inertia: ..., live: { prop: Model }` where the app has inertia_rails.
     config.after_initialize do
       if defined?(::InertiaRails::Renderer)
         require "instant_record/inertia"
+        require "instant_record/inertia/renderer"
         ::InertiaRails::Renderer.prepend(InstantRecord::Inertia::Renderer)
       end
     end
 
     # A record that declares sync_file takes its file with it when it goes.
     config.to_prepare { InstantRecord::Files.forget_on_destroy }
+
+    initializer "instant_record.helpers" do
+      ActiveSupport.on_load(:action_view) do
+        include InstantRecord::SyncNoticesHelper
+      end
+    end
 
     initializer "instant_record.compiled_site" do |app|
       host = app.config.instant_record.compiled_host

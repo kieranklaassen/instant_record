@@ -23,7 +23,9 @@ const watch = context => {
   const seen = [];
   context.on("request", request => {
     const url = new URL(request.url());
-    if (url.pathname.includes("/email/sync/")) seen.push(url.pathname.split("/").pop() + url.search);
+    if (url.pathname.includes("/instant_record/") || url.pathname.startsWith("/email/shell")) {
+      seen.push(url.pathname.split("/").pop() + url.search);
+    }
   });
   return seen;
 };
@@ -125,7 +127,7 @@ try {
 
   // 7. Before the fill has run, a search widens from the server. The fill is held back here.
   const partial = await browser.newContext();
-  await partial.route(/\/email\/sync\/.*\/records\?type=/, route => route.abort());
+  await partial.route(/\/instant_record\/records\?.*type=/, route => route.abort());
   const partialRequests = watch(partial);
   const narrow = await open(partial);
   assert.ok(!(await subjects(narrow)).includes("A zebra at the door"));
@@ -133,7 +135,7 @@ try {
   await narrow.keyboard.press("/");
   await narrow.keyboard.type("zebra");
   await narrow.locator(".mail-row strong", { hasText: "A zebra at the door" }).waitFor({ timeout: 15000 });
-  assert.ok(partialRequests.some(path => path.startsWith("records?search=zebra")), "the server was asked for the search");
+  assert.ok(partialRequests.some(path => path.startsWith("records?") && path.includes("search=zebra")), "the server was asked for the search");
   assert.match(narrow.url(), /[?&]q=zebra/);
 
   // The match is a row of the local database now: offline, the same search still finds it.

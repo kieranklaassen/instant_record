@@ -64,7 +64,7 @@ final class InboxUITests: XCTestCase {
 
     /// A message arrives in Support from somewhere else.
     private func deliver() {
-        var request = URLRequest(url: URL(string: server + "/email/sync/maya/support/incoming")!)
+        var request = URLRequest(url: URL(string: server + "/email/incoming?member=maya&inbox=support")!)
         request.httpMethod = "POST"
         request.setValue("Bearer " + (environment["TOKEN"] ?? ""), forHTTPHeaderField: "Authorization")
         let done = expectation(description: "delivered")

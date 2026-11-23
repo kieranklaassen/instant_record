@@ -1,0 +1,47 @@
+# Explicit types for the compiled Inertia page responder. Roundhouse reads this
+# file from the staged app (lib/instant_record/compiler/gem_vendor.rb) so every
+# slot stays monomorphic (String, bool, Array[String]) and Spinel never widens a
+# controller prop into a polymorphic Hash.
+module InstantRecord
+  module Inertia
+    class Page
+      @component: String
+      @url: String
+      @version: String
+      @inertia: bool
+      @partial: bool
+      @only: Array[String]
+      @except: Array[String]
+      @prop_keys: Array[String]
+      @prop_values: Array[String]
+      @live_keys: Array[String]
+      @live_values: Array[String]
+
+      attr_reader component: String
+      attr_reader url: String
+      attr_reader version: String
+
+      def self.for_request: (String component, ActionDispatch::Request? request, ?version: String) -> InstantRecord::Inertia::Page
+      def self.header_list: (String value) -> Array[String]
+      def self.quote: (String value) -> String
+      def self.json_strings: (Array[String] values) -> String
+
+      def initialize: (String component, String url, bool inertia, String partial_component, String partial_data, String partial_except, ?String version) -> void
+      def inertia?: () -> bool
+      def partial?: () -> bool
+      def want?: (String name) -> bool
+      def string: (String name, String value) -> nil
+      def int: (String name, Integer value) -> nil
+      def bool: (String name, bool value) -> nil
+      def strings: (String name, Array[String] values) -> nil
+      def raw: (String name, String encoded) -> nil
+      def always_raw: (String name, String encoded) -> nil
+      def lazy: (String name) { () -> String } -> nil
+      def live: (String name, String event) { () -> String } -> nil
+      def live_many: (String name, Array[String] events) { () -> String } -> nil
+      def json: () -> String
+      def put_json: (String name, String encoded) -> nil
+      def register_live: (String name, Array[String] events) -> nil
+    end
+  end
+end

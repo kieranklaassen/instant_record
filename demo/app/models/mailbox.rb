@@ -21,7 +21,7 @@ class Mailbox < ApplicationRecord
 
   def generate_incoming!
     examples = INCOMING.fetch(id)
-    recent = mail_entries.where(subject: examples.map(&:third)).order(server_version: :desc).limit(examples.size - 1).pluck(:subject)
+    recent = mail_entries.where(subject: examples.map(&:third)).order(created_at: :desc, id: :desc).limit(examples.size - 1).pluck(:subject)
     sender, handle, subject, body = examples.reject { |example| recent.include?(example.third) }.sample
     append!(id: SecureRandom.uuid, author: sender, attributes: {
       kind: "message", address: "#{handle}@example.test", subject: subject, body: body
@@ -29,15 +29,11 @@ class Mailbox < ApplicationRecord
   end
 
   # What a first sync hands a client: the newest page of open conversations
-  # with their replies and marks, and the revision to follow the feed from.
-  # The revision is read before the rows. A write that lands between the two
-  # is then sent again by the feed and upserts, where the other order would
-  # skip it.
+  # with their replies and marks, and the change-log cursor to follow the feed from.
   def first_sync
-    cursor = self.class.where(id: id).pick(:revision)
-    messages = mail_entries.open_messages.order(created_at: :desc, id: :desc).limit(MailEntry::PAGE_SIZE).to_a
-    actions = mail_entries.where(parent_id: messages.map(&:id), kind: MailEntry::ACTIONS).order(:server_version)
-    { cursor: cursor, records: (messages + actions).map { |entry| InstantRecord.record_payload(entry) } }
+    cursor = InstantRecord::Change.maximum(:id) || 0
+    records = MailEntry.instant_record_sync_shape.bootstrap_records(mail_entries)
+    { cursor: cursor, records: records.map { |entry| InstantRecord.record_payload(entry) } }
   end
 
   def self.open_demo(name)
@@ -49,8 +45,8 @@ class Mailbox < ApplicationRecord
     end
   end
 
-  # Serialize sequence allocation and the write. A cursor can never skip a
-  # lower revision that was still uncommitted when a peer polled.
+  # Append a mail entry to this mailbox. Syncable automatically logs the
+  # partitioned InstantRecord::Change row for connected clients.
   def append!(id:, author:, attributes:)
     with_lock do
       existing = mail_entries.find_by(id: id)
@@ -68,8 +64,8 @@ class Mailbox < ApplicationRecord
         raise ArgumentError, "Conversation unavailable" unless mail_entries.exists?(id: entry.parent_id, kind: "message")
         raise ArgumentError, "Enter a reply" if entry.kind == "reply" && entry.body.blank?
       end
+      entry.save!
       increment!(:revision)
-      entry.update!(server_version: revision)
       entry
     end
   end

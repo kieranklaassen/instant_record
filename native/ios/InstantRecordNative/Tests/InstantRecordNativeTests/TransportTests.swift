@@ -5,11 +5,13 @@ final class TransportTests: XCTestCase {
     func testEveryRequestPassesThroughWhatTheAppPreparesItWith() {
         let transport = Transport(prepare: { $0.setValue("Bearer abc.def", forHTTPHeaderField: "Authorization") })
 
-        let get = transport.request("GET http://example.test/email/sync/maya/support/events?after=3\n")
-        let post = transport.request("POST http://example.test/email/sync/maya/support/mutations\n{\"mutations\":[]}")
+        let get = transport.request("GET http://example.test/instant_record/events?after=3\nX-Instant-Record-Partition: mailbox_id:support\n\n")
+        let post = transport.request("POST http://example.test/instant_record/mutations\nX-Instant-Record-Partition: mailbox_id:support\n\n{\"mutations\":[]}")
 
         XCTAssertEqual("Bearer abc.def", get?.value(forHTTPHeaderField: "Authorization"))
         XCTAssertEqual("Bearer abc.def", post?.value(forHTTPHeaderField: "Authorization"))
+        XCTAssertEqual("mailbox_id:support", get?.value(forHTTPHeaderField: "X-Instant-Record-Partition"))
+        XCTAssertEqual("mailbox_id:support", post?.value(forHTTPHeaderField: "X-Instant-Record-Partition"))
         XCTAssertEqual(["GET", "POST"], [get?.httpMethod, post?.httpMethod])
         XCTAssertEqual("{\"mutations\":[]}", post?.httpBody.map { String(decoding: $0, as: UTF8.self) })
         XCTAssertEqual("application/json", post?.value(forHTTPHeaderField: "Content-Type"))
@@ -32,6 +34,8 @@ final class TransportTests: XCTestCase {
 
         XCTAssertEqual(Transport.offline, transport.exchange("GET http://127.0.0.1:9/events\n"))
         XCTAssertEqual(Transport.offline, transport.exchange("nonsense"))
+        XCTAssertNil(transport.download("http://127.0.0.1:9/shell/file?token=x"))
+        XCTAssertNil(transport.download("not-a-url"))
     }
 
     func testTheDevEngineAsksTheServerAndSaysWhenItDoesNotAnswer() {

@@ -90,11 +90,12 @@ const json = (body, status = 200) => new Response(JSON.stringify(body), { status
 
 // The files endpoints, as FilesController answers them. `records` are the
 // ids the server holds a record for; a file sent for any other is 404.
-export function fakeServer({ records = [], maxSize = Infinity } = {}) {
+export function fakeServer({ records = [], maxSize = Infinity, chunkSize = null, advertiseChunkSize = true } = {}) {
   const server = {
     records: new Set(records), files: new Map(), partials: new Map(), requests: [], offline: false, failAfter: Infinity,
-    ranges: true,
+    ranges: true, chunkSize, advertiseChunkSize,
   }
+  const chunkField = () => (server.chunkSize && server.advertiseChunkSize ? { chunk_size: server.chunkSize } : {})
 
   server.fetch = async (input, { method = "GET", headers = {}, body } = {}) => {
     const url = new URL(input)
@@ -102,33 +103,41 @@ export function fakeServer({ records = [], maxSize = Infinity } = {}) {
     const key = `${type}/${id}`
     const range = headers.Range || headers.range
     if (server.offline) throw new TypeError("Failed to fetch")
-    server.requests.push({ method, key, upload: !!tail, range, offset: url.searchParams.get("offset"), scope: url.searchParams.get("scope") })
+    const bodySize = body ? (body.size ?? body.byteLength ?? body.length ?? 0) : 0
+    server.requests.push({ method, key, upload: !!tail, range, offset: url.searchParams.get("offset"), scope: url.searchParams.get("scope"), bodySize })
     if (server.requests.length > server.failAfter) throw new TypeError("Failed to fetch")
 
     if (tail || method === "PUT") {
       if (!server.records.has(key)) return new Response(null, { status: 404 })
-      if (server.files.has(key)) return json({ complete: true, offset: server.files.get(key).size })
+      if (server.files.has(key)) return json({ complete: true, offset: server.files.get(key).size, ...chunkField() })
       const part = `${key}.${url.searchParams.get("upload")}`
       const held = server.partials.get(part) || new Blob([])
-      if (tail) return json({ complete: false, offset: held.size })
+      if (tail) return json({ complete: false, offset: held.size, ...chunkField() })
 
       const size = Number(url.searchParams.get("size"))
       const offset = Number(url.searchParams.get("offset"))
       if (size > maxSize) return json({ error: "larger than this server takes" }, 413)
-      if (offset !== held.size) return json({ complete: false, offset: held.size }, 409)
+      if (server.chunkSize && bodySize > server.chunkSize) {
+        return json({ error: "piece larger than this server takes", chunk_size: server.chunkSize }, 413)
+      }
+      if (offset !== held.size) return json({ complete: false, offset: held.size, ...chunkField() }, 409)
       const grown = new Blob([held, body])
       if (grown.size < size) {
         server.partials.set(part, grown)
-        return json({ complete: false, offset: grown.size })
+        return json({ complete: false, offset: grown.size, ...chunkField() })
       }
       server.partials.delete(part)
       server.files.set(key, grown)
-      return json({ complete: true, offset: grown.size })
+      return json({ complete: true, offset: grown.size, ...chunkField() })
     }
 
     const file = server.records.has(key) && server.files.get(key)
     if (!file) return new Response(null, { status: 404 })
-    const about = { "content-type": file.type || "application/octet-stream", "content-length": String(file.size) }
+    const about = {
+      "content-type": file.type || "application/octet-stream",
+      "content-length": String(file.size),
+      ...(server.chunkSize && server.advertiseChunkSize ? { "x-instant-record-chunk-size": String(server.chunkSize) } : {}),
+    }
     if (method === "HEAD") return new Response(null, { status: 200, headers: about })
     if (!range || !server.ranges) return new Response(file, { status: 200, headers: about })
     const [from, to] = range.replace("bytes=", "").split("-").map(Number)

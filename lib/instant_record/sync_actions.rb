@@ -25,26 +25,36 @@ module InstantRecord
   module SyncActions
     ACTION_NAME_PATTERN = /\A[a-z_][a-zA-Z0-9_]*[!?]?\z/
 
-    # Pure-Ruby 32-bit-safe SHA-256 constants (FIPS 180-4) for deterministic
-    # UUID derivation across CRuby and Spinel without Digest or 64-bit overflow.
-    SHA256_K = [
-      0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-      0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-      0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-      0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-      0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-      0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-      0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-      0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+    # Pure-Ruby 16-bit-split SHA-256 constants (FIPS 180-4) for deterministic
+    # UUID derivation across CRuby and 32-bit signed Spinel (`-DSP_INT_OVERFLOW_MODE_RAISE`)
+    # without Digest or >31-bit integer overflow.
+    SHA256_K_HI = [
+      0x428a, 0x7137, 0xb5c0, 0xe9b5, 0x3956, 0x59f1, 0x923f, 0xab1c,
+      0xd807, 0x1283, 0x2431, 0x550c, 0x72be, 0x80de, 0x9bdc, 0xc19b,
+      0xe49b, 0xefbe, 0x0fc1, 0x240c, 0x2de9, 0x4a74, 0x5cb0, 0x76f9,
+      0x983e, 0xa831, 0xb003, 0xbf59, 0xc6e0, 0xd5a7, 0x06ca, 0x1429,
+      0x27b7, 0x2e1b, 0x4d2c, 0x5338, 0x650a, 0x766a, 0x81c2, 0x9272,
+      0xa2bf, 0xa81a, 0xc24b, 0xc76c, 0xd192, 0xd699, 0xf40e, 0x106a,
+      0x19a4, 0x1e37, 0x2748, 0x34b0, 0x391c, 0x4ed8, 0x5b9c, 0x682e,
+      0x748f, 0x78a5, 0x84c8, 0x8cc7, 0x90be, 0xa450, 0xbef9, 0xc671
     ].freeze
 
-    SHA256_H = [
-      0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-      0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+    SHA256_K_LO = [
+      0x2f98, 0x4491, 0xfbcf, 0xdba5, 0xc25b, 0x11f1, 0x82a4, 0x5ed5,
+      0xaa98, 0x5b01, 0x85be, 0x7dc3, 0x5d74, 0xb1fe, 0x06a7, 0xf174,
+      0x69c1, 0x4786, 0x9dc6, 0xa1cc, 0x2c6f, 0x84aa, 0xa9dc, 0x88da,
+      0x5152, 0xc66d, 0x27c8, 0x7fc7, 0x0bf3, 0x9147, 0x6351, 0x2967,
+      0x0a85, 0x2138, 0x6dfc, 0x0d13, 0x7354, 0x0abb, 0xc92e, 0x2c85,
+      0xe8a1, 0x664b, 0x8b70, 0x51a3, 0xe819, 0x0624, 0x3585, 0xa070,
+      0xc116, 0x6c08, 0x774c, 0xbcb5, 0x0cb3, 0xaa4a, 0xca4f, 0x6ff3,
+      0x82ee, 0x636f, 0x7814, 0x0208, 0xfffa, 0x6ceb, 0xa3f7, 0x78f2
     ].freeze
+
+    SHA256_H_HI = [0x6a09, 0xbb67, 0x3c6e, 0xa54f, 0x510e, 0x9b05, 0x1f83, 0x5be0].freeze
+    SHA256_H_LO = [0xe667, 0xae85, 0xf372, 0xf53a, 0x527f, 0x688c, 0xd9ab, 0xcd19].freeze
 
     HEX_DIGITS = "0123456789abcdef".freeze
-    MASK32 = 0xffffffff
+    MASK16 = 0xffff
 
     def self.included(base)
       base.extend(ClassMethods)
@@ -152,12 +162,13 @@ module InstantRecord
     # Server-only execution frame used by MutationApplier during authoritative
     # replay (and direct server calls with deterministic mutation_id).
     class ServerFrame
-      attr_reader :mutation_id, :identity, :scope, :enforcing
+      attr_reader :mutation_id, :identity, :scope, :partition, :enforcing
 
-      def initialize(mutation_id:, identity: nil, scope: nil, enforcing: false)
+      def initialize(mutation_id:, identity: nil, scope: nil, partition: nil, enforcing: false)
         @mutation_id = mutation_id
         @identity = identity
         @scope = scope
+        @partition = partition
         @enforcing = enforcing
         @seq = 0
         @touched_refs = []
@@ -200,6 +211,17 @@ module InstantRecord
         model = record.class
         note_ref(model.name, record.id)
 
+        if (part = model.instant_record_sync_partition)
+          part_value = part.extract(@partition)
+          raise MutationApplier::NotPermitted, "a partition is required" unless part_value
+
+          col = part.column
+          given = record[col].presence
+          raise MutationApplier::NotPermitted, "record not in active partition" if given && given.to_s != part_value
+
+          record[col] = part_value
+        end
+
         if (column = model.instant_record_sync_scope)
           raise MutationApplier::NotPermitted, "a scope is required" unless @scope
 
@@ -231,6 +253,15 @@ module InstantRecord
         model = record.class
         note_ref(model.name, record.id)
 
+        if (part = model.instant_record_sync_partition)
+          part_value = part.extract(@partition)
+          raise MutationApplier::NotPermitted, "a partition is required" unless part_value
+
+          col = part.column
+          existing_part = record.attribute_in_database(col)
+          raise MutationApplier::NotPermitted, "record not in active partition" if existing_part.to_s != part_value || record[col].to_s != part_value
+        end
+
         if (column = model.instant_record_sync_scope)
           raise MutationApplier::NotPermitted, "a scope is required" unless @scope
 
@@ -259,6 +290,12 @@ module InstantRecord
         model = record.class
         note_ref(model.name, record.id)
 
+        if (part = model.instant_record_sync_partition)
+          part_value = part.extract(@partition)
+          raise MutationApplier::NotPermitted, "a partition is required" unless part_value
+          raise MutationApplier::NotPermitted, "record not in active partition" if record[part.column].to_s != part_value
+        end
+
         if (column = model.instant_record_sync_scope)
           raise MutationApplier::NotPermitted, "a scope is required" unless @scope
           raise MutationApplier::NotPermitted if record[column] != @scope
@@ -276,7 +313,8 @@ module InstantRecord
           operation: "destroy",
           version: 0,
           attributes_payload: {},
-          scope: InstantRecord.scope_of(record)
+          scope: InstantRecord.scope_of(record),
+          partition: InstantRecord.partition_of(record)
         )
         record_applied(model.name, record.id, {
           type: model.name,
@@ -291,13 +329,13 @@ module InstantRecord
 
       def hidden?(model, id)
         model.instant_record_visibility && model.exists?(id: id) &&
-          !SyncScope.visible(model, @identity).exists?(id: id)
+          !SyncScope.visible(model, @identity, partition: @partition).exists?(id: id)
       end
 
       def permit_writable!(model, id)
         return unless model.instant_record_writability
 
-        raise MutationApplier::NotPermitted unless SyncScope.writable(model, @identity).exists?(id: id)
+        raise MutationApplier::NotPermitted unless SyncScope.writable(model, @identity, partition: @partition).exists?(id: id)
       end
 
       def log_change(record, operation)
@@ -307,7 +345,8 @@ module InstantRecord
           operation: operation,
           version: record[:server_version],
           attributes_payload: InstantRecord.wire_attributes(record.attributes),
-          scope: InstantRecord.scope_of(record)
+          scope: InstantRecord.scope_of(record),
+          partition: InstantRecord.partition_of(record)
         )
       end
 
@@ -375,9 +414,9 @@ module InstantRecord
         end
       end
 
-      # GemVendor replaces this method in compiled builds with native SQLite SAVEPOINT.
+      # Delegated to InstantRecord::Host so compiled builds use native SQLite SAVEPOINT.
       def with_savepoint(&block)
-        ActiveRecord::Base.transaction(requires_new: true, &block)
+        InstantRecord::Host.with_savepoint(&block)
       end
 
       # Recursively normalize mutator arguments to JSON-safe string-keyed values.
@@ -627,98 +666,134 @@ module InstantRecord
         end
       end
 
-      def rotr32(x, n)
-        ((x >> n) | ((x << (32 - n)) & MASK32)) & MASK32
+      def rotr32_hi(hi, lo, n)
+        if n < 16
+          (hi >> n) | ((lo & ((1 << n) - 1)) << (16 - n))
+        else
+          m = n - 16
+          (lo >> m) | ((hi & ((1 << m) - 1)) << (16 - m))
+        end
+      end
+
+      def rotr32_lo(hi, lo, n)
+        if n < 16
+          (lo >> n) | ((hi & ((1 << n) - 1)) << (16 - n))
+        else
+          m = n - 16
+          (hi >> m) | ((lo & ((1 << m) - 1)) << (16 - m))
+        end
       end
 
       def sha256_bytes(text)
         msg = []
         text.each_byte { |b| msg << b }
-        bit_len = msg.length * 8
+        byte_len = msg.length
         msg << 0x80
         msg << 0 while (msg.length % 64) != 56
 
-        # Append 64-bit big-endian bit length (high 32 bits, then low 32 bits).
-        hi = (bit_len >> 32) & MASK32
-        lo = bit_len & MASK32
-        msg << ((hi >> 24) & 0xff) << ((hi >> 16) & 0xff) << ((hi >> 8) & 0xff) << (hi & 0xff)
-        msg << ((lo >> 24) & 0xff) << ((lo >> 16) & 0xff) << ((lo >> 8) & 0xff) << (lo & 0xff)
+        # Append 64-bit big-endian bit length using 16-bit words (safe on 32-bit signed ints).
+        len_lo = (byte_len & 0x1fff) << 3
+        len_mid = (byte_len >> 13) & MASK16
+        len_hi = (byte_len >> 29) & MASK16
+        msg << 0 << 0 << ((len_hi >> 8) & 0xff) << (len_hi & 0xff)
+        msg << ((len_mid >> 8) & 0xff) << (len_mid & 0xff) << ((len_lo >> 8) & 0xff) << (len_lo & 0xff)
 
-        h0 = SHA256_H[0]
-        h1 = SHA256_H[1]
-        h2 = SHA256_H[2]
-        h3 = SHA256_H[3]
-        h4 = SHA256_H[4]
-        h5 = SHA256_H[5]
-        h6 = SHA256_H[6]
-        h7 = SHA256_H[7]
+        h0_h = SHA256_H_HI[0]; h0_l = SHA256_H_LO[0]
+        h1_h = SHA256_H_HI[1]; h1_l = SHA256_H_LO[1]
+        h2_h = SHA256_H_HI[2]; h2_l = SHA256_H_LO[2]
+        h3_h = SHA256_H_HI[3]; h3_l = SHA256_H_LO[3]
+        h4_h = SHA256_H_HI[4]; h4_l = SHA256_H_LO[4]
+        h5_h = SHA256_H_HI[5]; h5_l = SHA256_H_LO[5]
+        h6_h = SHA256_H_HI[6]; h6_l = SHA256_H_LO[6]
+        h7_h = SHA256_H_HI[7]; h7_l = SHA256_H_LO[7]
 
         offset = 0
         while offset < msg.length
-          w = Array.new(64, 0)
+          w_h = Array.new(64, 0)
+          w_l = Array.new(64, 0)
           i = 0
           while i < 16
             j = offset + i * 4
-            w[i] = ((msg[j] << 24) | (msg[j + 1] << 16) | (msg[j + 2] << 8) | msg[j + 3]) & MASK32
+            w_h[i] = (msg[j] << 8) | msg[j + 1]
+            w_l[i] = (msg[j + 2] << 8) | msg[j + 3]
             i += 1
           end
           while i < 64
-            x = w[i - 15]
-            s0 = rotr32(x, 7) ^ rotr32(x, 18) ^ (x >> 3)
-            y = w[i - 2]
-            s1 = rotr32(y, 17) ^ rotr32(y, 19) ^ (y >> 10)
-            w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & MASK32
+            xh = w_h[i - 15]; xl = w_l[i - 15]
+            s0_h = rotr32_hi(xh, xl, 7) ^ rotr32_hi(xh, xl, 18) ^ (xh >> 3)
+            s0_l = rotr32_lo(xh, xl, 7) ^ rotr32_lo(xh, xl, 18) ^ ((xl >> 3) | ((xh & 7) << 13))
+
+            yh = w_h[i - 2]; yl = w_l[i - 2]
+            s1_h = rotr32_hi(yh, yl, 17) ^ rotr32_hi(yh, yl, 19) ^ (yh >> 10)
+            s1_l = rotr32_lo(yh, yl, 17) ^ rotr32_lo(yh, yl, 19) ^ ((yl >> 10) | ((yh & 0x3ff) << 6))
+
+            sum_l = w_l[i - 16] + s0_l + w_l[i - 7] + s1_l
+            w_l[i] = sum_l & MASK16
+            w_h[i] = (w_h[i - 16] + s0_h + w_h[i - 7] + s1_h + (sum_l >> 16)) & MASK16
             i += 1
           end
 
-          a = h0
-          b = h1
-          c = h2
-          d = h3
-          e = h4
-          f = h5
-          g = h6
-          h = h7
+          ah = h0_h; al = h0_l
+          bh = h1_h; bl = h1_l
+          ch = h2_h; cl = h2_l
+          dh = h3_h; dl = h3_l
+          eh = h4_h; el = h4_l
+          fh = h5_h; fl = h5_l
+          gh = h6_h; gl = h6_l
+          hh = h7_h; hl = h7_l
 
           i = 0
           while i < 64
-            s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25)
-            ch = (e & f) ^ ((e ^ MASK32) & g)
-            temp1 = (h + s1 + ch + SHA256_K[i] + w[i]) & MASK32
-            s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22)
-            maj = (a & b) ^ (a & c) ^ (b & c)
-            temp2 = (s0 + maj) & MASK32
+            s1_h = rotr32_hi(eh, el, 6) ^ rotr32_hi(eh, el, 11) ^ rotr32_hi(eh, el, 25)
+            s1_l = rotr32_lo(eh, el, 6) ^ rotr32_lo(eh, el, 11) ^ rotr32_lo(eh, el, 25)
+            ch_h = (eh & fh) ^ ((eh ^ MASK16) & gh)
+            ch_l = (el & fl) ^ ((el ^ MASK16) & gl)
 
-            h = g
-            g = f
-            f = e
-            e = (d + temp1) & MASK32
-            d = c
-            c = b
-            b = a
-            a = (temp1 + temp2) & MASK32
+            t1_l = hl + s1_l + ch_l + SHA256_K_LO[i] + w_l[i]
+            t1_h = (hh + s1_h + ch_h + SHA256_K_HI[i] + w_h[i] + (t1_l >> 16)) & MASK16
+            t1_l &= MASK16
+
+            s0_h = rotr32_hi(ah, al, 2) ^ rotr32_hi(ah, al, 13) ^ rotr32_hi(ah, al, 22)
+            s0_l = rotr32_lo(ah, al, 2) ^ rotr32_lo(ah, al, 13) ^ rotr32_lo(ah, al, 22)
+            maj_h = (ah & bh) ^ (ah & ch) ^ (bh & ch)
+            maj_l = (al & bl) ^ (al & cl) ^ (bl & cl)
+
+            t2_l = s0_l + maj_l
+            t2_h = (s0_h + maj_h + (t2_l >> 16)) & MASK16
+            t2_l &= MASK16
+
+            hh = gh; hl = gl
+            gh = fh; gl = fl
+            fh = eh; fl = el
+            el = dl + t1_l
+            eh = (dh + t1_h + (el >> 16)) & MASK16
+            el &= MASK16
+            dh = ch; dl = cl
+            ch = bh; cl = bl
+            bh = ah; bl = al
+            al = t1_l + t2_l
+            ah = (t1_h + t2_h + (al >> 16)) & MASK16
+            al &= MASK16
             i += 1
           end
 
-          h0 = (h0 + a) & MASK32
-          h1 = (h1 + b) & MASK32
-          h2 = (h2 + c) & MASK32
-          h3 = (h3 + d) & MASK32
-          h4 = (h4 + e) & MASK32
-          h5 = (h5 + f) & MASK32
-          h6 = (h6 + g) & MASK32
-          h7 = (h7 + h) & MASK32
+          h0_l += al; h0_h = (h0_h + ah + (h0_l >> 16)) & MASK16; h0_l &= MASK16
+          h1_l += bl; h1_h = (h1_h + bh + (h1_l >> 16)) & MASK16; h1_l &= MASK16
+          h2_l += cl; h2_h = (h2_h + ch + (h2_l >> 16)) & MASK16; h2_l &= MASK16
+          h3_l += dl; h3_h = (h3_h + dh + (h3_l >> 16)) & MASK16; h3_l &= MASK16
+          h4_l += el; h4_h = (h4_h + eh + (h4_l >> 16)) & MASK16; h4_l &= MASK16
+          h5_l += fl; h5_h = (h5_h + fh + (h5_l >> 16)) & MASK16; h5_l &= MASK16
+          h6_l += gl; h6_h = (h6_h + gh + (h6_l >> 16)) & MASK16; h6_l &= MASK16
+          h7_l += hl; h7_h = (h7_h + hh + (h7_l >> 16)) & MASK16; h7_l &= MASK16
           offset += 64
         end
 
-        out = []
-        [h0, h1, h2, h3].each do |word|
-          out << ((word >> 24) & 0xff)
-          out << ((word >> 16) & 0xff)
-          out << ((word >> 8) & 0xff)
-          out << (word & 0xff)
-        end
-        out
+        [
+          (h0_h >> 8) & 0xff, h0_h & 0xff, (h0_l >> 8) & 0xff, h0_l & 0xff,
+          (h1_h >> 8) & 0xff, h1_h & 0xff, (h1_l >> 8) & 0xff, h1_l & 0xff,
+          (h2_h >> 8) & 0xff, h2_h & 0xff, (h2_l >> 8) & 0xff, h2_l & 0xff,
+          (h3_h >> 8) & 0xff, h3_h & 0xff, (h3_l >> 8) & 0xff, h3_l & 0xff
+        ]
       end
     end
   end

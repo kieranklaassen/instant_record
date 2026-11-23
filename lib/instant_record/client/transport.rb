@@ -3,7 +3,25 @@ require "json"
 module InstantRecord
   module Client
     module Transport
-      Error = Class.new(StandardError)
+      class Error < StandardError
+        attr_reader :status
+
+        def initialize(message = nil, status: nil)
+          super(message)
+          @status = status.nil? ? parse_status(message) : status.to_i
+        end
+
+        def server_error?
+          @status.is_a?(Integer) && @status >= 500 && @status < 600
+        end
+
+        private
+
+        def parse_status(message)
+          match = message.to_s.match(/->\s*(\d{3})\b/)
+          match ? match[1].to_i : nil
+        end
+      end
 
       # Incremental parser for text/event-stream bodies. Pure Ruby so the
       # sync loop is unit-testable without a browser. Yields one hash per
@@ -36,32 +54,57 @@ module InstantRecord
         REQUEST = "/host/request".freeze
         RESPONSE = "/host/response".freeze
 
-        def get_json(path)
-          JSON.parse(exchange("GET", path, ""))
+        def get_json(path, headers: nil)
+          raw = (headers.nil? || headers.empty?) ? exchange("GET", path, "") : exchange("GET", path, "", headers: headers)
+          JSON.parse(raw)
+        rescue JSON::ParserError => e
+          raise Error, "GET #{path} invalid JSON: #{e.message}"
         end
 
-        def post_json(path, payload)
-          JSON.parse(exchange("POST", path, JSON.generate(payload)))
+        def post_json(path, payload, headers: nil)
+          body = JSON.generate(payload)
+          raw = (headers.nil? || headers.empty?) ? exchange("POST", path, body) : exchange("POST", path, body, headers: headers)
+          JSON.parse(raw)
+        rescue JSON::ParserError => e
+          raise Error, "POST #{path} invalid JSON: #{e.message}"
         end
 
         # The host returns the whole catch-up stream at once (the loop polls with window=0).
-        def each_event(path, &block)
+        def each_event(path, headers: nil, &block)
           parser = SseParser.new(&block)
-          parser.feed(exchange("GET", path, ""))
+          raw = (headers.nil? || headers.empty?) ? exchange("GET", path, "") : exchange("GET", path, "", headers: headers)
+          parser.feed(raw)
         end
 
         private
 
-        # Request file: first line "METHOD URL", then the body. Response file: first line the
-        # status, then the body. Status 0 is a network failure.
-        def exchange(method, path, body)
-          File.write(REQUEST, "#{method} #{InstantRecord.config.endpoint}#{path}\n#{body}")
-          response = File.read(RESPONSE)
+        # Request file:
+        #   Without headers: "METHOD URL\n<body>"
+        #   With headers:    "METHOD URL\nName: Value\n...\n\n<body>"
+        # Response file: first line the status, then the body. Status 0 is a network failure.
+        def exchange(method, path, body, headers: nil)
+          payload = format_request(method, "#{InstantRecord.config.endpoint}#{path}", body, headers)
+          InstantRecord::Host.write_channel("request", payload)
+          response = InstantRecord::Host.read_channel("response")
           newline = response.index("\n") || response.length
           status = response[0, newline].to_i
-          raise Error, "#{method} #{path} -> #{status}" unless status >= 200 && status < 300
+          raise Error.new("#{method} #{path} -> #{status}", status: status) unless status >= 200 && status < 300
 
           response[(newline + 1)..] || ""
+        end
+
+        def format_request(method, url, body, headers)
+          return "#{method} #{url}\n#{body}" if headers.nil? || headers.empty?
+
+          lines = []
+          headers.each do |name, value|
+            k = name.to_s.gsub(/[\r\n]/, "")
+            v = value.to_s.gsub(/[\r\n]/, "")
+            lines << "#{k}: #{v}" unless k.empty? || v.empty?
+          end
+          return "#{method} #{url}\n#{body}" if lines.empty?
+
+          "#{method} #{url}\n#{lines.join("\n")}\n\n#{body}"
         end
       end
     end

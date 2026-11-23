@@ -18,12 +18,16 @@ module InstantRecord
       "x-accel-buffering" => "no"
     }.freeze
 
+    rescue_from InstantRecord::Unauthorized, with: -> { head :unauthorized }
+    rescue_from InstantRecord::Forbidden, with: -> { head :forbidden }
+
     class EventStream
-      # `identity` is who the stream was opened by, for as long as it stays
-      # open: the request is read once, when it arrives.
-      def initialize(cursor:, deadline:, heartbeat: 15.0, identity: nil)
+      # `identity` and `partition` are fixed when the stream opens.
+      def initialize(cursor:, deadline:, heartbeat: 15.0, identity: nil, partition: nil, partition_spec: nil)
         @cursor = cursor
         @identity = identity
+        @partition = partition
+        @partition_spec = partition_spec
         @deadline = deadline
         @heartbeat = heartbeat
         @last_write = Time.current
@@ -31,18 +35,17 @@ module InstantRecord
 
       def each
         loop do
-          changes = Change.poll(@cursor, scope: SyncScope.token(@identity))
-          SyncScope.events_for(changes, @identity).each do |id, event|
+          changes = Change.poll(@cursor, scope: SyncScope.token(@identity), partition: @partition)
+          SyncScope.events_for(changes, @identity, partition: @partition_spec).each do |id, event|
             @cursor = id
             @last_write = Time.current
-            yield "id: #{id}\nevent: change\ndata: #{event.to_json}\n\n"
+            stamped = event.merge(server_time: InstantRecord::HLC.iso_now)
+            yield "id: #{id}\nevent: change\ndata: #{stamped.to_json}\n\n"
           end
 
           # An SSE comment, written only when the stream has been quiet for a
           # full interval. Keeps idle-connection reapers (reverse proxies) at
-          # bay, and doubles as the write that discovers a vanished client —
-          # without it, a dead peer on a quiet stream holds its fiber and its
-          # poll loop until the window ends.
+          # bay, and doubles as the write that discovers a vanished client.
           if @heartbeat.positive? && Time.current - @last_write >= @heartbeat
             @last_write = Time.current
             yield ": hb\n\n"
@@ -52,30 +55,42 @@ module InstantRecord
           sleep 0.5
         end
       rescue Errno::EPIPE, Errno::ECONNRESET, IOError
-        # The client hung up mid-stream — a closed tab, a navigation, a dead
-        # network. That is the normal end of an SSE stream, not a failure;
-        # returning cleanly here is what keeps the server's logs from filling
-        # with a full backtrace per departed visitor.
+        # The client hung up mid-stream — the normal end of an SSE stream.
       end
     end
 
+    def preflight
+      headers.merge!(InstantRecord::CORS_HEADERS)
+      head :no_content
+    end
+
     def index
+      headers.merge!(InstantRecord::CORS_HEADERS)
       cursor = (request.headers["Last-Event-ID"] || params[:after] || 0).to_i
 
+      SyncScope.authenticate!(request)
       identity = SyncScope.identity(request)
+      partition_spec = SyncScope.partition(request, identity)
+      Rails.application.eager_load! if defined?(Rails) && Rails.application && !Rails.application.config.eager_load
+      models = SyncScope.models_for(partition_spec)
+      SyncScope.authorize_models!(models, partition_spec, identity, request)
+      change_partitions = SyncScope.change_partitions_for(models, partition_spec)
 
-      headers.merge!(EVENT_STREAM_HEADERS).merge!(InstantRecord::CORS_HEADERS)
+      headers.merge!(EVENT_STREAM_HEADERS)
 
       # A client that synced as someone else is told to start over, and nothing
       # more: no id line, so the cursor it is about to drop does not move.
-      if SyncScope.stale?(params[:identity], identity)
-        self.response_body = ["event: reset\ndata: #{SyncScope.reset_event(identity).to_json}\n\n"]
+      if SyncScope.stale?(params[:identity], identity, partition: partition_spec)
+        reset_payload = SyncScope.reset_event(identity, partition: partition_spec).merge(server_time: InstantRecord::HLC.iso_now)
+        self.response_body = ["event: reset\ndata: #{reset_payload.to_json}\n\n"]
         return
       end
 
       self.response_body = EventStream.new(
         cursor: cursor,
         identity: identity,
+        partition: change_partitions,
+        partition_spec: partition_spec,
         deadline: Time.current + window_seconds,
         heartbeat: Rails.application.config.instant_record.sse_heartbeat_seconds.to_f
       )

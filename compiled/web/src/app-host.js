@@ -1,6 +1,6 @@
 // Host for the compiled app (hand-written). Boots the WASI reactor wasm module ONCE per worker
-// lifetime on an in-memory WASI filesystem, keeping the Spinel GC slab and SQLite connection live
-// across requests and sync passes:
+// lifetime on an in-memory or OPFS-backed WASI filesystem, keeping the Spinel GC slab and SQLite
+// connection live across requests and sync passes:
 //   /storage   the app's SQLite file (and its secret key)
 //   /host      in / out   request/sync input and output buffers
 //              request    the gem writes "METHOD URL\nbody"

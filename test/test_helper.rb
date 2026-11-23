@@ -3,6 +3,7 @@ require "active_record"
 require "instant_record"
 require "instant_record/sync_scope"
 require "instant_record/files"
+require "instant_record/outbox_upcaster"
 
 ActiveRecord::Base.establish_connection(adapter: "sqlite3", database: ":memory:")
 
@@ -71,6 +72,7 @@ module InstantRecordTestHelpers
     ActiveRecord::Base.connection.execute("DELETE FROM items")
     InstantRecord::OutboxMutation.delete_all
     InstantRecord::SyncMetadata.delete_all
+    InstantRecord::SyncNotice.delete_all
     InstantRecord::Change.delete_all
     InstantRecord::AppliedMutation.delete_all
     InstantRecord::Client.forget_database

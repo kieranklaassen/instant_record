@@ -4,6 +4,14 @@
 class MailboxScreen < InstantRecord::Native::Screen
   extend InstantRecord::RuntimeScoped
 
+  contract "InboxSummary" do |c|
+    c.string :inbox
+    c.int :unread
+    c.int :showing
+    c.bool :filtered
+    c.bool :more
+  end
+
   def member = param("member")
   def inbox = param("inbox")
   def mail = MailAccess.new(member, inbox)

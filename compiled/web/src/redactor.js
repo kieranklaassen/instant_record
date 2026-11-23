@@ -404,13 +404,26 @@ export class Redactor {
       }
     }
 
-    return {
+    const out = {
       method,
       url,
       requestBody,
       status: exchange.status,
       responseBody,
     };
+    if (exchange.requestHeaders && typeof exchange.requestHeaders === "object") {
+      const redactedHeaders = {};
+      for (const [key, value] of Object.entries(exchange.requestHeaders)) {
+        if (SENSITIVE_HEADER_RE.test(key) || /scope/i.test(key)) {
+          this.redactedFields.add(key.toLowerCase());
+          redactedHeaders[key] = this.pseudonymize(value, `header:${key.toLowerCase()}`);
+        } else {
+          redactedHeaders[key] = value;
+        }
+      }
+      out.requestHeaders = redactedHeaders;
+    }
+    return out;
   }
 
   redactWasiInput(exportName, inputBytes) {
@@ -419,8 +432,31 @@ export class Redactor {
     switch (exportName) {
       case "wasm_request":
         return this.redactHttpRequest(text);
-      case "wasm_sync":
+      case "wasm_sync": {
+        if (text.trimStart().startsWith("{")) {
+          try {
+            const parsed = JSON.parse(text);
+            const redacted = { ...parsed };
+            if (typeof redacted.endpoint === "string") redacted.endpoint = this.redactUrl(redacted.endpoint);
+            if (redacted.push && typeof redacted.push === "object") {
+              redacted.push = {
+                ...redacted.push,
+                body: typeof redacted.push.body === "string" ? this.redactJsonBody(redacted.push.body) : redacted.push.body,
+              };
+            }
+            if (redacted.bootstrap && typeof redacted.bootstrap === "object") {
+              redacted.bootstrap = {
+                ...redacted.bootstrap,
+                body: typeof redacted.bootstrap.body === "string" ? this.redactJsonBody(redacted.bootstrap.body) : redacted.bootstrap.body,
+              };
+            }
+            return JSON.stringify(redacted);
+          } catch {
+            return this.redactJsonBody(text);
+          }
+        }
         return this.redactUrl(text);
+      }
       case "wasm_stream":
         return this.redactSseChunk(text);
       case "wasm_history": {
@@ -434,6 +470,10 @@ export class Redactor {
           return text;
         }
       }
+      case "wasm_notices":
+      case "wasm_import_outbox":
+      case "wasm_branch_replay":
+        return this.redactJsonBody(text);
       default:
         return text;
     }

@@ -4,13 +4,20 @@ require "base64"
 module InstantRecord
   DEFAULT_MOUNT_PATH = "/instant_record".freeze
 
+  # Raised by `config.authenticate_request`, `config.scope_from`,
+  # `config.partition_from`, or `authorize_partition` to reject a sync request
+  # with HTTP 401 or 403.
+  Unauthorized = Class.new(StandardError)
+  Forbidden = Class.new(StandardError)
+
   # Engine endpoints allow cross-origin reads and JSON writes so a separately
   # hosted compiled site or Vite dev server can reach Rails. Access control is
-  # enforced per model via `sync_scope`, `syncable_to`, and `writable_by`.
+  # enforced per model via `sync_scope`, `sync_partition`, `syncable_to`, and
+  # `writable_by`.
   CORS_HEADERS = {
     "access-control-allow-origin" => "*",
     "access-control-allow-methods" => "GET, POST, OPTIONS",
-    "access-control-allow-headers" => "content-type, last-event-id"
+    "access-control-allow-headers" => "content-type, last-event-id, authorization, x-instant-record-scope, x-instant-record-partition, x-instant-record-member"
   }.freeze
 
   # Every timestamp crossing the wire carries microseconds, in both directions.
@@ -29,15 +36,19 @@ end
 
 require "active_support/isolated_execution_state"
 require "instant_record/version"
+require "instant_record/host"
 require "instant_record/configuration"
 require "instant_record/runtime_scoped"
+require "instant_record/inertia"
+require "instant_record/read_tracker"
 require "instant_record/native"
-require "instant_record/engine" if defined?(Rails::Engine)
+InstantRecord::Host.load_engine
 
 module InstantRecord
   class << self
-    # The compiler replaces this method in the browser bundle.
-    def browser? = false
+    # Delegated to InstantRecord::Host so AOT builds swap the host adapter
+    # module instead of string-patching this file.
+    def browser? = Host.browser?
 
     def config
       @config ||= Configuration.new
@@ -60,8 +71,7 @@ module InstantRecord
     def synced_model(record_type)
       return synced_models.find { |model| model.name == record_type } if synced_models.any?
 
-      klass = record_type.to_s.safe_constantize
-      klass if klass.respond_to?(:instant_record_syncable?) && klass.instant_record_syncable?
+      Host.resolve_syncable_model(record_type)
     end
 
     # Every model participating in sync: the explicit allowlist when set,
@@ -69,10 +79,7 @@ module InstantRecord
     def syncable_models
       return synced_models if synced_models.any?
 
-      ActiveRecord::Base.descendants.select do |model|
-        !model.abstract_class? && model.name &&
-          model.respond_to?(:instant_record_syncable?) && model.instant_record_syncable?
-      end
+      Host.discover_syncable_models
     end
 
     # One record's attributes as they cross the wire, in either direction and on
@@ -82,7 +89,13 @@ module InstantRecord
     # the (created_at, id) keyset cursor round-trips exactly and both sides of a
     # last-write-wins comparison are measured with the same ruler.
     def wire_attributes(attributes)
-      attributes.except("sync_state").transform_values do |value|
+      snapshot_attributes(attributes.except("sync_state"))
+    end
+
+    # Full local row snapshot for delay-line rollback: keeps sync_state alongside
+    # every other column, with timestamps at TIME_PRECISION so restore is lossless.
+    def snapshot_attributes(attributes)
+      attributes.transform_values do |value|
         # usec, not iso8601: a Date answers to iso8601 but takes no precision
         # argument, and its default JSON form already round-trips exactly.
         value.respond_to?(:usec) ? value.iso8601(TIME_PRECISION) : value
@@ -95,16 +108,27 @@ module InstantRecord
       record[column].presence if column
     end
 
+    # The partition key-value a record belongs to (e.g. "mailbox_id:support"),
+    # or nil for an unpartitioned model.
+    def partition_of(record)
+      partition = record.class.instant_record_sync_partition
+      partition&.change_partition_for(record)
+    end
+
     # The wire shape for one record, shared by the bootstrap and records
     # endpoints and mirroring Change#as_event: clients apply all three through
     # the same upsert path.
     def record_payload(record)
-      {
+      payload = {
         type: record.class.name,
         id: record.id,
         version: record[:server_version],
         attributes: wire_attributes(record.attributes)
       }
+      if (stamp = HLC.record_hlc(record.class.name, record.id))
+        payload[:hlc] = stamp
+      end
+      payload
     end
 
     # Begin background sync in the browser.
@@ -168,14 +192,37 @@ module InstantRecord
       return JSON.generate(ok: false, busy: true) if result == :busy
       return JSON.generate(ok: false, started: false) if result == :not_started
 
-      JSON.generate(ok: true, pending: pending_count)
+      payload = { ok: true, pending: pending_count }
+      next_ms = next_release_ms
+      payload[:next_release_ms] = next_ms unless next_ms.nil?
+      JSON.generate(payload)
     rescue StandardError => e
       # Never raise across the JS boundary; a failed pass is a retry, not a crash.
       JSON.generate(ok: false, error: e.message, pending: safe_pending_count)
     end
 
     def pending_count = Client.pending_count
+    def held_count = Client.held_count
+    def held_mutations = Client.held_mutations
+    def next_release_at = Client.next_release_at
+    def next_release_ms = Client.next_release_ms
     def cursor = Client.cursor
+    def sync_notices = SyncNotice.active.recent
+    def sync_notices_count = SyncNotice.active.count
+    def resolve_sync_notice(id, action:, overrides: {}) = SyncNotice.resolve(id, action: action, overrides: overrides)
+
+    # Hold local outbox writes created inside the block for `seconds` before they
+    # mature for sync, recording a pre-mutation snapshot so cancel_pending can
+    # restore local SQLite and drop the outbox row before release.
+    def hold_for(seconds, &block)
+      Client.with_hold(seconds, &block)
+    end
+
+    # Cancel a held outbox mutation before its release_at matures, restoring the
+    # local SQLite row from its pre-mutation snapshot and deleting the outbox row.
+    def cancel_pending(mutation_id)
+      Client.cancel_pending(mutation_id)
+    end
 
     # Copy-on-write local SQLite staging branch. Forks the live local SQLite
     # workspace into an isolated offline copy for safe bulk edits and visual UI
@@ -335,11 +382,7 @@ module InstantRecord
     def mount_path
       return config.mount_path if config.mount_path.is_a?(String)
 
-      configured =
-        if defined?(Rails) && Rails.application && Rails.application.config.respond_to?(:instant_record)
-          Rails.application.config.instant_record.mount_path
-        end
-      configured.is_a?(String) ? configured : DEFAULT_MOUNT_PATH
+      Host.default_mount_path
     end
 
     # The retry decision must survive a database that is itself unhappy:
@@ -368,16 +411,16 @@ end
 
 ActiveSupport.on_load(:active_record) do
   require "instant_record/sync_window"
+  require "instant_record/sync_partition"
+  require "instant_record/sync_metadata"
+  require "instant_record/hlc"
   require "instant_record/sync_actions"
   require "instant_record/syncable"
   require "instant_record/outbox_mutation"
-  require "instant_record/sync_metadata"
+  require "instant_record/sync_notice"
   require "instant_record/client"
   require "instant_record/branch"
-  require "instant_record/branch/sqlite_store"
+  InstantRecord::Host.load_branch_store
 end
 
-ActiveSupport.on_load(:active_job) do
-  require "instant_record/sync_actions"
-  InstantRecord::SyncActions.install_active_job_guard!
-end
+InstantRecord::Host.install_active_job_guard

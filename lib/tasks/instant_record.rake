@@ -27,8 +27,23 @@ namespace :instant_record do
       endpoint: ENV.fetch("SYNC_ENDPOINT") { mount_path },
       mount_path: mount_path,
       baseline: Rails.application.config.instant_record.compiled_migration_baseline,
-      migration_paths: Rails.application.config.paths["db/migrate"].existent
+      migration_paths: Rails.application.config.paths["db/migrate"].existent,
+      island: ENV["INSTANT_RECORD_ISLAND"].presence || Rails.application.config.instant_record.island,
+      overrides: Rails.application.config.instant_record.include,
+      shell_snapshot: Rails.application.config.instant_record.shell_snapshot
     }
+  end
+
+  desc "Print the canonical instant_record.manifest.json for this app's local-first island"
+  task :manifest, [:island] => :environment do |_task, args|
+    require "instant_record/compiler"
+    manifest = InstantRecord::Compiler.manifest(
+      root: Rails.root,
+      island: args[:island].presence || ENV["INSTANT_RECORD_ISLAND"].presence || Rails.application.config.instant_record.island,
+      overrides: Rails.application.config.instant_record.include,
+      migration_paths: Rails.application.config.paths["db/migrate"].existent
+    )
+    puts manifest.to_json
   end
 
   desc "Compile this Rails app to a static browser site using Roundhouse, Spinel and SQLite"
@@ -49,24 +64,128 @@ namespace :instant_record do
   task :native, [:target] => :environment do |_task, args|
     options = compiler_options.call
     require_toolchain.call(options[:toolchain])
-    output = InstantRecord::Compiler.build_native(**options, target: args[:target])
+    output = InstantRecord::Compiler.build_native(
+      **options.except(:shell_snapshot),
+      target: args[:target],
+      swift_out: ENV["SWIFT_OUT"],
+      kotlin: ENV["KOTLIN"] == "1" || ENV["KOTLIN_OUT"].present?,
+      kotlin_out: ENV["KOTLIN_OUT"],
+      kotlin_package: ENV.fetch("KOTLIN_PACKAGE", "dev.instantrecord.contracts")
+    )
     puts "Native libraries: #{output}"
   rescue InstantRecord::Compiler::BuildError, ArgumentError => e
     abort e.message
   end
 
-  desc "Verify the compiler toolchain configuration (optional target: wasm, native, iphonesimulator, iphoneos)"
+  namespace :native do
+    desc "Generate typed Swift (and optional Kotlin) contract bindings from app/screens without running a C build"
+    task contracts: :environment do
+      require "instant_record/compiler"
+      swift_out = ENV.fetch("SWIFT_OUT") { Rails.root.join("tmp/instant_record/compiled/.build-native/generated/InstantRecordContracts.swift").to_s }
+      kotlin_out = ENV["KOTLIN_OUT"] || (ENV["KOTLIN"] == "1" ? Rails.root.join("tmp/instant_record/compiled/.build-native/generated/InstantRecordContracts.kt").to_s : nil)
+      result = InstantRecord::Compiler.generate_native_contracts(
+        screens_dir: Rails.root.join("app/screens").to_s,
+        swift_out: swift_out,
+        kotlin_out: kotlin_out,
+        kotlin_package: ENV.fetch("KOTLIN_PACKAGE", "dev.instantrecord.contracts")
+      )
+      if result[:contracts].empty?
+        puts "No native contracts declared in app/screens."
+      else
+        result[:written].each { |lang, path| puts "Generated #{lang} contracts (#{result[:contracts].size}): #{path}" }
+      end
+    rescue InstantRecord::Compiler::BuildError => e
+      abort e.message
+    end
+  end
+
+  desc "Run the local MCP stdio server or offline CLI around the compiled native host (pass CLI args after `--`)"
+  task mcp: :environment do
+    require "instant_record/compiler"
+    require "instant_record/mcp"
+
+    Rails.application.eager_load!
+    mount_path = Rails.application.config.instant_record.mount_path || InstantRecord::DEFAULT_MOUNT_PATH
+    default_endpoint =
+      if mount_path.to_s.start_with?("http://", "https://")
+        mount_path.to_s
+      else
+        "http://127.0.0.1:#{ENV.fetch('PORT', '3000')}#{mount_path}"
+      end
+
+    screens = InstantRecord::Compiler::EntryBuilder.discover_screens(Rails.root.to_s).map(&:first)
+    models = InstantRecord.syncable_models.map(&:name)
+    builder = lambda do
+      options = compiler_options.call
+      require_toolchain.call(options[:toolchain])
+      InstantRecord::Compiler.build_native(**options, out: $stderr)
+    end
+
+    cli_args =
+      if (sep = ARGV.index("--"))
+        ARGV[(sep + 1)..]
+      else
+        []
+      end
+
+    status = InstantRecord::Mcp::Cli.run(
+      cli_args,
+      defaults: {
+        root: Rails.root.to_s,
+        endpoint: default_endpoint,
+        models: models,
+        screens: screens,
+        builder: builder
+      }
+    )
+    exit(status)
+  end
+
+  desc "Verify the compiler toolchain, static AOT/32-bit compatibility, and schema lockfile upgrade ladder (optional target: wasm, native, iphonesimulator, iphoneos)"
   task :doctor, [:target] => :environment do |_task, args|
     require "instant_record/compiler"
+    Rails.application.eager_load!
     toolchain = toolchain_path.call
     require_toolchain.call(toolchain)
     report = InstantRecord::Compiler.doctor(
       toolchain: toolchain,
       target: args[:target] || :wasm,
-      web_dir: Rails.root.join("tmp/instant_record/compiled/web")
+      web_dir: Rails.root.join("tmp/instant_record/compiled/web"),
+      root: Rails.root,
+      app_root: Rails.root,
+      baseline: Rails.application.config.instant_record.compiled_migration_baseline,
+      migration_paths: Rails.application.config.paths["db/migrate"].existent,
+      models: InstantRecord.syncable_models
     )
     puts report
-    abort "Toolchain check failed." unless report.ok?
+    abort "Doctor check failed." unless report.ok?
+  end
+
+  namespace :schema do
+    desc "Generate or update db/instant_record_lock.json from db/schema.rb and db/migrate"
+    task lock: :environment do
+      require "instant_record/compiler"
+      lock = InstantRecord::Compiler.lock_schema(
+        root: Rails.root,
+        baseline: Rails.application.config.instant_record.compiled_migration_baseline,
+        migration_paths: Rails.application.config.paths["db/migrate"].existent
+      )
+      puts "Wrote #{InstantRecord::Compiler::SchemaLock.path(Rails.root)} (schema version #{lock['schema_version']}, #{lock['versions'].size} versions)"
+    end
+
+    desc "Verify db/instant_record_lock.json and replay every historical schema version + pending outbox up to HEAD"
+    task verify: :environment do
+      require "instant_record/compiler"
+      Rails.application.eager_load!
+      report = InstantRecord::Compiler.verify_schema(
+        root: Rails.root,
+        baseline: Rails.application.config.instant_record.compiled_migration_baseline,
+        migration_paths: Rails.application.config.paths["db/migrate"].existent,
+        models: InstantRecord.syncable_models
+      )
+      puts report
+      abort "Schema lockfile verification failed." unless report.ok?
+    end
   end
 
   desc "Replay a recorded .irtrace flight recorder file deterministically in Node AppHost"
@@ -146,6 +265,30 @@ namespace :instant_record do
       removed = InstantRecord::Files.store.sweep(before: days.days.ago)
       puts "Removed #{removed} given-up #{"upload".pluralize(removed)}"
     end
+  end
+
+  desc "Run headless dual-runtime parity checks across CRuby+DB, compiled app.wasm (Node AppHost), and Native C ABI (Fiddle)"
+  task verify_parity: :environment do
+    require "instant_record/testing"
+    Rails.application.eager_load!
+    InstantRecord::Testing.verify_parity(
+      rails_app: Rails.application,
+      root: Rails.root
+    )
+  rescue InstantRecord::Testing::Error => e
+    abort e.message
+  end
+
+  desc "Run deterministic seeded multi-client chaos simulation across CRuby+DB, compiled app.wasm, and Native C ABI (SEED=, SEEDS=, STEPS=, CLIENTS=, RUNTIMES=, REQUIRE_COMPILED=1)"
+  task chaos: :environment do
+    require "instant_record/testing"
+    Rails.application.eager_load!
+    InstantRecord::Testing.run_chaos(
+      rails_app: Rails.application,
+      root: Rails.root
+    )
+  rescue InstantRecord::Testing::Error => e
+    abort e.message
   end
 end
 

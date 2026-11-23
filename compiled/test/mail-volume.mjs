@@ -4,11 +4,12 @@ import { performance } from "node:perf_hooks";
 import { chromium } from "../bench/env.mjs";
 
 const [site, rails] = process.argv.slice(2);
-const sync = new URL("/email/sync/maya/support/", rails);
+const sync = new URL("/instant_record/", rails);
+const headers = { "X-Instant-Record-Partition": "mailbox_id:support", "X-Instant-Record-Member": "maya" };
 const seen = new Set();
 let route = "bootstrap", pages = 0, maxRoots = 0, bootstrapBytes;
 do {
-  const response = await fetch(new URL(route, sync));
+  const response = await fetch(new URL(route, sync), { headers });
   assert.equal(response.status, 200);
   const text = await response.text();
   if (!pages) bootstrapBytes = Buffer.byteLength(text);
@@ -80,7 +81,7 @@ try {
     // A reader deep in the list keeps their place: the row they are on stays put.
     const place = () => rows.nth(3).evaluate(el => ({ id: el.dataset.id, y: el.getBoundingClientRect().top }));
     const held = await place();
-    const response = await page.request.post(new URL("incoming", sync).href);
+    const response = await page.request.post(new URL("/email/incoming?member=maya&inbox=support", rails).href);
     assert.equal(response.status(), 201);
     const incomingId = (await response.json()).id;
     await page.waitForTimeout(3000);
