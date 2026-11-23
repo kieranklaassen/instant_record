@@ -16,12 +16,15 @@ Gem::Specification.new do |spec|
   spec.metadata["source_code_uri"] = spec.homepage
   spec.metadata["changelog_uri"]   = "#{spec.homepage}/blob/main/CHANGELOG.md"
 
+  spec.bindir      = "exe"
+  spec.executables = ["instant_record_mcp"]
+
   # db/ is not optional: the engine appends its own db/migrate to the host app's
   # migration paths, and those migrations create the tables the sync protocol
   # runs on (changes, outbox, sync_metadata, applied_mutations). Omit them and
   # the gem installs into an app that can never build its own schema.
   files = Dir[
-    "{app,config,db,lib,sig}/**/*",
+    "{app,config,db,exe,lib,sig}/**/*",
     "frontend/**/*.js",
     "frontend/package.json",
     "CHANGELOG.md",

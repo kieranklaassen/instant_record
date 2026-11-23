@@ -81,6 +81,22 @@ class EvictionTest < Minitest::Test
     assert_equal 50, @model.where(sync_state: "synced").count
   end
 
+  def test_newer_pending_rows_do_not_starve_synced_rows_during_eviction
+    seed_rows(50, state: "a", start_at: 300.minutes.ago)
+    InstantRecord::Client.applying_remote do
+      55.times do |i|
+        at = 60.minutes.ago + i.minutes
+        @model.create!(id: "pending-#{format('%03d', i)}", state: "a", sync_state: "pending",
+          created_at: at, updated_at: at)
+      end
+    end
+
+    cold_boot_tick
+
+    assert_equal 50, @model.where(sync_state: "synced").count, "newer pending rows must not push synced rows past the window limit"
+    assert_equal 55, @model.where(sync_state: "pending").count
+  end
+
   def test_partitions_trim_independently
     seed_rows(55, state: "a", start_at: 300.minutes.ago)
     seed_rows(3, state: "b", start_at: 300.minutes.ago)

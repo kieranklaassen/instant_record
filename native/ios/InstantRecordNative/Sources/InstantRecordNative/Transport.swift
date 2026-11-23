@@ -19,6 +19,12 @@ public struct Transport {
         self.prepare = prepare
     }
 
+    /// Apply this transport's request preparation (for example Authorization
+    /// headers) to an outgoing request.
+    public func prepareRequest(_ request: inout URLRequest) {
+        prepare(&request)
+    }
+
     /// The request as it goes out, or nil when it cannot be read.
     func request(_ exchange: String) -> URLRequest? {
         let parts = exchange.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
@@ -48,6 +54,27 @@ public struct Transport {
         }.resume()
         done.wait()
         return answer
+    }
+
+    /// Downloads raw binary bytes (such as a prebuilt SQLite shell) without
+    /// UTF-8 decoding. Runs `prepare` so auth headers travel with the request,
+    /// and ignores caches so private shells are never reused across callers.
+    public func download(_ urlString: String) -> (status: Int, data: Data)? {
+        guard let url = URL(string: urlString), url.scheme != nil else { return nil }
+        var call = URLRequest(url: url)
+        call.httpMethod = "GET"
+        call.cachePolicy = .reloadIgnoringLocalCacheData
+        prepare(&call)
+        var result: (status: Int, data: Data)?
+        let done = DispatchSemaphore(value: 0)
+        session.dataTask(with: call) { data, response, _ in
+            if let response = response as? HTTPURLResponse, let data {
+                result = (response.statusCode, data)
+            }
+            done.signal()
+        }.resume()
+        done.wait()
+        return result
     }
 }
 

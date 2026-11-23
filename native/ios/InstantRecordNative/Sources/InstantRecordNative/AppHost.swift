@@ -51,6 +51,8 @@ public final class AppHost: ObservableObject {
     /// The screens on show, as the app last described them.
     @Published public private(set) var screens: [Route: Node] = [:]
     @Published public private(set) var status = Status()
+    /// Quarantined offline writes the server rejected or LWW overwrote.
+    @Published public private(set) var notices: [SyncNotice] = []
     /// True from launch until the first sync of a database that has never
     /// synced has ended: there is nothing to show yet, and that is not "empty".
     @Published public private(set) var fetchingFirst = false
@@ -91,6 +93,8 @@ public final class AppHost: ObservableObject {
     private let store: (Route) -> Store
     private let transport: Transport
     private let exchange: (String) -> String
+    private let download: (String) -> (status: Int, data: Data)?
+    private let shellFingerprint: String
     private let follows: Bool
     private let leaveWithin: TimeInterval
     private let thread = EngineThread()
@@ -115,6 +119,7 @@ public final class AppHost: ObservableObject {
     /// leaving it. `exchange` stands in for the network in tests.
     public init(engine: Engine, root: Route, views: Screens = Screens(), store: @escaping (Route) -> Store,
                 transport: Transport = Transport(), follows: Bool = true, leaveWithin: TimeInterval = 1, exchange: ((String) -> String)? = nil,
+                download: ((String) -> (status: Int, data: Data)?)? = nil, shellFingerprint: String = "",
                 pace: SyncSchedule.Pace = SyncSchedule.Pace(), clock: Timekeeper = MainClock(), reachability: Reachability = NetworkPath()) {
         self.engine = engine
         self.root = root
@@ -124,6 +129,8 @@ public final class AppHost: ObservableObject {
         self.follows = follows
         self.leaveWithin = leaveWithin
         self.exchange = exchange ?? transport.exchange
+        self.download = download ?? transport.download
+        self.shellFingerprint = shellFingerprint
         visible = [root]
         schedule = SyncSchedule(pace: pace, clock: clock) { [weak self] in self?.pass() }
         stream = StreamClient(transport: transport, address: { [weak self] in await self?.streamAddress() }, feed: { [weak self] in await self?.feed($0, from: $1) })
@@ -143,8 +150,10 @@ public final class AppHost: ObservableObject {
                 return Transport.offline
             }
             if self.engine.boot(database: store.database) { self.open = store } else { self.report() }
-            let first = self.engine.syncs && self.position()["bootstrap"] == "needed"
+            let pos = self.engine.syncs ? self.position() : [:]
+            let first = self.engine.syncs && pos["bootstrap"] == "needed"
             DispatchQueue.main.async { self.fetchingFirst = first }
+            self.loadNoticesIfNeeded(from: pos)
             self.draw()
         }
         schedule.request()
@@ -174,18 +183,20 @@ public final class AppHost: ObservableObject {
     }
 
     /// A tap: the screen at `route` performs `action` with the arguments the
-    /// element carried and whatever is typed into the screen's fields. The
-    /// screens are drawn again from the local database, and the write goes
-    /// to the server soon after.
-    public func perform(_ action: String, args: [String: String] = [:], on route: Route) {
-        let values = typed[route] ?? [:]
+    /// element carried and whatever is typed into the screen's fields (plus
+    /// any explicit `values` passed by a typed native view). The screens are
+    /// drawn again from the local database, and the write goes to the server
+    /// soon after.
+    public func perform(_ action: String, args: [String: String] = [:], values: [String: String] = [:], on route: Route) {
+        let fieldValues = typed[route] ?? [:]
+        let mergedValues = values.isEmpty ? fieldValues : fieldValues.merging(values) { _, explicit in explicit }
         thread.run {
-            let performed = self.act(action, args, values, on: route)
+            let performed = self.act(action, args, mergedValues, on: route)
             self.draw()
             // What was typed is forgotten once it has been handed over, unless
             // more was typed since.
-            if performed, !values.isEmpty {
-                DispatchQueue.main.async { if self.typed[route] == values { self.typed[route] = nil } }
+            if performed, !fieldValues.isEmpty {
+                DispatchQueue.main.async { if self.typed[route] == fieldValues { self.typed[route] = nil } }
             }
         }
         schedule.request()
@@ -255,6 +266,21 @@ public final class AppHost: ObservableObject {
         undrawn = false
     }
 
+    /// Re-apply a quarantined local write so it queues a fresh outbox mutation.
+    public func retryNotice(_ id: String, overrides: [String: String] = [:]) {
+        resolveNotice("retry", id: id, overrides: overrides)
+    }
+
+    /// Fork a quarantined local write into a new record with a fresh UUID.
+    public func forkNotice(_ id: String, overrides: [String: String] = [:]) {
+        resolveNotice("fork", id: id, overrides: overrides)
+    }
+
+    /// Dismiss a quarantined sync notice without deleting its audit row.
+    public func dismissNotice(_ id: String) {
+        resolveNotice("dismiss", id: id, overrides: [:])
+    }
+
     // Follow the server's events while in front, from the database now open.
     // Called again when another database opens, which drops the request
     // held for the one that was left.
@@ -292,10 +318,10 @@ public final class AppHost: ObservableObject {
             guard let store = self.open, self.engine.syncs else {
                 // Nothing can sync. Say the pass ended, or the schedule
                 // would wait for it and never start another.
-                return self.ended(ok: self.engine.syncs == false, pending: 0, offline: false, error: nil)
+                return self.ended(ok: self.engine.syncs == false, pending: 0, offline: false, error: nil, nextRelease: nil)
             }
             self.run(store) { outcome in
-                self.ended(ok: outcome.ok, pending: outcome.pending, offline: outcome.offline, error: outcome.error)
+                self.ended(ok: outcome.ok, pending: outcome.pending, offline: outcome.offline, error: outcome.error, nextRelease: outcome.nextRelease)
                 // A tap between the fetch and the hand-over changed what the
                 // app wanted to send. It goes out with a pass of its own.
                 if outcome.outdated { DispatchQueue.main.async { self.schedule.request() } }
@@ -324,7 +350,9 @@ public final class AppHost: ObservableObject {
             thread.run {
                 guard self.open == store else { return done.resume() }
                 if self.engine.call("stream", event) == nil { self.report() }
-                if self.engine.notice().hasPrefix("records_changed") { self.draw() }
+                let signal = NoticeSignal.parse(self.engine.notice())
+                if !signal.syncNotices.isEmpty { self.mergeNotices(signal.syncNotices) }
+                if signal.recordsChanged { self.draw() }
                 done.resume()
             }
         }
@@ -338,19 +366,32 @@ public final class AppHost: ObservableObject {
         var offline = false
         var outdated = false
         var error: String?
+        var nextRelease: TimeInterval?
     }
+
+    private static let sqliteHeader = Data("SQLite format 3\0".utf8)
 
     /// One sync pass for `store`: ask the app what it will want, fetch that
     /// off this thread, then let the app sync against the answers alone.
+    /// When a brand-new database needs a bootstrap and carries a schema
+    /// fingerprint, try hydrating from a prebuilt SQLite shell via `ir_open`
+    /// first, falling back seamlessly to `/bootstrap` on any miss or error.
     /// `then` runs on this thread when the pass has ended.
-    private func run(_ store: Store, then: @escaping (Outcome) -> Void) {
+    private func run(_ store: Store, allowShell: Bool = true, then: @escaping (Outcome) -> Void) {
         guard let plan = engine.call("sync_plan", "").flatMap(Self.object) else {
-            return then(Outcome(pending: pending(), error: engine.error()))
+            return then(Outcome(pending: pending(), error: engine.error(), nextRelease: nextRelease()))
+        }
+        let push = (plan["push"] as? String) ?? ""
+        let needsBootstrap = plan["bootstrap"] as? Bool == true
+        let planFingerprint = (plan["fingerprint"] as? String) ?? ""
+        let fingerprint = planFingerprint.isEmpty ? shellFingerprint : planFingerprint
+        if allowShell, needsBootstrap, push.isEmpty, !fingerprint.isEmpty {
+            return hydrateFromShell(store, fingerprint: fingerprint, then: then)
         }
         let position = position()
         var wanted: [String] = []
-        if let push = plan["push"] as? String, !push.isEmpty { wanted.append("POST \(store.endpoint)/mutations\n\(push)") }
-        if plan["bootstrap"] as? Bool == true {
+        if !push.isEmpty { wanted.append("POST \(store.endpoint)/mutations\n\(push)") }
+        if needsBootstrap {
             wanted.append("GET \(store.endpoint)/bootstrap\n")
         } else {
             let who = (position["identity"] ?? "").isEmpty ? "" : "&identity=" + position["identity"]!
@@ -380,8 +421,12 @@ public final class AppHost: ObservableObject {
                 let synced = self.engine.call("sync", store.endpoint)
                 self.prepared = nil
                 if synced == nil { outcome.error = self.engine.error() }
-                if self.engine.notice().hasPrefix("records_changed") { self.draw() }
-                outcome.pending = self.pending()
+                let signal = NoticeSignal.parse(self.engine.notice())
+                if !signal.syncNotices.isEmpty { self.mergeNotices(signal.syncNotices) }
+                if signal.recordsChanged { self.draw() }
+                let state = self.position()
+                outcome.pending = Int(state["pending"] ?? "") ?? 0
+                outcome.nextRelease = Self.releaseDelay(from: state)
                 outcome.outdated = self.unanswered && !outcome.offline
                 outcome.ok = synced != nil && !outcome.offline && outcome.error == nil
                 then(outcome)
@@ -389,14 +434,119 @@ public final class AppHost: ObservableObject {
         }
     }
 
-    private func ended(ok: Bool, pending: Int, offline: Bool, error: String?) {
+    private func hydrateFromShell(_ store: Store, fingerprint: String, then: @escaping (Outcome) -> Void) {
+        let grantRequest = "GET \(store.endpoint)/shell?fingerprint=\(fingerprint)\n"
+        network.async {
+            let grantReply = Reply(self.exchange(grantRequest))
+            if grantReply.status == 0 {
+                return self.thread.run { then(Outcome(offline: true)) }
+            }
+            guard grantReply.status == 200,
+                  let grant = Self.object(grantReply.body),
+                  let filePath = grant["path"] as? String,
+                  filePath.hasPrefix("/shell/file"),
+                  let cursor = grant["cursor"] as? Int,
+                  cursor >= 0,
+                  let fetched = self.download(store.endpoint + filePath),
+                  fetched.status == 200,
+                  fetched.data.count >= Self.sqliteHeader.count,
+                  fetched.data.prefix(Self.sqliteHeader.count) == Self.sqliteHeader
+            else {
+                return self.thread.run {
+                    guard self.open == store else { return then(Outcome()) }
+                    self.run(store, allowShell: false, then: then)
+                }
+            }
+            let expectedIdentity = grant["identity"] as? String ?? ""
+            let staged = store.database + ".shell.\(UUID().uuidString).tmp"
+            let stagedURL = URL(fileURLWithPath: staged)
+            do {
+                try FileManager.default.createDirectory(at: stagedURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try fetched.data.write(to: stagedURL, options: .atomic)
+            } catch {
+                Self.removeSQLiteFiles(atPath: staged)
+                return self.thread.run {
+                    guard self.open == store else { return then(Outcome()) }
+                    self.run(store, allowShell: false, then: then)
+                }
+            }
+            self.thread.run {
+                guard self.open == store else {
+                    Self.removeSQLiteFiles(atPath: staged)
+                    return then(Outcome())
+                }
+                let current = self.position()
+                guard current["bootstrap"] == "needed", self.pending() == 0 else {
+                    Self.removeSQLiteFiles(atPath: staged)
+                    return self.run(store, allowShell: false, then: then)
+                }
+                guard self.engine.open(database: staged) else {
+                    Self.removeSQLiteFiles(atPath: staged)
+                    return self.run(store, allowShell: false, then: then)
+                }
+                let state = self.position()
+                let validCursor = state["bootstrap"] == "ready" && Int(state["cursor"] ?? "") == cursor
+                let validIdentity = expectedIdentity.isEmpty || state["identity"] == expectedIdentity
+                guard validCursor && validIdentity else {
+                    _ = self.engine.open(database: store.database)
+                    Self.removeSQLiteFiles(atPath: staged)
+                    return self.run(store, allowShell: false, then: then)
+                }
+                guard self.promoteShell(staged: staged, to: store.database) else {
+                    _ = self.engine.open(database: store.database)
+                    Self.removeSQLiteFiles(atPath: staged)
+                    return self.run(store, allowShell: false, then: then)
+                }
+                self.draw()
+                // Hydrated and drawn; schedule an immediate catch-up pass from the shell's cursor.
+                then(Outcome(ok: true, pending: self.pending(), offline: false, outdated: true, error: nil, nextRelease: self.nextRelease()))
+            }
+        }
+    }
+
+    private func promoteShell(staged: String, to target: String) -> Bool {
+        let fm = FileManager.default
+        let backup = target + ".shell-backup.\(UUID().uuidString).tmp"
+        let hadTarget = fm.fileExists(atPath: target)
+        do {
+            if hadTarget {
+                try fm.moveItem(atPath: target, toPath: backup)
+                for suffix in ["-wal", "-shm", "-journal"] {
+                    try? fm.removeItem(atPath: target + suffix)
+                }
+            }
+            try fm.moveItem(atPath: staged, toPath: target)
+            guard engine.open(database: target) else {
+                try? fm.removeItem(atPath: target)
+                if hadTarget { try? fm.moveItem(atPath: backup, toPath: target) }
+                return false
+            }
+            Self.removeSQLiteFiles(atPath: staged)
+            if hadTarget { Self.removeSQLiteFiles(atPath: backup) }
+            return true
+        } catch {
+            if !fm.fileExists(atPath: target), hadTarget, fm.fileExists(atPath: backup) {
+                try? fm.moveItem(atPath: backup, toPath: target)
+            }
+            return false
+        }
+    }
+
+    private static func removeSQLiteFiles(atPath path: String) {
+        let fm = FileManager.default
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            try? fm.removeItem(atPath: path + suffix)
+        }
+    }
+
+    private func ended(ok: Bool, pending: Int, offline: Bool, error: String?, nextRelease: TimeInterval?) {
         draw()
         DispatchQueue.main.async {
             self.fetchingFirst = false
             self.status.pending = pending
             self.status.offline = offline
             if let error { self.status.syncError = error } else if ok { self.status.syncError = "" }
-            self.schedule.finished(ok: ok, pending: pending)
+            self.schedule.finished(ok: ok, pending: pending, nextRelease: nextRelease)
             let waiting = self.refreshing
             self.refreshing = []
             waiting.forEach { $0() }
@@ -409,7 +559,9 @@ public final class AppHost: ObservableObject {
     // that has never synced has nothing to show yet.
     private func arrive(at route: Route) {
         let drawn = engine.call("render", route.input()).flatMap { try? Node(json: $0) }
-        let first = engine.syncs && position()["bootstrap"] == "needed"
+        let pos = engine.syncs ? position() : [:]
+        let first = engine.syncs && pos["bootstrap"] == "needed"
+        loadNoticesIfNeeded(from: pos)
         DispatchQueue.main.async {
             self.root = route
             if let drawn { self.screens[route] = drawn }
@@ -446,6 +598,15 @@ public final class AppHost: ObservableObject {
         Int(position()["pending"] ?? "") ?? 0
     }
 
+    private func nextRelease() -> TimeInterval? {
+        Self.releaseDelay(from: position())
+    }
+
+    private static func releaseDelay(from state: [String: String]) -> TimeInterval? {
+        guard let raw = state["next_release_ms"], let ms = Double(raw) else { return nil }
+        return max(0, ms / 1000.0)
+    }
+
     // A screen that cannot be drawn keeps the last one that could, and the
     // reason is shown.
     private func draw() {
@@ -479,6 +640,53 @@ public final class AppHost: ObservableObject {
         DispatchQueue.main.async {
             self.status.error = message
             self.undrawn = false
+        }
+    }
+
+    private func resolveNotice(_ action: String, id: String, overrides: [String: String]) {
+        let payload: [String: Any] = ["action": action, "id": id, "overrides": overrides]
+        let input = (try? JSONSerialization.data(withJSONObject: payload)).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+        thread.run {
+            guard let raw = self.engine.call("notices", input) else {
+                self.report()
+                return
+            }
+            if let response = try? JSONDecoder().decode(SyncNoticesResponse.self, from: Data(raw.utf8)) {
+                DispatchQueue.main.async {
+                    if let list = response.notices { self.notices = list }
+                    if !response.ok, let message = response.error {
+                        self.status.error = message
+                        self.undrawn = false
+                    }
+                }
+            }
+            self.draw()
+        }
+        if action == "retry" || action == "fork" {
+            schedule.request()
+        }
+    }
+
+    private func loadNoticesIfNeeded(from position: [String: String]) {
+        let count = Int(position["notices"] ?? "") ?? 0
+        guard count > 0 else {
+            DispatchQueue.main.async { self.notices = [] }
+            return
+        }
+        guard let raw = engine.call("notices", "{\"action\":\"list\"}"),
+              let response = try? JSONDecoder().decode(SyncNoticesResponse.self, from: Data(raw.utf8)),
+              let list = response.notices else { return }
+        DispatchQueue.main.async { self.notices = list }
+    }
+
+    private func mergeNotices(_ incoming: [SyncNotice]) {
+        DispatchQueue.main.async {
+            var merged = incoming
+            let incomingIds = Set(incoming.map(\.id))
+            for existing in self.notices where !incomingIds.contains(existing.id) {
+                merged.append(existing)
+            }
+            self.notices = merged
         }
     }
 
