@@ -289,7 +289,22 @@ function createTestEnvironment({ opfsUnavailable = false, seedIdbBytes = null, s
     sync() { return { changed: false, pending: 0, cursor: this.state.cursor, notified: false, changes: null }; }
     applySync() { return { changed: false, pending: 0, cursor: this.state.cursor, progressed: false, failed: false, quarantined: 0, notified: false, changes: null }; }
     syncState() { return { bootstrapped: true, cursor: this.state.cursor, pending: 0, identity: "" }; }
-    consumeStream() { return { applied: 0, cursor: this.state.cursor, bootstrapped: true, notified: false, changes: null }; }
+    consumeStream(chunk) {
+      const applied = [];
+      let cursor = this.state.cursor;
+      for (const block of String(chunk).split("\n\n")) {
+        const idMatch = /^id: (.+)$/m.exec(block);
+        const dataMatch = /^data: (.+)$/m.exec(block);
+        if (!dataMatch) continue;
+        const ev = JSON.parse(dataMatch[1]);
+        if (idMatch) cursor = Number(idMatch[1]);
+        applied.push({ type: ev.type, id: ev.id });
+      }
+      if (applied.length > 0) {
+        this._persist({ ...this.state, cursor, items: [...this.state.items, ...applied.map(c => c.id)] });
+      }
+      return { applied: applied.length, cursor, bootstrapped: true, notified: applied.length > 0, changes: applied.length > 0 ? applied : null };
+    }
     history(_key, response = "") {
       if (!response) return { ok: false, applied: 0, has_more: true };
       const page = JSON.parse(response);
@@ -298,7 +313,7 @@ function createTestEnvironment({ opfsUnavailable = false, seedIdbBytes = null, s
     }
   }
 
-  function spawnWorker({ envOverrides = {}, fetchImpl } = {}) {
+  function spawnWorker({ envOverrides = {}, fetchImpl, streamEnabled = false, streamOptions = {} } = {}) {
     const idb = makeIdbForWorker();
     const messages = [];
     const runtime = createWorkerRuntime({
@@ -321,7 +336,9 @@ function createTestEnvironment({ opfsUnavailable = false, seedIdbBytes = null, s
       fetchImpl: fetchImpl || (async () => ({ status: 200, ok: true, text: async () => "{}" })),
       postMessage: msg => messages.push(msg),
       origin: "http://demo.test",
-      pollIntervalMs: 0,
+      pollIntervalMs: streamEnabled ? 1000 : 0,
+      streamEnabled,
+      streamOptions,
       fillInitialDelayMs: 60000,
     });
 
@@ -512,4 +529,79 @@ test("cold-boot IndexedDB deletion resets stale OPFS file cleanly on next boot",
   const read = await tab2.rpc("request", { method: "GET", path: "/items" });
   assert.deepEqual(JSON.parse(read.body), []);
   tab2.runtime.shutdown();
+});
+
+test("reactor leader holds one visibility-aware SSE stream, broadcasts to followers, and fails over cleanly", async () => {
+  const env = createTestEnvironment();
+  const requests = [];
+  const streams = [];
+  const encoder = new TextEncoder();
+
+  const sseFetch = async (url, init = {}) => {
+    if (!String(url).includes("/events")) {
+      return { status: 200, ok: true, text: async () => "{}" };
+    }
+    requests.push(url);
+    let controllerRef;
+    let closed = false;
+    const body = new ReadableStream({
+      start(controller) {
+        controllerRef = controller;
+        init.signal?.addEventListener("abort", () => {
+          if (!closed) {
+            closed = true;
+            try { controller.error(Object.assign(new Error("Aborted"), { name: "AbortError" })); } catch {}
+          }
+        }, { once: true });
+      },
+    });
+    const stream = {
+      push: text => { if (!closed) controllerRef.enqueue(encoder.encode(text)); },
+      isClosed: () => closed,
+    };
+    streams.push(stream);
+    return { status: 200, ok: true, body };
+  };
+
+  const waitFor = async (fn, ms = 1500) => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (fn()) return;
+      await new Promise(r => setTimeout(r, 10));
+    }
+    throw new Error("Timed out waiting for condition");
+  };
+
+  const tab1 = env.spawnWorker({ fetchImpl: sseFetch, streamEnabled: true, streamOptions: { hiddenGraceMs: 40 } });
+  const tab2 = env.spawnWorker({ fetchImpl: sseFetch, streamEnabled: true, streamOptions: { hiddenGraceMs: 40 } });
+
+  try {
+    await tab1.rpc("boot", { module: {}, path: "/todo", scope: "s1", visible: true });
+    await tab2.rpc("boot", { module: {}, path: "/todo", scope: "s1", visible: true });
+
+    await waitFor(() => streams.length === 1 && tab1.runtime.streamOpen);
+    assert.equal(requests.length, 1);
+    assert.doesNotMatch(requests[0], /window=0/);
+    assert.match(requests[0], /\/instant_record\/events\?after=1&scope=s1/);
+
+    // Streamed event feeds host.consumeStream and notifies follower over BroadcastChannel.
+    streams[0].push('id: 2\nevent: change\ndata: {"type":"Issue","id":"streamed-1"}\n\n');
+    await waitFor(() => tab2.messages.some(m => m.type === "records_changed" && m.changes?.some(c => c.id === "streamed-1")));
+
+    // Hiding both tabs pauses the stream; revealing tab2 resumes it.
+    await tab1.runtime.handleMessage({ data: { type: "instant_record.visibility", visible: false } });
+    await tab2.runtime.handleMessage({ data: { type: "instant_record.visibility", visible: false } });
+    await waitFor(() => streams[0].isClosed() && !tab1.runtime.streamOpen);
+
+    await tab2.runtime.handleMessage({ data: { type: "instant_record.visibility", visible: true } });
+    await waitFor(() => streams.length === 2 && tab1.runtime.streamOpen);
+
+    // Leader crash promotes tab2 and resumes streaming from cursor 2.
+    tab1.runtime.shutdown({ announceBye: false });
+    await waitFor(() => tab2.runtime.role === "leader" && streams.length === 3 && tab2.runtime.streamOpen);
+    assert.match(requests[2], /after=2/);
+  } finally {
+    tab1.runtime.shutdown();
+    tab2.runtime.shutdown();
+  }
 });

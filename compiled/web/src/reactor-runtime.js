@@ -1,6 +1,7 @@
 // Core worker runtime: coordinates leader election per (origin, scope), OPFS page-level
-// WASI SQLite storage (with IndexedDB fallback), non-blocking outbox draining, change
-// polling, background history fill, and multi-tab RPC routing.
+// WASI SQLite storage (with IndexedDB fallback), non-blocking outbox draining, a
+// leader-elected visibility-aware SSE change stream, background history fill, and
+// multi-tab RPC routing.
 import { BranchManager } from "./branch-manager.js";
 import { advance, fresh, held, query } from "./history-fill.js";
 import { redirectHeaders } from "./http-headers.js";
@@ -10,10 +11,10 @@ import { createLeaderCoordinator } from "./leader-election.js";
 import { resolveServerRequest, serverRoot } from "./server-request.js";
 import { isValidSqliteBytes, parseShellGrant, scopedUrl, shouldFetchShell, validateShellState } from "./shell.js";
 import { openDatabaseStorage } from "./storage-backend.js";
+import { createStreamLeader } from "./stream-leader.js";
 import { runDrain } from "./sync-drain.js";
 import { nextSyncAction } from "./sync-schedule.js";
 
-const POLL_EVERY_MS = 1000;
 const QUIET_MS = 30;
 const DRAIN_RETRY_BASE_MS = 500;
 const DRAIN_RETRY_CAP_MS = 10000;
@@ -48,7 +49,9 @@ export function createWorkerRuntime({
   storageApi = globalThis.navigator?.storage,
   createChannel,
   compileWasm = url => WebAssembly.compileStreaming(fetchImpl(url)),
-  pollIntervalMs = POLL_EVERY_MS,
+  pollIntervalMs = 1000,
+  streamEnabled = pollIntervalMs !== 0,
+  streamOptions = {},
   fillInitialDelayMs = 1000,
   scopeOf = path => mailboxScope(path, !!env.VITE_SHARED_INBOX_DEMO),
   now = () => performance.now(),
@@ -76,15 +79,17 @@ export function createWorkerRuntime({
   let host = null;
   const branches = new BranchManager();
   let snapshotRevision;
-  let currentCursor = null;
-  let currentIdentity = "";
   let kickTimer = null;
   let kickHeld = false;
-  let pollTimer = null;
-  let pollInFlight = false;
   let draining = null;
   let localRevision = 0;
   const drainRetry = { baseMs: DRAIN_RETRY_BASE_MS, capMs: DRAIN_RETRY_CAP_MS, delayMs: DRAIN_RETRY_BASE_MS };
+
+  let streamLeader = null;
+  let streamOpen = false;
+  let pageVisible = true;
+  let pageTornDown = false;
+  let pageSuspended = false;
 
   let mailScope = "";
   let fillState = null;
@@ -294,7 +299,6 @@ export function createWorkerRuntime({
             host = restored;
             snapshotRevision = revision;
             localRevision++;
-            currentCursor = null;
           }
           return operation(() => {
             const bytes = host.databaseBytes();
@@ -314,7 +318,6 @@ export function createWorkerRuntime({
   async function fetchReply(method, path, body = "", endpoint = syncEndpoint, contentType = undefined) {
     const url = endpoint + path;
     const started = now();
-    const poll = path.startsWith("/events?");
     let status = 0;
     let text = "";
     let responseContentType = "";
@@ -342,15 +345,13 @@ export function createWorkerRuntime({
     } catch {
       // A failed exchange stays in the durable outbox for retry.
     } finally {
-      if (!poll || status !== 200 || text.trim()) {
-        report({
-          kind: poll ? "stream" : "sync",
-          method,
-          path: new URL(url, origin).pathname,
-          status: outcome,
-          ms: Math.round(now() - started),
-        });
-      }
+      report({
+        kind: "sync",
+        method,
+        path: new URL(url, origin).pathname,
+        status: outcome,
+        ms: Math.round(now() - started),
+      });
     }
     return { method, url, body, status, text, contentType: responseContentType };
   }
@@ -377,9 +378,14 @@ export function createWorkerRuntime({
   }
 
   function handleOnline() {
+    streamLeader?.setOnline(true);
     if (!isLeaderOrStandalone()) return;
     kickSync(0);
     if (mailScope && fillState && !fillState.done && !fillState.full) scheduleFill(0);
+  }
+
+  function handleOffline() {
+    streamLeader?.setOnline(false);
   }
 
   function syncPass() {
@@ -390,17 +396,28 @@ export function createWorkerRuntime({
     if (branches.isActive()) return Promise.resolve({ skipped: true, reason: "branched" });
     if (!draining) {
       const revision = localRevision;
-      draining = drain().finally(() => {
-        draining = null;
-        if (revision !== localRevision && !kickTimer) kickSync();
-      });
+      let drainOutcome = null;
+      draining = drain()
+        .then(result => {
+          drainOutcome = result;
+          return result;
+        })
+        .finally(() => {
+          draining = null;
+          if (revision !== localRevision && !kickTimer) kickSync();
+          if (drainOutcome && !drainOutcome.skipped) {
+            if (drainOutcome.bootstrappedNow) streamLeader?.reconnect();
+            else if (drainOutcome.pending === 0) streamLeader?.wake();
+          }
+        });
     }
     return draining;
   }
 
   async function drain(initial = false, early = null) {
     if (branches.isActive()) return { changed: false, skipped: true };
-    return runDrain({
+    let hadBootstrap = false;
+    const result = await runDrain({
       withSnapshot: (mode, op) => withDb(mode, save => op(() => {
         localRevision++;
         save();
@@ -411,7 +428,7 @@ export function createWorkerRuntime({
       initial,
       early,
       report,
-      setCursor: cursor => { currentCursor = cursor; },
+      setCursor: cursor => { if (cursor === null) hadBootstrap = true; },
       onRecordsChanged: changedRecords => emitRecordsChanged(changedRecords),
       onSyncNotices: notices => emitSyncNotices(notices),
       scheduleRetry: delay => kickSync(delay),
@@ -419,56 +436,81 @@ export function createWorkerRuntime({
       onIdle: () => applySyncSchedule({ kind: "idle" }),
       retryState: drainRetry,
     });
+    const bootstrappedNow = hadBootstrap && !!host?.syncState?.().bootstrapped;
+    return { ...result, bootstrappedNow };
   }
 
-  async function pollChanges() {
-    if (!isLeaderOrStandalone() || !host || pollInFlight || draining || (kickTimer && !kickHeld)) return;
-    const revision = localRevision;
-    pollInFlight = true;
-    try {
-      if (currentCursor === null) {
-        const state = await withDb("readonly", () => host.syncState());
-        const action = nextSyncAction(state, 0);
-        if (action.kind === "immediate") {
-          kickSync(0);
-          return;
-        }
-        applySyncSchedule(action);
-        currentCursor = state.cursor;
-        currentIdentity = state.identity;
-      }
-      const who = currentIdentity ? `&identity=${encodeURIComponent(currentIdentity)}` : "";
-      const { status, text } = await fetchReply("GET", `/events?after=${currentCursor}&window=0${who}`);
-      if (status !== 200) return;
-      if (!text.trim() || draining || (kickTimer && !kickHeld) || revision !== localRevision) return;
+  async function readStreamParams() {
+    if (!isLeaderOrStandalone() || !host || draining || (kickTimer && !kickHeld)) return { ready: false };
+    const state = await withDb("readonly", () => host.syncState());
+    const action = nextSyncAction(state, 0);
+    if (action.kind === "immediate") {
+      if (!draining && (!kickTimer || kickHeld)) kickSync(0);
+      return { ready: false };
+    }
+    applySyncSchedule(action);
+    return { ready: true, cursor: state.cursor, identity: state.identity };
+  }
 
-      const changed = await withDb("readwrite", save => {
-        if (draining || (kickTimer && !kickHeld) || revision !== localRevision) return;
-        const consumed = host.consumeStream(text);
-        currentCursor = consumed.cursor;
-        if (!consumed.bootstrapped) {
-          currentCursor = null;
-          kickSync(0);
-        }
-        const syncNotices = consumed.notices?.length ? host.notices({ action: "list" }).notices : null;
-        if (consumed.applied > 0 || consumed.notified) {
-          localRevision++;
-          save();
-          return { applied: consumed.applied, changes: consumed.changes, syncNotices };
-        }
-      });
-      if (changed?.syncNotices) emitSyncNotices(changed.syncNotices);
-      if (changed) {
-        if (branches.isActive()) {
-          emitBranchState(branches.noteMainDelta(changed.applied || 1));
-        } else {
-          emitRecordsChanged(changed.changes);
-        }
+  async function applyStreamFrames(framesText) {
+    if (draining) await draining.catch(() => {});
+    if (!isLeaderOrStandalone() || !host) return { applied: 0, cursor: 0, reset: false };
+    const outcome = await withDb("readwrite", save => {
+      const previousCursor = host.syncState().cursor;
+      const consumed = host.consumeStream(framesText);
+      const reset = !consumed.bootstrapped;
+      const notify = consumed.applied > 0 || consumed.notified || reset;
+      const syncNotices = consumed.notices?.length && typeof host.notices === "function"
+        ? host.notices({ action: "list" }).notices
+        : null;
+      if (notify || consumed.cursor > previousCursor) {
+        localRevision++;
+        save();
       }
-    } catch {
-      // offline: try again on the next interval
-    } finally {
-      pollInFlight = false;
+      return { applied: consumed.applied, cursor: consumed.cursor, reset, changes: notify ? consumed.changes : null, notify, syncNotices };
+    });
+    if (outcome.syncNotices) emitSyncNotices(outcome.syncNotices);
+    if (outcome.reset) kickSync(0);
+    if (outcome.notify) {
+      if (branches.isActive()) {
+        emitBranchState(branches.noteMainDelta(outcome.applied || 1));
+      } else {
+        emitRecordsChanged(outcome.changes);
+      }
+    }
+    return outcome;
+  }
+
+  function ensureStreamLeader() {
+    if (!streamEnabled || streamLeader) return;
+    streamLeader = createStreamLeader({
+      ...streamOptions,
+      getEndpoint: () => syncEndpoint,
+      mailboxScope: currentScope,
+      getSyncScope: () => syncScope,
+      initialVisible: pageVisible,
+      canLead: false,
+      locks,
+      ...(createChannel ? { createChannel } : {}),
+      fetch: fetchImpl,
+      isOfflineSimulated: () => effectiveSimulation().offline,
+      getLatencyMs: () => effectiveSimulation().latencyMs,
+      getStreamParams: readStreamParams,
+      applyFrames: applyStreamFrames,
+      onReport: entry => report(entry),
+      onStreamStateChange: open => {
+        streamOpen = open;
+        const msg = { type: "instant_record.stream_state", streamOpen: open };
+        if (coordinator && coordinator.role === "leader") {
+          coordinator.broadcast(msg);
+        } else {
+          postMessage(msg);
+        }
+      },
+    });
+    if (!pageTornDown) {
+      streamLeader.start();
+      if (pageSuspended) streamLeader.suspend();
     }
   }
 
@@ -870,11 +912,9 @@ export function createWorkerRuntime({
     const bootstrapStart = now();
     if (!restored && !shell) await drain(true, await bootstrapFetch);
     if (restored) applySyncSchedule(nextSyncAction(host.syncState(), 0));
-    if (shell) pollChanges();
+    ensureStreamLeader();
+    streamLeader?.setCanLead(true);
     const bootstrapMs = now() - bootstrapStart;
-
-    clearInterval(pollTimer);
-    if (pollIntervalMs > 0) pollTimer = setInterval(pollChanges, pollIntervalMs);
 
     if (scope && scope !== "invalid/invalid") {
       mailScope = scope;
@@ -913,14 +953,18 @@ export function createWorkerRuntime({
     }
     const root = serverRoot(publicEndpoint, mountPath);
     const body = typeof payload.body === "string" ? payload.body : "";
-    return fetchReply(method, targetPath, body, root, payload.contentType ?? "");
+    const reply = await fetchReply(method, targetPath, body, root, payload.contentType ?? "");
+    if (method !== "GET" && method !== "HEAD" && reply.status >= 200 && reply.status < 400) {
+      streamLeader?.reconnect();
+    }
+    return reply;
   }
 
   async function wipeLocalStorage() {
-    clearInterval(pollTimer);
+    streamLeader?.stop();
+    streamLeader = null;
     clearTimeout(kickTimer);
     clearTimeout(fillTimer);
-    pollTimer = null;
     kickTimer = null;
     kickHeld = false;
     fillTimer = null;
@@ -1040,6 +1084,7 @@ export function createWorkerRuntime({
     savedBootPayload = payload;
     currentScope = scopeOf(payload.path || "/");
     syncScope = typeof payload.scope === "string" ? payload.scope : "";
+    if (typeof payload.visible === "boolean") pageVisible = payload.visible;
     if (currentScope) {
       syncEndpoint = serverRoot(publicEndpoint, mountPath) + "/email/sync/" + currentScope;
     }
@@ -1047,6 +1092,8 @@ export function createWorkerRuntime({
     const started = now();
     savedModule = payload.module || await compileWasm(wasmUrl);
     const compiled = now();
+
+    ensureStreamLeader();
 
     coordinator = createCoordinator({
       scope: currentScope,
@@ -1066,10 +1113,11 @@ export function createWorkerRuntime({
         if (msg.type === "clear_log") {
           history.length = 0;
         } else if (msg.type === "simulate" && msg.backlog) {
-          reply?.({ type: "instant_record.debug_backlog", entries: history, streamOpen: false });
+          reply?.({ type: "instant_record.debug_backlog", entries: history, streamOpen });
         }
       },
       onLeaderSimulationChange: (next, prev) => {
+        streamLeader?.setOfflineSimulated(!!next.offline);
         if (host && prev.offline && !next.offline) {
           drainRetry.delayMs = DRAIN_RETRY_BASE_MS;
           kickSync(0);
@@ -1081,6 +1129,7 @@ export function createWorkerRuntime({
       },
       onRoleChange: nextRole => {
         postMessage({ type: "instant_record.role", role: nextRole });
+        if (nextRole === "leader" || nextRole === "standalone") streamLeader?.wake();
       },
     });
 
@@ -1130,10 +1179,10 @@ export function createWorkerRuntime({
   }
 
   function shutdown({ announceBye = true } = {}) {
-    clearInterval(pollTimer);
+    streamLeader?.stop();
+    streamLeader = null;
     clearTimeout(kickTimer);
     clearTimeout(fillTimer);
-    pollTimer = null;
     kickTimer = null;
     kickHeld = false;
     fillTimer = null;
@@ -1148,6 +1197,28 @@ export function createWorkerRuntime({
   async function handleMessage(event) {
     const { id, type, payload } = event.data;
     try {
+      if (type === "instant_record.visibility") {
+        pageVisible = !!event.data.visible;
+        streamLeader?.setVisible(pageVisible);
+        return;
+      }
+      if (type === "instant_record.pagehide") {
+        pageVisible = false;
+        if (event.data.persisted) {
+          pageSuspended = true;
+          streamLeader?.suspend();
+        } else {
+          pageTornDown = true;
+          shutdown({ announceBye: true });
+        }
+        return;
+      }
+      if (type === "instant_record.pageshow") {
+        pageSuspended = false;
+        pageVisible = !!event.data.visible;
+        streamLeader?.resume(pageVisible);
+        return;
+      }
       if (type === "instant_record.bye") {
         shutdown({ announceBye: true });
         return;
@@ -1167,8 +1238,9 @@ export function createWorkerRuntime({
         if (coordinator) {
           coordinator.updateSimulation(localSimulation, { backlog: !!event.data.backlog });
         } else if (event.data.backlog) {
-          postMessage({ type: "instant_record.debug_backlog", entries: history, streamOpen: false });
+          postMessage({ type: "instant_record.debug_backlog", entries: history, streamOpen });
         }
+        streamLeader?.setOfflineSimulated(!!effectiveSimulation().offline);
         if (isLeaderOrStandalone() && host && previous.offline && !localSimulation.offline && !effectiveSimulation().offline) {
           drainRetry.delayMs = DRAIN_RETRY_BASE_MS;
           kickSync(0);
@@ -1222,12 +1294,13 @@ export function createWorkerRuntime({
     boot,
     handleMessage,
     handleOnline,
+    handleOffline,
     shutdown,
     fillStep,
     syncPass,
-    pollChanges,
     get role() { return coordinator?.role || "idle"; },
     get storageMode() { return storage?.mode || coordinator?.storageMode || null; },
     get fillState() { return fillState; },
+    get streamOpen() { return streamOpen; },
   };
 }

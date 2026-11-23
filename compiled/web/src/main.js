@@ -301,6 +301,24 @@ async function submitInPlace(event) {
   if (typed !== null && typed !== sent && typed.startsWith(sent) && field.isConnected) field.value = typed.slice(sent.length);
 }
 
+function reportVisibility() {
+  worker.postMessage({ type: "instant_record.visibility", visible: document.visibilityState !== "hidden" });
+}
+function reportPageHide(event) {
+  try { worker.postMessage({ type: "instant_record.pagehide", persisted: !!event.persisted }); } catch {}
+}
+function reportPageShow(event) {
+  if (event.persisted) {
+    worker.postMessage({ type: "instant_record.pageshow", visible: document.visibilityState !== "hidden" });
+  }
+}
+function bindVisibility() {
+  document.addEventListener("visibilitychange", reportVisibility);
+  window.addEventListener("pagehide", reportPageHide);
+  window.addEventListener("pageshow", reportPageShow);
+  reportVisibility();
+}
+
 // One async function, since the built shell is a classic script (vite.config.js) and cannot
 // await at its top level.
 async function openApp() {
@@ -308,6 +326,7 @@ async function openApp() {
     module: await window.__wasm,
     path: location.pathname + location.search,
     scope: syncScope(),
+    visible: document.visibilityState !== "hidden",
     headers: defaultBrowserHeaders({ referrer: document.referrer }),
   }).catch(error => {
     document.body.textContent = "The app could not open this release. Your saved database was kept. " + error.message;
@@ -317,9 +336,6 @@ async function openApp() {
     window.__spinel.role = boot.role;
     window.__spinel.storage = boot.storageMode;
   }
-  window.addEventListener("pagehide", () => {
-    try { worker.postMessage({ type: "instant_record.bye" }); } catch {}
-  });
   marks.booted = performance.now();
   marks.compileMs = window.__wasmMs ?? boot.compileMs;
   const { result, finalPath } = boot.first;
@@ -331,6 +347,7 @@ async function openApp() {
   document.open();
   document.write(result.status === 200 ? result.body : `<pre>${result.status}\n${(result.errors || []).join("\n")}</pre>`);
   document.close();
+  bindVisibility();
   document.addEventListener("turbo:before-morph-element", keepTyping);
   document.addEventListener("turbo:render", () => { redrawing = false; });
   document.addEventListener("submit", submitInPlace);
@@ -379,6 +396,7 @@ async function openApp() {
     document.write(html);
     document.close();
     window.addEventListener("submit", submitLocalForm);
+    bindVisibility();
     window.dispatchEvent(new Event("instant-record:dom-written"));
   }
   window.addEventListener("submit", submitLocalForm);
