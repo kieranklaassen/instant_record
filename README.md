@@ -155,13 +155,16 @@ Useful helpers:
 - `InstantRecord.server_url(path)` — the URL that reaches the authoritative server from either runtime, honouring a customised `mount_path`
 - `sync_file` — a record that carries a file, kept in the browser and sent to the server in the background (below)
 
-Convergence is last-write-wins on `updated_at`, and the value that loses is gone from the row. A model can watch for that:
+Convergence uses server-anchored string-encoded Hybrid Logical Clocks (HLCs) and 3-way column-level merging via `base_version`: disjoint concurrent column edits merge cleanly, while same-column collisions honor declarative `sync_merge` policies (`:lww` default, `:union`, or `:server_wins`). A model can also observe remote values dropped on the client:
 
 ```ruby
 class Issue < ApplicationRecord
   include InstantRecord::Syncable
 
-  # A value from the server that last-write-wins threw away. The block runs with
+  sync_merge :state, :server_wins
+  sync_merge :tags, :union
+
+  # A value from the server that HLC ordering threw away. The block runs with
   # the losing attribute hash at the only moment it exists here — nothing is
   # assigned, no callback fires, and the gem keeps no copy.
   on_discarded_change { |attributes| Rails.logger.info("dropped #{attributes["title"].inspect}") }
@@ -442,6 +445,37 @@ To ship the optimized browser app with a Rails deploy, set
 hostname. Rails asset precompilation publishes the build. Open tabs detect the
 release, and returning profiles migrate their local database before rendering.
 [Deployment and browser migration setup](compiled/README.md#ship-on-a-rails-deploy).
+
+## Local MCP server and offline CLI
+
+`bin/rails instant_record:native` compiles your Rails app (models, validations, screens, and SQLite) into a screenless native `host` binary. `bin/rails instant_record:mcp` packages that binary as a local MCP JSON-RPC 2.0 stdio server and offline CLI:
+
+```sh
+# Build the native host once (or pass --build / INSTANT_RECORD_BUILD=1)
+bin/rails instant_record:native
+
+# Start the drop-in MCP stdio server against a scoped local SQLite replica
+INSTANT_RECORD_ENDPOINT=http://127.0.0.1:3000/instant_record \
+INSTANT_RECORD_TOKEN="$MY_TOKEN" \
+INSTANT_RECORD_SCOPE="visitor-1" \
+  bin/rails instant_record:mcp
+
+# Or use the offline CLI subcommands (pass CLI arguments after `--`)
+bin/rails instant_record:mcp -- sync
+bin/rails instant_record:mcp -- --offline query Issue --where state=open
+bin/rails instant_record:mcp -- --offline search "invoice"
+bin/rails instant_record:mcp -- --offline action mailbox archive --param member=maya --param inbox=support --arg id=<id>
+bin/rails instant_record:mcp -- --offline request POST /todo/issues --data 'issue[title]=Offline task'
+
+# Standalone executable (skips Rails boot once the native host is compiled)
+bundle exec instant_record_mcp serve \
+  --host tmp/instant_record/compiled/.build-native/host \
+  --db tmp/instant_record/mcp/local.sqlite3 \
+  --endpoint http://127.0.0.1:3000/instant_record \
+  --cookie "_session=..."
+```
+
+Exposed MCP tools (`<1ms` offline against local SQLite + persistent compiled `host`): `instant_record_status`, `instant_record_sync`, `instant_record_models`, `instant_record_query`, `instant_record_get`, `instant_record_search`, `instant_record_outbox`, `instant_record_render_screen`, `instant_record_action`, `instant_record_request`, and `instant_record_history`.
 
 ## Running the demo
 

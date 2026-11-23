@@ -32,6 +32,7 @@ module InstantRecord
       # The key a client keeps and sends back, so the server notices when the
       # person behind the browser or active partition changes.
       payload[:identity] = SyncScope.key(identity, partition: partition)
+      payload[:server_time] = InstantRecord::HLC.iso_now
       headers["cache-control"] = "no-store"
       render json: payload
     end

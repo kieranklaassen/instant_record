@@ -3,7 +3,25 @@ require "json"
 module InstantRecord
   module Client
     module Transport
-      Error = Class.new(StandardError)
+      class Error < StandardError
+        attr_reader :status
+
+        def initialize(message = nil, status: nil)
+          super(message)
+          @status = status.nil? ? parse_status(message) : status.to_i
+        end
+
+        def server_error?
+          @status.is_a?(Integer) && @status >= 500 && @status < 600
+        end
+
+        private
+
+        def parse_status(message)
+          match = message.to_s.match(/->\s*(\d{3})\b/)
+          match ? match[1].to_i : nil
+        end
+      end
 
       # Incremental parser for text/event-stream bodies. Pure Ruby so the
       # sync loop is unit-testable without a browser. Yields one hash per
@@ -38,10 +56,14 @@ module InstantRecord
 
         def get_json(path, headers: nil)
           JSON.parse(exchange("GET", path, "", headers: headers))
+        rescue JSON::ParserError => e
+          raise Error, "GET #{path} invalid JSON: #{e.message}"
         end
 
         def post_json(path, payload, headers: nil)
           JSON.parse(exchange("POST", path, JSON.generate(payload), headers: headers))
+        rescue JSON::ParserError => e
+          raise Error, "POST #{path} invalid JSON: #{e.message}"
         end
 
         # The host returns the whole catch-up stream at once (the loop polls with window=0).
@@ -58,11 +80,11 @@ module InstantRecord
         # Response file: first line the status, then the body. Status 0 is a network failure.
         def exchange(method, path, body, headers: nil)
           payload = format_request(method, "#{InstantRecord.config.endpoint}#{path}", body, headers)
-          File.write(REQUEST, payload)
-          response = File.read(RESPONSE)
+          InstantRecord::Host.write_channel("request", payload)
+          response = InstantRecord::Host.read_channel("response")
           newline = response.index("\n") || response.length
           status = response[0, newline].to_i
-          raise Error, "#{method} #{path} -> #{status}" unless status >= 200 && status < 300
+          raise Error.new("#{method} #{path} -> #{status}", status: status) unless status >= 200 && status < 300
 
           response[(newline + 1)..] || ""
         end

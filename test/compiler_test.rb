@@ -156,41 +156,93 @@ class CompilerTest < ActiveSupport::TestCase
     end
   end
 
-  test "DemoCarver and GemVendor stage the real demo with all seams intact" do
+  test "AppStage and GemVendor stage the real demo via local_first reachability with all seams intact" do
     Dir.mktmpdir do |dir|
       app = File.join(dir, "app-src")
-      InstantRecord::Compiler::DemoCarver.carve(
-        gem_src: GEM_ROOT,
+      manifest_path = File.join(dir, "instant_record.manifest.json")
+      staged = InstantRecord::Compiler::AppStage.stage(
+        source: File.join(GEM_ROOT, "demo"),
         target: app,
+        native: false,
         overlay_dir: File.join(PIPELINE_DIR, "demo"),
-        native: false
+        manifest_path: manifest_path
       )
 
       refute File.exist?(File.join(app, "config/initializers/ruby_llm.rb"))
       refute File.exist?(File.join(app, "app/screens"))
-      assert_includes File.read(File.join(app, "app/models/mail_entry.rb")), "include InstantRecord::Syncable"
-      assert_includes File.read(File.join(app, "app/models/slack/seeds.rb")), "Browser build: the seeding routines"
+      refute File.exist?(File.join(app, "app/models/mailbox.rb"))
+      refute File.exist?(File.join(app, "app/models/mail_shell.rb"))
+      refute File.exist?(File.join(app, "app/models/assistant/reply.rb"))
+      refute File.exist?(File.join(app, "app/controllers/source_controller.rb"))
+      refute File.exist?(File.join(app, "app/controllers/auth/sessions_controller.rb"))
+      refute File.exist?(File.join(app, "app/controllers/slack/resets_controller.rb"))
+      refute File.exist?(File.join(app, "app/controllers/email/sync_controller.rb"))
+      refute File.exist?(File.join(app, "app/views/inertia.html.erb"))
+      refute File.exist?(File.join(app, "app/views/source"))
+      refute File.exist?(File.join(app, "app/helpers/source_helper.rb"))
+
+      # The overlay's console controller renders no partial, so the one the
+      # server's controller renders is not staged for the compiler to choke on.
+      assert File.file?(File.join(app, "app/views/console/sessions/index.html.erb"))
+      refute File.exist?(File.join(app, "app/views/console/sessions/_result.html.erb"))
+
+      # Of the four todo apps only /instant is local_first; the Rails-served
+      # three and /compare stay out of the browser build.
+      assert File.file?(File.join(app, "app/controllers/instant/todos_controller.rb"))
+      %w[plain hotwire inertia].each do |way|
+        refute File.exist?(File.join(app, "app/controllers", way))
+        refute File.exist?(File.join(app, "app/models", way))
+        refute File.exist?(File.join(app, "app/views", way))
+      end
+      refute File.exist?(File.join(app, "app/controllers/compare_controller.rb"))
+      refute File.exist?(File.join(app, "app/views/compare"))
+
+      assert File.file?(manifest_path)
+      manifest = InstantRecord::Compiler::Manifest.read(manifest_path)
+      assert_equal "island", manifest.mode
+      assert_equal %w[AssistantChat AssistantTurn AuthNote Channel ChatUser Issue MailEntry Message Note], manifest.synced_model_names
+      assert_equal({ "limit" => 50, "partition_by" => "channel_id" }, manifest.sync_windows["Message"])
+      assert_equal({ "column" => "visitor_id", "policy" => false }, manifest.sync_scopes["AssistantChat"])
+      assert_equal({ "column" => nil, "policy" => true }, manifest.sync_scopes["AuthNote"])
+      assert_equal manifest.to_h, staged.manifest.to_h
 
       count = InstantRecord::Compiler::GemVendor.vendor(gem_src: GEM_ROOT, app_dir: app, demo: true)
-      assert_equal 18, count
-      assert_includes File.read(File.join(app, "lib/instant_record.rb")), "def browser? = true"
+      assert_equal 22, count
+      assert File.file?(File.join(app, "lib/instant_record/client/rebaser.rb"))
+      assert File.file?(File.join(app, "lib/instant_record/read_tracker.rb"))
+      assert File.file?(File.join(app, "lib/instant_record/sync_partition.rb"))
+      assert File.file?(File.join(app, "lib/instant_record/sync_notice.rb"))
+      assert File.file?(File.join(app, "lib/instant_record/hlc.rb"))
+      assert_includes File.read(File.join(app, "lib/instant_record/host.rb")), "def browser? = true"
+      assert_includes File.read(File.join(app, "lib/instant_record/host.rb")), "id.blank?"
+      assert_includes File.read(File.join(app, "lib/instant_record/host.rb")), 'Db.exec("SAVEPOINT "'
+      assert_includes File.read(File.join(app, "lib/instant_record.rb")), "def browser? = Host.browser?"
       refute_includes File.read(File.join(app, "lib/instant_record.rb")), "branch/sqlite_store"
       assert File.file?(File.join(app, "lib/instant_record/branch.rb"))
       refute File.exist?(File.join(app, "lib/instant_record/syncable.rb"))
       assert File.file?(File.join(app, "app/models/concerns/syncable.rb"))
-      assert_includes File.read(File.join(app, "app/models/concerns/syncable.rb")), "id.nil? || id == \"\""
+      assert_includes File.read(File.join(app, "app/models/concerns/syncable.rb")), "InstantRecord::Host.blank_id?(id)"
       assert_includes File.read(File.join(app, "app/models/mail_entry.rb")), "include Syncable"
       assert_includes File.read(File.join(app, "app/models/mail_entry.rb")), "sync_partition :mailbox_id"
       refute_includes File.read(File.join(app, "app/models/mail_entry.rb")), "authorize_partition"
+      refute_includes File.read(File.join(app, "app/models/slack/seeds.rb")), "apply_backfill"
       vendored_actions = File.read(File.join(app, "lib/instant_record/sync_actions.rb"))
       assert Prism.parse(vendored_actions).success?, "vendored sync_actions.rb must remain valid Ruby"
-      assert_includes vendored_actions, 'Db.exec("SAVEPOINT "'
+      assert_includes vendored_actions, "InstantRecord::Host.with_savepoint"
       refute_includes vendored_actions, "ActiveJobCommitGuard"
       refute_includes vendored_actions, "class ServerFrame"
       vendored_code = vendored_actions.lines.reject { |l| l.lstrip.start_with?("#") }.join
       refute_match(/\b(?:public_send|send|constantize)\b/, vendored_code)
       assert File.file?(File.join(app, "sig/instant_record/native.rbs"))
       assert_includes File.read(File.join(app, "app/views/todo/issues/index.html.erb")), '<% content_for(:demo_scope, "todo") %>'
+      assert_includes File.read(File.join(app, "app/helpers/slack_helper.rb")), '"/slack/reset?instant_record_network=1"'
+      assert_includes File.read(File.join(app, "app/helpers/auth_helper.rb")), '"/instant_record/bootstrap?instant_record_network=1"'
+      assert_includes File.read(File.join(app, "app/controllers/slack/channels_controller.rb")), ".order(:created_at, :id).to_a : []"
+      refute_includes File.read(File.join(app, "app/controllers/slack/channels_controller.rb")), "InstantRecord.browser?"
+
+      # The entire staged demo tree must pass the pre-Spinel static AOT/32-bit linter.
+      lint = InstantRecord::Compiler::StaticLinter.lint(app, staged: true)
+      assert lint.ok?, lint.to_s
 
       dist = File.join(dir, "dist")
       InstantRecord::Compiler::SourcePages.write(
@@ -299,8 +351,7 @@ class CompilerTest < ActiveSupport::TestCase
       FileUtils.mkdir_p(File.join(app, "app/screens"))
 
       File.write(File.join(emit, "main.rb"), "require_relative \"boot\"\nif ARGV.length > 0 && ARGV[0] == \"sidekiq\"\nend\n")
-      File.write(File.join(emit, "app/models/instant_record/client/transport.rb"), "File.write(REQUEST, body)\nFile.read(RESPONSE)\n")
-      File.write(File.join(emit, "app/models/instant_record/client/notifier.rb"), "File.write(\"/host/notify\", body)\n")
+      File.write(File.join(emit, "app/models/instant_record/host.rb"), InstantRecord::Compiler::HostAdapters::Wasm.host_source)
 
       plan = { "version" => 1, "baseline" => nil, "migrations" => {} }
       windows = {
@@ -420,13 +471,7 @@ class CompilerTest < ActiveSupport::TestCase
         end
       RUBY
       File.write(File.join(app, "app/screens/inbox_list_screen.rb"), "class InboxListScreen < InstantRecord::Native::Screen; end\n")
-      File.write(File.join(emit, "app/models/instant_record/client/transport.rb"), <<~RUBY)
-        File.write(REQUEST, body)
-        File.read(RESPONSE)
-      RUBY
-      File.write(File.join(emit, "app/models/instant_record/client/notifier.rb"), <<~RUBY)
-        File.write("/host/notify", message)
-      RUBY
+      File.write(File.join(emit, "app/models/instant_record/host.rb"), InstantRecord::Compiler::HostAdapters::Wasm.host_source)
 
       plan = {
         "version" => 20261120000001,
@@ -447,6 +492,9 @@ class CompilerTest < ActiveSupport::TestCase
       wasm_main = File.read(File.join(emit, "main_wasm.rb"))
       assert_includes wasm_main, "module WasmBridge"
       assert_includes wasm_main, 'File.read("/host/in")'
+      assert_includes wasm_main, "InstantRecord::ReadTracker.track"
+      assert_includes wasm_main, "InstantRecord::Client.capture_local_changes"
+      assert_includes wasm_main, "X-Instant-Record-Reads: "
       assert_includes wasm_main, 'if previous < "00000020261120000001"'
       assert_includes wasm_main, '\#{x}\#@y\#$z'
       assert_includes wasm_main, "InstantRecord.sync(Note)"
@@ -470,14 +518,13 @@ class CompilerTest < ActiveSupport::TestCase
       assert_includes native_main, "def self.branch_outbox"
       assert_includes native_main, "def self.branch_replay"
       assert_includes native_main, 'when "inbox_list" then InboxListScreen.new(params)'
+      assert_includes native_main, 'NativeHost.ir_host_give("reads", InstantRecord::ReadTracker.serialize(reads))'
       assert_includes native_main, 'InstantRecord::SyncMetadata.set("schema_version", "00000020261120000001")'
       assert_includes native_main, "InstantRecord::Client.streaming = false"
 
-      transport = File.read(File.join(emit, "app/models/instant_record/client/transport.rb"))
-      assert_includes transport, 'NativeHost.ir_host_give("request", body)'
-      assert_includes transport, 'NativeHost.ir_host_take("response")'
-      notifier = File.read(File.join(emit, "app/models/instant_record/client/notifier.rb"))
-      assert_includes notifier, 'NativeHost.ir_host_give("notify", message)'
+      host = File.read(File.join(emit, "app/models/instant_record/host.rb"))
+      assert_includes host, "NativeHost.ir_host_take(name)"
+      assert_includes host, "NativeHost.ir_host_give(name, body)"
     end
   end
 
@@ -495,8 +542,7 @@ class CompilerTest < ActiveSupport::TestCase
           puts "sidekiq"
         end
       RUBY
-      File.write(File.join(emit, "app/models/instant_record/client/transport.rb"), "File.write(REQUEST, body)\nFile.read(RESPONSE)\n")
-      File.write(File.join(emit, "app/models/instant_record/client/notifier.rb"), "File.write(\"/host/notify\", message)\n")
+      File.write(File.join(emit, "app/models/instant_record/host.rb"), InstantRecord::Compiler::HostAdapters::Wasm.host_source)
 
       File.write(File.join(app, "app/models/issue.rb"), <<~RUBY)
         class Issue < ApplicationRecord
@@ -591,12 +637,19 @@ class CompilerTest < ActiveSupport::TestCase
       File.write(File.join(emit, "runtime/pool.rb"), "require \"timeout\"\nThread.current\nFiber.yield\n")
       File.write(File.join(emit, "runtime/message_digest.rb"), "require \"openssl\"\nmodule MD\n  def self.aes_256_gcm_encrypt; end\nend\n")
       File.write(File.join(emit, "runtime/db.rb"), "sqlite3_bind_int64\nsqlite3_last_insert_rowid\n")
+      File.write(File.join(emit, "runtime/sqlite_adapter.rb"), "module SqliteAdapter\n  def self.each_row(sql)\n  end\nend\n")
       File.write(File.join(emit, "runtime/active_record/base.rb"), "module ActiveRecord\n  class Base\n    def has_changes_to_save?\n    end\n  end\nend\n")
       File.write(File.join(emit, "runtime/action_text.rb"), "line1\nline2\n")
       File.write(File.join(emit, "app/models/note.rb"), <<~RUBY)
         if name == "created_at"
           if respond_to?(:created_at=)
             self.created_at = value
+          end
+        end
+        def fill_timestamps(creating)
+          now = ActiveSupport.db_now
+          if !(creating) || @updated_at_raw.nil? || @updated_at_raw.empty?
+            @updated_at_raw = now
           end
         end
       RUBY
@@ -619,9 +672,11 @@ class CompilerTest < ActiveSupport::TestCase
       assert_includes pool, "WasmThread.current"
       assert_includes pool, "WasmFiber.yield"
       assert_includes File.read(File.join(tree, "runtime/db.rb")), "rh_sqlite3_bind_int64"
+      assert_includes File.read(File.join(tree, "runtime/sqlite_adapter.rb")), "InstantRecord::ReadTracker.record_sql(sql)"
       assert_includes File.read(File.join(tree, "runtime/message_digest.rb")), "NotImplementedError"
       assert_includes File.read(File.join(tree, "runtime/active_record/base.rb")), "def changed"
       assert_includes File.read(File.join(tree, "app/models/note.rb")), "ActiveSupport.cast_datetime(value)"
+      assert_includes File.read(File.join(tree, "app/models/note.rb")), "!(creating) && !InstantRecord::Client.applying_remote?"
       assert_includes File.read(File.join(tree, "app/views/slack/channels/_sidebar.rb")), "channel_row == channel"
       assert_includes File.read(File.join(tree, "runtime/action_text.rb")), "# Pruned for browser wasm"
     end
@@ -645,13 +700,15 @@ class CompilerTest < ActiveSupport::TestCase
       assert_equal Pathname(app_root).realpath.join("tmp/instant_record/compiled/web/dist"), output
       assert File.file?(output.join("index.html"))
       assert File.file?(output.join("instant-record-release.json"))
+      assert File.file?(output.join("instant_record.manifest.json"))
       assert File.file?(output.join("service-worker.js"))
       assert File.file?(output.join("assets/turbo.min.js"))
       assert_equal 1, Dir.glob(output.join("app-*.wasm").to_s).size
       refute File.exist?(Pathname(app_root).join("tmp/instant_record/compiled/pipeline")), "pipeline scripts should not be copied into tmp/"
 
       index_html = output.join("index.html").read
-      assert_includes index_html, '<link rel="modulepreload" href="/harness/worker-abc.js">'
+      assert_includes index_html, 'window.__worker = new Worker("/harness/worker-abc.js", { type: "module" })'
+      refute_includes index_html, "modulepreload"
       assert_includes index_html, '<link rel="preload" as="style" href="https://fonts.example.test/font.css">'
       assert_includes index_html, "instant_record.warmed"
 
@@ -692,6 +749,7 @@ class CompilerTest < ActiveSupport::TestCase
       end
       assert File.file?(native_out.join("libinstant_record_app.a"))
       assert File.file?(native_out.join("host"))
+      assert File.file?(native_out.join(InstantRecord::Compiler::NativeBuild.shared_library_name))
 
       # Both WasmBuild and NativeBuild compile sqlite3.c with FTS5 enabled.
       calls = File.read(fake[:call_log]).lines
@@ -713,6 +771,38 @@ class CompilerTest < ActiveSupport::TestCase
       assert File.file?(ios_out.join("libinstant_record_app.a"))
       assert File.file?(ios_out.join("libspinel_rt.a"))
       refute File.exist?(ios_out.join("host"))
+      refute File.exist?(ios_out.join(InstantRecord::Compiler::NativeBuild.shared_library_name))
+    end
+  end
+
+  test "WasmBuild#inject_preloads keeps core CSS as low-priority preloads and defers extra stylesheets" do
+    Dir.mktmpdir do |dir|
+      fake = create_fake_toolchain(dir)
+      dist = File.join(dir, "dist")
+      FileUtils.mkdir_p(File.join(dist, "harness"))
+      FileUtils.mkdir_p(File.join(dist, "assets"))
+      File.write(File.join(dist, "index.html"), "<!doctype html><html><head>\n  </head><body></body></html>")
+      File.write(File.join(dist, "harness/worker-123.js"), "// worker\n")
+      %w[base.css ui-deadbeef01.css mail.css slack.css extra.css].each do |name|
+        File.write(File.join(dist, "assets", name), "body { color: #000; }\n")
+      end
+
+      build = InstantRecord::Compiler::WasmBuild.new(
+        workspace: dir,
+        gem_root: File.expand_path("..", __dir__),
+        toolchain: fake[:toolchain_file]
+      )
+      build.inject_preloads(dist, nil)
+
+      html = File.read(File.join(dist, "index.html"))
+      assert_includes html, 'window.__worker = new Worker("/harness/worker-123.js", { type: "module" })'
+      assert_includes html, '<link rel="preload" as="style" fetchpriority="low" href="/assets/base.css">'
+      assert_includes html, '<link rel="preload" as="style" fetchpriority="low" href="/assets/ui-deadbeef01.css">'
+      assert_includes html, '<link rel="preload" as="style" fetchpriority="low" href="/assets/mail.css">'
+      refute_includes html, '<link rel="preload" as="style" fetchpriority="low" href="/assets/slack.css">'
+      refute_includes html, '<link rel="preload" as="style" fetchpriority="low" href="/assets/extra.css">'
+      assert_includes html, '"/assets/slack.css"'
+      assert_includes html, '"/assets/extra.css"'
     end
   end
 
@@ -824,8 +914,7 @@ class CompilerTest < ActiveSupport::TestCase
       printf 'require "openssl"\\n  def self.aes_256_gcm_encrypt; end\\nend\\n' > "$out/runtime/message_digest.rb"
       printf 'sqlite3_bind_int64\\n' > "$out/runtime/db.rb"
       printf '    def has_changes_to_save?\\n    end\\n' > "$out/runtime/active_record/base.rb"
-      printf 'File.write(REQUEST, body)\\nFile.read(RESPONSE)\\n' > "$out/app/models/instant_record/client/transport.rb"
-      printf 'File.write("/host/notify", body)\\n' > "$out/app/models/instant_record/client/notifier.rb"
+      printf 'module InstantRecord; module Host; end; end\\n' > "$out/app/models/instant_record/host.rb"
     SH
 
     write_exec(File.join(spinel, "bin/spin"), <<~SH)

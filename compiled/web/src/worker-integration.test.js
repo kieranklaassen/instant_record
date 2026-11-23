@@ -260,20 +260,39 @@ function createTestEnvironment({ opfsUnavailable = false, seedIdbBytes = null, s
       if (method === "POST" && path === "/items") {
         const next = { ...this.state, items: [...this.state.items, body] };
         this._persist(next);
-        return { status: 201, headers: [], body: "created:" + body, exit: 0, errors: [] };
+        return {
+          status: 201,
+          headers: [],
+          body: "created:" + body,
+          notified: true,
+          changes: [{ type: "Item", id: String(next.items.length), op: "create", changed_columns: ["name"], attrs: { name: body } }],
+          exit: 0,
+          errors: [],
+        };
       }
-      return { status: 200, headers: [], body: JSON.stringify(this.state.items), exit: 0, errors: [] };
+      if (method === "POST" && path === "/items-redirect") {
+        const next = { ...this.state, items: [...this.state.items, body] };
+        this._persist(next);
+        return {
+          status: 302,
+          headers: [["Location", "/items"]],
+          body: "",
+          notified: true,
+          changes: [{ type: "Item", id: String(next.items.length), op: "create", changed_columns: ["name"], attrs: { name: body } }],
+          exit: 0,
+          errors: [],
+        };
+      }
+      return { status: 200, headers: [], body: JSON.stringify(this.state.items), notified: false, changes: null, exit: 0, errors: [] };
     }
-    syncPlan() { return { push: "", bootstrap: !this.state.bootstrapped }; }
-    sync(endpoint, exchange) {
-      if (!this.state.bootstrapped && exchange) {
-        const res = exchange("GET", endpoint + "/bootstrap", "");
-        if (res.status === 200) {
-          this._persist({ ...this.state, bootstrapped: true });
-          return { changed: true, pending: 0, cursor: this.state.cursor, notified: false, changes: null };
-        }
+    syncPlan() { return { push: "", mutation_ids: [], bootstrap: !this.state.bootstrapped }; }
+    sync() { return { changed: false, pending: 0, cursor: this.state.cursor, notified: false, changes: null }; }
+    applySync(_endpoint, { bootstrap } = {}) {
+      if (!this.state.bootstrapped && bootstrap && bootstrap.status === 200) {
+        this._persist({ ...this.state, bootstrapped: true });
+        return { changed: true, pending: 0, cursor: this.state.cursor, progressed: true, failed: false, quarantined: 0, notified: false, changes: null };
       }
-      return { changed: false, pending: 0, cursor: this.state.cursor, notified: false, changes: null };
+      return { changed: false, pending: 0, cursor: this.state.cursor, progressed: false, failed: false, quarantined: 0, notified: false, changes: null };
     }
     syncState() { return { bootstrapped: this.state.bootstrapped, cursor: this.state.cursor, pending: 0, identity: "" }; }
     consumeStream() { return { applied: 0, cursor: this.state.cursor, bootstrapped: true, notified: false, changes: null }; }
@@ -367,10 +386,25 @@ test("two tabs share one hot OPFS leader AppHost with zero databaseBytes dumps a
   assert.equal(env.hostMetrics.databaseBytesCalls, 0, "OPFS writes never serialize whole databaseBytes()");
   assert.ok(env.opfsStats.flushes >= 1, "OPFS writes flush to disk");
 
-  // Leader sees the record immediately and received records_changed.
+  // Leader sees the record immediately and received typed records_changed deltas.
   const read1 = await tab1.rpc("request", { method: "GET", path: "/items" });
   assert.deepEqual(JSON.parse(read1.body), ["from-tab-2"]);
-  assert.ok(tab1.messages.some(m => m.type === "records_changed"));
+  const notice1 = tab1.messages.find(m => m.type === "records_changed");
+  assert.ok(notice1, "leader tab received records_changed from peer write");
+  assert.deepEqual(notice1.changes, [
+    { type: "Item", id: "1", op: "create", changed_columns: ["name"], attrs: { name: "from-tab-2" } },
+  ]);
+
+  // Follower navigate across redirect also broadcasts the POST's typed row deltas to peers.
+  tab1.messages.length = 0;
+  const navWrite = await tab2.rpc("navigate", { method: "POST", path: "/items-redirect", body: "via-redirect" });
+  assert.equal(navWrite.redirected, true);
+  assert.equal(navWrite.finalPath, "/items");
+  const notice2 = tab1.messages.find(m => m.type === "records_changed");
+  assert.ok(notice2, "leader tab received records_changed after peer redirect write");
+  assert.deepEqual(notice2.changes, [
+    { type: "Item", id: "2", op: "create", changed_columns: ["name"], attrs: { name: "via-redirect" } },
+  ]);
 
   // Crash Tab 1 abruptly (without leader_bye): Tab 2 promotes over the same OPFS file and preserves writes.
   tab1.runtime.shutdown({ announceBye: false });
@@ -381,12 +415,12 @@ test("two tabs share one hot OPFS leader AppHost with zero databaseBytes dumps a
   assert.equal(tab2.runtime.storageMode, "opfs");
 
   const readAfterFailover = await tab2.rpc("request", { method: "GET", path: "/items" });
-  assert.deepEqual(JSON.parse(readAfterFailover.body), ["from-tab-2"]);
+  assert.deepEqual(JSON.parse(readAfterFailover.body), ["from-tab-2", "via-redirect"]);
 
   const writeAfterFailover = await tab2.rpc("request", { method: "POST", path: "/items", body: "after-failover" });
   assert.equal(writeAfterFailover.status, 201);
   const readFinal = await tab2.rpc("request", { method: "GET", path: "/items" });
-  assert.deepEqual(JSON.parse(readFinal.body), ["from-tab-2", "after-failover"]);
+  assert.deepEqual(JSON.parse(readFinal.body), ["from-tab-2", "via-redirect", "after-failover"]);
 
   tab2.runtime.shutdown();
 });

@@ -12,8 +12,8 @@
 #include <sys/random.h>
 #endif
 
-enum { IN, OUT, NOTIFY, REQUEST, RESPONSE, SLOTS };
-static const char *const names[SLOTS] = { "in", "out", "notify", "request", "response" };
+enum { IN, OUT, NOTIFY, READS, REQUEST, RESPONSE, SLOTS };
+static const char *const names[SLOTS] = { "in", "out", "notify", "reads", "request", "response" };
 static char *slots[SLOTS];
 static char error[512];
 static ir_exchange_fn exchange;
@@ -134,6 +134,7 @@ const char *ir_call(const char *entry, const char *input) {
     put(IN, input);
     put(OUT, "");
     put(NOTIFY, "");
+    put(READS, "");
     return run_guarded(entries[i].fn) ? NULL : slots[OUT];
   }
   snprintf(error, sizeof error, "No entry named %s", entry);
@@ -141,4 +142,5 @@ const char *ir_call(const char *entry, const char *input) {
 }
 
 const char *ir_notice(void) { return slots[NOTIFY] ? slots[NOTIFY] : ""; }
+const char *ir_reads(void) { return slots[READS] ? slots[READS] : ""; }
 const char *ir_error(void) { return error; }

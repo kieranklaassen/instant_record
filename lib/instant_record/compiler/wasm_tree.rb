@@ -340,7 +340,9 @@ module InstantRecord
         touched = adapt_threading_and_timeout(paths)
         patch_message_digest
         patch_sqlite_shims
+        patch_read_tracking
         patch_model_datetime_casts
+        patch_model_remote_timestamps
         patch_active_record_changed
         patch_emitted_views
         patch_slack_sidebar if @demo
@@ -395,6 +397,24 @@ module InstantRecord
         File.write(path, text)
       end
 
+      def patch_read_tracking
+        path = File.join(@target, "runtime/sqlite_adapter.rb")
+        return unless File.file?(path)
+
+        text = File.read(path)
+        hook = "InstantRecord::ReadTracker.record_sql(sql)"
+        return if text.include?(hook)
+
+        updated = text.gsub(
+          /^(\s*def (?:self\.)?(?:each_row|select_all|select_rows|select_value|select_values|query|exec_query)\(sql\b[^\n]*\)\n)/
+        ) do
+          line = Regexp.last_match(1)
+          indent = line[/\A(\s*)/, 1]
+          "#{line}#{indent}  #{hook}\n"
+        end
+        File.write(path, updated) if updated != text
+      end
+
       def patch_model_datetime_casts
         models_dir = File.join(@target, "app/models")
         return unless File.directory?(models_dir)
@@ -405,6 +425,25 @@ module InstantRecord
           fixed = text.gsub(
             /(if name == "(\w+_at)"\n\s+if respond_to\?\(:\2=\)\n\s+self\.\2 = )value\n/,
             '\1ActiveSupport.cast_datetime(value)' + "\n"
+          )
+          File.write(path, fixed) if fixed != text
+        end
+      end
+
+      def patch_model_remote_timestamps
+        models_dir = File.join(@target, "app/models")
+        return unless File.directory?(models_dir)
+
+        Dir.glob("**/*.rb", base: models_dir).sort.each do |rel|
+          path = File.join(models_dir, rel)
+          text = File.read(path)
+          # Roundhouse's generated fill_timestamps unconditionally stamps
+          # updated_at = db_now on every UPDATE, clobbering the server's
+          # authoritative timestamp during upsert_from_server. Preserve the
+          # incoming server timestamp while applying_remote? is active.
+          fixed = text.gsub(
+            "if !(creating) || @updated_at_raw.nil? || @updated_at_raw.empty?",
+            "if (!(creating) && !InstantRecord::Client.applying_remote?) || @updated_at_raw.nil? || @updated_at_raw.empty?"
           )
           File.write(path, fixed) if fixed != text
         end

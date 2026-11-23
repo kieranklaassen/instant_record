@@ -1,0 +1,122 @@
+<% content_for(:title, "Ship v2 — InstantRecord") %>
+
+
+<div class="page" data-controller="release" data-instant-refresh
+     data-action="instant-record:records-changed@window->release#refresh">
+  <header class="page-header">
+    <h1>Ship v2</h1>
+    <p class="schema-pill <%= @release_pending ? "pending" : "applied" %>">
+      <span class="schema-dot" aria-hidden="true"></span>
+      Local schema
+      <strong class="data">
+        <%= @release_pending ? "v1 · v2 (#{Release.version}) pending" : "v2 (#{Release.version}) applied" %>
+      </strong>
+    </p>
+  </header>
+
+  <p class="intro">
+    A migration is the one deploy step local-first cannot do for you server-side.
+    The database that has to change is sitting in a visitor's browser, holding
+    their rows and — if they were offline — a queue of writes that never reached
+    you. This page runs that migration for real: DDL and a backfill against the
+    local SQLite database exactly as you left it.
+  </p>
+
+  <ol class="run">
+    <li>Write a couple of notes. Each one commits locally and syncs.</li>
+    <li>Flip the switch at the top right to <strong>Offline</strong>, then write two more notes. Those stay in the outbox.</li>
+    <li>Read the three numbers below.</li>
+    <li>Press <strong>Ship v2</strong>.</li>
+    <li>Read them again, and look at the list: the same rows, with the timestamps they already had, now carrying a word count derived from the body text that was already there.</li>
+  </ol>
+
+  <section class="state">
+    <h2 class="micro-label">The local database right now</h2>
+
+    <dl class="facts">
+      <dt>Rows in <code>notes</code></dt>
+      <dd class="data"><%= @notes.size %></dd>
+
+      <dt>Outbox rows pending</dt>
+      <dd class="data"><%= @pending_count %></dd>
+
+      <dt>Columns in <code>notes</code></dt>
+      <dd class="data"><%= @columns.size %></dd>
+    </dl>
+
+    <%# Read from the connection, not from Note.column_names — the claim is
+        about what the store actually holds, not what the model believes. %>
+    <ul class="columns">
+      <% @columns.each do |column| %>
+        <li class="data <%= "added" if column == Release::COLUMN %>"><%= column %></li>
+      <% end %>
+    </ul>
+
+    <% if @release_pending %>
+      <p class="change">
+        <strong>Ship v2</strong> adds <code><%= Release::COLUMN %></code> to
+        <code>notes</code> and backfills it from <code>body</code>. It deletes no
+        rows, and it writes no outbox mutations — the backfill runs through a direct SQLite update in the same transaction. Both numbers above must read the same afterwards.
+      </p>
+
+      <%= form_with url: migrate_ship_path, method: :post,
+                    data: { turbo: true, action: "submit->release#ship" } do |f| %>
+        <%= f.submit "Ship v2", data: { release_target: "button" } %>
+      <% end %>
+    <% else %>
+      <p class="change">
+        v2 applied. <code><%= Release::COLUMN %></code> is in the table above,
+        the rows below are the ones you wrote before it ran, and the outbox count
+        did not move. The version is recorded in <code>schema_migrations</code>,
+        so a reload does not run it again.
+      </p>
+
+      <%= form_with url: migrate_ship_path, method: :delete, data: { turbo: true } do |f| %>
+        <%= f.submit "Roll back to v1" %>
+        <p class="note">
+          Drops <code><%= Release::COLUMN %></code> again and leaves every row and
+          timestamp alone, so the migration can be watched a second time. Rollback uses <code>ALTER TABLE</code> and removes the local migration version.
+        </p>
+      <% end %>
+    <% end %>
+  </section>
+
+  <%= form_with url: migrate_notes_path, method: :post, class: "note-form", data: { turbo: true } do |f| %>
+    <%= f.text_field "note[title]", placeholder: "Note title", required: true %>
+    <%= f.text_area "note[body]", placeholder: "Body — the word count is derived from this", rows: 2 %>
+    <%= f.submit "Write note" %>
+  <% end %>
+
+  <table class="notes">
+    <thead>
+      <tr>
+        <th>Title</th>
+        <th>Body</th>
+        <% unless @release_pending %><th class="num data"><%= Release::COLUMN %></th><% end %>
+        <th>Written</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% @notes.each do |note| %>
+        <tr>
+          <td><%= note.title %></td>
+          <td class="body"><%= note.body %></td>
+          <% unless @release_pending %><td class="num data"><%= note.word_count %></td><% end %>
+          <td class="data"><%= note.created_at.strftime("%H:%M:%S") %></td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+
+  <section class="scope">
+    <h2 class="micro-label">What this does not stage</h2>
+
+    <p>
+      <strong>The sync server can stay on v1.</strong>
+      Both versions save the title and body. A v2 browser calculates
+      <code>word_count</code> from the body, including for notes received from other browsers.
+    </p>
+
+
+  </section>
+</div>

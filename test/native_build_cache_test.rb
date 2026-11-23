@@ -435,8 +435,7 @@ class NativeBuildCacheTest < ActiveSupport::TestCase
       printf 'require "openssl"\\n  def self.aes_256_gcm_encrypt; end\\nend\\n' > "$out/runtime/message_digest.rb"
       printf 'sqlite3_bind_int64\\n' > "$out/runtime/db.rb"
       printf '    def has_changes_to_save?\\n    end\\n' > "$out/runtime/active_record/base.rb"
-      printf 'File.write(REQUEST, body)\\nFile.read(RESPONSE)\\n' > "$out/app/models/instant_record/client/transport.rb"
-      printf 'File.write("/host/notify", body)\\n' > "$out/app/models/instant_record/client/notifier.rb"
+      printf 'module InstantRecord; module Host; end; end\\n' > "$out/app/models/instant_record/host.rb"
     SH
 
     write_exec(File.join(spinel, "bin/spin"), <<~SH)

@@ -39,7 +39,8 @@ module InstantRecord
           SyncScope.events_for(changes, @identity, partition: @partition_spec).each do |id, event|
             @cursor = id
             @last_write = Time.current
-            yield "id: #{id}\nevent: change\ndata: #{event.to_json}\n\n"
+            stamped = event.merge(server_time: InstantRecord::HLC.iso_now)
+            yield "id: #{id}\nevent: change\ndata: #{stamped.to_json}\n\n"
           end
 
           # An SSE comment, written only when the stream has been quiet for a
@@ -80,7 +81,8 @@ module InstantRecord
       # A client that synced as someone else is told to start over, and nothing
       # more: no id line, so the cursor it is about to drop does not move.
       if SyncScope.stale?(params[:identity], identity, partition: partition_spec)
-        self.response_body = ["event: reset\ndata: #{SyncScope.reset_event(identity, partition: partition_spec).to_json}\n\n"]
+        reset_payload = SyncScope.reset_event(identity, partition: partition_spec).merge(server_time: InstantRecord::HLC.iso_now)
+        self.response_body = ["event: reset\ndata: #{reset_payload.to_json}\n\n"]
         return
       end
 

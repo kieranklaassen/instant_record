@@ -45,7 +45,8 @@ module InstantRecord
           end
       end
 
-      render json: { results: permitted.each_index.map { |index| applied[index] } }
+      results = permitted.each_index.map { |index| applied[index] }
+      render json: { results: results, server_time: InstantRecord::HLC.iso_now }
     end
 
     private
@@ -77,7 +78,7 @@ module InstantRecord
         base[:args] = sanitize_json_value(raw[:args]) || {}
         base
       else
-        raw.permit(:id, :record_type, :record_id, :operation, :base_version, changes: {})
+        raw.permit(:id, :record_type, :record_id, :operation, :base_version, :hlc, changes: {})
       end
     end
 
