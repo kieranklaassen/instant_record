@@ -55,13 +55,16 @@ module InstantRecord
         RESPONSE = "/host/response".freeze
 
         def get_json(path, headers: nil)
-          JSON.parse(exchange("GET", path, "", headers: headers))
+          raw = (headers.nil? || headers.empty?) ? exchange("GET", path, "") : exchange("GET", path, "", headers: headers)
+          JSON.parse(raw)
         rescue JSON::ParserError => e
           raise Error, "GET #{path} invalid JSON: #{e.message}"
         end
 
         def post_json(path, payload, headers: nil)
-          JSON.parse(exchange("POST", path, JSON.generate(payload), headers: headers))
+          body = JSON.generate(payload)
+          raw = (headers.nil? || headers.empty?) ? exchange("POST", path, body) : exchange("POST", path, body, headers: headers)
+          JSON.parse(raw)
         rescue JSON::ParserError => e
           raise Error, "POST #{path} invalid JSON: #{e.message}"
         end
@@ -69,7 +72,8 @@ module InstantRecord
         # The host returns the whole catch-up stream at once (the loop polls with window=0).
         def each_event(path, headers: nil, &block)
           parser = SseParser.new(&block)
-          parser.feed(exchange("GET", path, "", headers: headers))
+          raw = (headers.nil? || headers.empty?) ? exchange("GET", path, "") : exchange("GET", path, "", headers: headers)
+          parser.feed(raw)
         end
 
         private
