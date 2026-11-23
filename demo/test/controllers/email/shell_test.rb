@@ -177,8 +177,9 @@ class MailShellTest < ActionDispatch::IntegrationTest
 
   test "the browser build computes the fingerprint from the same format and model list" do
     require "instant_record/compiler"
+    manifest = InstantRecord::Compiler.manifest(root: Rails.root)
     assert_equal InstantRecord::Shell::FORMAT, InstantRecord::Compiler::WasmBuild::SHELL_FORMAT
-    assert_equal InstantRecord::Shell.models.sort, InstantRecord::Compiler::EntryBuilder::DEMO_MODELS.sort
+    assert_equal InstantRecord::Shell.models.sort, manifest.synced_model_names.sort
   end
 
   test "a rebuild replaces the file once its addresses have run out" do

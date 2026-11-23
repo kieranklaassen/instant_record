@@ -626,6 +626,20 @@ final class AppHostTests: XCTestCase {
         XCTAssertNil(host.status.message)
     }
 
+    func testAHeldMutationPlansItsNextSyncPassAtNextReleaseMs() {
+        engine.nextReleaseMs = 4500
+        let host = host()
+
+        XCTAssertEqual(4.5, clock.planned.last)
+        XCTAssertTrue(clock.waiting)
+        XCTAssertEqual(0, host.status.pending)
+        XCTAssertNil(host.status.message)
+
+        engine.nextReleaseMs = nil
+        pass(host)
+        XCTAssertFalse(clock.waiting)
+    }
+
     func testColdStartHydratesFromPrebuiltShellViaIrOpenAndCatchesUpFromItsCursor() {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ir-shell-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }

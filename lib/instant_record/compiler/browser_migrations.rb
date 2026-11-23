@@ -4,6 +4,7 @@ require "active_record"
 require "active_record/connection_adapters/sqlite3_adapter"
 require "digest"
 require "json"
+require "pathname"
 require "prism"
 require_relative "runner"
 
@@ -16,7 +17,7 @@ module InstantRecord
         { version: planned["version"], statements: statements }
       end
 
-      def self.plan(root:, baseline: nil, migration_paths: nil)
+      def self.plan(root:, baseline: nil, migration_paths: nil, only_files: nil)
         schema_path = File.join(root, "db/schema.rb")
         raise BuildError, "Missing #{schema_path}" unless File.file?(schema_path)
 
@@ -28,10 +29,18 @@ module InstantRecord
         baseline_int = baseline.nil? || baseline.to_s.empty? ? nil : Integer(baseline.to_s, 10)
         raise BuildError, "Invalid browser migration baseline" if baseline_int && !(0..version).cover?(baseline_int)
 
-        dirs = Array(migration_paths || [File.join(root, "db/migrate")])
-        paths = dirs.flat_map { |dir| File.directory?(dir) ? Dir.glob("[0-9]*_*.rb", base: dir).map { |name| File.join(dir, name) } : [] }
-          .uniq
-          .sort_by { |file| File.basename(file).to_i }
+        paths =
+          if only_files
+            Array(only_files).map { |f| Pathname(f).absolute? ? f.to_s : File.join(root, f.to_s) }
+              .select { |file| File.file?(file) }
+              .uniq
+              .sort_by { |file| File.basename(file).to_i }
+          else
+            dirs = Array(migration_paths || [File.join(root, "db/migrate")])
+            dirs.flat_map { |dir| File.directory?(dir) ? Dir.glob("[0-9]*_*.rb", base: dir).map { |name| File.join(dir, name) } : [] }
+              .uniq
+              .sort_by { |file| File.basename(file).to_i }
+          end
 
         connection = ActiveRecord::ConnectionAdapters::SQLite3Adapter.new({ adapter: "sqlite3", database: ":memory:" })
         compiler = new(connection)

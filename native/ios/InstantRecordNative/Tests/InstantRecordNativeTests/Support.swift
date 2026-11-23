@@ -66,11 +66,14 @@ final class FakeEngine: Engine {
         set { lock.withLock { kept.rows = newValue } }
     }
     var noticeAfter: [String: String] = [:]
+    var noticesCount = 0
+    var noticesResponses: [String: String] = [:]
     var raises: Set<String> = []
     var unreadable = false
     var bootstrapped = true
     var boots = true
     var syncs = true
+    var nextReleaseMs: Int? = nil
     var shellFingerprint = ""
     var cursorValue = 7
     var identityValue = ""
@@ -117,7 +120,15 @@ final class FakeEngine: Engine {
             let fp = shellFingerprint.isEmpty ? "" : ",\"fingerprint\":\(FakeEngine.quoted(shellFingerprint))"
             return "{\"push\":\(FakeEngine.quoted(push)),\"bootstrap\":\(!bootstrapped)\(fp)}"
         case "cursor":
-            return "cursor=\(cursorValue) pending=\(push.isEmpty ? 0 : 1) bootstrap=\(bootstrapped ? "ready" : "needed") identity=\(identityValue)"
+            let release = nextReleaseMs.map { " next_release_ms=\($0)" } ?? ""
+            return "cursor=\(cursorValue) pending=\(push.isEmpty ? 0 : 1) bootstrap=\(bootstrapped ? "ready" : "needed") identity=\(identityValue) notices=\(noticesCount)\(release)"
+        case "notices":
+            let object = (try? JSONSerialization.jsonObject(with: Data(input.utf8))) as? [String: Any] ?? [:]
+            let action = object["action"] as? String ?? "list"
+            let id = object["id"] as? String ?? ""
+            note(id.isEmpty ? "notices \(action)" : "notices \(action) \(id)")
+            if raises.contains(entry) { return nil }
+            return noticesResponses[action] ?? "{\"ok\":true,\"notices\":[]}"
         case "sync":
             note("sync " + input)
             if raises.contains(entry) { return nil }

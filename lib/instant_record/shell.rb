@@ -211,10 +211,10 @@ module InstantRecord
         in_snapshot_transaction do
           cursor = Change.maximum(:id) || 0
           records = snapshot_models(models).flat_map do |model|
+            visible = SyncScope.visible(model, identity)
             window = model.instant_record_sync_window
-            rows = window ? window.in_window : model.all
-            rows.merge(SyncScope.visible(model, identity))
-              .map { |record| InstantRecord.record_payload(record) }
+            rows = window ? window.in_window(visible) : visible
+            rows.map { |record| InstantRecord.record_payload(record) }
           end
           { cursor: cursor, records: records }
         end
