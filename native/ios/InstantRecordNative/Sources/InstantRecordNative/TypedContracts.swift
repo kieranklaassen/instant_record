@@ -198,6 +198,7 @@ private struct TypedStateView<S: NativePropsState, Content: View>: View {
         switch Result(catching: { try props.decode(S.Props.self) }) {
         case let .success(decoded):
             NativeStateHost(decoded: decoded, actions: TypedActions(actions), content: content)
+                .id(actions.route)
         case let .failure(error):
             ContractDecodeFailureView(component: S.Props.componentName, error: error)
         }
