@@ -93,6 +93,8 @@ public final class AppHost: ObservableObject {
     private let store: (Route) -> Store
     private let transport: Transport
     private let exchange: (String) -> String
+    private let download: (String) -> (status: Int, data: Data)?
+    private let shellFingerprint: String
     private let follows: Bool
     private let leaveWithin: TimeInterval
     private let thread = EngineThread()
@@ -117,6 +119,7 @@ public final class AppHost: ObservableObject {
     /// leaving it. `exchange` stands in for the network in tests.
     public init(engine: Engine, root: Route, views: Screens = Screens(), store: @escaping (Route) -> Store,
                 transport: Transport = Transport(), follows: Bool = true, leaveWithin: TimeInterval = 1, exchange: ((String) -> String)? = nil,
+                download: ((String) -> (status: Int, data: Data)?)? = nil, shellFingerprint: String = "",
                 pace: SyncSchedule.Pace = SyncSchedule.Pace(), clock: Timekeeper = MainClock(), reachability: Reachability = NetworkPath()) {
         self.engine = engine
         self.root = root
@@ -126,6 +129,8 @@ public final class AppHost: ObservableObject {
         self.follows = follows
         self.leaveWithin = leaveWithin
         self.exchange = exchange ?? transport.exchange
+        self.download = download ?? transport.download
+        self.shellFingerprint = shellFingerprint
         visible = [root]
         schedule = SyncSchedule(pace: pace, clock: clock) { [weak self] in self?.pass() }
         stream = StreamClient(transport: transport, address: { [weak self] in await self?.streamAddress() }, feed: { [weak self] in await self?.feed($0, from: $1) })
@@ -364,17 +369,29 @@ public final class AppHost: ObservableObject {
         var nextRelease: TimeInterval?
     }
 
+    private static let sqliteHeader = Data("SQLite format 3\0".utf8)
+
     /// One sync pass for `store`: ask the app what it will want, fetch that
     /// off this thread, then let the app sync against the answers alone.
+    /// When a brand-new database needs a bootstrap and carries a schema
+    /// fingerprint, try hydrating from a prebuilt SQLite shell via `ir_open`
+    /// first, falling back seamlessly to `/bootstrap` on any miss or error.
     /// `then` runs on this thread when the pass has ended.
-    private func run(_ store: Store, then: @escaping (Outcome) -> Void) {
+    private func run(_ store: Store, allowShell: Bool = true, then: @escaping (Outcome) -> Void) {
         guard let plan = engine.call("sync_plan", "").flatMap(Self.object) else {
             return then(Outcome(pending: pending(), error: engine.error(), nextRelease: nextRelease()))
         }
+        let push = (plan["push"] as? String) ?? ""
+        let needsBootstrap = plan["bootstrap"] as? Bool == true
+        let planFingerprint = (plan["fingerprint"] as? String) ?? ""
+        let fingerprint = planFingerprint.isEmpty ? shellFingerprint : planFingerprint
+        if allowShell, needsBootstrap, push.isEmpty, !fingerprint.isEmpty {
+            return hydrateFromShell(store, fingerprint: fingerprint, then: then)
+        }
         let position = position()
         var wanted: [String] = []
-        if let push = plan["push"] as? String, !push.isEmpty { wanted.append("POST \(store.endpoint)/mutations\n\(push)") }
-        if plan["bootstrap"] as? Bool == true {
+        if !push.isEmpty { wanted.append("POST \(store.endpoint)/mutations\n\(push)") }
+        if needsBootstrap {
             wanted.append("GET \(store.endpoint)/bootstrap\n")
         } else {
             let who = (position["identity"] ?? "").isEmpty ? "" : "&identity=" + position["identity"]!
@@ -414,6 +431,111 @@ public final class AppHost: ObservableObject {
                 outcome.ok = synced != nil && !outcome.offline && outcome.error == nil
                 then(outcome)
             }
+        }
+    }
+
+    private func hydrateFromShell(_ store: Store, fingerprint: String, then: @escaping (Outcome) -> Void) {
+        let grantRequest = "GET \(store.endpoint)/shell?fingerprint=\(fingerprint)\n"
+        network.async {
+            let grantReply = Reply(self.exchange(grantRequest))
+            if grantReply.status == 0 {
+                return self.thread.run { then(Outcome(offline: true)) }
+            }
+            guard grantReply.status == 200,
+                  let grant = Self.object(grantReply.body),
+                  let filePath = grant["path"] as? String,
+                  filePath.hasPrefix("/shell/file"),
+                  let cursor = grant["cursor"] as? Int,
+                  cursor >= 0,
+                  let fetched = self.download(store.endpoint + filePath),
+                  fetched.status == 200,
+                  fetched.data.count >= Self.sqliteHeader.count,
+                  fetched.data.prefix(Self.sqliteHeader.count) == Self.sqliteHeader
+            else {
+                return self.thread.run {
+                    guard self.open == store else { return then(Outcome()) }
+                    self.run(store, allowShell: false, then: then)
+                }
+            }
+            let expectedIdentity = grant["identity"] as? String ?? ""
+            let staged = store.database + ".shell.\(UUID().uuidString).tmp"
+            let stagedURL = URL(fileURLWithPath: staged)
+            do {
+                try FileManager.default.createDirectory(at: stagedURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try fetched.data.write(to: stagedURL, options: .atomic)
+            } catch {
+                Self.removeSQLiteFiles(atPath: staged)
+                return self.thread.run {
+                    guard self.open == store else { return then(Outcome()) }
+                    self.run(store, allowShell: false, then: then)
+                }
+            }
+            self.thread.run {
+                guard self.open == store else {
+                    Self.removeSQLiteFiles(atPath: staged)
+                    return then(Outcome())
+                }
+                let current = self.position()
+                guard current["bootstrap"] == "needed", self.pending() == 0 else {
+                    Self.removeSQLiteFiles(atPath: staged)
+                    return self.run(store, allowShell: false, then: then)
+                }
+                guard self.engine.open(database: staged) else {
+                    Self.removeSQLiteFiles(atPath: staged)
+                    return self.run(store, allowShell: false, then: then)
+                }
+                let state = self.position()
+                let validCursor = state["bootstrap"] == "ready" && Int(state["cursor"] ?? "") == cursor
+                let validIdentity = expectedIdentity.isEmpty || state["identity"] == expectedIdentity
+                guard validCursor && validIdentity else {
+                    _ = self.engine.open(database: store.database)
+                    Self.removeSQLiteFiles(atPath: staged)
+                    return self.run(store, allowShell: false, then: then)
+                }
+                guard self.promoteShell(staged: staged, to: store.database) else {
+                    _ = self.engine.open(database: store.database)
+                    Self.removeSQLiteFiles(atPath: staged)
+                    return self.run(store, allowShell: false, then: then)
+                }
+                self.draw()
+                // Hydrated and drawn; schedule an immediate catch-up pass from the shell's cursor.
+                then(Outcome(ok: true, pending: self.pending(), offline: false, outdated: true, error: nil, nextRelease: self.nextRelease()))
+            }
+        }
+    }
+
+    private func promoteShell(staged: String, to target: String) -> Bool {
+        let fm = FileManager.default
+        let backup = target + ".shell-backup.\(UUID().uuidString).tmp"
+        let hadTarget = fm.fileExists(atPath: target)
+        do {
+            if hadTarget {
+                try fm.moveItem(atPath: target, toPath: backup)
+                for suffix in ["-wal", "-shm", "-journal"] {
+                    try? fm.removeItem(atPath: target + suffix)
+                }
+            }
+            try fm.moveItem(atPath: staged, toPath: target)
+            guard engine.open(database: target) else {
+                try? fm.removeItem(atPath: target)
+                if hadTarget { try? fm.moveItem(atPath: backup, toPath: target) }
+                return false
+            }
+            Self.removeSQLiteFiles(atPath: staged)
+            if hadTarget { Self.removeSQLiteFiles(atPath: backup) }
+            return true
+        } catch {
+            if !fm.fileExists(atPath: target), hadTarget, fm.fileExists(atPath: backup) {
+                try? fm.moveItem(atPath: backup, toPath: target)
+            }
+            return false
+        }
+    }
+
+    private static func removeSQLiteFiles(atPath path: String) {
+        let fm = FileManager.default
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            try? fm.removeItem(atPath: path + suffix)
         }
     }
 

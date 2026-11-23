@@ -4,7 +4,7 @@
 # read the first page). It says nothing certain about the compiled runtime,
 # where applying a record costs more than it does here.
 #
-#   cd demo && RAILS_ENV=test bin/rails runner 'box = Mailbox.open_demo("support"); MailShell.build(box); puts MailShell.fingerprint'
+#   cd demo && RAILS_ENV=test bin/rails runner 'Mailbox.open_demo("support"); InstantRecord::Shell.build_source(:mailbox, "support"); puts InstantRecord::Shell.fingerprint'
 #   RAILS_ENV=test bin/rails server -p 3999
 #   cd .. && bundle exec ruby demo/script/mail_shell_first_load.rb <fingerprint>
 require "bundler/setup"

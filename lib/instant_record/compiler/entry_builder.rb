@@ -61,7 +61,8 @@ module InstantRecord
             plan = {
               push: push,
               mutation_ids: mutations.map { |m| m[:id] },
-              bootstrap: !InstantRecord::Client.bootstrapped?
+              bootstrap: !InstantRecord::Client.bootstrapped?,
+              fingerprint: "<<shell_fingerprint>>"
             }
             plan[:next_release_ms] = next_ms unless next_ms.nil?
             <<write:out>>JSON.generate(plan))
@@ -443,8 +444,8 @@ module InstantRecord
         result
       end
 
-      def bridge(name, read:, write:, entries: "")
-        fill(BRIDGE, { "bridge" => name, "entries" => entries }, read: read, write: write)
+      def bridge(name, read:, write:, entries: "", shell_fingerprint: "")
+        fill(BRIDGE, { "bridge" => name, "entries" => entries, "shell_fingerprint" => shell_fingerprint.to_s }, read: read, write: write)
       end
 
       def database(pragmas:, steps:, models:)
@@ -459,7 +460,7 @@ module InstantRecord
         fill(START, { "config" => cfg, "windows" => declarations, "models" => models.join(", "), "streaming" => flag })
       end
 
-      def write_wasm_entry(emit_dir:, demo: false, manifest: nil, models: nil, migration_plan:, pipeline_dir:, app_dir: nil, sync_windows: nil, endpoint: nil, mount_path: nil)
+      def write_wasm_entry(emit_dir:, demo: false, manifest: nil, models: nil, migration_plan:, pipeline_dir:, app_dir: nil, sync_windows: nil, endpoint: nil, mount_path: nil, shell_fingerprint: "")
         if demo
           FileUtils.cp(
             File.join(pipeline_dir, "sqlite_release.rb"),
@@ -480,7 +481,8 @@ module InstantRecord
           bridge(
             "WasmBridge",
             read: ->(name) { %(File.read("/host/#{name}")) },
-            write: ->(name) { "File.write(\"/host/#{name}\", " }
+            write: ->(name) { "File.write(\"/host/#{name}\", " },
+            shell_fingerprint: shell_fingerprint
           ) +
           "\ndb_path = Main.default_db_path\n" +
           database(
@@ -671,7 +673,7 @@ module InstantRecord
         raise BuildError, e.message
       end
 
-      def write_native_entry(tree_dir:, app_dir:, demo: false, manifest: nil, models: nil, migration_plan:, sync_windows: nil, endpoint: nil, mount_path: nil)
+      def write_native_entry(tree_dir:, app_dir:, demo: false, manifest: nil, models: nil, migration_plan:, sync_windows: nil, endpoint: nil, mount_path: nil, shell_fingerprint: "")
         wasm_main = File.read(File.join(tree_dir, "main_wasm.rb"))
         unless wasm_main.scan(BANNER).length == 1
           raise BuildError, "main_wasm.rb has no entry to start from"
@@ -704,7 +706,8 @@ module InstantRecord
             "NativeBridge",
             read: ->(name) { %(NativeHost.ir_host_take("#{name}")) },
             write: ->(name) { "NativeHost.ir_host_give(\"#{name}\", " },
-            entries: NATIVE_ENTRIES
+            entries: NATIVE_ENTRIES,
+            shell_fingerprint: shell_fingerprint
           ) +
           fill(NATIVE_DATABASE, { "database" => indent(db_body, "    ") }) +
           "\nNativeDatabase.open(Main.default_db_path)\n" +

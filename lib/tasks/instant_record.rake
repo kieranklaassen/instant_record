@@ -29,7 +29,8 @@ namespace :instant_record do
       baseline: Rails.application.config.instant_record.compiled_migration_baseline,
       migration_paths: Rails.application.config.paths["db/migrate"].existent,
       island: ENV["INSTANT_RECORD_ISLAND"].presence || Rails.application.config.instant_record.island,
-      overrides: Rails.application.config.instant_record.include
+      overrides: Rails.application.config.instant_record.include,
+      shell_snapshot: Rails.application.config.instant_record.shell_snapshot
     }
   end
 
@@ -64,7 +65,7 @@ namespace :instant_record do
     options = compiler_options.call
     require_toolchain.call(options[:toolchain])
     output = InstantRecord::Compiler.build_native(
-      **options,
+      **options.except(:shell_snapshot),
       target: args[:target],
       swift_out: ENV["SWIFT_OUT"],
       kotlin: ENV["KOTLIN"] == "1" || ENV["KOTLIN_OUT"].present?,

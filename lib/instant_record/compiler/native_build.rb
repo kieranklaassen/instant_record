@@ -165,7 +165,8 @@ module InstantRecord
           sync_windows: @sync_windows,
           endpoint: @endpoint,
           mount_path: @mount_path,
-          migration_plan: plan
+          migration_plan: plan,
+          shell_fingerprint: emitted[:shell_fingerprint]
         )
         @out.puts "wrote main_native.rb with screens: #{screens.empty? ? 'none' : screens.join(', ')}"
 

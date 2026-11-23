@@ -39,7 +39,7 @@ module InstantRecord
       toolchain || ENV.fetch("INSTANT_RECORD_TOOLCHAIN") { gem_root.join("compiled/toolchain.env").to_s }
     end
 
-    def self.build(root:, toolchain:, endpoint:, models: nil, sync_windows: nil, mount_path: nil, baseline: nil, migration_paths: nil, island: nil, overrides: nil)
+    def self.build(root:, toolchain:, endpoint:, models: nil, sync_windows: nil, mount_path: nil, baseline: nil, migration_paths: nil, island: nil, overrides: nil, shell_snapshot: nil)
       with_workspace(root: root, toolchain: toolchain, stage_web: true) do |shared|
         WasmBuild.new(
           **shared,
@@ -50,7 +50,8 @@ module InstantRecord
           baseline: baseline,
           migration_paths: migration_paths || shared[:migration_paths],
           island: island,
-          overrides: overrides
+          overrides: overrides,
+          shell_snapshot: shell_snapshot
         ).run
       end
     end
