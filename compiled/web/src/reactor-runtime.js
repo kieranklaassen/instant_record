@@ -8,6 +8,7 @@ import { redirectHeaders } from "./http-headers.js";
 import { mailboxScope } from "./mailbox-scope.js";
 import { isServerAllowed, parseManifest } from "./manifest.js";
 import { createLeaderCoordinator } from "./leader-election.js";
+import { detectSchemaDrift, openOrRehydrate, rehydrateFromBytes, reloadOrRehydrateSnapshot } from "./schema-recovery.js";
 import { resolveServerRequest, serverRoot } from "./server-request.js";
 import { isValidSqliteBytes, parseShellGrant, scopedUrl, shouldFetchShell, validateShellState } from "./shell.js";
 import { openDatabaseStorage } from "./storage-backend.js";
@@ -281,26 +282,56 @@ export function createWorkerRuntime({
       }
 
       // IndexedDB fallback mode (whole-file snapshots).
+      let pendingPersist = null;
+      let needsSync = false;
       try {
-        return await withFiles(mode, async (get, put) => {
+        const result = await withFiles(mode, async (get, put) => {
           const revision = await get(REVISION);
+          let allowSave = true;
           // Only standalone (no Web Locks) needs to check for peer writes in IndexedDB.
           if (coordinator?.role === "standalone" && revision !== snapshotRevision) {
-            if ((await get(SCHEMA)) !== targetSchema) {
-              postMessage({ type: "release_required" });
-              throw new Error("A newer Rails release migrated this database. Reload to continue.");
-            }
-            const bytes = await get(DATABASE);
+            const [bytes, savedSchema] = await Promise.all([get(DATABASE), get(SCHEMA)]);
             const previous = host;
-            const restored = new AppHost(previous.module, { env: previous.env });
-            restored.cookies = previous.cookies;
-            if (bytes) restored.restoreDatabase(bytes, targetSchema);
-            restored.ensureBooted();
-            host = restored;
-            snapshotRevision = revision;
+            const recovered = reloadOrRehydrateSnapshot({
+              bytes,
+              savedSchema,
+              targetSchema,
+              createHost: () => {
+                const next = new AppHost(previous.module, { env: previous.env });
+                next.cookies = previous.cookies;
+                return next;
+              },
+              onReleaseRequired: () => postMessage({ type: "release_required" }),
+              onReport: report,
+            });
+            host = recovered.host;
             localRevision++;
+            if (recovered.rehydrated) {
+              needsSync = true;
+              if (recovered.persist) {
+                const rebuiltBytes = host.databaseBytes();
+                if (mode === "readwrite") {
+                  snapshotRevision = (revision ?? 0) + 1;
+                  put(DATABASE, rebuiltBytes);
+                  put(REVISION, snapshotRevision);
+                  put(SCHEMA, targetSchema);
+                  put("migration_history", migrationHistory);
+                  put("schema_digest", schemaDigest);
+                  put(STORAGE_BACKEND, "indexeddb");
+                  put(FILL, null);
+                } else {
+                  pendingPersist = { expectedRevision: revision, bytes: rebuiltBytes };
+                }
+              } else {
+                allowSave = false;
+                snapshotRevision = revision;
+              }
+            } else {
+              snapshotRevision = revision;
+            }
           }
           return operation(() => {
+            if (!allowSave) return;
             const bytes = host.databaseBytes();
             if (!bytes) throw new Error("SQLite did not produce a database snapshot");
             snapshotRevision = (revision ?? 0) + 1;
@@ -308,6 +339,25 @@ export function createWorkerRuntime({
             put(REVISION, snapshotRevision);
           }, put);
         });
+        if (pendingPersist) {
+          await withFiles("readwrite", async (get, put) => {
+            const currentRev = await get(REVISION);
+            const currentSchema = await get(SCHEMA);
+            if (currentRev !== pendingPersist.expectedRevision || (currentSchema != null && currentSchema > targetSchema)) {
+              return;
+            }
+            snapshotRevision = (currentRev ?? 0) + 1;
+            put(DATABASE, pendingPersist.bytes);
+            put(REVISION, snapshotRevision);
+            put(SCHEMA, targetSchema);
+            put("migration_history", migrationHistory);
+            put("schema_digest", schemaDigest);
+            put(STORAGE_BACKEND, "indexeddb");
+            put(FILL, null);
+          });
+        }
+        if (needsSync) kickSync(0);
+        return result;
       } catch (error) {
         if (coordinator?.role === "standalone") snapshotRevision = Symbol("reload");
         throw error;
@@ -713,31 +763,6 @@ export function createWorkerRuntime({
     }
   }
 
-  function validateSchemaMetadata({ hasExistingDb, version, savedHistory, previousDigest }) {
-    if (hasExistingDb && version == null && !legacySchema) {
-      throw new Error("Set compiled_migration_baseline to the schema version of the previously deployed browser app.");
-    }
-    const previous = version ?? Number(legacySchema);
-    if (hasExistingDb && (previous > targetSchema || (legacySchema && previous < Number(legacySchema)))) {
-      throw new Error("This release cannot migrate the saved schema version " + previous + ".");
-    }
-    if (savedHistory) {
-      const priorVersions = new Set([...Object.keys(savedHistory), ...Object.keys(migrationHistory)]);
-      for (const key of priorVersions) {
-        if (Number(key) <= previous && migrationHistory[key] !== savedHistory[key]) {
-          throw new Error("Published migration " + key + " changed. Add a new migration instead.");
-        }
-      }
-    }
-    if (version === targetSchema && previousDigest && previousDigest !== schemaDigest) {
-      throw new Error("The compiled schema changed without a new Rails migration version.");
-    }
-    if (hasExistingDb && previous < targetSchema && !(targetSchema in migrationHistory)) {
-      throw new Error("Missing browser migration for schema version " + targetSchema + ".");
-    }
-    return previous;
-  }
-
   async function openLeaderDatabase(module, { scope, path, promoted }) {
     ensureSnapshotOpen(scope);
     const storageStart = now();
@@ -790,44 +815,82 @@ export function createWorkerRuntime({
         }
 
         const existing = opfsHasBytes;
-        const previous = validateSchemaMetadata({
-          hasExistingDb: existing,
-          version,
-          savedHistory,
-          previousDigest,
-        });
         const secret = meta.savedSecret || randomHex(64);
-        const fromShell = !existing && !!shell;
+        const createHost = () => new AppHost(module, { env: { SECRET_KEY_BASE: secret } });
+        const drift = detectSchemaDrift({
+          bytes: existing ? new Uint8Array([1]) : null,
+          version,
+          targetSchema,
+          legacySchema,
+          history: savedHistory,
+          migrationHistory,
+          previousDigest,
+          schemaDigest,
+        });
 
-        const candidate = new AppHost(module, { env: { SECRET_KEY_BASE: secret } });
-        // Back up bytes ONLY when a schema migration is about to mutate an existing OPFS DB.
-        const migrationBackup = existing && previous < targetSchema ? storage.readAllBytes() : null;
-        if (fromShell) storage.writeAllBytes(shell.bytes);
+        let candidate;
+        let restoredOpfs = existing;
+        let rehydrated = null;
+        let fromShell = !existing && !!shell;
 
-        candidate.mountDatabase(storage.file, fromShell ? targetSchema : (existing ? previous : targetSchema));
-        const initStart = now();
-        try {
-          candidate.ensureBooted();
-          runtimeMs = now() - initStart;
-          if (fromShell) {
-            const state = candidate.syncState();
-            if (!validateShellState(state, shell)) {
-              throw new Error("The shell does not match its grant.");
+        const rehydrateOpfs = (oldBytes, reason) => {
+          shell = null;
+          fromShell = false;
+          const outcome = rehydrateFromBytes({
+            bytes: oldBytes,
+            reason,
+            createHost,
+            prepareFresh: freshHost => {
+              storage.truncate(0);
+              freshHost.mountDatabase(storage.file, targetSchema);
+            },
+            onReport: report,
+          });
+          candidate = outcome.host;
+          runtimeMs = outcome.runtimeMs;
+          restoredOpfs = false;
+          rehydrated = outcome.rehydrated;
+        };
+
+        if (drift) {
+          rehydrateOpfs(existing ? storage.readAllBytes() : null, drift);
+        } else {
+          const previous = version ?? Number(legacySchema);
+          candidate = createHost();
+          // Back up bytes ONLY when a schema migration is about to mutate an existing OPFS DB.
+          const migrationBackup = existing && previous < targetSchema ? storage.readAllBytes() : null;
+          if (fromShell) storage.writeAllBytes(shell.bytes);
+
+          candidate.mountDatabase(storage.file, fromShell ? targetSchema : (existing ? previous : targetSchema));
+          const initStart = now();
+          try {
+            candidate.ensureBooted();
+            runtimeMs = now() - initStart;
+            if (fromShell) {
+              const state = candidate.syncState();
+              if (!validateShellState(state, shell)) {
+                throw new Error("The shell does not match its grant.");
+              }
+            } else {
+              shell = null;
             }
-          } else {
-            shell = null;
+          } catch (error) {
+            if (existing) {
+              try {
+                rehydrateOpfs(migrationBackup || storage.readAllBytes(), "migration_failed");
+              } catch (rehydrateError) {
+                if (migrationBackup) storage.writeAllBytes(migrationBackup);
+                throw rehydrateError;
+              }
+            } else {
+              if (fromShell || !existing) storage.truncate(0);
+              throw error;
+            }
           }
-        } catch (error) {
-          if (migrationBackup) {
-            storage.writeAllBytes(migrationBackup);
-          } else if (fromShell || !existing) {
-            storage.truncate(0);
-          }
-          throw error;
         }
 
         candidate.flushDatabase();
-        const needsMetaWrite = !meta.savedSecret || fromShell || version !== targetSchema ||
+        const needsMetaWrite = !meta.savedSecret || fromShell || !!rehydrated || version !== targetSchema ||
           !previousDigest || migratedFromIdb || meta.savedBackend !== "opfs";
 
         snapshotRevision = meta.revision ?? 0;
@@ -840,12 +903,13 @@ export function createWorkerRuntime({
             put("migration_history", migrationHistory);
             put("schema_digest", schemaDigest);
             put(STORAGE_BACKEND, "opfs");
+            if (rehydrated) put(FILL, null);
             // Reclaim legacy whole-file IDB snapshot once OPFS boot succeeds.
             if (migratedFromIdb || meta.legacyBytes) del(DATABASE);
           });
         }
         host = candidate;
-        return existing;
+        return { restored: restoredOpfs, rehydrated };
       }
 
       // IndexedDB fallback path (whole-file transaction).
@@ -854,22 +918,24 @@ export function createWorkerRuntime({
           get(DATABASE), get(SCHEMA), get(REVISION), get("secret_key_base"),
           get("migration_history"), get("schema_digest"),
         ]);
-        const previous = validateSchemaMetadata({
-          hasExistingDb: !!bytes,
-          version,
-          savedHistory,
-          previousDigest,
-        });
         const secret = savedSecret || randomHex(64);
         if (!savedSecret) put("secret_key_base", secret);
-        const candidate = new AppHost(module, { env: { SECRET_KEY_BASE: secret } });
-        const fromShell = !bytes && !!shell;
-        if (bytes) candidate.restoreDatabase(bytes, previous);
-        if (fromShell) candidate.restoreDatabase(shell.bytes, targetSchema);
-        const initStart = now();
-        candidate.ensureBooted();
-        runtimeMs = now() - initStart;
-        if (fromShell) {
+        const outcome = openOrRehydrate({
+          bytes,
+          version,
+          targetSchema,
+          legacySchema,
+          history: savedHistory,
+          migrationHistory,
+          previousDigest,
+          schemaDigest,
+          shell,
+          createHost: () => new AppHost(module, { env: { SECRET_KEY_BASE: secret } }),
+          onReport: report,
+        });
+        const candidate = outcome.host;
+        runtimeMs = outcome.runtimeMs;
+        if (outcome.fromShell) {
           const state = candidate.syncState();
           if (!validateShellState(state, shell)) {
             throw new Error("The shell does not match its grant.");
@@ -878,7 +944,7 @@ export function createWorkerRuntime({
           shell = null;
         }
         snapshotRevision = revision;
-        if (fromShell || version !== targetSchema || !previousDigest) {
+        if (outcome.fromShell || outcome.rehydrated || version !== targetSchema || !previousDigest) {
           snapshotRevision = (revision ?? 0) + 1;
           put(DATABASE, candidate.databaseBytes());
           put(REVISION, snapshotRevision);
@@ -886,21 +952,22 @@ export function createWorkerRuntime({
           put("migration_history", migrationHistory);
           put("schema_digest", schemaDigest);
           put(STORAGE_BACKEND, "indexeddb");
+          if (outcome.rehydrated) put(FILL, null);
         }
         host = candidate;
-        return !!bytes;
+        return { restored: outcome.restored, rehydrated: outcome.rehydrated };
       });
     };
 
-    let restored;
+    let opened;
     try {
       try {
-        restored = await openOnce();
+        opened = await openOnce();
       } catch (error) {
         if (!shell) throw error;
         report({ kind: "sync", method: "GET", path: "/shell", status: "rejected", ms: Math.round(shell.ms) });
         shell = null;
-        restored = await openOnce();
+        opened = await openOnce();
       }
     } catch (error) {
       // Release the OPFS sync handle if boot or schema validation fails.
@@ -909,8 +976,9 @@ export function createWorkerRuntime({
       throw error;
     }
 
+    const { restored, rehydrated } = opened;
     const bootstrapStart = now();
-    if (!restored && !shell) await drain(true, await bootstrapFetch);
+    if (!restored && !shell) await drain(true, rehydrated ? null : await bootstrapFetch);
     if (restored) applySyncSchedule(nextSyncAction(host.syncState(), 0));
     ensureStreamLeader();
     streamLeader?.setCanLead(true);
@@ -923,6 +991,7 @@ export function createWorkerRuntime({
 
     return {
       restored,
+      rehydrated,
       storageMs,
       runtimeMs,
       bootstrapMs,
@@ -1150,6 +1219,7 @@ export function createWorkerRuntime({
       return {
         compileMs: compiled - started,
         restored: bootInfo.restored,
+        rehydrated: bootInfo.rehydrated,
         storageMs: bootInfo.storageMs,
         runtimeMs: bootInfo.runtimeMs,
         bootstrapMs: bootInfo.bootstrapMs,

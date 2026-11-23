@@ -41,7 +41,7 @@ module InstantRecord
         base[:args] = sanitize_json_value(raw[:args]) || {}
         base
       else
-        raw.permit(:id, :record_type, :record_id, :operation, :base_version, :hlc, changes: {})
+        raw.permit(:id, :record_type, :record_id, :operation, :base_version, :hlc, :schema_version, changes: {})
       end
     end
 

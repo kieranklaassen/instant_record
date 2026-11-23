@@ -141,19 +141,51 @@ namespace :instant_record do
     exit(status)
   end
 
-  desc "Verify the compiler toolchain configuration and static AOT/32-bit compatibility (optional target: wasm, native, iphonesimulator, iphoneos)"
+  desc "Verify the compiler toolchain, static AOT/32-bit compatibility, and schema lockfile upgrade ladder (optional target: wasm, native, iphonesimulator, iphoneos)"
   task :doctor, [:target] => :environment do |_task, args|
     require "instant_record/compiler"
+    Rails.application.eager_load!
     toolchain = toolchain_path.call
     require_toolchain.call(toolchain)
     report = InstantRecord::Compiler.doctor(
       toolchain: toolchain,
       target: args[:target] || :wasm,
       web_dir: Rails.root.join("tmp/instant_record/compiled/web"),
-      app_root: Rails.root
+      root: Rails.root,
+      app_root: Rails.root,
+      baseline: Rails.application.config.instant_record.compiled_migration_baseline,
+      migration_paths: Rails.application.config.paths["db/migrate"].existent,
+      models: InstantRecord.syncable_models
     )
     puts report
     abort "Doctor check failed." unless report.ok?
+  end
+
+  namespace :schema do
+    desc "Generate or update db/instant_record_lock.json from db/schema.rb and db/migrate"
+    task lock: :environment do
+      require "instant_record/compiler"
+      lock = InstantRecord::Compiler.lock_schema(
+        root: Rails.root,
+        baseline: Rails.application.config.instant_record.compiled_migration_baseline,
+        migration_paths: Rails.application.config.paths["db/migrate"].existent
+      )
+      puts "Wrote #{InstantRecord::Compiler::SchemaLock.path(Rails.root)} (schema version #{lock['schema_version']}, #{lock['versions'].size} versions)"
+    end
+
+    desc "Verify db/instant_record_lock.json and replay every historical schema version + pending outbox up to HEAD"
+    task verify: :environment do
+      require "instant_record/compiler"
+      Rails.application.eager_load!
+      report = InstantRecord::Compiler.verify_schema(
+        root: Rails.root,
+        baseline: Rails.application.config.instant_record.compiled_migration_baseline,
+        migration_paths: Rails.application.config.paths["db/migrate"].existent,
+        models: InstantRecord.syncable_models
+      )
+      puts report
+      abort "Schema lockfile verification failed." unless report.ok?
+    end
   end
 
   namespace :files do

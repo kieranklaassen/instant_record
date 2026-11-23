@@ -6,6 +6,7 @@ require_relative "compiler/runner"
 require_relative "compiler/toolchain"
 require_relative "compiler/path_scrubber"
 require_relative "compiler/browser_migrations"
+require_relative "compiler/schema_lock"
 require_relative "compiler/manifest"
 require_relative "compiler/route_analyzer"
 require_relative "compiler/reachability_tracer"
@@ -158,11 +159,36 @@ module InstantRecord
       ).manifest
     end
 
-    def self.doctor(toolchain:, target: :wasm, web_dir: nil, app_root: nil, island: nil, overrides: nil)
+    def self.doctor(toolchain:, target: :wasm, web_dir: nil, root: nil, app_root: nil, baseline: nil, migration_paths: nil, models: nil, island: nil, overrides: nil)
       report = Toolchain.load(toolchain).doctor(target: target, web_dir: web_dir)
-      return report unless app_root
+      if app_root
+        report = report.with_lint(lint(app_root, staged: false, island: island, overrides: overrides))
+      end
+      schema_root = root || app_root
+      if schema_root && File.file?(File.join(schema_root.to_s, "db/schema.rb"))
+        schema_report = SchemaLock.verify(
+          root: schema_root,
+          baseline: baseline,
+          migration_paths: migration_paths,
+          models: models
+        )
+        schema_report.checks.each do |check|
+          report.checks << Toolchain::Check.new(
+            name: "schema:#{check.name}",
+            status: check.ok? ? :ok : :error,
+            detail: check.detail
+          )
+        end
+      end
+      report
+    end
 
-      report.with_lint(lint(app_root, staged: false, island: island, overrides: overrides))
+    def self.lock_schema(root:, baseline: nil, migration_paths: nil, force: false)
+      SchemaLock.write!(root: root, baseline: baseline, migration_paths: migration_paths, force: force)
+    end
+
+    def self.verify_schema(root:, baseline: nil, migration_paths: nil, models: nil)
+      SchemaLock.verify(root: root, baseline: baseline, migration_paths: migration_paths, models: models)
     end
 
     def self.lint(root, staged: false, exclude: nil, island: nil, overrides: nil)

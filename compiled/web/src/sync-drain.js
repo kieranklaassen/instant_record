@@ -29,7 +29,7 @@ export async function runDrain({
     return { changed: false, notified: false, pending: 0, nextReleaseMs };
   }
   const push = plan.push ? await fetchReply("POST", "/mutations", plan.push) : null;
-  const snapshot = plan.bootstrap ? (early?.status === 200 ? early : await fetchReply("GET", "/bootstrap")) : null;
+  const snapshot = plan.bootstrap ? (!plan.push && early?.status === 200 ? early : await fetchReply("GET", "/bootstrap")) : null;
 
   const result = await withSnapshot("readwrite", save => {
     const host = getHost();

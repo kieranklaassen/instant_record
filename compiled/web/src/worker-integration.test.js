@@ -222,6 +222,15 @@ function createTestEnvironment({ opfsUnavailable = false, seedIdbBytes = null, s
       this.memBytes = new Uint8Array(bytes);
       this.schemaVersion = schemaVersion;
     }
+    extractOutbox(bytes) {
+      if (!bytes || !bytes.byteLength) return [];
+      const parsed = JSON.parse(new TextDecoder().decode(bytes));
+      return Array.isArray(parsed.outbox) ? parsed.outbox.map(row => ({ ...row })) : [];
+    }
+    importOutbox(rows) {
+      this._persist({ ...this.state, outbox: [...(this.state.outbox || []), ...rows] });
+      return { imported: rows.length };
+    }
     ensureBooted() {
       const raw = this.inode ? this.inode.readAll() : this.memBytes;
       if (raw && raw.byteLength > 0) {
@@ -468,6 +477,36 @@ test("failed schema migration in OPFS rolls back exact SQLite bytes and leaves I
   assert.equal(env.idbStores.get("__default__").get("snapshot_revision"), 4);
 
   tab.runtime.shutdown();
+});
+
+test("schema drift in OPFS auto-rehydrates onto a clean database while preserving pending outbox rows", async () => {
+  const pendingOutbox = [{ id: "m-offline-1", record_type: "Note", record_id: "n-1", operation: "create", changes_payload: '{"title":"keep"}' }];
+  const driftedBytes = new TextEncoder().encode(JSON.stringify({ items: ["stale"], cursor: 9, bootstrapped: true, historyPages: 0, outbox: pendingOutbox }));
+  const env = createTestEnvironment({
+    seedIdbBytes: driftedBytes,
+    seedMeta: {
+      rails_schema_version: 99,
+      snapshot_revision: 4,
+      schema_digest: "digest-v99",
+      migration_history: { "1": "h1", "99": "h99" },
+    },
+  });
+
+  const tab = env.spawnWorker();
+  try {
+    const booted = await tab.rpc("boot", { module: {}, path: "/todo", scope: "s1" });
+    assert.equal(booted.storageMode, "opfs");
+    assert.equal(booted.restored, false);
+    assert.equal(booted.rehydrated.reason, "schema_version_ahead:99");
+    assert.equal(booted.rehydrated.preservedOutbox, 1);
+
+    const stored = JSON.parse(new TextDecoder().decode(env.opfsTree.get("instant-record-spinel").get("default").get("development.sqlite3").bytes));
+    assert.deepEqual(stored.items, [], "rebuilt OPFS database starts clean");
+    assert.deepEqual(stored.outbox, pendingOutbox, "pending outbox rows preserved across OPFS rehydration");
+    assert.equal(env.idbStores.get("__default__").get("rails_schema_version"), 2);
+  } finally {
+    tab.runtime.shutdown();
+  }
 });
 
 test("Safari Private Mode falls back cleanly to IndexedDB and keeps 24 MB fill cap while OPFS exceeds 24 MB", async () => {
