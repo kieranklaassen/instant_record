@@ -181,6 +181,22 @@ class CompilerTest < ActiveSupport::TestCase
       refute File.exist?(File.join(app, "app/views/source"))
       refute File.exist?(File.join(app, "app/helpers/source_helper.rb"))
 
+      # The overlay's console controller renders no partial, so the one the
+      # server's controller renders is not staged for the compiler to choke on.
+      assert File.file?(File.join(app, "app/views/console/sessions/index.html.erb"))
+      refute File.exist?(File.join(app, "app/views/console/sessions/_result.html.erb"))
+
+      # Of the four todo apps only /instant is local_first; the Rails-served
+      # three and /compare stay out of the browser build.
+      assert File.file?(File.join(app, "app/controllers/instant/todos_controller.rb"))
+      %w[plain hotwire inertia].each do |way|
+        refute File.exist?(File.join(app, "app/controllers", way))
+        refute File.exist?(File.join(app, "app/models", way))
+        refute File.exist?(File.join(app, "app/views", way))
+      end
+      refute File.exist?(File.join(app, "app/controllers/compare_controller.rb"))
+      refute File.exist?(File.join(app, "app/views/compare"))
+
       assert File.file?(manifest_path)
       manifest = InstantRecord::Compiler::Manifest.read(manifest_path)
       assert_equal "island", manifest.mode
@@ -472,11 +488,13 @@ class CompilerTest < ActiveSupport::TestCase
         demo: false,
         models: ["Note"],
         migration_plan: plan,
-        pipeline_dir: PIPELINE_DIR
+        pipeline_dir: PIPELINE_DIR,
+        shell_fingerprint: "abc123fingerprint"
       )
 
       wasm_main = File.read(File.join(emit, "main_wasm.rb"))
       assert_includes wasm_main, "module WasmBridge"
+      assert_includes wasm_main, "InstantRecord::Client.handle_history("
       assert_includes wasm_main, 'File.read("/host/in")'
       assert_includes wasm_main, "InstantRecord::ReadTracker.track"
       assert_includes wasm_main, "InstantRecord::Client.capture_local_changes"
@@ -485,6 +503,7 @@ class CompilerTest < ActiveSupport::TestCase
       assert_includes wasm_main, '\#{x}\#@y\#$z'
       assert_includes wasm_main, "InstantRecord.sync(Note)"
       assert_includes wasm_main, "InstantRecord::Client.streaming = true"
+      assert_includes wasm_main, 'fingerprint: "abc123fingerprint"'
       assert_includes wasm_main, "def self.notices"
       assert_includes wasm_main, "notices="
       assert_includes wasm_main, "def self.branch_outbox"
@@ -495,18 +514,21 @@ class CompilerTest < ActiveSupport::TestCase
         app_dir: app,
         demo: false,
         models: ["Note"],
-        migration_plan: plan
+        migration_plan: plan,
+        shell_fingerprint: "abc123fingerprint"
       )
 
       assert_equal ["inbox_list"], screens
       native_main = File.read(File.join(emit, "main_native.rb"))
       assert_includes native_main, "module NativeBridge"
+      assert_includes native_main, "InstantRecord::Client.handle_history("
       assert_includes native_main, "def self.branch_outbox"
       assert_includes native_main, "def self.branch_replay"
       assert_includes native_main, 'when "inbox_list" then InboxListScreen.new(params)'
       assert_includes native_main, 'NativeHost.ir_host_give("reads", InstantRecord::ReadTracker.serialize(reads))'
       assert_includes native_main, 'InstantRecord::SyncMetadata.set("schema_version", "00000020261120000001")'
       assert_includes native_main, "InstantRecord::Client.streaming = false"
+      assert_includes native_main, 'fingerprint: "abc123fingerprint"'
 
       host = File.read(File.join(emit, "app/models/instant_record/host.rb"))
       assert_includes host, "NativeHost.ir_host_take(name)"
@@ -693,7 +715,8 @@ class CompilerTest < ActiveSupport::TestCase
       refute File.exist?(Pathname(app_root).join("tmp/instant_record/compiled/pipeline")), "pipeline scripts should not be copied into tmp/"
 
       index_html = output.join("index.html").read
-      assert_includes index_html, '<link rel="modulepreload" href="/harness/worker-abc.js">'
+      assert_includes index_html, 'window.__worker = new Worker("/harness/worker-abc.js", { type: "module" })'
+      refute_includes index_html, "modulepreload"
       assert_includes index_html, '<link rel="preload" as="style" href="https://fonts.example.test/font.css">'
       assert_includes index_html, "instant_record.warmed"
 
@@ -723,18 +746,29 @@ class CompilerTest < ActiveSupport::TestCase
       end
       assert_equal new_modules, File.readlink(Pathname(app_root).realpath.join("tmp/instant_record/compiled/web/node_modules"))
 
-      # Native host build runs end-to-end and outputs libinstant_record_app.a + host.
+      # Native host build runs end-to-end and outputs libinstant_record_app.a + host + typed contracts.
+      custom_swift = File.join(dir, "exported/Contracts.swift")
       native_out = with_path(fake[:bin_dir]) do
         InstantRecord::Compiler.build_native(
           root: app_root,
           models: ["Task"],
           toolchain: fake[:toolchain_file],
-          endpoint: "/instant_record"
+          endpoint: "/instant_record",
+          swift_out: custom_swift,
+          kotlin: true,
+          kotlin_package: "com.acme.tasks"
         )
       end
       assert File.file?(native_out.join("libinstant_record_app.a"))
       assert File.file?(native_out.join("host"))
       assert File.file?(native_out.join(InstantRecord::Compiler::NativeBuild.shared_library_name))
+      assert File.file?(native_out.join("generated/InstantRecordContracts.swift"))
+      assert File.file?(native_out.join("generated/InstantRecordContracts.kt"))
+      assert File.file?(custom_swift)
+      assert_includes native_out.join("generated/InstantRecordContracts.swift").read, "public struct TasksViewProps"
+      assert_includes native_out.join("generated/InstantRecordContracts.kt").read, "package com.acme.tasks"
+      assert_includes native_out.join("generated/InstantRecordContracts.kt").read, "data class TasksViewProps"
+      refute_includes native_out.join("app-src/app/screens/tasks_screen.rb").read, "contract"
 
       # Both WasmBuild and NativeBuild compile sqlite3.c with FTS5 enabled.
       calls = File.read(fake[:call_log]).lines
@@ -757,6 +791,37 @@ class CompilerTest < ActiveSupport::TestCase
       assert File.file?(ios_out.join("libspinel_rt.a"))
       refute File.exist?(ios_out.join("host"))
       refute File.exist?(ios_out.join(InstantRecord::Compiler::NativeBuild.shared_library_name))
+    end
+  end
+
+  test "WasmBuild#inject_preloads keeps core CSS as low-priority preloads and defers extra stylesheets" do
+    Dir.mktmpdir do |dir|
+      fake = create_fake_toolchain(dir)
+      dist = File.join(dir, "dist")
+      FileUtils.mkdir_p(File.join(dist, "harness"))
+      FileUtils.mkdir_p(File.join(dist, "assets"))
+      File.write(File.join(dist, "index.html"), "<!doctype html><html><head>\n  </head><body></body></html>")
+      File.write(File.join(dist, "harness/worker-123.js"), "// worker\n")
+      %w[base.css ui-deadbeef01.css mail.css slack.css extra.css].each do |name|
+        File.write(File.join(dist, "assets", name), "body { color: #000; }\n")
+      end
+
+      build = InstantRecord::Compiler::WasmBuild.new(
+        workspace: dir,
+        gem_root: File.expand_path("..", __dir__),
+        toolchain: fake[:toolchain_file]
+      )
+      build.inject_preloads(dist, nil)
+
+      html = File.read(File.join(dist, "index.html"))
+      assert_includes html, 'window.__worker = new Worker("/harness/worker-123.js", { type: "module" })'
+      assert_includes html, '<link rel="preload" as="style" fetchpriority="low" href="/assets/base.css">'
+      assert_includes html, '<link rel="preload" as="style" fetchpriority="low" href="/assets/ui-deadbeef01.css">'
+      assert_includes html, '<link rel="preload" as="style" fetchpriority="low" href="/assets/mail.css">'
+      refute_includes html, '<link rel="preload" as="style" fetchpriority="low" href="/assets/slack.css">'
+      refute_includes html, '<link rel="preload" as="style" fetchpriority="low" href="/assets/extra.css">'
+      assert_includes html, '"/assets/slack.css"'
+      assert_includes html, '"/assets/extra.css"'
     end
   end
 
@@ -786,7 +851,22 @@ class CompilerTest < ActiveSupport::TestCase
     File.write(File.join(app_root, "Gemfile"), "source 'https://rubygems.org'\n")
     File.write(File.join(app_root, "config/routes.rb"), "Rails.application.routes.draw { root 'tasks#index' }\n")
     File.write(File.join(app_root, "app/models/task.rb"), "class Task < ApplicationRecord\n  include InstantRecord::Syncable\nend\n")
-    File.write(File.join(app_root, "app/screens/tasks_screen.rb"), "class TasksScreen < InstantRecord::Native::Screen\n  def body; navigation(title: 'Tasks') {}; end\nend\n")
+    File.write(File.join(app_root, "app/screens/tasks_screen.rb"), <<~RUBY)
+      class TasksScreen < InstantRecord::Native::Screen
+        contract "TasksView" do |c|
+          c.string :heading
+          c.int :count
+          c.action :refresh
+        end
+
+        def body
+          swift "TasksView" do
+            prop "heading", "Tasks"
+            number "count", 0
+          end
+        end
+      end
+    RUBY
     File.write(File.join(app_root, "app/views/layouts/application.html.erb"), <<~HTML)
       <html><head>
         <link rel="preconnect" href="https://fonts.example.test">

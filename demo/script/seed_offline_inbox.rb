@@ -10,5 +10,5 @@ box = Mailbox.create!(id: "support")
     attributes: { kind: "message", address: "rae#{number}@example.test", subject: subject, body: "Can you help with number #{number}?" })
   box.append!(id: SecureRandom.uuid, author: "theo", attributes: { kind: "reply", parent_id: message.id, body: "On it." }) if (number % 5).zero?
 end
-shell = MailShell.build(box)
+shell = InstantRecord::Shell.build_source(:mailbox, box.id)
 puts "support: #{box.reload.revision} entries, shell at #{shell.cursor} (#{shell.bytes} bytes)"

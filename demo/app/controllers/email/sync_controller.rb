@@ -2,7 +2,8 @@ module Email
   class SyncController < ActionController::API
     before_action do
       headers.merge!(InstantRecord::CORS_HEADERS)
-      headers["Cache-Control"] = "no-store"
+      headers["Cache-Control"] = "private, no-store"
+      headers["Vary"] = "Authorization, Cookie"
     end
     before_action :check_token, except: :preflight
     before_action :load_mailbox, except: :preflight
@@ -15,23 +16,31 @@ module Email
       render json: @mailbox.first_sync
     end
 
-    # Where a new browser may fetch this inbox's shell, when one stands that
-    # its build can open and that is not too far behind. No content sends the
-    # browser to the bootstrap above. A missing or ageing shell is rebuilt for
-    # whoever comes next.
+    # Where a new browser or phone may fetch this inbox's shell, when one stands
+    # that its build can open and that is not too far behind. No content sends
+    # the client to the bootstrap above. A missing or ageing shell is rebuilt
+    # for whoever comes next.
     def shell
-      shell = MailShell.latest(@mailbox.id)
-      ShellBuildJob.perform_later(@mailbox.id) if shell.nil? || shell.stale?(@mailbox.revision)
-      return head :no_content unless shell&.servable?(@mailbox.revision) && params[:fingerprint] == MailShell.fingerprint
+      expected = InstantRecord::Shell.fingerprint
+      return head :no_content unless params[:fingerprint].to_s == expected
 
-      render json: { cursor: shell.cursor, bytes: shell.bytes, built_at: shell.built_at.utc.iso8601,
-        path: "/shell/file?#{{ token: shell.signed_token(@member) }.to_query}" }
+      shell = InstantRecord::Shell.latest(@mailbox.id, fingerprint: expected)
+      InstantRecord::ShellBuildJob.perform_later(source: "mailbox", arg: @mailbox.id) if shell.nil? || shell.stale?(@mailbox.revision)
+      return head :no_content unless shell&.servable?(@mailbox.revision)
+
+      render json: {
+        cursor: shell.cursor,
+        bytes: shell.bytes,
+        built_at: shell.built_at.utc.iso8601,
+        path: "/shell/file?#{{ token: shell.signed_token(holder: @member) }.to_query}"
+      }
     end
 
     def shell_file
-      shell = MailShell.find_signed(params[:token].to_s, member: @member, inbox: @mailbox.id)
+      shell = InstantRecord::Shell.find_signed(params[:token].to_s, partition: @mailbox.id, holder: @member)
       return head :not_found unless shell
 
+      headers["x-content-type-options"] = "nosniff"
       send_file shell.path, type: "application/vnd.sqlite3", disposition: "inline"
     end
 

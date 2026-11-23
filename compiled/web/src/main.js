@@ -5,9 +5,11 @@ import { mailboxScope } from "./mailbox-scope.js";
 import { isLocalRoute, parseManifest } from "./manifest.js";
 import { watchRelease } from "./release-updates.js";
 import { isLocalUrl } from "./server-request.js";
+import workerUrl from "./worker.js?worker&url";
 const manifest = parseManifest(import.meta.env.VITE_MANIFEST);
 let releaseRequired;
-const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
+// A built shell has already started the worker from its first inline script (WasmBuild#inject_preloads).
+const worker = window.__worker || new Worker(workerUrl, { type: "module" });
 const waiting = new Map();
 let nextId = 1;
 let historyFill = null;
@@ -154,7 +156,7 @@ async function parseFetchInput(input, init, { binary = true } = {}) {
       }
     }
   }
-  return { method, body, contentType, redirect };
+  return { method, body, contentType, redirect, requestHeaders };
 }
 
 // The same seam a service worker's fetch handler is, from inside the page.
@@ -174,7 +176,7 @@ window.fetch = async (input, init) => {
     : (init?.method || input.method || "GET").toUpperCase();
   if (!isLocal(url, requestMethod)) return networkFetch(input, init);
 
-  const { method, body, contentType, redirect } = await parseFetchInput(input, init, { binary: true });
+  const { method, body, contentType, redirect, requestHeaders } = await parseFetchInput(input, init, { binary: true });
   const path = url.pathname + url.search;
 
   if (redirect === "manual") {
@@ -257,100 +259,148 @@ function syncScope() {
   }
 }
 
-const boot = await call("boot", {
-  module: await window.__wasm,
-  path: location.pathname + location.search,
-  scope: syncScope(),
-  headers: defaultBrowserHeaders({ referrer: document.referrer }),
-}).catch(error => {
-  document.body.textContent = "The app could not open this release. Your saved database was kept. " + error.message;
-  throw error;
-});
-if (window.__spinel) {
-  window.__spinel.role = boot.role;
-  window.__spinel.storage = boot.storageMode;
-}
-window.addEventListener("pagehide", () => {
-  try { worker.postMessage({ type: "instant_record.bye" }); } catch {}
-});
-marks.booted = performance.now();
-marks.compileMs = window.__wasmMs ?? boot.compileMs;
-const { result, finalPath } = boot.first;
-if (result.reads) window.__spinel.reads = result.reads;
-marks.firstResponse = performance.now();
-marks.firstRequestMs = result.ms;
-if (finalPath !== location.pathname + location.search) history.replaceState(null, "", finalPath);
-// Hand the document to the app's own page: its importmap, Turbo and Stimulus take over from here.
-document.open();
-document.write(result.status === 200 ? result.body : `<pre>${result.status}\n${(result.errors || []).join("\n")}</pre>`);
-document.close();
-document.addEventListener("turbo:before-morph-element", keepTyping);
-document.addEventListener("turbo:render", () => { redrawing = false; });
-document.addEventListener("turbo:before-visit", event => {
-  const destination = new URL(event.detail.url, location.href);
-  if (mailboxScope(event.detail.url) !== initialScope || !isLocal(destination, "GET")) {
-    event.preventDefault();
-    location.assign(event.detail.url);
-  }
-});
-
-marks.rendered = performance.now();
-
-
-// Turbo and Stimulus handle their own forms first. An ordinary Rails form still
-// submits locally in apps without either library.
-async function submitLocalForm(event) {
-  if (event.defaultPrevented || !(event.target instanceof HTMLFormElement)) return;
+// A form the app in this browser answers is drawn in the task its answer arrives in. Turbo would
+// visit the page the app redirected to and wait a frame before it drew it, and the app has
+// answered long before that frame. So the answer's page is morphed into this one at once, and
+// the change is on screen at the next paint: the time a page takes to draw a guess, and this
+// is no guess. A form that asks Turbo for something of its own (a frame, a stream, a question
+// first) is left to Turbo, and so is an answer that is another page.
+async function submitInPlace(event) {
+  const turbo = window.Turbo;
   const form = event.target;
   const button = event.submitter;
+  if (!turbo?.morphBodyElements || event.defaultPrevented || !(form instanceof HTMLFormElement)) return;
+  const asks = (name) => button?.hasAttribute(name) || form.hasAttribute(name);
+  if (["data-turbo-frame", "data-turbo-stream", "data-turbo-confirm", "data-turbo-action", "data-turbo-method"].some(asks)) return;
+  if (form.closest("turbo-frame, [data-turbo='false']") || button?.dataset.turbo === "false") return;
   const target = button?.getAttribute("formtarget") || form.target;
   const url = new URL(button?.getAttribute("formaction") || form.action, location.href);
-  const method = (button?.getAttribute("formmethod") || form.method).toUpperCase();
-  if (!isLocal(url, method) || url.searchParams.has("instant_record_network") || method !== "POST" || (target && target !== "_self")) return;
-  event.preventDefault();
+  const posted = (button?.getAttribute("formmethod") || form.method).toUpperCase();
+  if (posted !== "POST" || url.searchParams.has("instant_record_network") || (target && target !== "_self")) return;
   const fields = new FormData(form, button || undefined);
-  const file = [...fields.values()].find(value => value instanceof File && value.name);
-  if (file) {
-    window.alert("This compiled runtime does not support file uploads.");
-    return;
-  }
-  const response = await appRequest(
-    method,
-    url.pathname + url.search,
-    encodeFormData(fields),
-    "application/x-www-form-urlencoded",
-    withBrowserHeaders({ Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" }),
-  );
-  if (response.result.status < 400 && response.redirected) {
-    location.assign(response.finalPath);
-    return;
-  }
-  const html = response.result.status >= 400 ? (response.result.body || "<p>Request failed</p>") : response.result.body;
-  if (response.result.reads) window.__spinel.reads = response.result.reads;
-  document.open();
-  document.write(html);
-  document.close();
-  window.addEventListener("submit", submitLocalForm);
-  window.dispatchEvent(new Event("instant-record:dom-written"));
-}
-window.addEventListener("submit", submitLocalForm);
-mountBranchPreview(branchApi);
-releaseRequired = watchRelease(networkFetch, import.meta.env.VITE_SOURCE_VERSION, () => waiting.size > 0 || !!window.__spinel?.branchState?.active);
+  const method = String(fields.get("_method") || posted).toUpperCase();
+  if (!isLocal(url, method) || [...fields.values()].some(value => value instanceof File && value.name)) return;
+  event.preventDefault();
 
-// Resource Timing distinguishes a cached module from a network response and gives
-// compressed and decoded byte counts without downloading the module a second time.
-const resource = performance.getEntriesByName(new URL(import.meta.env.VITE_WASM_URL, location.origin).href).at(-1);
-if (resource?.decodedBodySize) {
-  const cached = resource.transferSize === 0;
-  const compileEnd = window.__wasmStart + marks.compileMs;
-  const ledger = { at: Date.now(), totalMs: marks.rendered - result.ms, entries: [
-    { phase: "bundle", ms: resource.responseEnd - resource.startTime, bytes: resource.decodedBodySize,
-      wireBytes: cached ? 0 : resource.encodedBodySize, cached },
-    { phase: "compile", ms: Math.max(0, compileEnd - resource.responseEnd) },
-    { phase: "sqlite", ms: boot.storageMs }, { phase: "vm", ms: boot.runtimeMs },
-    { phase: "schema", ms: boot.bootstrapMs }, { phase: "render", ms: result.ms },
-    ...(boot.shell ? [{ phase: "shell", ms: boot.shell.ms, bytes: boot.shell.bytes }] : []),
-  ] };
-  window.__spinel.ledger = ledger;
-  try { localStorage.setItem("instant_record.compiled.boot." + (cached ? "cache" : "network"), JSON.stringify(ledger)); } catch {}
+  // Through the page's fetch, as Turbo's own submission goes: whatever watches that sees this.
+  const answer = await window.fetch(url, { method, body: encodeFormData(fields),
+    headers: { "Content-Type": "application/x-www-form-urlencoded" } });
+  const type = answer.headers.get("content-type") || "";
+  const body = await answer.text();
+  const path = new URL(answer.url).pathname + new URL(answer.url).search;
+  if (type.includes("turbo-stream")) return turbo.renderStreamMessage(body);
+  if (answer.redirected && path !== location.pathname + location.search) return turbo.visit(path);
+  if (!type.includes("html")) return redraw();
+
+  // The page as the app draws it has the form's fields as new. What the person typed into the
+  // field they are in since the press is theirs, and is put back after the morph.
+  const field = document.activeElement;
+  const sent = field?.form === form ? fields.get(field.name) : null;
+  const typed = typeof sent === "string" ? field.value : null;
+  turbo.morphBodyElements(document.body, new DOMParser().parseFromString(body, "text/html").body);
+  if (typed !== null && typed !== sent && typed.startsWith(sent) && field.isConnected) field.value = typed.slice(sent.length);
 }
+
+// One async function, since the built shell is a classic script (vite.config.js) and cannot
+// await at its top level.
+async function openApp() {
+  const boot = await call("boot", {
+    module: await window.__wasm,
+    path: location.pathname + location.search,
+    scope: syncScope(),
+    headers: defaultBrowserHeaders({ referrer: document.referrer }),
+  }).catch(error => {
+    document.body.textContent = "The app could not open this release. Your saved database was kept. " + error.message;
+    throw error;
+  });
+  if (window.__spinel) {
+    window.__spinel.role = boot.role;
+    window.__spinel.storage = boot.storageMode;
+  }
+  window.addEventListener("pagehide", () => {
+    try { worker.postMessage({ type: "instant_record.bye" }); } catch {}
+  });
+  marks.booted = performance.now();
+  marks.compileMs = window.__wasmMs ?? boot.compileMs;
+  const { result, finalPath } = boot.first;
+  if (result.reads) window.__spinel.reads = result.reads;
+  marks.firstResponse = performance.now();
+  marks.firstRequestMs = result.ms;
+  if (finalPath !== location.pathname + location.search) history.replaceState(null, "", finalPath);
+  // Hand the document to the app's own page: its importmap, Turbo and Stimulus take over from here.
+  document.open();
+  document.write(result.status === 200 ? result.body : `<pre>${result.status}\n${(result.errors || []).join("\n")}</pre>`);
+  document.close();
+  document.addEventListener("turbo:before-morph-element", keepTyping);
+  document.addEventListener("turbo:render", () => { redrawing = false; });
+  document.addEventListener("submit", submitInPlace);
+  document.addEventListener("turbo:before-visit", event => {
+    const destination = new URL(event.detail.url, location.href);
+    if (mailboxScope(event.detail.url) !== initialScope || !isLocal(destination, "GET")) {
+      event.preventDefault();
+      location.assign(event.detail.url);
+    }
+  });
+
+  marks.rendered = performance.now();
+
+
+  // Turbo and Stimulus handle their own forms first. An ordinary Rails form still
+  // submits locally in apps without either library.
+  async function submitLocalForm(event) {
+    if (event.defaultPrevented || !(event.target instanceof HTMLFormElement)) return;
+    const form = event.target;
+    const button = event.submitter;
+    const target = button?.getAttribute("formtarget") || form.target;
+    const url = new URL(button?.getAttribute("formaction") || form.action, location.href);
+    const method = (button?.getAttribute("formmethod") || form.method).toUpperCase();
+    if (!isLocal(url, method) || url.searchParams.has("instant_record_network") || method !== "POST" || (target && target !== "_self")) return;
+    event.preventDefault();
+    const fields = new FormData(form, button || undefined);
+    const file = [...fields.values()].find(value => value instanceof File && value.name);
+    if (file) {
+      window.alert("This compiled runtime does not support file uploads.");
+      return;
+    }
+    const response = await appRequest(
+      method,
+      url.pathname + url.search,
+      encodeFormData(fields),
+      "application/x-www-form-urlencoded",
+      withBrowserHeaders({ Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" }),
+    );
+    if (response.result.status < 400 && response.redirected) {
+      location.assign(response.finalPath);
+      return;
+    }
+    const html = response.result.status >= 400 ? (response.result.body || "<p>Request failed</p>") : response.result.body;
+    if (response.result.reads) window.__spinel.reads = response.result.reads;
+    document.open();
+    document.write(html);
+    document.close();
+    window.addEventListener("submit", submitLocalForm);
+    window.dispatchEvent(new Event("instant-record:dom-written"));
+  }
+  window.addEventListener("submit", submitLocalForm);
+  mountBranchPreview(branchApi);
+  releaseRequired = watchRelease(networkFetch, import.meta.env.VITE_SOURCE_VERSION, () => waiting.size > 0 || !!window.__spinel?.branchState?.active);
+
+  // Resource Timing distinguishes a cached module from a network response and gives
+  // compressed and decoded byte counts without downloading the module a second time.
+  const resource = performance.getEntriesByName(new URL(import.meta.env.VITE_WASM_URL, location.origin).href).at(-1);
+  if (resource?.decodedBodySize) {
+    const cached = resource.transferSize === 0;
+    const compileEnd = window.__wasmStart + marks.compileMs;
+    const ledger = { at: Date.now(), totalMs: marks.rendered - result.ms, entries: [
+      { phase: "bundle", ms: resource.responseEnd - resource.startTime, bytes: resource.decodedBodySize,
+        wireBytes: cached ? 0 : resource.encodedBodySize, cached },
+      { phase: "compile", ms: Math.max(0, compileEnd - resource.responseEnd) },
+      { phase: "sqlite", ms: boot.storageMs }, { phase: "vm", ms: boot.runtimeMs },
+      { phase: "schema", ms: boot.bootstrapMs }, { phase: "render", ms: result.ms },
+      ...(boot.shell ? [{ phase: "shell", ms: boot.shell.ms, bytes: boot.shell.bytes }] : []),
+    ] };
+    window.__spinel.ledger = ledger;
+    try { localStorage.setItem("instant_record.compiled.boot." + (cached ? "cache" : "network"), JSON.stringify(ledger)); } catch {}
+  }
+}
+openApp();

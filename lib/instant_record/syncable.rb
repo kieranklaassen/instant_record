@@ -12,9 +12,6 @@ module InstantRecord
       extend InstantRecord::RuntimeScoped
       extend InstantRecord::SyncActions::ClassMethods
 
-      attr_accessor :hold_for
-      attr_reader :last_outbox_mutation_id
-
       before_create :assign_instant_record_uuid
 
       # Guarded at call time, not include time, so the same class works in
@@ -22,9 +19,9 @@ module InstantRecord
       # Capture the server-confirmed row snapshot BEFORE the first unacked
       # local write mutates the row, inside the same transaction as the write
       # and outbox insert so rollbacks undo all three atomically.
-      before_create  { capture_confirmed_snapshot(creating: true) if instant_record_local_write? && !InstantRecord::SyncActions.recording_client_mutator? }
-      before_update  { capture_confirmed_snapshot(creating: false) if instant_record_local_write? && !InstantRecord::SyncActions.recording_client_mutator? }
-      before_destroy { capture_confirmed_snapshot(creating: false) if instant_record_local_write? && !InstantRecord::SyncActions.recording_client_mutator? }
+      before_create  { capture_confirmed_snapshot(true) if instant_record_local_write? && !InstantRecord::SyncActions.recording_client_mutator? }
+      before_update  { capture_confirmed_snapshot(false) if instant_record_local_write? && !InstantRecord::SyncActions.recording_client_mutator? }
+      before_destroy { capture_confirmed_snapshot(false) if instant_record_local_write? && !InstantRecord::SyncActions.recording_client_mutator? }
 
       # after_create/update/destroy run INSIDE the wrapping transaction
       # (unlike after_commit), which is what gives us write+outbox atomicity.
@@ -112,6 +109,20 @@ module InstantRecord
           InstantRecord::SyncActions.server_note_read(self) if instant_record_server_mutator_write?
         end
       end
+    end
+
+    # Plain methods, not attr_accessor inside `included`: the compiler that carries a model
+    # into the browser reads these, and cannot read an accessor declared in that block.
+    def hold_for
+      @hold_for
+    end
+
+    def hold_for=(seconds)
+      @hold_for = seconds
+    end
+
+    def last_outbox_mutation_id
+      @last_outbox_mutation_id
     end
 
     def destroy(hold_for: nil)
@@ -273,8 +284,8 @@ module InstantRecord
       self.id = frame ? frame.next_uuid : SecureRandom.uuid
     end
 
-    def capture_confirmed_snapshot(creating:)
-      InstantRecord::Client::Rebaser.capture_before_local_write(self.class, id, creating: creating)
+    def capture_confirmed_snapshot(creating)
+      InstantRecord::Client::Rebaser.capture_before_local_write(self.class, id, creating)
     end
 
     def record_outbox_mutation(operation)

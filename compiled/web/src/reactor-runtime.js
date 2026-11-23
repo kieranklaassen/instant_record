@@ -8,6 +8,7 @@ import { mailboxScope } from "./mailbox-scope.js";
 import { isServerAllowed, parseManifest } from "./manifest.js";
 import { createLeaderCoordinator } from "./leader-election.js";
 import { resolveServerRequest, serverRoot } from "./server-request.js";
+import { isValidSqliteBytes, parseShellGrant, scopedUrl, shouldFetchShell, validateShellState } from "./shell.js";
 import { openDatabaseStorage } from "./storage-backend.js";
 import { runDrain } from "./sync-drain.js";
 import { nextSyncAction } from "./sync-schedule.js";
@@ -334,8 +335,7 @@ export function createWorkerRuntime({
         if (headerType) options.headers = { "Content-Type": headerType };
         options.body = body;
       }
-      const scoped = syncScope ? url + (url.includes("?") ? "&" : "?") + "scope=" + encodeURIComponent(syncScope) : url;
-      const response = await fetchImpl(scoped, options);
+      const response = await fetchImpl(scopedUrl(url, syncScope), options);
       text = await response.text();
       responseContentType = response.headers?.get?.("content-type") || "";
       outcome = status = response.status;
@@ -626,26 +626,44 @@ export function createWorkerRuntime({
   }
 
   async function fetchShell(scope, path, hasExistingDb) {
-    const asked = new URL(path || "/", origin).searchParams.get("shell") === "1";
-    if (!scope || !shellFingerprint || !(shellAlways || asked) || effectiveSimulation().offline || hasExistingDb) return null;
+    if (hasExistingDb || !shouldFetchShell({
+      path,
+      fingerprint: shellFingerprint,
+      always: shellAlways,
+      offline: effectiveSimulation().offline,
+      blocked: scope === "invalid/invalid",
+    })) {
+      return null;
+    }
     const started = now();
     try {
-      const grant = await fetchReply("GET", "/shell?fingerprint=" + shellFingerprint);
+      const grant = await fetchReply("GET", "/shell?fingerprint=" + encodeURIComponent(shellFingerprint));
       if (grant.status !== 200) return null;
-      const { path: file, cursor } = JSON.parse(grant.text);
-      const response = await fetchImpl(syncEndpoint + file, { signal: AbortSignal.timeout(30000) });
+      const parsed = parseShellGrant(grant.text);
+      if (!parsed) return null;
+      const response = await fetchImpl(scopedUrl(syncEndpoint + parsed.path, syncScope), {
+        signal: AbortSignal.timeout(30000),
+        cache: "no-store",
+      });
       if (!response.ok) return null;
       const bytes = new Uint8Array(await response.arrayBuffer());
-      if (new TextDecoder().decode(bytes.subarray(0, 15)) !== "SQLite format 3") return null;
-      return { bytes, cursor, ms: now() - started };
+      if (!isValidSqliteBytes(bytes)) return null;
+      return { bytes, cursor: parsed.cursor, identity: parsed.identity, ms: now() - started };
     } catch {
       return null;
     }
   }
 
-  async function earlyBootstrap(path, hasExistingMeta) {
-    const asked = new URL(path || "/", origin).searchParams.get("shell") === "1";
-    if (hasExistingMeta || (shellFingerprint && (shellAlways || asked))) return null;
+  async function earlyBootstrap(scope, path, hasExistingMeta) {
+    if (hasExistingMeta || shouldFetchShell({
+      path,
+      fingerprint: shellFingerprint,
+      always: shellAlways,
+      offline: effectiveSimulation().offline,
+      blocked: scope === "invalid/invalid",
+    })) {
+      return null;
+    }
     try {
       return await fetchReply("GET", "/bootstrap");
     } catch {
@@ -705,7 +723,7 @@ export function createWorkerRuntime({
 
     // On failover promotion, the DB already exists — never fetch a fresh shell or bootstrap.
     const shellFetch = promoted ? Promise.resolve(null) : fetchShell(scope, path, hasExistingDb);
-    const bootstrapFetch = promoted ? Promise.resolve(null) : earlyBootstrap(path, hasExistingDb || meta.version != null);
+    const bootstrapFetch = promoted ? Promise.resolve(null) : earlyBootstrap(scope, path, hasExistingDb || meta.version != null);
 
     let shell = await shellFetch;
     let runtimeMs = 0;
@@ -751,8 +769,8 @@ export function createWorkerRuntime({
           runtimeMs = now() - initStart;
           if (fromShell) {
             const state = candidate.syncState();
-            if (!state.bootstrapped || state.cursor !== shell.cursor) {
-              throw new Error("The shell does not carry its cursor.");
+            if (!validateShellState(state, shell)) {
+              throw new Error("The shell does not match its grant.");
             }
           } else {
             shell = null;
@@ -811,8 +829,8 @@ export function createWorkerRuntime({
         runtimeMs = now() - initStart;
         if (fromShell) {
           const state = candidate.syncState();
-          if (!state.bootstrapped || state.cursor !== shell.cursor) {
-            throw new Error("The shell does not carry its cursor.");
+          if (!validateShellState(state, shell)) {
+            throw new Error("The shell does not match its grant.");
           }
         } else {
           shell = null;

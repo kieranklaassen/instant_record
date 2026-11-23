@@ -4,6 +4,23 @@
 # its props. Under it sits a reply box drawn from Ruby. Opened with `member`,
 # `inbox` and `thread`. Opening it marks the message read.
 class ThreadScreen < InstantRecord::Native::Screen
+  contract "ConversationView" do |c|
+    c.string :subject
+    c.string :participants
+    c.bool :archived
+    c.many :messages do |m|
+      m.string :author
+      m.string :address
+      m.date :date
+      m.string :body
+      m.bool :mine
+    end
+    c.action :archive
+    c.action :reply do |a|
+      a.value :body, :string
+    end
+  end
+
   def member = param("member")
   def inbox = param("inbox")
   def mail = MailAccess.new(member, inbox)

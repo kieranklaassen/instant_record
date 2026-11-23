@@ -34,23 +34,45 @@ public struct Screens {
 ///   props.date("sent")                    // from `time`
 ///   props.list("messages").map { $0["author"] }
 public struct Props: Equatable {
-    private struct Value: Equatable {
+    struct Value: Equatable {
         let type: String
         let text: String
     }
 
-    private let values: [String: Value]
-    private let lists: [String: [Props]]
+    let values: [String: Value]
+    let nestedObjects: [String: Props]
+    let lists: [String: [Props]]
+    let scalarLists: [String: [Value]]
 
     public init(_ node: Node) {
         values = Dictionary(node.children(of: "prop").map { ($0.prop("name"), Value(type: $0.prop("type"), text: $0.text)) }) { $1 }
-        lists = Dictionary(node.children(of: "props").map { ($0.prop("name"), $0.children(of: "record").map(Props.init)) }) { $1 }
+        nestedObjects = Dictionary(
+            node.children(of: "record")
+                .filter { !$0.prop("name").isEmpty }
+                .map { ($0.prop("name"), Props($0)) }
+        ) { $1 }
+
+        var recordLists: [String: [Props]] = [:]
+        var valueLists: [String: [Value]] = [:]
+        for listNode in node.children(of: "props") {
+            let name = listNode.prop("name")
+            let propItems = listNode.children(of: "prop")
+            if !propItems.isEmpty && listNode.children(of: "record").isEmpty {
+                valueLists[name] = propItems.map { Value(type: $0.prop("type"), text: $0.text) }
+            } else {
+                recordLists[name] = listNode.children(of: "record").map(Props.init)
+            }
+        }
+        lists = recordLists
+        scalarLists = valueLists
     }
 
     public subscript(name: String) -> String { values[name]?.text ?? "" }
     public func bool(_ name: String) -> Bool { value(name, "bool") == "true" }
     public func int(_ name: String) -> Int { Int(value(name, "int") ?? "") ?? 0 }
+    public func double(_ name: String) -> Double { Double(value(name, "float") ?? "") ?? 0 }
     public func date(_ name: String) -> Date? { value(name, "date").flatMap(Moment.date) }
+    public func nested(_ name: String) -> Props? { nestedObjects[name] }
     public func list(_ name: String) -> [Props] { lists[name] ?? [] }
 
     // A value read as another kind than the screen sent is not there.
@@ -66,7 +88,7 @@ public struct Actions {
     let host: AppHost
     let route: Route
 
-    public func perform(_ action: String, _ args: [String: String] = [:]) {
-        host.perform(action, args: args, on: route)
+    public func perform(_ action: String, _ args: [String: String] = [:], values: [String: String] = [:]) {
+        host.perform(action, args: args, values: values, on: route)
     }
 }

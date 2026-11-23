@@ -393,18 +393,24 @@ module InstantRecord
         end
       end
 
-      def self.trace(source_root:, route_analysis:, overrides: nil, native: false, migration_paths: nil)
+      def self.trace(source_root:, route_analysis:, overrides: nil, native: false, migration_paths: nil, overlay_dir: nil)
         new(
           source_root: source_root,
           route_analysis: route_analysis,
           overrides: overrides,
           native: native,
-          migration_paths: migration_paths
+          migration_paths: migration_paths,
+          overlay_dir: overlay_dir
         ).trace
       end
 
-      def initialize(source_root:, route_analysis:, overrides: nil, native: false, migration_paths: nil)
+      # +overlay_dir+ holds files that replace the app's own under app/ once it
+      # is staged (AppStage copies it over last). The trace reads those in place
+      # of the originals, so what is staged is what the staged code reaches: a
+      # partial only the replaced controller rendered is left behind.
+      def initialize(source_root:, route_analysis:, overrides: nil, native: false, migration_paths: nil, overlay_dir: nil)
         @source_root = File.expand_path(source_root.to_s)
+        @overlay_dir = overlay_dir && File.directory?(overlay_dir) ? File.expand_path(overlay_dir.to_s) : nil
         @route_analysis = route_analysis
         @overrides = Manifest.merge_overrides(route_analysis.overrides, overrides)
         @native = native
@@ -620,7 +626,7 @@ module InstantRecord
           @visited << rel
           categorize(rel)
 
-          full = File.join(@source_root, rel)
+          full = overlaid(rel) || File.join(@source_root, rel)
           next unless File.file?(full)
 
           if rel.end_with?(".rb")
@@ -631,8 +637,16 @@ module InstantRecord
         end
       end
 
+      # The overlay's replacement for an app file, if it has one.
+      def overlaid(rel)
+        return unless @overlay_dir && rel.start_with?("app/")
+
+        path = File.join(@overlay_dir, rel.delete_prefix("app/"))
+        path if File.file?(path)
+      end
+
       def visit_ruby_file(rel, full)
-        source = File.read(full)
+        source = File.read(full, encoding: "UTF-8")
         parsed = Prism.parse(source)
         unless parsed.success?
           errors = parsed.errors.map { |e| "line #{e.location.start_line}: #{e.message}" }.join("; ")
@@ -658,7 +672,7 @@ module InstantRecord
       end
 
       def visit_erb_file(rel, full)
-        erb_source = File.read(full)
+        erb_source = File.read(full, encoding: "UTF-8")
         ruby_source = ActionView::Template::Handlers::ERB::Erubi.new(erb_source).src
         # Wrap in a method body so `yield` in layouts is valid Ruby, preserving 1-based line numbers via line: 0.
         parsed = Prism.parse("def _instant_record_template\n#{ruby_source}\nend\n", line: 0)

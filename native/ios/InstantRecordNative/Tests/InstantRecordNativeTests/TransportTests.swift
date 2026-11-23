@@ -32,6 +32,8 @@ final class TransportTests: XCTestCase {
 
         XCTAssertEqual(Transport.offline, transport.exchange("GET http://127.0.0.1:9/events\n"))
         XCTAssertEqual(Transport.offline, transport.exchange("nonsense"))
+        XCTAssertNil(transport.download("http://127.0.0.1:9/shell/file?token=x"))
+        XCTAssertNil(transport.download("not-a-url"))
     }
 
     func testTheDevEngineAsksTheServerAndSaysWhenItDoesNotAnswer() {

@@ -12,6 +12,7 @@ require_relative "source_pages"
 require_relative "static_linter"
 require_relative "toolchain"
 require_relative "wasm_tree"
+require_relative "../shell"
 
 module InstantRecord
   class Compiler
@@ -19,10 +20,11 @@ module InstantRecord
     class WasmBuild
       WASM_OPT_LEVEL = "-Oz"
       WASM_OPT_PASS = "-Oz"
-      SHELL_FORMAT = 1
+      SHELL_FORMAT = InstantRecord::Shell::FORMAT
       DEFAULT_SYNC_ENDPOINT = "http://127.0.0.1:3210/instant_record"
       SPINEL_PACKAGES = %w[json stringio zlib].freeze
       HOTWIRE_ASSETS = %w[turbo.min.js stimulus.min.js stimulus-loading.js].freeze
+      CORE_PRELOAD_STYLES = %w[base ui mail].freeze
 
       REACTOR_EXPORTS = [
         "WasmBridge.handle_request",
@@ -192,6 +194,11 @@ module InstantRecord
         version_controller_urls(app, emit)
         disable_jemalloc(emit)
 
+        shell_fingerprint = InstantRecord::Shell.fingerprint(
+          models: EntryBuilder.app_models(manifest: manifest, models: @models),
+          schema_path: File.join(app, "db/schema.rb")
+        )
+
         tree = File.join(@build_dir, "wasm-tree")
         clean(tree)
         EntryBuilder.write_wasm_entry(
@@ -204,11 +211,12 @@ module InstantRecord
           mount_path: @mount_path,
           migration_plan: plan,
           pipeline_dir: @pipeline_dir,
-          app_dir: app
+          app_dir: app,
+          shell_fingerprint: shell_fingerprint
         )
         WasmTree.build(source: emit, target: tree, demo: @demo)
 
-        { app: app, emit: emit, tree: tree, plan: plan, manifest: manifest }
+        { app: app, emit: emit, tree: tree, plan: plan, manifest: manifest, shell_fingerprint: shell_fingerprint }
       end
 
       def input_digest
@@ -312,9 +320,17 @@ module InstantRecord
         links
       end
 
-      def warm_scripts(assets_dir)
+      def warm_scripts(assets_dir, deferred_css: [])
         urls = []
         seen = Digest::SHA256.new
+        deferred_css.each do |name|
+          path = File.join(assets_dir, name)
+          next unless File.file?(path)
+
+          digest = Digest::SHA256.file(path).hexdigest[0, 10]
+          seen.update(name + digest)
+          urls << "/assets/#{name}"
+        end
         [
           [assets_dir, "/assets/"],
           [File.join(assets_dir, "controllers"), "/assets/controllers/"]
@@ -347,19 +363,28 @@ module InstantRecord
         if File.directory?(harness_dir)
           Dir.children(harness_dir).sort.each do |name|
             if name.start_with?("worker-") && name.end_with?(".js")
-              links << %(    <link rel="modulepreload" href="/harness/#{name}">)
+              # Started here, not preloaded: a modulepreload is a module load in the page, after
+              # which Firefox refuses the import map of the app's own page (compiled/web/vite.config.js).
+              links << %(    <script>try { window.__worker = new Worker("/harness/#{name}", { type: "module" }); } catch (error) {}</script>)
             end
           end
         end
 
         assets_dir = File.join(dist, "assets")
+        deferred_css = []
         if File.directory?(assets_dir)
-          Dir.children(assets_dir).sort.each do |name|
-            links << %(    <link rel="preload" as="style" href="/assets/#{name}">) if name.end_with?(".css")
+          css_files = Dir.children(assets_dir).sort.select { |name| name.end_with?(".css") }
+          css_files.each do |name|
+            stem = File.basename(name, ".css").sub(/-[0-9a-f]{8,}\z/, "")
+            if css_files.length <= 3 || CORE_PRELOAD_STYLES.include?(stem)
+              links << %(    <link rel="preload" as="style" fetchpriority="low" href="/assets/#{name}">)
+            else
+              deferred_css << name
+            end
           end
         end
 
-        links.concat(warm_scripts(assets_dir))
+        links.concat(warm_scripts(assets_dir, deferred_css: deferred_css))
         return if links.empty?
 
         index_path = File.join(dist, "index.html")
@@ -531,9 +556,7 @@ module InstantRecord
         digest = Digest::SHA256.file(final_wasm).hexdigest[0, 10]
         dist = File.join(@build_dir, "site")
 
-        model_set = EntryBuilder.app_models(manifest: manifest, models: @models).sort.join(",")
-        schema_source = File.read(File.join(app, "db/schema.rb"))
-        shell_fingerprint = Digest::SHA256.hexdigest([SHELL_FORMAT.to_s, model_set, schema_source].join("\n"))
+        shell_fingerprint = emitted[:shell_fingerprint]
         schema_digest = Digest::SHA256.file(File.join(emit, "config/schema.rb")).hexdigest
 
         @runner.run(
