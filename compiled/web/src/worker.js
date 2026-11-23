@@ -1,8 +1,8 @@
 // Dedicated worker: elects a single leader per (origin, scope) via navigator.locks.
 // The leader mounts OPFS page-level WASI storage (PagedSyncOPFSFile) at
 // /storage/development.sqlite3 (with clean IndexedDB fallback), runs the single hot
-// AppHost, outbox drain, change polling, and background history fill, and serves
-// peer tabs over dedicated channels with crash-safe failover.
+// AppHost, outbox drain, visibility-aware SSE change stream, and background history fill,
+// and serves peer tabs over dedicated channels with crash-safe failover.
 import { AppHost } from "./app-host.js";
 import { PagedSyncOPFSFile } from "./opfs-wasi-file.js";
 import { createWorkerRuntime } from "./reactor-runtime.js";
@@ -32,4 +32,5 @@ const runtime = createWorkerRuntime({
 });
 
 self.addEventListener("online", () => runtime.handleOnline());
+self.addEventListener("offline", () => runtime.handleOffline());
 self.onmessage = event => runtime.handleMessage(event);

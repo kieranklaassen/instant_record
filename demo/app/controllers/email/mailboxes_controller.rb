@@ -5,13 +5,6 @@ module Email
       skip_forgery_protection
     end
 
-    # How Inertia keeps the page current: both props are made of mail
-    # entries, and Inertia reloads each when one changes in the local database.
-    # The server says so with `live:` (InstantRecord::Inertia). The compiled
-    # runtime has no gem to say it, so its half spells out the same hash.
-    CHANGED = { listeners: [{ channel: { name: "instant_record", type: "local" }, events: ["MailEntry"] }], throttle: 150 }.freeze
-    LIVE_PROPS = { mail: CHANGED, thread: CHANGED }.freeze
-
     # An Inertia page. Its props are the first paint, and every later read is
     # a partial reload of `mail` or `thread`: in the compiled runtime this
     # same action answers it from the local database, with no request to Rails.
@@ -122,6 +115,33 @@ module Email
       list
     end
 
+    # One rendering path for both Rails and the compiled WASI runtime:
+    # InstantRecord::Inertia::Page reads X-Inertia / X-Inertia-Partial-* from
+    # request.headers and evaluates `mail` / `thread` only when requested.
+    def render_page
+      page = InstantRecord::Inertia::Page.for_request("Email/Inbox", request)
+      page.string("member", @member)
+      page.string("inbox", @inbox)
+      page.strings("inboxes", @inboxes)
+      page.lazy("people") { JSON.generate(people) }
+      page.bool("composing", params[:compose] == "1")
+      page.live("mail", "MailEntry") { JSON.generate(mail_props) }
+      page.live("thread", "MailEntry") { JSON.generate(thread_props) }
+
+      response.headers["Vary"] = "X-Inertia"
+      if page.inertia?
+        response.headers["X-Inertia"] = "true"
+        render plain: page.json, content_type: "application/json"
+      else
+        @page = page.json
+      end
+    end
+
+    # A write returns the reader to the page they were on, with fresh props.
+    def finish_write(target)
+      redirect_back_or_to target, status: :see_other
+    end
+
     server_only do
       rescue_from ArgumentError, ActiveRecord::RecordInvalid do
         head :unprocessable_entity
@@ -129,19 +149,6 @@ module Email
 
       def prepare_inbox
         Mailbox.open_demo(@inbox)
-      end
-
-      # Lazy props: a partial reload evaluates only the ones it asks for.
-      def render_page
-        render inertia: "Email/Inbox", live: { mail: MailEntry, thread: MailEntry }, props: {
-          member: @member, inbox: @inbox, inboxes: @inboxes, people: people, composing: params[:compose] == "1",
-          mail: -> { mail_props }, thread: -> { thread_props }
-        }
-      end
-
-      # A write returns the reader to the page they were on, with fresh props.
-      def finish_write(target)
-        redirect_back_or_to target, status: :see_other
       end
 
       def append_entry(kind, parent, subject, body)
@@ -152,34 +159,6 @@ module Email
 
     browser_only do
       def prepare_inbox
-      end
-
-      # The compiled runtime has no Inertia gem and its requests carry no
-      # headers, so this speaks the protocol itself. A visit arrives with
-      # _inertia=1 and the props it wants in _only
-      # (the gem's frontend/http.js) and is answered with the page
-      # object; a first load gets the same object placed by index.html.erb.
-      def render_page
-        only = params[:_only].to_s
-        props = { member: @member, inbox: @inbox, inboxes: @inboxes, people: people, composing: params[:compose] == "1" }
-        props[:mail] = mail_props if only.empty? || only.include?("mail")
-        props[:thread] = thread_props if only.empty? || only.include?("thread")
-        url = "/email?member=#{@member}&inbox=#{@inbox}"
-        url += "&thread=#{params[:thread]}" unless params[:thread].to_s.empty?
-        url += "&limit=#{params[:limit].to_i}" if params[:limit].to_i > MailEntry::PAGE_SIZE
-        url += "&compose=1" if params[:compose] == "1"
-        term = params[:q].to_s.strip
-        url += "&q=" + term.gsub("%", "%25").gsub("&", "%26").gsub("+", "%2B").gsub("#", "%23").gsub(" ", "+") unless term.empty?
-        page = JSON.generate({ component: "Email/Inbox", props: props, url: url, version: "", liveProps: LIVE_PROPS })
-        if params[:_inertia] == "1"
-          render plain: page, content_type: "application/json"
-        else
-          @page = page
-        end
-      end
-
-      def finish_write(target)
-        redirect_to target, status: :see_other
       end
 
       def append_entry(kind, parent, subject, body)

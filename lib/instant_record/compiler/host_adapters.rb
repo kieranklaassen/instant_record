@@ -74,10 +74,12 @@ module InstantRecord
           File.write(File.join(app_dir, "lib/instant_record/native.rb"), NATIVE_SEAM)
 
           FileUtils.mkdir_p(File.join(app_dir, "sig/instant_record"))
-          FileUtils.cp(
-            File.join(gem_src, "sig/instant_record/native.rbs"),
-            File.join(app_dir, "sig/instant_record/native.rbs")
-          )
+          %w[native.rbs inertia.rbs].each do |rbs|
+            FileUtils.cp(
+              File.join(gem_src, "sig/instant_record", rbs),
+              File.join(app_dir, "sig/instant_record", rbs)
+            )
+          end
 
           adapt_compiled_mutate_signatures(app_dir)
           adapt_sync_actions(app_dir)
@@ -219,6 +221,8 @@ module InstantRecord
 
               def load_engine = nil
 
+              def load_inertia_renderer = nil
+
               def load_branch_store = nil
 
               def install_active_job_guard = nil
@@ -280,6 +284,8 @@ module InstantRecord
               def browser? = true
 
               def load_engine = nil
+
+              def load_inertia_renderer = nil
 
               def load_branch_store = nil
 

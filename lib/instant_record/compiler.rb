@@ -16,6 +16,9 @@ require_relative "compiler/static_linter"
 require_relative "compiler/app_stage"
 require_relative "compiler/gem_vendor"
 require_relative "compiler/entry_builder"
+require_relative "compiler/native_contracts"
+require_relative "compiler/swift_codegen"
+require_relative "compiler/kotlin_codegen"
 require_relative "compiler/wasm_tree"
 require_relative "compiler/source_pages"
 require_relative "compiler/wasm_build"
@@ -37,7 +40,7 @@ module InstantRecord
       toolchain || ENV.fetch("INSTANT_RECORD_TOOLCHAIN") { gem_root.join("compiled/toolchain.env").to_s }
     end
 
-    def self.build(root:, toolchain:, endpoint:, models: nil, sync_windows: nil, mount_path: nil, baseline: nil, migration_paths: nil, island: nil, overrides: nil)
+    def self.build(root:, toolchain:, endpoint:, models: nil, sync_windows: nil, mount_path: nil, baseline: nil, migration_paths: nil, island: nil, overrides: nil, shell_snapshot: nil)
       with_workspace(root: root, toolchain: toolchain, stage_web: true) do |shared|
         WasmBuild.new(
           **shared,
@@ -48,7 +51,8 @@ module InstantRecord
           baseline: baseline,
           migration_paths: migration_paths || shared[:migration_paths],
           island: island,
-          overrides: overrides
+          overrides: overrides,
+          shell_snapshot: shell_snapshot
         ).run
       end
     end
@@ -56,7 +60,24 @@ module InstantRecord
     # The same app as libraries a native host links: for this machine, or
     # with target "iphonesimulator" or "iphoneos" for the iOS simulator or
     # an iPhone. Returns the folder that holds them.
-    def self.build_native(root:, toolchain:, endpoint:, models: nil, target: nil, sync_windows: nil, mount_path: nil, baseline: nil, migration_paths: nil, island: nil, overrides: nil, out: $stdout)
+    def self.build_native(
+      root:,
+      toolchain:,
+      endpoint:,
+      models: nil,
+      target: nil,
+      sync_windows: nil,
+      mount_path: nil,
+      baseline: nil,
+      migration_paths: nil,
+      island: nil,
+      overrides: nil,
+      swift_out: nil,
+      kotlin: false,
+      kotlin_out: nil,
+      kotlin_package: "dev.instantrecord.contracts",
+      out: $stdout
+    )
       with_workspace(root: root, toolchain: toolchain, stage_web: false) do |shared|
         NativeBuild.new(
           **shared,
@@ -69,9 +90,37 @@ module InstantRecord
           migration_paths: migration_paths || shared[:migration_paths],
           island: island,
           overrides: overrides,
+          swift_out: swift_out,
+          kotlin: kotlin,
+          kotlin_out: kotlin_out,
+          kotlin_package: kotlin_package,
           out: out
         ).run
       end
+    end
+
+    # Extract typed prop/action contracts from app/screens via Prism and emit
+    # Swift (and optionally Kotlin) source files without running a C build.
+    def self.generate_native_contracts(screens_dir:, swift_out: nil, kotlin_out: nil, kotlin_package: "dev.instantrecord.contracts", kotlin_serializable: true)
+      contracts = NativeContracts.extract_dir(screens_dir)
+      written = {}
+      return { contracts: contracts, written: written } if contracts.empty?
+
+      if swift_out
+        path = File.expand_path(swift_out.to_s)
+        FileUtils.mkdir_p(File.dirname(path))
+        File.write(path, SwiftCodegen.generate(contracts))
+        written[:swift] = Pathname(path)
+      end
+
+      if kotlin_out
+        path = File.expand_path(kotlin_out.to_s)
+        FileUtils.mkdir_p(File.dirname(path))
+        File.write(path, KotlinCodegen.generate(contracts, package: kotlin_package, serializable: kotlin_serializable))
+        written[:kotlin] = Pathname(path)
+      end
+
+      { contracts: contracts, written: written }
     end
 
     # Build the repository's own demo into compiled/web/dist.

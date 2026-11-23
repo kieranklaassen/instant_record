@@ -44,7 +44,7 @@ module InstantRecord
         InstantRecord::MutationApplier
         InstantRecord::AppliedMutation
         InstantRecord::SyncScope
-        InstantRecord::Inertia
+        InstantRecord::Inertia::Renderer
         InstantRecord::CompiledSite
         InstantRecord::Compiler
       ]).freeze

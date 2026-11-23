@@ -12,7 +12,7 @@ class NativeXcodeProjectTest < ActiveSupport::TestCase
 
     assert_equal File.read(File.join(INBOX, "Inbox.xcodeproj/project.pbxproj")), project.pbxproj, "run ruby native/ios/Inbox/project.rb"
     assert_equal File.read(File.join(INBOX, "Inbox.xcodeproj/xcshareddata/xcschemes/Inbox.xcscheme")), project.scheme
-    assert_equal %w[ConversationView.swift InboxApp.swift InboxSummary.swift LibraryEngine.swift], project.sources
+    assert_equal %w[ConversationView.swift InboxApp.swift InboxSummary.swift InstantRecordContracts.swift LibraryEngine.swift], project.sources
   end
 
   test "the Inbox's engine wrapper is the one the generator gives a new app" do

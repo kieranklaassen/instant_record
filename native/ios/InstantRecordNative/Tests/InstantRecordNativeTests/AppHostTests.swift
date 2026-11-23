@@ -639,4 +639,148 @@ final class AppHostTests: XCTestCase {
         pass(host)
         XCTAssertFalse(clock.waiting)
     }
+
+    func testColdStartHydratesFromPrebuiltShellViaIrOpenAndCatchesUpFromItsCursor() {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ir-shell-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let dbPath = dir.appendingPathComponent("support.sqlite3").path
+        let sqliteBytes = Data("SQLite format 3\0payload".utf8)
+        let fp = "fp123456"
+        engine.bootstrapped = false
+        engine.shellFingerprint = fp
+        engine.rows = []
+        engine.onOpen = { path in
+            if path.contains(".shell.") || FileManager.default.contents(atPath: path) == sqliteBytes {
+                self.engine.bootstrapped = true
+                self.engine.cursorValue = 42
+                self.engine.identityValue = "id-ada"
+                self.engine.rows = ["shell-1", "shell-2"]
+            }
+            return true
+        }
+
+        var downloaded: [String] = []
+        let host = AppHost(
+            engine: engine,
+            root: mailbox,
+            store: { _ in AppHost.Store(database: dbPath, endpoint: self.support) },
+            exchange: { request in
+                let line = String(request.prefix { $0 != "\n" }).replacingOccurrences(of: "http://example.test", with: "")
+                self.lock.withLock { self.fetched.append(line) }
+                if line.contains("/shell?fingerprint=\(fp)") {
+                    return "200\n{\"cursor\":42,\"identity\":\"id-ada\",\"path\":\"/shell/file?token=signed\"}"
+                }
+                return "200\n"
+            },
+            download: { url in
+                self.lock.withLock { downloaded.append(url) }
+                return (200, sqliteBytes)
+            },
+            clock: clock,
+            reachability: network
+        )
+        host.start()
+        host.settle()
+        XCTAssertTrue(host.fetchingFirst)
+
+        // First pass hydrates via shell + ir_open, draws immediately, and schedules catch-up.
+        pass(host)
+
+        XCTAssertFalse(host.fetchingFirst)
+        XCTAssertEqual(["shell-1", "shell-2"], host.screens[mailbox]?.children.map(\.id))
+        XCTAssertEqual([support + "/shell/file?token=signed"], downloaded)
+        XCTAssertEqual(sqliteBytes, FileManager.default.contents(atPath: dbPath))
+        XCTAssertFalse(fetched.contains { $0.contains("/bootstrap") }, "bootstrap should not run when shell hydrated")
+
+        // Follow-up pass catches up from the shell's cursor with its identity.
+        pass(host)
+        XCTAssertEqual(["GET /maya-support/shell?fingerprint=\(fp)", "GET /maya-support/events?after=42&window=0&identity=id-ada"], fetched)
+    }
+
+    func testColdStartFallsBackToBootstrapWhenShellIsMissingOrInvalid() {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ir-shell-fallback-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let dbPath = dir.appendingPathComponent("support.sqlite3").path
+        let fp = "fp999"
+
+        // Case 1: 204 No Content -> falls back directly to /bootstrap.
+        engine.bootstrapped = false
+        engine.shellFingerprint = fp
+        let host204 = AppHost(
+            engine: engine,
+            root: mailbox,
+            store: { _ in AppHost.Store(database: dbPath, endpoint: self.support) },
+            exchange: { request in
+                let line = String(request.prefix { $0 != "\n" }).replacingOccurrences(of: "http://example.test", with: "")
+                self.lock.withLock { self.fetched.append(line) }
+                return line.contains("/shell?") ? "204\n" : "200\n"
+            },
+            download: { _ in XCTFail("download should not be called on 204"); return nil },
+            clock: clock,
+            reachability: network
+        )
+        host204.start()
+        pass(host204)
+        XCTAssertEqual(["GET /maya-support/shell?fingerprint=\(fp)", "GET /maya-support/bootstrap"], fetched)
+
+        // Case 2: cursor mismatch after ir_open -> rolls back to store.database and falls back to /bootstrap.
+        fetched = []
+        engine.bootstrapped = false
+        engine.cursorValue = 7
+        engine.onOpen = { path in
+            if path.contains(".shell.") {
+                self.engine.bootstrapped = true
+                self.engine.cursorValue = 999 // mismatches grant cursor 42
+            } else {
+                self.engine.bootstrapped = false
+                self.engine.cursorValue = 0
+            }
+            return true
+        }
+        let hostMismatch = AppHost(
+            engine: engine,
+            root: mailbox,
+            store: { _ in AppHost.Store(database: dbPath, endpoint: self.support) },
+            exchange: { request in
+                let line = String(request.prefix { $0 != "\n" }).replacingOccurrences(of: "http://example.test", with: "")
+                self.lock.withLock { self.fetched.append(line) }
+                if line.contains("/shell?") {
+                    return "200\n{\"cursor\":42,\"path\":\"/shell/file?token=signed\"}"
+                }
+                return "200\n"
+            },
+            download: { _ in (200, Data("SQLite format 3\0bad-cursor".utf8)) },
+            clock: clock,
+            reachability: network
+        )
+        hostMismatch.start()
+        pass(hostMismatch)
+        XCTAssertEqual(["GET /maya-support/shell?fingerprint=\(fp)", "GET /maya-support/bootstrap"], fetched)
+        let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        XCTAssertTrue(leftovers.filter { $0.contains(".shell.") }.isEmpty, "staging temp files must be cleaned up")
+    }
+
+    func testColdStartSkipsShellWhenPendingLocalWritesExist() {
+        engine.bootstrapped = false
+        engine.shellFingerprint = "fp-pending"
+        engine.push = "{\"mutations\":[\"archive\"]}"
+        let host = AppHost(
+            engine: engine,
+            root: mailbox,
+            store: { _ in AppHost.Store(database: "/tmp/pending-shell.sqlite3", endpoint: self.support) },
+            exchange: { request in
+                let line = String(request.prefix { $0 != "\n" }).replacingOccurrences(of: "http://example.test", with: "")
+                self.lock.withLock { self.fetched.append(line) }
+                return "200\n"
+            },
+            download: { _ in XCTFail("shell must not overwrite pending local writes"); return nil },
+            clock: clock,
+            reachability: network
+        )
+        host.start()
+        pass(host)
+        XCTAssertFalse(fetched.contains { $0.contains("/shell?") })
+        XCTAssertTrue(fetched.contains("POST /maya-support/mutations"))
+        XCTAssertTrue(fetched.contains("GET /maya-support/bootstrap"))
+    }
 }

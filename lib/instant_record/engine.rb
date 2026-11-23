@@ -2,6 +2,7 @@ require "instant_record/routing"
 require "instant_record/sync_scope"
 require "instant_record/files"
 require "instant_record/outbox_upcaster"
+require "instant_record/shell"
 
 module InstantRecord
   class Engine < ::Rails::Engine
@@ -10,6 +11,7 @@ module InstantRecord
     config.instant_record = ActiveSupport::OrderedOptions.new
     config.instant_record.mount_path = DEFAULT_MOUNT_PATH
     config.instant_record.build_on_precompile = false
+    config.instant_record.shell_snapshot = nil
     # Serve a native app's screens over HTTP for development (NativeScreensController).
     config.instant_record.native_dev = false
     # Optional island name (for monoliths declaring multiple local_first(:name) blocks)
@@ -28,6 +30,7 @@ module InstantRecord
     config.after_initialize do
       if defined?(::InertiaRails::Renderer)
         require "instant_record/inertia"
+        require "instant_record/inertia/renderer"
         ::InertiaRails::Renderer.prepend(InstantRecord::Inertia::Renderer)
       end
     end

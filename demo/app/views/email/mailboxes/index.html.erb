@@ -1,9 +1,7 @@
-<%# Only the compiled runtime renders this file: it has no Inertia gem, so its
-    controller writes the page object and this places it. The object sits in
-    an attribute, escaped like any other value, and the gem's frontend package
-    hands it to Inertia (frontend/index.js). On the server
-    app/views/inertia.html.erb is the root. The page itself is
-    app/frontend/pages/Email/Inbox.jsx in both runtimes. %>
+<%# Shared initial-load root for both Rails and the compiled runtime:
+    InstantRecord::Inertia::Page builds `@page`, ERB escapes it into `data-page`,
+    and the gem's frontend package hands it to Inertia (frontend/index.js).
+    The page itself is app/frontend/pages/Email/Inbox.jsx in both runtimes. %>
 <% content_for(:title, "Inbox · Shared inbox") %>
 <div id="app" data-page="<%= @page %>"></div>
 <script type="module" src="<%= asset_path("inbox.js") %>"></script>
