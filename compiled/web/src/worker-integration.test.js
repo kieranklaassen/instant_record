@@ -538,6 +538,9 @@ test("reactor leader holds one visibility-aware SSE stream, broadcasts to follow
   const encoder = new TextEncoder();
 
   const sseFetch = async (url, init = {}) => {
+    if (!String(url).includes("/events")) {
+      return { status: 200, ok: true, text: async () => "{}" };
+    }
     requests.push(url);
     let controllerRef;
     let closed = false;
@@ -572,30 +575,33 @@ test("reactor leader holds one visibility-aware SSE stream, broadcasts to follow
   const tab1 = env.spawnWorker({ fetchImpl: sseFetch, streamEnabled: true, streamOptions: { hiddenGraceMs: 40 } });
   const tab2 = env.spawnWorker({ fetchImpl: sseFetch, streamEnabled: true, streamOptions: { hiddenGraceMs: 40 } });
 
-  await tab1.rpc("boot", { module: {}, path: "/todo", scope: "s1", visible: true });
-  await tab2.rpc("boot", { module: {}, path: "/todo", scope: "s1", visible: true });
+  try {
+    await tab1.rpc("boot", { module: {}, path: "/todo", scope: "s1", visible: true });
+    await tab2.rpc("boot", { module: {}, path: "/todo", scope: "s1", visible: true });
 
-  await waitFor(() => streams.length === 1 && tab1.runtime.streamOpen);
-  assert.equal(requests.length, 1);
-  assert.doesNotMatch(requests[0], /window=0/);
-  assert.match(requests[0], /\/instant_record\/events\?after=1&scope=s1/);
+    await waitFor(() => streams.length === 1 && tab1.runtime.streamOpen);
+    assert.equal(requests.length, 1);
+    assert.doesNotMatch(requests[0], /window=0/);
+    assert.match(requests[0], /\/instant_record\/events\?after=1&scope=s1/);
 
-  // Streamed event feeds host.consumeStream and notifies follower over BroadcastChannel.
-  streams[0].push('id: 2\nevent: change\ndata: {"type":"Issue","id":"streamed-1"}\n\n');
-  await waitFor(() => tab2.messages.some(m => m.type === "records_changed" && m.changes?.some(c => c.id === "streamed-1")));
+    // Streamed event feeds host.consumeStream and notifies follower over BroadcastChannel.
+    streams[0].push('id: 2\nevent: change\ndata: {"type":"Issue","id":"streamed-1"}\n\n');
+    await waitFor(() => tab2.messages.some(m => m.type === "records_changed" && m.changes?.some(c => c.id === "streamed-1")));
 
-  // Hiding both tabs pauses the stream; revealing tab2 resumes it.
-  await tab1.runtime.handleMessage({ data: { type: "instant_record.visibility", visible: false } });
-  await tab2.runtime.handleMessage({ data: { type: "instant_record.visibility", visible: false } });
-  await waitFor(() => streams[0].isClosed() && !tab1.runtime.streamOpen);
+    // Hiding both tabs pauses the stream; revealing tab2 resumes it.
+    await tab1.runtime.handleMessage({ data: { type: "instant_record.visibility", visible: false } });
+    await tab2.runtime.handleMessage({ data: { type: "instant_record.visibility", visible: false } });
+    await waitFor(() => streams[0].isClosed() && !tab1.runtime.streamOpen);
 
-  await tab2.runtime.handleMessage({ data: { type: "instant_record.visibility", visible: true } });
-  await waitFor(() => streams.length === 2 && tab1.runtime.streamOpen);
+    await tab2.runtime.handleMessage({ data: { type: "instant_record.visibility", visible: true } });
+    await waitFor(() => streams.length === 2 && tab1.runtime.streamOpen);
 
-  // Leader crash promotes tab2 and resumes streaming from cursor 2.
-  tab1.runtime.shutdown({ announceBye: false });
-  await waitFor(() => tab2.runtime.role === "leader" && streams.length === 3 && tab2.runtime.streamOpen);
-  assert.match(requests[2], /after=2/);
-
-  tab2.runtime.shutdown();
+    // Leader crash promotes tab2 and resumes streaming from cursor 2.
+    tab1.runtime.shutdown({ announceBye: false });
+    await waitFor(() => tab2.runtime.role === "leader" && streams.length === 3 && tab2.runtime.streamOpen);
+    assert.match(requests[2], /after=2/);
+  } finally {
+    tab1.runtime.shutdown();
+    tab2.runtime.shutdown();
+  }
 });

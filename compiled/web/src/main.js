@@ -1,5 +1,6 @@
 import { mountBranchPreview } from "./branch-preview.js";
 import { affectsReads, mergeReads } from "./changes.js";
+import { extractHeaders, hasHeader, headerValue } from "./http-headers.js";
 import { mailboxScope } from "./mailbox-scope.js";
 import { isLocalRoute, parseManifest } from "./manifest.js";
 import { watchRelease } from "./release-updates.js";
@@ -88,7 +89,8 @@ try {
 const isLocal = (url, method = null) => isLocalUrl(url, location.origin, syncEndpoint) && isLocalRoute(manifest, url.pathname, method, syncEndpoint);
 
 // One page request; the worker follows the app's redirects and returns the final answer.
-const appRequest = (method, path, body, contentType) => call("navigate", { method, path, body, contentType });
+const appRequest = (method, path, body, contentType, headers) =>
+  call("navigate", { method, path, body, contentType, headers });
 
 const encodeFormData = (form) => {
   const fields = new URLSearchParams();
@@ -96,16 +98,19 @@ const encodeFormData = (form) => {
   return fields.toString();
 };
 
-const headerValue = (headers, target) => {
-  if (!headers) return undefined;
-  if (headers instanceof Headers) return headers.get(target) || undefined;
-  const lower = target.toLowerCase();
-  if (Array.isArray(headers)) {
-    const pair = headers.find(([k]) => k.toLowerCase() === lower);
-    return pair?.[1];
+const defaultBrowserHeaders = ({ referrer = location.href, referrerPolicy = "" } = {}) => {
+  const headers = { Host: location.host };
+  if (location.protocol === "https:") headers["X-Forwarded-Proto"] = "https";
+  if (referrer && referrerPolicy !== "no-referrer") headers.Referer = referrer;
+  return headers;
+};
+
+const withBrowserHeaders = (headers, options) => {
+  const merged = { ...headers };
+  for (const [name, value] of Object.entries(defaultBrowserHeaders(options))) {
+    if (!hasHeader(merged, name)) merged[name] = value;
   }
-  for (const [k, v] of Object.entries(headers)) if (k.toLowerCase() === lower) return v;
-  return undefined;
+  return merged;
 };
 
 async function parseFetchInput(input, init, { binary = true } = {}) {
@@ -114,10 +119,12 @@ async function parseFetchInput(input, init, { binary = true } = {}) {
   let body;
   let contentType;
   let redirect;
+  let requestHeaders;
 
   if (isUrlInput) {
     method = (init?.method || "GET").toUpperCase();
     redirect = init?.redirect || "follow";
+    requestHeaders = withBrowserHeaders(extractHeaders(init?.headers), { referrerPolicy: init?.referrerPolicy });
     contentType = headerValue(init?.headers, "content-type");
     if (method !== "GET" && method !== "HEAD" && init?.body != null) {
       const raw = init.body;
@@ -126,7 +133,7 @@ async function parseFetchInput(input, init, { binary = true } = {}) {
         contentType = "application/x-www-form-urlencoded";
       } else if (raw instanceof URLSearchParams) {
         body = raw.toString();
-        contentType ||= "application/x-www-form-urlencoded";
+        contentType = "application/x-www-form-urlencoded";
       } else if (typeof raw === "string") {
         body = raw;
       } else {
@@ -138,6 +145,7 @@ async function parseFetchInput(input, init, { binary = true } = {}) {
     const request = init ? new Request(input, init) : input.clone();
     method = request.method.toUpperCase();
     redirect = request.redirect;
+    requestHeaders = withBrowserHeaders(extractHeaders(request.headers), { referrerPolicy: request.referrerPolicy });
     contentType = request.headers.get("content-type") || undefined;
     if (method !== "GET" && method !== "HEAD") {
       if (contentType && contentType.startsWith("multipart/form-data")) {
@@ -148,7 +156,7 @@ async function parseFetchInput(input, init, { binary = true } = {}) {
       }
     }
   }
-  return { method, body, contentType, redirect };
+  return { method, body, contentType, redirect, requestHeaders };
 }
 
 // The same seam a service worker's fetch handler is, from inside the page.
@@ -168,19 +176,19 @@ window.fetch = async (input, init) => {
     : (init?.method || input.method || "GET").toUpperCase();
   if (!isLocal(url, requestMethod)) return networkFetch(input, init);
 
-  const { method, body, contentType, redirect } = await parseFetchInput(input, init, { binary: true });
+  const { method, body, contentType, redirect, requestHeaders } = await parseFetchInput(input, init, { binary: true });
   const path = url.pathname + url.search;
 
   if (redirect === "manual") {
     // The demo's controllers post with redirect: "manual" and only need to know it went through.
-    const result = await call("request", { method, path, body, contentType });
+    const result = await call("request", { method, path, body, contentType, headers: requestHeaders });
     const ok = result.status < 400;
     return new Response(null, { status: ok ? 200 : result.status });
   }
-  const { result, redirected, finalPath } = await appRequest(method, path, body, contentType);
+  const { result, redirected, finalPath } = await appRequest(method, path, body, contentType, requestHeaders);
   if ((method === "GET" || redirected) && result.reads) {
     const finalParams = new URL(finalPath, location.origin).searchParams;
-    const partial = finalParams.has("_only") || finalParams.has("fragment");
+    const partial = hasHeader(requestHeaders, "x-inertia-partial-data") || finalParams.has("fragment");
     window.__spinel.reads = partial ? mergeReads(window.__spinel.reads, result.reads) : result.reads;
   }
   const headers = result.headers.filter(([name]) => !/^(content-length|transfer-encoding)$/i.test(name));
@@ -319,6 +327,7 @@ async function openApp() {
     path: location.pathname + location.search,
     scope: syncScope(),
     visible: document.visibilityState !== "hidden",
+    headers: defaultBrowserHeaders({ referrer: document.referrer }),
   }).catch(error => {
     document.body.textContent = "The app could not open this release. Your saved database was kept. " + error.message;
     throw error;
@@ -370,7 +379,13 @@ async function openApp() {
       window.alert("This compiled runtime does not support file uploads.");
       return;
     }
-    const response = await appRequest(method, url.pathname + url.search, encodeFormData(fields), "application/x-www-form-urlencoded");
+    const response = await appRequest(
+      method,
+      url.pathname + url.search,
+      encodeFormData(fields),
+      "application/x-www-form-urlencoded",
+      withBrowserHeaders({ Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" }),
+    );
     if (response.result.status < 400 && response.redirected) {
       location.assign(response.finalPath);
       return;

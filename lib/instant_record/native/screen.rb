@@ -230,8 +230,8 @@ module InstantRecord
         node
       end
 
-      # A view written in SwiftUI, by the name the app registered it under.
-      # The block hands it props.
+      # A view written in SwiftUI (or Compose), by the name the app registered
+      # it under. The block hands it typed props.
       def swift(name)
         node = add("swift")
         node.text = name
@@ -239,36 +239,60 @@ module InstantRecord
         node
       end
 
-      # A string for the Swift view, by name: `props["subject"]` in Swift.
-      def prop(name, value)
-        typed(name, "string", value)
+      # Platform-neutral alias for `swift`: hands typed props to a registered
+      # native component.
+      def component(name)
+        node = add("swift")
+        node.text = name
+        inside(node) { yield } if block_given?
+        node
       end
 
-      # A yes or no for the Swift view: `props.bool("archived")`.
+      # A string for the native view, by name: `props["subject"]` in Swift.
+      # Passing nil omits the prop (matching an optional field in a contract).
+      def prop(name, value)
+        return nil if value.nil?
+        typed(name, "string", value.to_s)
+      end
+
+      # A yes or no for the native view: `props.bool("archived")`.
       def flag(name, value)
+        return nil if value.nil?
         typed(name, "bool", value ? "true" : "false")
       end
 
-      # A whole number for the Swift view: `props.int("unread")`.
+      # A whole number for the native view: `props.int("unread")`.
       def number(name, value)
+        return nil if value.nil?
         typed(name, "int", value.to_s)
       end
 
-      # A moment for the Swift view, as ISO 8601: `props.date("sent")`.
-      def time(name, iso8601)
-        typed(name, "date", iso8601)
+      # A floating-point number for the native view: `props.double("score")`.
+      def decimal(name, value)
+        return nil if value.nil?
+        typed(name, "float", value.to_s)
       end
 
-      # A list for the Swift view, by name. The block holds its records.
+      # A moment for the native view, as ISO 8601: `props.date("sent")`.
+      def time(name, iso8601)
+        return nil if iso8601.nil?
+        typed(name, "date", iso8601.to_s)
+      end
+
+      # A list for the native view, by name. The block holds its records or
+      # unnamed scalar items (`prop "", value`).
       def props(name)
         node = add("props")
         node.set("name", name)
         inside(node) { yield }
       end
 
-      # One entry of a list: the block holds its props.
-      def record
-        inside(add("record")) { yield }
+      # One entry of a list (`record { ... }`), or a named nested object
+      # (`record("sender") { ... }`): the block holds its props.
+      def record(name = "")
+        node = add("record")
+        node.set("name", name)
+        inside(node) { yield }
       end
 
       # Controls in the navigation bar: buttons, and buttons that open a menu.

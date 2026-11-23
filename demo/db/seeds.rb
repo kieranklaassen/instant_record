@@ -8,7 +8,7 @@
 # the downstream change-log sync instead.
 Slack::Seeds.apply unless InstantRecord.browser?
 
-Mailbox::WELCOME.each_key { |name| Mailbox.open_demo(name) }
+Mailbox::WELCOME.each_key { |name| Mailbox.open_demo(name) } unless InstantRecord.browser?
 
 AuthNote.seed_demo unless InstantRecord.browser?
 
