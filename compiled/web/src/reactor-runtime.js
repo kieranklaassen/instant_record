@@ -5,10 +5,13 @@
 import { BranchManager } from "./branch-manager.js";
 import { advance, fresh, held, query } from "./history-fill.js";
 import { mailboxScope } from "./mailbox-scope.js";
+import { isServerAllowed, parseManifest } from "./manifest.js";
 import { createLeaderCoordinator } from "./leader-election.js";
 import { resolveServerRequest, serverRoot } from "./server-request.js";
 import { openDatabaseStorage } from "./storage-backend.js";
 import { createStreamLeader } from "./stream-leader.js";
+import { runDrain } from "./sync-drain.js";
+import { nextSyncAction } from "./sync-schedule.js";
 
 const QUIET_MS = 30;
 const DRAIN_RETRY_BASE_MS = 500;
@@ -51,6 +54,7 @@ export function createWorkerRuntime({
   scopeOf = path => mailboxScope(path, !!env.VITE_SHARED_INBOX_DEMO),
   now = () => performance.now(),
 } = {}) {
+  const manifest = parseManifest(env.VITE_MANIFEST);
   const publicEndpoint = env.VITE_SYNC_ENDPOINT || "/instant_record";
   const mountPath = env.VITE_MOUNT_PATH || "/instant_record";
   let syncEndpoint = publicEndpoint;
@@ -74,9 +78,10 @@ export function createWorkerRuntime({
   const branches = new BranchManager();
   let snapshotRevision;
   let kickTimer = null;
+  let kickHeld = false;
   let draining = null;
   let localRevision = 0;
-  let drainDelayMs = DRAIN_RETRY_BASE_MS;
+  const drainRetry = { baseMs: DRAIN_RETRY_BASE_MS, capMs: DRAIN_RETRY_CAP_MS, delayMs: DRAIN_RETRY_BASE_MS };
 
   let streamLeader = null;
   let streamOpen = false;
@@ -132,6 +137,94 @@ export function createWorkerRuntime({
     } else {
       postMessage(msg);
     }
+  }
+
+  function emitSyncNotices(notices) {
+    const msg = { type: "instant_record.sync_notices", notices: Array.isArray(notices) ? notices : [] };
+    if (coordinator && coordinator.role === "leader") {
+      coordinator.broadcast(msg);
+    } else {
+      postMessage(msg);
+    }
+  }
+
+  async function runNoticeAction(payload = { action: "list" }) {
+    const action = payload.action || "list";
+    if (action === "list") {
+      return withDb("readonly", () => host.notices({ action: "list" }));
+    }
+    const result = await withDb("readwrite", save => {
+      const resolved = host.notices(payload);
+      if (resolved.ok) {
+        localRevision++;
+        save();
+        if (action === "retry" || action === "fork") {
+          drainRetry.delayMs = DRAIN_RETRY_BASE_MS;
+          kickSync();
+        }
+      }
+      return resolved;
+    });
+    if (Array.isArray(result.notices)) emitSyncNotices(result.notices);
+    if (result.notified) emitRecordsChanged(result.changes);
+    return result;
+  }
+
+  function matchSyncNoticeRoute(method, path, body = "", contentType = "") {
+    const url = new URL(path, origin);
+    const base = new URL(publicEndpoint, origin).pathname.replace(/\/+$/, "") + "/sync_notices";
+    const pathname = url.pathname.replace(/\.json$/, "");
+    let verb = method.toUpperCase();
+    if (verb === "POST" && (!contentType || contentType.startsWith("application/x-www-form-urlencoded"))) {
+      const text = typeof body === "string" ? body : new TextDecoder().decode(body || new Uint8Array());
+      const override = new URLSearchParams(text).get("_method");
+      if (override && /^delete$/i.test(override)) verb = "DELETE";
+    }
+    if (pathname === base && verb === "GET") return { action: "list", json: url.pathname.endsWith(".json") };
+    if (!pathname.startsWith(base + "/")) return null;
+    const parts = pathname.slice(base.length + 1).split("/");
+    const id = decodeURIComponent(parts[0] || "");
+    if (!id) return null;
+    if (parts.length === 1 && verb === "DELETE") return { action: "dismiss", id, json: url.pathname.endsWith(".json") };
+    if (parts.length === 2 && verb === "POST" && ["retry", "fork", "dismiss"].includes(parts[1])) {
+      return { action: parts[1], id, json: url.pathname.endsWith(".json") };
+    }
+    return null;
+  }
+
+  function parseNoticeForm(body, contentType) {
+    const text = typeof body === "string" ? body : new TextDecoder().decode(body || new Uint8Array());
+    if (contentType && contentType.includes("application/json")) {
+      try {
+        const parsed = JSON.parse(text || "{}");
+        return { overrides: parsed.overrides || {}, returnTo: parsed.return_to || "" };
+      } catch {
+        return { overrides: {}, returnTo: "" };
+      }
+    }
+    const params = new URLSearchParams(text);
+    const overrides = {};
+    for (const [key, value] of params.entries()) {
+      const match = /^overrides\[(.+)\]$/.exec(key);
+      if (match) overrides[match[1]] = value;
+    }
+    return { overrides, returnTo: params.get("return_to") || "" };
+  }
+
+  function handleSyncNoticeHttp(route, body, contentType, targetHost = host) {
+    const { overrides, returnTo } = parseNoticeForm(body, contentType);
+    const result = targetHost.notices(route.action === "list" ? { action: "list" } : { action: route.action, id: route.id, overrides });
+    const status = result.ok ? (route.json || route.action === "list" ? 200 : 303) : 422;
+    const headers = [];
+    let responseBody = "";
+    if (status === 303) {
+      const target = returnTo && returnTo.startsWith("/") && !returnTo.startsWith("//") ? returnTo : "/";
+      headers.push(["Location", target]);
+    } else {
+      headers.push(["Content-Type", "application/json; charset=utf-8"]);
+      responseBody = JSON.stringify(result);
+    }
+    return { status, headers, body: responseBody, exit: 0, errors: [], noticeResult: result };
   }
 
   function announceFill() {
@@ -262,10 +355,25 @@ export function createWorkerRuntime({
     return { method, url, body, status, text, contentType: responseContentType };
   }
 
-  function kickSync(delay = QUIET_MS) {
+  function kickSync(delay = QUIET_MS, { held = false } = {}) {
     if (!isLeaderOrStandalone() || branches.isActive()) return;
     clearTimeout(kickTimer);
+    kickHeld = held;
     kickTimer = setTimeout(syncPass, delay);
+  }
+
+  function clearHeldKick() {
+    if (kickTimer && kickHeld) {
+      clearTimeout(kickTimer);
+      kickTimer = null;
+      kickHeld = false;
+    }
+  }
+
+  function applySyncSchedule(action) {
+    if (action.kind === "immediate") kickSync(action.delay);
+    else if (action.kind === "held") kickSync(action.delay, { held: true });
+    else clearHeldKick();
   }
 
   function handleOnline() {
@@ -283,6 +391,7 @@ export function createWorkerRuntime({
     if (!isLeaderOrStandalone()) return Promise.resolve({ changed: false });
     clearTimeout(kickTimer);
     kickTimer = null;
+    kickHeld = false;
     if (branches.isActive()) return Promise.resolve({ skipped: true, reason: "branched" });
     if (!draining) {
       const revision = localRevision;
@@ -294,8 +403,8 @@ export function createWorkerRuntime({
         })
         .finally(() => {
           draining = null;
-          if (revision !== localRevision) kickSync();
-          if (drainOutcome && !drainOutcome.retried) {
+          if (revision !== localRevision && !kickTimer) kickSync();
+          if (drainOutcome && !drainOutcome.skipped) {
             if (drainOutcome.bootstrappedNow) streamLeader?.reconnect();
             else if (drainOutcome.pending === 0) streamLeader?.wake();
           }
@@ -306,47 +415,39 @@ export function createWorkerRuntime({
 
   async function drain(initial = false, early = null) {
     if (branches.isActive()) return { changed: false, skipped: true };
-    const { plan, revision } = await withDb("readonly", () => ({ plan: host.syncPlan(), revision: localRevision }));
-    const push = plan.push ? await fetchReply("POST", "/mutations", plan.push) : null;
-    const snapshot = plan.bootstrap ? (early?.status === 200 ? early : await fetchReply("GET", "/bootstrap")) : null;
-
-    const result = await withDb("readwrite", save => {
-      if (revision !== localRevision) {
-        kickSync();
-        return { changed: false, retried: true };
-      }
-      const applied = host.sync(syncEndpoint, (method, url, body) => {
-        const reply = method === "POST" ? push : snapshot;
-        if (!reply || reply.method !== method || reply.url !== url || reply.body !== body) {
-          throw new Error("Unexpected request while applying prepared sync responses");
-        }
-        return { status: reply.status, body: reply.text };
-      });
-      const needsBootstrap = plan.bootstrap && !host.syncState().bootstrapped;
-      if (push || snapshot) report({ kind: "sync-pass", path: `${applied.pending} pending` });
-      if (applied.changed || applied.notified) {
+    let hadBootstrap = false;
+    const result = await runDrain({
+      withSnapshot: (mode, op) => withDb(mode, save => op(() => {
         localRevision++;
         save();
-      }
-      if (applied.pending > 0 || needsBootstrap) {
-        kickSync(drainDelayMs);
-        drainDelayMs = Math.min(drainDelayMs * 2, DRAIN_RETRY_CAP_MS);
-      } else {
-        drainDelayMs = DRAIN_RETRY_BASE_MS;
-      }
-      return { ...applied, bootstrappedNow: plan.bootstrap && !needsBootstrap };
+      })),
+      fetchReply,
+      getHost: () => host,
+      syncEndpoint,
+      initial,
+      early,
+      report,
+      setCursor: cursor => { if (cursor === null) hadBootstrap = true; },
+      onRecordsChanged: changedRecords => emitRecordsChanged(changedRecords),
+      onSyncNotices: notices => emitSyncNotices(notices),
+      scheduleRetry: delay => kickSync(delay),
+      scheduleHeld: delay => applySyncSchedule({ kind: "held", delay }),
+      onIdle: () => applySyncSchedule({ kind: "idle" }),
+      retryState: drainRetry,
     });
-    if (!initial && result.notified) emitRecordsChanged(result.changes);
-    return result;
+    const bootstrappedNow = hadBootstrap && !!host?.syncState?.().bootstrapped;
+    return { ...result, bootstrappedNow };
   }
 
   async function readStreamParams() {
-    if (!isLeaderOrStandalone() || !host || draining || kickTimer) return { ready: false };
+    if (!isLeaderOrStandalone() || !host || draining || (kickTimer && !kickHeld)) return { ready: false };
     const state = await withDb("readonly", () => host.syncState());
-    if (state.pending > 0 || !state.bootstrapped) {
-      if (!draining && !kickTimer) kickSync(0);
+    const action = nextSyncAction(state, 0);
+    if (action.kind === "immediate") {
+      if (!draining && (!kickTimer || kickHeld)) kickSync(0);
       return { ready: false };
     }
+    applySyncSchedule(action);
     return { ready: true, cursor: state.cursor, identity: state.identity };
   }
 
@@ -358,12 +459,16 @@ export function createWorkerRuntime({
       const consumed = host.consumeStream(framesText);
       const reset = !consumed.bootstrapped;
       const notify = consumed.applied > 0 || consumed.notified || reset;
+      const syncNotices = consumed.notices?.length && typeof host.notices === "function"
+        ? host.notices({ action: "list" }).notices
+        : null;
       if (notify || consumed.cursor > previousCursor) {
         localRevision++;
         save();
       }
-      return { applied: consumed.applied, cursor: consumed.cursor, reset, changes: notify ? consumed.changes : null, notify };
+      return { applied: consumed.applied, cursor: consumed.cursor, reset, changes: notify ? consumed.changes : null, notify, syncNotices };
     });
+    if (outcome.syncNotices) emitSyncNotices(outcome.syncNotices);
     if (outcome.reset) kickSync(0);
     if (outcome.notify) {
       if (branches.isActive()) {
@@ -433,7 +538,7 @@ export function createWorkerRuntime({
     fillState = (await withFiles("readonly", get => get(FILL))) || fresh();
     announceFill();
     if (fillState.done || fillState.full) return false;
-    if (effectiveSimulation().offline || draining || kickTimer || branches.isActive()) return true;
+    if (effectiveSimulation().offline || draining || (kickTimer && !kickHeld) || branches.isActive()) return true;
 
     const key = query(fillState, FILL_PAGE);
     const revision = localRevision;
@@ -510,21 +615,29 @@ export function createWorkerRuntime({
       if (writing) {
         localRevision++;
         save();
-        drainDelayMs = DRAIN_RETRY_BASE_MS;
-        kickSync();
+        drainRetry.delayMs = DRAIN_RETRY_BASE_MS;
+        applySyncSchedule(nextSyncAction(host.syncState(), QUIET_MS));
       }
       return rendered;
     });
     if (writing) {
-      // Peer tabs need to refresh when another tab mutates local SQLite.
-      emitRecordsChanged(null, { excludeTabId: tabId });
+      // Peer tabs receive typed row deltas when the write recorded them,
+      // degrading cleanly to null (wildcard) when unlisted.
+      const deltaChanges = result?.notified ? result.changes : null;
+      emitRecordsChanged(deltaChanges, { excludeTabId: tabId });
     }
     return result;
   }
 
   function localRequest(method, path, options, targetHost = host) {
     const started = now();
-    const result = targetHost.request(method, path, options);
+    const noticeRoute = matchSyncNoticeRoute(method, path, options?.body, options?.contentType);
+    const result = noticeRoute
+      ? handleSyncNoticeHttp(noticeRoute, options?.body, options?.contentType, targetHost)
+      : targetHost.request(method, path, options);
+    if (result.noticeResult && Array.isArray(result.noticeResult.notices)) {
+      emitSyncNotices(result.noticeResult.notices);
+    }
     report({ kind: "local", method, path, status: result.status, ms: Math.round(now() - started) });
     return result;
   }
@@ -532,6 +645,8 @@ export function createWorkerRuntime({
   function navigate({ method, path, body, contentType }, targetHost = host) {
     const started = now();
     let result = localRequest(method, path, { body: body ?? "", contentType: contentType || "application/x-www-form-urlencoded" }, targetHost);
+    const notified = result.notified;
+    const writeChanges = result.changes;
     let redirected = false;
     let finalPath = path;
     for (let hops = 0; hops < 5 && result.status >= 300 && result.status < 400; hops++) {
@@ -542,7 +657,7 @@ export function createWorkerRuntime({
       redirected = true;
       result = localRequest("GET", finalPath, undefined, targetHost);
     }
-    return { result: { ...result, ms: now() - started }, redirected, finalPath };
+    return { result: { ...result, ms: now() - started }, redirected, finalPath, notified, changes: writeChanges };
   }
 
   async function fetchShell(scope, path, hasExistingDb) {
@@ -771,6 +886,7 @@ export function createWorkerRuntime({
 
     const bootstrapStart = now();
     if (!restored && !shell) await drain(true, await bootstrapFetch);
+    if (restored) applySyncSchedule(nextSyncAction(host.syncState(), 0));
     ensureStreamLeader();
     streamLeader?.setCanLead(true);
     const bootstrapMs = now() - bootstrapStart;
@@ -805,8 +921,12 @@ export function createWorkerRuntime({
 
   async function handleServerRequest(payload) {
     const targetPath = resolveServerRequest(payload.path, origin);
-    const root = serverRoot(publicEndpoint, mountPath);
     const method = (payload.method || "GET").toUpperCase();
+    const pathname = new URL(targetPath, origin).pathname;
+    if (manifest.mode === "island" && !isServerAllowed(manifest, method, pathname, publicEndpoint)) {
+      throw new Error(`Disallowed server action: ${method} ${pathname}`);
+    }
+    const root = serverRoot(publicEndpoint, mountPath);
     const body = typeof payload.body === "string" ? payload.body : "";
     const reply = await fetchReply(method, targetPath, body, root, payload.contentType ?? "");
     if (method !== "GET" && method !== "HEAD" && reply.status >= 200 && reply.status < 400) {
@@ -821,6 +941,7 @@ export function createWorkerRuntime({
     clearTimeout(kickTimer);
     clearTimeout(fillTimer);
     kickTimer = null;
+    kickHeld = false;
     fillTimer = null;
     host = null;
     if (storage) {
@@ -890,9 +1011,10 @@ export function createWorkerRuntime({
           return replay;
         }),
       });
-      if (result.applied > 0 || host.syncState().pending > 0) {
-        drainDelayMs = DRAIN_RETRY_BASE_MS;
-        kickSync(0);
+      const postApproveState = host.syncState();
+      if (result.applied > 0 || postApproveState.pending > 0 || postApproveState.nextReleaseMs != null) {
+        drainRetry.delayMs = DRAIN_RETRY_BASE_MS;
+        applySyncSchedule(nextSyncAction(result.applied > 0 ? { ...postApproveState, pending: Math.max(postApproveState.pending, 1) } : postApproveState, 0));
       }
       report({ kind: "branch", method: "APPROVE", path: `${result.name} (${result.applied} applied, ${result.skipped} skipped)`, status: 200 });
       emitBranchState({ active: false, lastAction: result });
@@ -901,9 +1023,10 @@ export function createWorkerRuntime({
     }
     if (method === "branch.discard") {
       const result = branches.discard();
-      if (host.syncState().pending > 0) {
-        drainDelayMs = DRAIN_RETRY_BASE_MS;
-        kickSync(0);
+      const postDiscardState = host.syncState();
+      if (postDiscardState.pending > 0 || postDiscardState.nextReleaseMs != null) {
+        drainRetry.delayMs = DRAIN_RETRY_BASE_MS;
+        applySyncSchedule(nextSyncAction(postDiscardState, 0));
       }
       report({ kind: "branch", method: "DISCARD", path: `${result.name} (${result.dropped} dropped)`, status: 200 });
       emitBranchState({ active: false, lastAction: result });
@@ -918,6 +1041,9 @@ export function createWorkerRuntime({
     }
     if (method === "sync") {
       return syncPass();
+    }
+    if (method === "notices") {
+      return runNoticeAction(payload || { action: "list" });
     }
     if (method === "serverRequest") {
       return handleServerRequest(payload);
@@ -967,7 +1093,7 @@ export function createWorkerRuntime({
       onLeaderSimulationChange: (next, prev) => {
         streamLeader?.setOfflineSimulated(!!next.offline);
         if (host && prev.offline && !next.offline) {
-          drainDelayMs = DRAIN_RETRY_BASE_MS;
+          drainRetry.delayMs = DRAIN_RETRY_BASE_MS;
           kickSync(0);
           if (mailScope && fillState && !fillState.done && !fillState.full) scheduleFill(0);
         }
@@ -991,6 +1117,9 @@ export function createWorkerRuntime({
       const first = payload.path
         ? await runRequest("GET", target => navigate({ method: "GET", path: payload.path }, target), { tabId: coordinator.workerId })
         : null;
+      if (host && typeof host.notices === "function" && host.syncState().notices > 0) {
+        emitSyncNotices(host.notices({ action: "list" }).notices);
+      }
       return {
         compileMs: compiled - started,
         restored: bootInfo.restored,
@@ -1028,6 +1157,7 @@ export function createWorkerRuntime({
     clearTimeout(kickTimer);
     clearTimeout(fillTimer);
     kickTimer = null;
+    kickHeld = false;
     fillTimer = null;
     if (storage) {
       storage.close();
@@ -1085,7 +1215,7 @@ export function createWorkerRuntime({
         }
         streamLeader?.setOfflineSimulated(!!effectiveSimulation().offline);
         if (isLeaderOrStandalone() && host && previous.offline && !localSimulation.offline && !effectiveSimulation().offline) {
-          drainDelayMs = DRAIN_RETRY_BASE_MS;
+          drainRetry.delayMs = DRAIN_RETRY_BASE_MS;
           kickSync(0);
         }
         return;
@@ -1119,6 +1249,10 @@ export function createWorkerRuntime({
       }
       if (type === "save") return postMessage({ id, result: await coordinator.call("save", null, { idempotent: true }) });
       if (type === "sync") return postMessage({ id, result: await coordinator.call("sync", null, { idempotent: true }) });
+      if (type === "notices") {
+        const action = payload?.action || "list";
+        return postMessage({ id, result: await coordinator.call("notices", payload || { action: "list" }, { idempotent: action === "list" }) });
+      }
       if (type === "wipe") return postMessage({ id, result: await coordinator.call("wipe", null, { idempotent: true }) });
       if (type === "branch.create") return postMessage({ id, result: await coordinator.call("branch.create", payload, { idempotent: false }) });
       if (type === "branch.status") return postMessage({ id, result: await coordinator.call("branch.status", payload, { idempotent: true }) });

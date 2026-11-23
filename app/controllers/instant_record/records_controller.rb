@@ -29,7 +29,8 @@ module InstantRecord
 
       render json: {
         records: rows.first(limit).map { |record| InstantRecord.record_payload(record) },
-        has_more: rows.size > limit
+        has_more: rows.size > limit,
+        server_time: InstantRecord::HLC.iso_now
       }
     end
 

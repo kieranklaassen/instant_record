@@ -59,7 +59,10 @@ module InstantRecord
     test "a change to a secret reaches its people as it is, and everyone else as nothing" do
       AuthNote.find("auth-payroll").update!(body: "Moved to the 30th")
 
-      assert_equal [{ "type" => "AuthNote", "id" => "auth-payroll", "operation" => "destroy", "version" => 0, "attributes" => {} }], events
+      received = events
+      assert_equal [{ "type" => "AuthNote", "id" => "auth-payroll", "operation" => "destroy", "version" => 0, "attributes" => {} }],
+        received.map { |event| event.except("server_time") }
+      assert received.first["server_time"].present?
       sign_in "ben"
       assert_empty events.first["attributes"]
       sign_in "ada"
