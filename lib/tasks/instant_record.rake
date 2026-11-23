@@ -36,10 +36,39 @@ namespace :instant_record do
   task :native, [:target] => :environment do |_task, args|
     options = compiler_options.call
     require_toolchain.call(options[:toolchain])
-    output = InstantRecord::Compiler.build_native(**options, target: args[:target])
+    output = InstantRecord::Compiler.build_native(
+      **options,
+      target: args[:target],
+      swift_out: ENV["SWIFT_OUT"],
+      kotlin: ENV["KOTLIN"] == "1" || ENV["KOTLIN_OUT"].present?,
+      kotlin_out: ENV["KOTLIN_OUT"],
+      kotlin_package: ENV.fetch("KOTLIN_PACKAGE", "dev.instantrecord.contracts")
+    )
     puts "Native libraries: #{output}"
   rescue ArgumentError => e
     abort e.message
+  end
+
+  namespace :native do
+    desc "Generate typed Swift (and optional Kotlin) contract bindings from app/screens without running a C build"
+    task contracts: :environment do
+      require "instant_record/compiler"
+      swift_out = ENV.fetch("SWIFT_OUT") { Rails.root.join("tmp/instant_record/compiled/.build-native/generated/InstantRecordContracts.swift").to_s }
+      kotlin_out = ENV["KOTLIN_OUT"] || (ENV["KOTLIN"] == "1" ? Rails.root.join("tmp/instant_record/compiled/.build-native/generated/InstantRecordContracts.kt").to_s : nil)
+      result = InstantRecord::Compiler.generate_native_contracts(
+        screens_dir: Rails.root.join("app/screens").to_s,
+        swift_out: swift_out,
+        kotlin_out: kotlin_out,
+        kotlin_package: ENV.fetch("KOTLIN_PACKAGE", "dev.instantrecord.contracts")
+      )
+      if result[:contracts].empty?
+        puts "No native contracts declared in app/screens."
+      else
+        result[:written].each { |lang, path| puts "Generated #{lang} contracts (#{result[:contracts].size}): #{path}" }
+      end
+    rescue InstantRecord::Compiler::BuildError => e
+      abort e.message
+    end
   end
 
   desc "Verify the compiler toolchain configuration (optional target: wasm, native, iphonesimulator, iphoneos)"

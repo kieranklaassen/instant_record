@@ -2,11 +2,11 @@ import InstantRecordNative
 import SwiftUI
 
 /// A card at the head of the mailbox's list, written by hand in SwiftUI.
-/// MailboxScreen (demo/app/screens/mailbox_screen.rb) hands it its props:
-///
-///   inbox, unread and showing (numbers), filtered and more (flags)
+/// MailboxScreen (demo/app/screens/mailbox_screen.rb) declares its typed
+/// contract (`InboxSummaryProps`), compiled by Prism into
+/// `InstantRecordContracts.swift`.
 struct InboxSummary: View {
-    let props: Props
+    let props: InboxSummaryProps
     @Environment(\.dynamicTypeSize) private var size
     @Environment(\.theme) private var theme
 
@@ -16,11 +16,11 @@ struct InboxSummary: View {
         let layout = size.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4)) : AnyLayout(HStackLayout(spacing: 14))
         layout {
             // A floor while older mail is still on the server: "12+".
-            Text("\(props.int("unread"))" + (props.bool("more") ? "+" : ""))
+            Text("\(props.unread)" + (props.more ? "+" : ""))
                 .font(.system(.largeTitle, design: .rounded).bold())
                 .foregroundStyle(theme.tint)
             VStack(alignment: .leading, spacing: 2) {
-                Text("unread in \(props["inbox"])").font(.headline).foregroundStyle(theme.ink)
+                Text("unread in \(props.inbox)").font(.headline).foregroundStyle(theme.ink)
                 Text(caption).font(.subheadline).foregroundStyle(theme.muted)
             }
             if !size.isAccessibilitySize {
@@ -36,7 +36,7 @@ struct InboxSummary: View {
 
     // What is on this phone, and whether the server holds more.
     private var caption: String {
-        let showing = props.bool("filtered") ? "Showing unread only" : "\(props.int("showing")) on this phone"
-        return props.bool("more") ? showing + ", more on the server" : showing
+        let showing = props.filtered ? "Showing unread only" : "\(props.showing) on this phone"
+        return props.more ? showing + ", more on the server" : showing
     }
 }

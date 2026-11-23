@@ -174,18 +174,20 @@ public final class AppHost: ObservableObject {
     }
 
     /// A tap: the screen at `route` performs `action` with the arguments the
-    /// element carried and whatever is typed into the screen's fields. The
-    /// screens are drawn again from the local database, and the write goes
-    /// to the server soon after.
-    public func perform(_ action: String, args: [String: String] = [:], on route: Route) {
-        let values = typed[route] ?? [:]
+    /// element carried and whatever is typed into the screen's fields (plus
+    /// any explicit `values` passed by a typed native view). The screens are
+    /// drawn again from the local database, and the write goes to the server
+    /// soon after.
+    public func perform(_ action: String, args: [String: String] = [:], values: [String: String] = [:], on route: Route) {
+        let fieldValues = typed[route] ?? [:]
+        let mergedValues = values.isEmpty ? fieldValues : fieldValues.merging(values) { _, explicit in explicit }
         thread.run {
-            let performed = self.act(action, args, values, on: route)
+            let performed = self.act(action, args, mergedValues, on: route)
             self.draw()
             // What was typed is forgotten once it has been handed over, unless
             // more was typed since.
-            if performed, !values.isEmpty {
-                DispatchQueue.main.async { if self.typed[route] == values { self.typed[route] = nil } }
+            if performed, !fieldValues.isEmpty {
+                DispatchQueue.main.async { if self.typed[route] == fieldValues { self.typed[route] = nil } }
             }
         }
         schedule.request()

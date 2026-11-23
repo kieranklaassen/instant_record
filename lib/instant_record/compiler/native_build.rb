@@ -2,7 +2,10 @@ require "etc"
 require "fileutils"
 require "pathname"
 require_relative "entry_builder"
+require_relative "kotlin_codegen"
+require_relative "native_contracts"
 require_relative "runner"
+require_relative "swift_codegen"
 require_relative "toolchain"
 require_relative "wasm_build"
 
@@ -66,6 +69,10 @@ module InstantRecord
         target: nil,
         baseline: nil,
         migration_paths: nil,
+        swift_out: nil,
+        kotlin: false,
+        kotlin_out: nil,
+        kotlin_package: "dev.instantrecord.contracts",
         out: $stdout
       )
         @workspace = File.expand_path(workspace.to_s)
@@ -74,6 +81,7 @@ module InstantRecord
         @toolchain = Toolchain.load(toolchain)
         @app_source = app_source ? File.expand_path(app_source.to_s) : nil
         @demo = @app_source.nil?
+        @source_root = @app_source || File.join(@gem_root, "demo")
         @models = models
         @endpoint = endpoint
         @target = target.nil? || target.to_s.empty? ? nil : target.to_s
@@ -83,6 +91,10 @@ module InstantRecord
         @build_dir = File.join(@workspace, *[".build-native", @target].compact)
         @baseline = baseline
         @migration_paths = migration_paths
+        @swift_out = swift_out ? File.expand_path(swift_out.to_s) : nil
+        @kotlin = !!kotlin || !kotlin_out.nil?
+        @kotlin_out = kotlin_out ? File.expand_path(kotlin_out.to_s) : nil
+        @kotlin_package = kotlin_package.to_s
         @runner = Runner.new(build_dir: @build_dir)
         @out = out
       end
@@ -90,6 +102,8 @@ module InstantRecord
       def run
         FileUtils.mkdir_p(@build_dir)
         FileUtils.mkdir_p(@toolchain.fetch("CACHE"))
+
+        generate_contracts
 
         spinel_home = @toolchain.fetch("SPINEL_HOME")
         path_env = { "PATH" => [File.join(spinel_home, "bin"), ENV.fetch("PATH", "")].join(File::PATH_SEPARATOR) }
@@ -189,6 +203,37 @@ module InstantRecord
         )
         @out.puts "built #{library} and #{host} (#{File.size(host)} bytes)"
         Pathname(@build_dir)
+      end
+
+      def generate_contracts
+        screens_dir = File.join(@source_root, "app/screens")
+        contracts = NativeContracts.extract_dir(screens_dir)
+        return [] if contracts.empty?
+
+        generated_dir = File.join(@build_dir, "generated")
+        FileUtils.mkdir_p(generated_dir)
+
+        swift_source = SwiftCodegen.generate(contracts)
+        swift_path = File.join(generated_dir, "InstantRecordContracts.swift")
+        File.write(swift_path, swift_source)
+        if @swift_out && @swift_out != swift_path
+          FileUtils.mkdir_p(File.dirname(@swift_out))
+          File.write(@swift_out, swift_source)
+        end
+        @out.puts "wrote #{swift_path} (#{contracts.size} contracts)"
+
+        if @kotlin
+          kotlin_source = KotlinCodegen.generate(contracts, package: @kotlin_package)
+          kotlin_path = File.join(generated_dir, "InstantRecordContracts.kt")
+          File.write(kotlin_path, kotlin_source)
+          if @kotlin_out && @kotlin_out != kotlin_path
+            FileUtils.mkdir_p(File.dirname(@kotlin_out))
+            File.write(@kotlin_out, kotlin_source)
+          end
+          @out.puts "wrote #{kotlin_path} (#{contracts.size} contracts)"
+        end
+
+        contracts
       end
 
       private

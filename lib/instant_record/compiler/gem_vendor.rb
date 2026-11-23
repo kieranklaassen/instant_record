@@ -1,6 +1,7 @@
 require "digest"
 require "fileutils"
 require "pathname"
+require "prism"
 require_relative "runner"
 
 module InstantRecord
@@ -171,6 +172,7 @@ module InstantRecord
             source = File.read(target)
             changed = strip_server_only(source)
             changed = unwrap_client_only(changed)
+            changed = strip_native_contracts(changed) if subdir == "app/screens"
             File.write(target, changed) if changed != source
           end
         end
@@ -247,6 +249,50 @@ module InstantRecord
           Regexp.last_match(2).split("\n", -1).map do |line|
             line.start_with?("#{indent}  ") ? line[2..] : line
           end.join("\n")
+        end
+      end
+
+      # Remove class-level `contract ... do ... end` declarations from staged
+      # app/screens files before Roundhouse/Spinel compile them, preserving line
+      # counts so `#line` diagnostics in generated C remain exact.
+      def strip_native_contracts(source)
+        parsed = Prism.parse(source)
+        return source unless parsed.success?
+
+        ranges = []
+        collect_contract_ranges(parsed.value, ranges)
+        return source if ranges.empty?
+
+        output = source.b
+        ranges.sort_by { |start_off, _| -start_off }.each do |start_off, end_off|
+          slice = output.byteslice(start_off...end_off)
+          output[start_off...end_off] = "\n" * slice.count("\n")
+        end
+        output.force_encoding(source.encoding)
+      end
+
+      def collect_contract_ranges(node, ranges)
+        return unless node
+
+        case node
+        when Prism::ProgramNode
+          collect_contract_ranges(node.statements, ranges)
+        when Prism::StatementsNode
+          node.body.each { |stmt| collect_contract_ranges(stmt, ranges) }
+        when Prism::ModuleNode
+          collect_contract_ranges(node.body, ranges)
+        when Prism::ClassNode
+          if node.body.is_a?(Prism::StatementsNode)
+            node.body.body.each do |stmt|
+              if stmt.is_a?(Prism::CallNode) && stmt.receiver.nil? && stmt.name == :contract
+                ranges << [stmt.location.start_offset, stmt.location.end_offset]
+              else
+                collect_contract_ranges(stmt, ranges)
+              end
+            end
+          else
+            collect_contract_ranges(node.body, ranges)
+          end
         end
       end
 
