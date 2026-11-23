@@ -489,6 +489,7 @@ class CompilerTest < ActiveSupport::TestCase
 
       wasm_main = File.read(File.join(emit, "main_wasm.rb"))
       assert_includes wasm_main, "module WasmBridge"
+      assert_includes wasm_main, "InstantRecord::Client.handle_history("
       assert_includes wasm_main, 'File.read("/host/in")'
       assert_includes wasm_main, "InstantRecord::ReadTracker.track"
       assert_includes wasm_main, "InstantRecord::Client.capture_local_changes"
@@ -515,6 +516,7 @@ class CompilerTest < ActiveSupport::TestCase
       assert_equal ["inbox_list"], screens
       native_main = File.read(File.join(emit, "main_native.rb"))
       assert_includes native_main, "module NativeBridge"
+      assert_includes native_main, "InstantRecord::Client.handle_history("
       assert_includes native_main, "def self.branch_outbox"
       assert_includes native_main, "def self.branch_replay"
       assert_includes native_main, 'when "inbox_list" then InboxListScreen.new(params)'

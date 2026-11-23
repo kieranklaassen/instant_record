@@ -109,25 +109,14 @@ module InstantRecord
           end
 
           # History has its own keyset and must not advance the live change cursor.
-          # Keep the page receipt in the same SQLite transaction as its records.
+          # Route through Client's durable SQLite history ledger so CRuby, WASM,
+          # and Native share one contiguity model and eviction invalidates it.
           def self.history
             input = JSON.parse(<<read:in>>)
-            key = "history:" + input["key"].to_s
-            response = input["response"].to_s
-            if response.empty?
-              mark = InstantRecord::SyncMetadata.get(key)
-              result = { ok: !mark.nil?, applied: 0, has_more: mark == "more" }
-            else
-              page = JSON.parse(response)
-              InstantRecord::Client.observe_server_time(page["server_time"])
-              records = Array(page["records"])
-              more = page["has_more"] == true
-              InstantRecord::OutboxMutation.transaction do
-                records.each { |record| InstantRecord::Client.apply_record(record) }
-                InstantRecord::SyncMetadata.set(key, more ? "more" : "end")
-              end
-              result = { ok: true, applied: records.size, has_more: more }
-            end
+            result = InstantRecord::Client.handle_history(
+              key: input["key"].to_s,
+              response: input["response"].to_s
+            )
             <<write:out>>JSON.generate(result))
             0
           end
