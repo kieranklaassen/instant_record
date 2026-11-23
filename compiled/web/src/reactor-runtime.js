@@ -174,7 +174,7 @@ export function createWorkerRuntime({
 
   function matchSyncNoticeRoute(method, path, body = "", contentType = "") {
     const url = new URL(path, origin);
-    const base = new URL(publicEndpoint, origin).pathname.replace(/\/+$/, "") + "/sync_notices";
+    const base = new URL(syncEndpoint, origin).pathname.replace(/\/+$/, "") + "/sync_notices";
     const pathname = url.pathname.replace(/\.json$/, "");
     let verb = method.toUpperCase();
     if (verb === "POST" && (!contentType || contentType.startsWith("application/x-www-form-urlencoded"))) {

@@ -27,12 +27,13 @@ export function parseShellGrant(text) {
     const { path, cursor, identity, fill } = parsed;
     if (typeof path !== "string" || !path.startsWith("/") || !path.includes("/shell/file")) return null;
     if (!Number.isInteger(cursor) || cursor < 0) return null;
-    return {
+    const grant = {
       path,
       cursor,
       identity: typeof identity === "string" ? identity : "",
-      fill: Array.isArray(fill) && fill.length > 0 ? fill[0] : null,
     };
+    if (Array.isArray(fill) && fill.length > 0) grant.fill = fill[0];
+    return grant;
   } catch {
     return null;
   }
