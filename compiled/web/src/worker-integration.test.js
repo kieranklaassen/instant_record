@@ -222,6 +222,15 @@ function createTestEnvironment({ opfsUnavailable = false, seedIdbBytes = null, s
       this.memBytes = new Uint8Array(bytes);
       this.schemaVersion = schemaVersion;
     }
+    extractOutbox(bytes) {
+      if (!bytes || !bytes.byteLength) return [];
+      const parsed = JSON.parse(new TextDecoder().decode(bytes));
+      return Array.isArray(parsed.outbox) ? parsed.outbox.map(row => ({ ...row })) : [];
+    }
+    importOutbox(rows) {
+      this._persist({ ...this.state, outbox: [...(this.state.outbox || []), ...rows] });
+      return { imported: rows.length };
+    }
     ensureBooted() {
       const raw = this.inode ? this.inode.readAll() : this.memBytes;
       if (raw && raw.byteLength > 0) {
@@ -295,7 +304,22 @@ function createTestEnvironment({ opfsUnavailable = false, seedIdbBytes = null, s
       return { changed: false, pending: 0, cursor: this.state.cursor, progressed: false, failed: false, quarantined: 0, notified: false, changes: null };
     }
     syncState() { return { bootstrapped: this.state.bootstrapped, cursor: this.state.cursor, pending: 0, identity: "" }; }
-    consumeStream() { return { applied: 0, cursor: this.state.cursor, bootstrapped: true, notified: false, changes: null }; }
+    consumeStream(chunk) {
+      const applied = [];
+      let cursor = this.state.cursor;
+      for (const block of String(chunk).split("\n\n")) {
+        const idMatch = /^id: (.+)$/m.exec(block);
+        const dataMatch = /^data: (.+)$/m.exec(block);
+        if (!dataMatch) continue;
+        const ev = JSON.parse(dataMatch[1]);
+        if (idMatch) cursor = Number(idMatch[1]);
+        applied.push({ type: ev.type, id: ev.id });
+      }
+      if (applied.length > 0) {
+        this._persist({ ...this.state, cursor, items: [...this.state.items, ...applied.map(c => c.id)] });
+      }
+      return { applied: applied.length, cursor, bootstrapped: true, notified: applied.length > 0, changes: applied.length > 0 ? applied : null };
+    }
     history(_key, response = "") {
       if (!response) return { ok: false, applied: 0, has_more: true };
       const page = JSON.parse(response);
@@ -304,7 +328,7 @@ function createTestEnvironment({ opfsUnavailable = false, seedIdbBytes = null, s
     }
   }
 
-  function spawnWorker({ envOverrides = {}, fetchImpl } = {}) {
+  function spawnWorker({ envOverrides = {}, fetchImpl, streamEnabled = false, streamOptions = {} } = {}) {
     const idb = makeIdbForWorker();
     const messages = [];
     const runtime = createWorkerRuntime({
@@ -341,7 +365,9 @@ function createTestEnvironment({ opfsUnavailable = false, seedIdbBytes = null, s
       fetchImpl: fetchImpl || (async () => ({ status: 200, ok: true, text: async () => "{}" })),
       postMessage: msg => messages.push(msg),
       origin: "http://demo.test",
-      pollIntervalMs: 0,
+      pollIntervalMs: streamEnabled ? 1000 : 0,
+      streamEnabled,
+      streamOptions,
       fillInitialDelayMs: 60000,
     });
 
@@ -473,6 +499,36 @@ test("failed schema migration in OPFS rolls back exact SQLite bytes and leaves I
   tab.runtime.shutdown();
 });
 
+test("schema drift in OPFS auto-rehydrates onto a clean database while preserving pending outbox rows", async () => {
+  const pendingOutbox = [{ id: "m-offline-1", record_type: "Note", record_id: "n-1", operation: "create", changes_payload: '{"title":"keep"}' }];
+  const driftedBytes = new TextEncoder().encode(JSON.stringify({ items: ["stale"], cursor: 9, bootstrapped: true, historyPages: 0, outbox: pendingOutbox }));
+  const env = createTestEnvironment({
+    seedIdbBytes: driftedBytes,
+    seedMeta: {
+      rails_schema_version: 99,
+      snapshot_revision: 4,
+      schema_digest: "digest-v99",
+      migration_history: { "1": "h1", "99": "h99" },
+    },
+  });
+
+  const tab = env.spawnWorker();
+  try {
+    const booted = await tab.rpc("boot", { module: {}, path: "/todo", scope: "s1" });
+    assert.equal(booted.storageMode, "opfs");
+    assert.equal(booted.restored, false);
+    assert.equal(booted.rehydrated.reason, "schema_version_ahead:99");
+    assert.equal(booted.rehydrated.preservedOutbox, 1);
+
+    const stored = JSON.parse(new TextDecoder().decode(env.opfsTree.get("instant-record-spinel").get("default").get("development.sqlite3").bytes));
+    assert.deepEqual(stored.items, [], "rebuilt OPFS database starts clean");
+    assert.deepEqual(stored.outbox, pendingOutbox, "pending outbox rows preserved across OPFS rehydration");
+    assert.equal(env.idbStores.get("__default__").get("rails_schema_version"), 2);
+  } finally {
+    tab.runtime.shutdown();
+  }
+});
+
 test("Safari Private Mode falls back cleanly to IndexedDB and keeps 24 MB fill cap while OPFS exceeds 24 MB", async () => {
   const bootstrapPayload = JSON.stringify({
     cursor: 1,
@@ -549,4 +605,79 @@ test("cold-boot IndexedDB deletion resets stale OPFS file cleanly on next boot",
   const read = await tab2.rpc("request", { method: "GET", path: "/items" });
   assert.deepEqual(JSON.parse(read.body), []);
   tab2.runtime.shutdown();
+});
+
+test("reactor leader holds one visibility-aware SSE stream, broadcasts to followers, and fails over cleanly", async () => {
+  const env = createTestEnvironment();
+  const requests = [];
+  const streams = [];
+  const encoder = new TextEncoder();
+
+  const sseFetch = async (url, init = {}) => {
+    if (!String(url).includes("/events")) {
+      return { status: 200, ok: true, text: async () => "{}" };
+    }
+    requests.push(url);
+    let controllerRef;
+    let closed = false;
+    const body = new ReadableStream({
+      start(controller) {
+        controllerRef = controller;
+        init.signal?.addEventListener("abort", () => {
+          if (!closed) {
+            closed = true;
+            try { controller.error(Object.assign(new Error("Aborted"), { name: "AbortError" })); } catch {}
+          }
+        }, { once: true });
+      },
+    });
+    const stream = {
+      push: text => { if (!closed) controllerRef.enqueue(encoder.encode(text)); },
+      isClosed: () => closed,
+    };
+    streams.push(stream);
+    return { status: 200, ok: true, body };
+  };
+
+  const waitFor = async (fn, ms = 1500) => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (fn()) return;
+      await new Promise(r => setTimeout(r, 10));
+    }
+    throw new Error("Timed out waiting for condition");
+  };
+
+  const tab1 = env.spawnWorker({ fetchImpl: sseFetch, streamEnabled: true, streamOptions: { hiddenGraceMs: 40 } });
+  const tab2 = env.spawnWorker({ fetchImpl: sseFetch, streamEnabled: true, streamOptions: { hiddenGraceMs: 40 } });
+
+  try {
+    await tab1.rpc("boot", { module: {}, path: "/todo", scope: "s1", visible: true });
+    await tab2.rpc("boot", { module: {}, path: "/todo", scope: "s1", visible: true });
+
+    await waitFor(() => streams.length === 1 && tab1.runtime.streamOpen);
+    assert.equal(requests.length, 1);
+    assert.doesNotMatch(requests[0], /window=0/);
+    assert.match(requests[0], /\/instant_record\/events\?after=1&scope=s1/);
+
+    // Streamed event feeds host.consumeStream and notifies follower over BroadcastChannel.
+    streams[0].push('id: 2\nevent: change\ndata: {"type":"Issue","id":"streamed-1"}\n\n');
+    await waitFor(() => tab2.messages.some(m => m.type === "records_changed" && m.changes?.some(c => c.id === "streamed-1")));
+
+    // Hiding both tabs pauses the stream; revealing tab2 resumes it.
+    await tab1.runtime.handleMessage({ data: { type: "instant_record.visibility", visible: false } });
+    await tab2.runtime.handleMessage({ data: { type: "instant_record.visibility", visible: false } });
+    await waitFor(() => streams[0].isClosed() && !tab1.runtime.streamOpen);
+
+    await tab2.runtime.handleMessage({ data: { type: "instant_record.visibility", visible: true } });
+    await waitFor(() => streams.length === 2 && tab1.runtime.streamOpen);
+
+    // Leader crash promotes tab2 and resumes streaming from cursor 2.
+    tab1.runtime.shutdown({ announceBye: false });
+    await waitFor(() => tab2.runtime.role === "leader" && streams.length === 3 && tab2.runtime.streamOpen);
+    assert.match(requests[2], /after=2/);
+  } finally {
+    tab1.runtime.shutdown();
+    tab2.runtime.shutdown();
+  }
 });

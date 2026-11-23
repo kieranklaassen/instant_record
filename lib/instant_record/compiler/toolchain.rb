@@ -30,6 +30,7 @@ module InstantRecord
             badge = case check.status
             when :ok then "OK"
             when :optional then "OPTIONAL"
+            when :error then "ERROR"
             when :fail then "FAIL"
             else "MISSING"
             end

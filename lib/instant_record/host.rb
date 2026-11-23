@@ -12,6 +12,10 @@ module InstantRecord
       require "instant_record/engine" if defined?(Rails::Engine)
     end
 
+    def load_inertia_renderer
+      require "instant_record/inertia/renderer"
+    end
+
     def load_branch_store
       require "instant_record/branch/sqlite_store"
     end

@@ -31,7 +31,7 @@ export async function runDrain({
   }
   const extra = plan.headers || {};
   const push = plan.push ? await fetchReply("POST", "/mutations", plan.push, syncEndpoint, extra) : null;
-  const snapshot = plan.bootstrap ? (early?.status === 200 ? early : await fetchReply("GET", "/bootstrap", "", syncEndpoint, extra)) : null;
+  const snapshot = plan.bootstrap ? (!plan.push && early?.status === 200 ? early : await fetchReply("GET", "/bootstrap", "", syncEndpoint, extra)) : null;
 
   let bootstrapFill = null;
   if (snapshot?.status === 200) {

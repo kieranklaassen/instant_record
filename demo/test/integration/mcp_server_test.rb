@@ -56,12 +56,13 @@ class McpServerTest < ActionDispatch::IntegrationTest
     host_bin = write_demo_protocol_host(@folder)
     db_path = File.join(@folder, "maya_support.sqlite3")
 
-    # Wrong token is rejected by demo Email::SyncController (401).
+    # Wrong token is rejected by InstantRecord::Engine (401).
+    inbox_headers = { "X-Instant-Record-Partition" => "mailbox_id:support", "X-Instant-Record-Member" => "maya" }
     bad_runtime = InstantRecord::Mcp::Runtime.new(
       host_binary: host_bin,
       database_path: db_path,
-      endpoint: "http://www.example.com/email/sync/maya/support",
-      exchange: rack_exchange(token: "wrong-token"),
+      endpoint: "http://www.example.com/instant_record",
+      exchange: rack_exchange(token: "wrong-token", extra_headers: inbox_headers),
       screens: %w[mailbox thread feedback]
     )
     bad_sync = bad_runtime.sync
@@ -73,8 +74,8 @@ class McpServerTest < ActionDispatch::IntegrationTest
     runtime = InstantRecord::Mcp::Runtime.new(
       host_binary: host_bin,
       database_path: db_path,
-      endpoint: "http://www.example.com/email/sync/maya/support",
-      exchange: rack_exchange(token: MailDirectory.token("maya")),
+      endpoint: "http://www.example.com/instant_record",
+      exchange: rack_exchange(token: MailDirectory.token("maya"), extra_headers: inbox_headers),
       screens: %w[mailbox thread feedback]
     )
 
@@ -186,11 +187,12 @@ class McpServerTest < ActionDispatch::IntegrationTest
     skip "Set INSTANT_RECORD_NATIVE_HOST to a compiled native host binary to run the real binary MCP test." unless binary && File.executable?(binary)
 
     db_path = File.join(@folder, "compiled_maya_support.sqlite3")
+    inbox_headers = { "X-Instant-Record-Partition" => "mailbox_id:support", "X-Instant-Record-Member" => "maya" }
     runtime = InstantRecord::Mcp::Runtime.new(
       host_binary: binary,
       database_path: db_path,
-      endpoint: "http://www.example.com/email/sync/maya/support",
-      exchange: rack_exchange(token: MailDirectory.token("maya")),
+      endpoint: "http://www.example.com/instant_record",
+      exchange: rack_exchange(token: MailDirectory.token("maya"), extra_headers: inbox_headers),
       screens: %w[mailbox thread feedback]
     )
 
@@ -249,14 +251,14 @@ class McpServerTest < ActionDispatch::IntegrationTest
 
   private
 
-  def rack_exchange(token: nil, cookie: nil, scope: nil)
+  def rack_exchange(token: nil, cookie: nil, scope: nil, extra_headers: {})
     InstantRecord::Mcp::HttpExchange.new(
       token: token,
       cookie: cookie,
       scope: scope,
       adapter: lambda do |verb, uri, headers, body|
         env = {}
-        headers.each do |key, value|
+        headers.merge(extra_headers).each do |key, value|
           if key.casecmp?("content-type")
             env["CONTENT_TYPE"] = value
           else

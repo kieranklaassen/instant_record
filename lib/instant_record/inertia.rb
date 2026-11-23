@@ -1,63 +1,222 @@
 module InstantRecord
-  # InstantRecord for an Inertia page. Loaded when the app has inertia_rails.
+  # InstantRecord for an Inertia page, shared by Rails and the compiled WASI/Spinel runtime.
   #
-  #   render inertia: "Email/Inbox", live: { mail: MailEntry, thread: MailEntry },
-  #     props: { mail: -> { ... }, thread: -> { ... } }
+  #   page = InstantRecord::Inertia::Page.for_request("Email/Inbox", request)
+  #   page.string("member", @member)
+  #   page.strings("inboxes", @inboxes)
+  #   page.bool("composing", params[:compose] == "1")
+  #   page.live("mail", "MailEntry") { JSON.generate(mail_props) }
+  #   page.live("thread", "MailEntry") { JSON.generate(thread_props) }
   #
-  # `live:` names, for each prop, the synced models it is made from. The page
-  # object then carries Inertia's `liveProps`, and the transport in the gem's
-  # frontend package (frontend/live.js) has Inertia reload a prop when a
-  # record of one of its models changes in the local database.
+  # Props are serialized as JSON text into parallel String arrays rather than a
+  # polymorphic Ruby Hash, and lazy/live props use Ruby blocks rather than Procs
+  # inside a Hash, so Roundhouse and Spinel keep strict concrete types.
   module Inertia
-    CHANNEL = { name: "instant_record", type: "local" }.freeze
+    CHANNEL_NAME = "instant_record".freeze
+    CHANNEL_TYPE = "local".freeze
     # A burst of changes becomes one reload. Reads are local, so this is short.
     THROTTLE_MS = 150
 
-    # The `liveProps` of a page object: one event per model, named for it.
-    # Each entry may be a Model / Array<Model> or a Hash with `models:` (or
-    # `model:`) and optional `partitions:` / `throttle:`.
-    def self.live_props(models_by_prop)
-      models_by_prop.to_h do |prop, spec|
-        if spec.is_a?(Hash)
-          models = Array(spec[:models] || spec["models"] || spec[:model] || spec["model"])
-          events = models.map { |model| model.respond_to?(:name) ? model.name : model.to_s }
-          partitions = spec[:partitions] || spec["partitions"]
-          channel = partitions ? CHANNEL.merge(partitions: normalize_partitions(partitions)) : CHANNEL
-          throttle = spec[:throttle] || spec["throttle"] || THROTTLE_MS
-          [prop.to_sym, { listeners: [{ channel: channel, events: events }], throttle: throttle }]
-        else
-          events = Array(spec).map { |model| model.respond_to?(:name) ? model.name : model.to_s }
-          [prop.to_sym, { listeners: [{ channel: CHANNEL, events: events }], throttle: THROTTLE_MS }]
+    class Page
+      HEX = "0123456789abcdef".freeze
+
+      attr_reader :component, :url, :version
+
+      def self.for_request(component, request, version: "")
+        if request.nil?
+          return new(component, "/", false, "", "", "", version)
         end
-      end
-    end
 
-    def self.normalize_partitions(partitions)
-      partitions.to_h do |col, val|
-        values = Array(val).compact.map(&:to_s).uniq
-        [col.to_s, values]
+        req_headers = request.headers
+        new(
+          component,
+          request.fullpath.to_s,
+          !req_headers["X-Inertia"].to_s.empty?,
+          req_headers["X-Inertia-Partial-Component"].to_s,
+          req_headers["X-Inertia-Partial-Data"].to_s,
+          req_headers["X-Inertia-Partial-Except"].to_s,
+          version
+        )
       end
-    end
 
-    # inertia_rails has no word for live props yet, so this adds the key to
-    # the page object its renderer builds.
-    module Renderer
-      def initialize(component, controller, request, response, render_method, **options)
-        @instant_record_live = options[:live]
-        super
+      def self.header_list(value)
+        out = []
+        parts = value.split(",")
+        i = 0
+        while i < parts.length
+          part = parts[i].strip
+          out << part unless part.empty?
+          i += 1
+        end
+        out
+      end
+
+      def self.quote(value)
+        out = +"\""
+        value.each_char do |char|
+          code = char.ord
+          if char == "\""
+            out << "\\\""
+          elsif char == "\\"
+            out << "\\\\"
+          elsif char == "\n"
+            out << "\\n"
+          elsif char == "\r"
+            out << "\\r"
+          elsif char == "\t"
+            out << "\\t"
+          elsif code < 32
+            out << "\\u00" << HEX[code / 16] << HEX[code % 16]
+          else
+            out << char
+          end
+        end
+        out << "\""
+        out
+      end
+
+      def self.json_strings(values)
+        out = +"["
+        i = 0
+        while i < values.length
+          out << "," if i > 0
+          out << quote(values[i])
+          i += 1
+        end
+        out << "]"
+        out
+      end
+
+      def initialize(component, url, inertia, partial_component, partial_data, partial_except, version = "")
+        @component = component
+        @url = url
+        @version = version
+        @inertia = inertia
+        @only = Page.header_list(partial_data)
+        @except = Page.header_list(partial_except)
+        @partial = inertia && partial_component == component
+        @prop_keys = ["errors"]
+        @prop_values = ["{}"]
+        @live_keys = []
+        @live_values = []
+      end
+
+      def inertia?
+        @inertia
+      end
+
+      def partial?
+        @partial
+      end
+
+      def want?(name)
+        !@partial || ((@only.empty? || @only.include?(name)) && !@except.include?(name))
+      end
+
+      def string(name, value)
+        put_json(name, Page.quote(value)) if want?(name)
+        nil
+      end
+
+      def int(name, value)
+        put_json(name, value.to_s) if want?(name)
+        nil
+      end
+
+      def bool(name, value)
+        put_json(name, value ? "true" : "false") if want?(name)
+        nil
+      end
+
+      def strings(name, values)
+        put_json(name, Page.json_strings(values)) if want?(name)
+        nil
+      end
+
+      def raw(name, encoded)
+        put_json(name, encoded) if want?(name)
+        nil
+      end
+
+      def always_raw(name, encoded)
+        put_json(name, encoded)
+        nil
+      end
+
+      def lazy(name)
+        put_json(name, yield) if want?(name)
+        nil
+      end
+
+      def live(name, event)
+        register_live(name, [event])
+        put_json(name, yield) if want?(name)
+        nil
+      end
+
+      def live_many(name, events)
+        register_live(name, events)
+        put_json(name, yield) if want?(name)
+        nil
+      end
+
+      # Written by hand so CRuby and the compiled runtime emit identical JSON.
+      def json
+        out = +"{\"component\":"
+        out << Page.quote(@component)
+        out << ",\"props\":{"
+        i = 0
+        while i < @prop_keys.length
+          out << "," if i > 0
+          out << Page.quote(@prop_keys[i]) << ":" << @prop_values[i]
+          i += 1
+        end
+        out << "},\"url\":" << Page.quote(@url)
+        out << ",\"version\":" << Page.quote(@version)
+        unless @live_keys.empty?
+          out << ",\"liveProps\":{"
+          i = 0
+          while i < @live_keys.length
+            out << "," if i > 0
+            out << Page.quote(@live_keys[i]) << ":" << @live_values[i]
+            i += 1
+          end
+          out << "}"
+        end
+        out << "}"
+        out
       end
 
       private
 
-      def build_page
-        page, reads = InstantRecord::ReadTracker.capture { super }
-        if @response && reads && (!reads["tables"].empty? || !reads["models"].empty?)
-          @response.set_header("X-Instant-Record-Reads", InstantRecord::ReadTracker.serialize(reads))
+      def put_json(name, encoded)
+        i = @prop_keys.index(name)
+        if i.nil?
+          @prop_keys << name
+          @prop_values << encoded
+        else
+          @prop_values[i] = encoded
         end
-        return page if @instant_record_live.blank?
+        nil
+      end
 
-        page.merge(liveProps: InstantRecord::Inertia.live_props(@instant_record_live))
+      def register_live(name, events)
+        entry = +"{\"listeners\":[{\"channel\":{\"name\":"
+        entry << Page.quote(CHANNEL_NAME)
+        entry << ",\"type\":" << Page.quote(CHANNEL_TYPE)
+        entry << "},\"events\":" << Page.json_strings(events)
+        entry << "}],\"throttle\":" << THROTTLE_MS.to_s << "}"
+        i = @live_keys.index(name)
+        if i.nil?
+          @live_keys << name
+          @live_values << entry
+        else
+          @live_values[i] = entry
+        end
+        nil
       end
     end
   end
 end
+
+InstantRecord::Host.load_inertia_renderer

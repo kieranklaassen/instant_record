@@ -297,7 +297,7 @@ class LocalFirstIslandsTest < ActiveSupport::TestCase
     assert_includes server_pairs, ["GET", "/auth/session"]
     assert_includes server_pairs, ["POST", "/auth/session"]
     assert_includes server_pairs, ["POST", "/auth/session/sign_out"]
-    assert_includes server_pairs, ["POST", "/email/sync/:member/:inbox/incoming"]
+    assert_includes server_pairs, ["POST", "/email/incoming"]
     assert_includes server_pairs, ["GET", "/receipts/probe"]
 
     local_pairs = manifest.local_routes.map { |r| [r["method"], r["path"]] }

@@ -24,8 +24,8 @@ struct InboxApp: App {
 
     init() {
         var views = Screens()
-        views.register("ConversationView") { props, actions in ConversationView(props: props, actions: actions) }
-        views.register("InboxSummary") { props, _ in InboxSummary(props: props) }
+        views.register(ConversationViewProps.self) { props, actions in ConversationView(props: props, actions: actions) }
+        views.register(InboxSummaryProps.self) { props, _ in InboxSummary(props: props) }
         views.register("FeedbackForm") { props, _ in FeedbackScreen(props: props) }
 
         let defaults = UserDefaults.standard

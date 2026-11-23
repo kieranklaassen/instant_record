@@ -1,6 +1,6 @@
+require "json"
 require "uri"
 require "time"
-require "json"
 require "active_support/notifications"
 require "instant_record/client/transport"
 require "instant_record/client/notifier"
@@ -16,6 +16,12 @@ module InstantRecord
 
     # More changes than this in one notice are not listed one by one.
     MAX_LISTED_CHANGES = 200
+
+    # SyncMetadata key prefixes for durable history tracking. Windowed models
+    # store per-partition contiguity low-water marks under HISTORY_WINDOW_PREFIX;
+    # non-windowed / opaque bridge keys live directly under HISTORY_KEY_PREFIX.
+    HISTORY_KEY_PREFIX = "history:".freeze
+    HISTORY_WINDOW_PREFIX = "history:window:".freeze
 
     # Upper bound on bounded batches drained in a single synchronous pass.
     MAX_DRAIN_CHUNKS_PER_PASS = 50
@@ -269,8 +275,10 @@ module InstantRecord
       # Trim every windowed model back to its declared window. delete_all
       # under applying_remote: no callbacks, no outbox rows. Pending rows are
       # excluded before ranking — unsynced writes are never evicted and never
-      # push synced rows out of the window. Returns true when anything was
-      # deleted.
+      # push synced rows out of the window. Any partition whose rows were
+      # trimmed has its durable history mark invalidated in the same SQLite
+      # transaction so later pagination refetches instead of serving ghost empty
+      # pages. Returns true when anything was deleted.
       def evict_beyond_windows
         return false unless @eviction_pending
 
@@ -281,7 +289,7 @@ module InstantRecord
           next unless window
 
           applying_remote do
-            evicted = true if window.beyond_window(model.where.not(sync_state: "pending")).delete_all.positive?
+            evicted = true if evict_model_window(model, window)
           end
         end
         unlisted_changes if evicted
@@ -500,7 +508,7 @@ module InstantRecord
         SyncMetadata.set("replay_from", cursor) if bootstrapped? && SyncMetadata.get("replay_from").nil?
         SyncMetadata.all.each do |entry|
           if entry.key == "cursor" || entry.key == "identity" || entry.key == DRAIN_BATCH_LIMIT_KEY ||
-              entry.key.start_with?("history:") ||
+              entry.key.start_with?(HISTORY_KEY_PREFIX) ||
               types.any? { |type| entry.key.start_with?("#{HLC::ROW_PREFIX}#{type}:") } ||
               (entry.key.start_with?(RETRY_PREFIX) && destroyed_ids.include?(entry.key[RETRY_PREFIX.length..]))
             entry.destroy
@@ -509,7 +517,6 @@ module InstantRecord
             entry.destroy if parsed && types.include?(parsed["record_type"])
           end
         end
-        history_marks.clear
         unlisted_changes
         instrument("reset")
         true
@@ -668,7 +675,6 @@ module InstantRecord
       # memory about the one before.
       def forget_database
         reset_stream
-        history_marks.clear
         changed_records.clear
         changed_index.clear
         recorded_notices.clear
@@ -775,37 +781,44 @@ module InstantRecord
         raise ArgumentError, "#{model.name} windows by #{window.partition_by}; pass partition:" if window.partition_by && partition.nil?
 
         limit ||= window.limit
-        before_at = Time.parse(before[:created_at].to_s)
+        before_at = parse_time(before[:created_at].to_s)
         before_id = before[:id].to_s
 
         unless InstantRecord.browser?
           return { ok: true, applied: 0, has_more: local_page(window, partition, before_at, before_id, limit + 1).size > limit }
         end
 
-        if (mark = history_mark(model, partition)) && page_local?(mark, window, partition, before_at, before_id, limit)
-          # has_more from the served page, not the partition-wide mark: rows
-          # remain below this page when the local probe overflows `limit`, or
-          # when the page reaches the contiguity frontier and the server still
-          # has older rows (mark[:has_more]). Echoing the mark alone reports
-          # "beginning reached" for any mid-history page after the true
-          # beginning was loaded.
-          local = local_page(window, partition, before_at, before_id, limit + 1)
-          return { ok: true, applied: 0, has_more: local.size > limit || mark[:has_more] }
+        if (local = local_history_page(model, window, partition, before_at, before_id, limit))
+          return local
         end
 
         instrument("fetch_history") do |event|
           body = transport_get_json(history_path(model, partition, before_at, before_id, limit))
           observe_server_time(body["server_time"])
-          records = Array(body["records"])
-          records.each { |record| apply_record(record) }
-          extend_history_mark(model, partition, records, has_more: !!body["has_more"])
-          event[:applied] = records.size
-          event[:has_more] = !!body["has_more"]
-          { ok: true, applied: records.size, has_more: !!body["has_more"] }
+          result = apply_history_page(model, partition, Array(body["records"]), has_more: !!body["has_more"])
+          event[:applied] = result[:applied]
+          event[:has_more] = result[:has_more]
+          result
         end
       rescue Transport::Error => e
         log_failure("fetch_history", e)
         { ok: false, applied: 0, has_more: nil, error: e.message }
+      end
+
+      # Unified history entry point for the compiled bridges (WasmBridge and
+      # NativeBridge). Windowed keyset queries share the durable SQLite
+      # contiguity ledger with fetch_history; non-windowed queries (search,
+      # thread lookups, and opaque Native screen keys) keep their per-key
+      # receipt in SyncMetadata in the same transaction as their records.
+      def handle_history(key:, response: "")
+        key = key.to_s
+        response = response.to_s
+
+        if (query = parse_windowed_history_key(key))
+          handle_windowed_history(query, response)
+        else
+          handle_opaque_history(key, response)
+        end
       end
 
       # Server results for a posted batch. Every result drops the outbox row —
@@ -1126,38 +1139,303 @@ module InstantRecord
         @stream_parser ||= Transport::SseParser.new { |event| stream_events << event }
       end
 
-      # Contiguity low-water marks, one per (model, partition), held in
-      # VM-session memory only. Row count alone cannot prove a local page has
-      # no holes (live updates re-create evicted rows as strays); the mark
-      # tracks the oldest boundary of contiguously fetched history plus the
-      # server's last has_more answer.
-      def history_marks
-        @history_marks ||= {}
+      # Durable contiguity low-water marks, one per (model, partition), stored
+      # in SyncMetadata so CRuby, WASM, and Native share one SQLite-backed
+      # ledger. Row count alone cannot prove a local page has no holes (live
+      # updates re-create evicted rows as strays); each mark tracks the oldest
+      # boundary of contiguously fetched history plus the server's last
+      # has_more answer.
+      def history_mark_key(model, partition)
+        partition.nil? ? "#{HISTORY_WINDOW_PREFIX}#{model.name}" : "#{HISTORY_WINDOW_PREFIX}#{model.name}/#{partition}"
       end
 
       def history_mark(model, partition)
-        history_marks[[model.name, partition]]
+        raw = SyncMetadata.get(history_mark_key(model, partition))
+        return nil if raw.nil? || raw.empty?
+
+        data = JSON.parse(raw)
+        return nil unless data.is_a?(Hash) && (data["has_more"] == true || data["has_more"] == false)
+
+        oldest_at = data["oldest_at"]
+        oldest_id = data["oldest_id"]
+        {
+          oldest_at: oldest_at ? parse_time(oldest_at.to_s) : nil,
+          oldest_id: oldest_id.nil? ? nil : oldest_id.to_s,
+          has_more: data["has_more"]
+        }
+      rescue JSON::ParserError, ArgumentError
+        nil
+      end
+
+      def write_history_mark(model, partition, mark)
+        payload = {
+          "oldest_at" => mark[:oldest_at] ? mark[:oldest_at].utc.iso8601(InstantRecord::TIME_PRECISION) : nil,
+          "oldest_id" => mark[:oldest_id],
+          "has_more" => !!mark[:has_more]
+        }
+        SyncMetadata.set(history_mark_key(model, partition), JSON.generate(payload))
+      end
+
+      def apply_history_page(model, partition, records, has_more:)
+        SyncMetadata.transaction do
+          records.each { |record| apply_record(record) }
+          extend_history_mark(model, partition, records, has_more: has_more)
+        end
+        { ok: true, applied: records.size, has_more: has_more }
       end
 
       def extend_history_mark(model, partition, records, has_more:)
-        key = [model.name, partition]
-        oldest = records.map { |r| [Time.parse(r.dig("attributes", "created_at").to_s), r["id"].to_s] }.min
-        mark = history_marks[key] ||= { oldest_at: nil, oldest_id: nil }
-        mark[:has_more] = has_more
-        return unless oldest
-        return if mark[:oldest_at] && ([mark[:oldest_at], mark[:oldest_id]] <=> oldest) <= 0
+        oldest = oldest_record_boundary(model, records)
+        mark = history_mark(model, partition)
 
-        mark[:oldest_at], mark[:oldest_id] = oldest
+        if mark.nil?
+          write_history_mark(model, partition, {
+            oldest_at: oldest ? oldest[0] : nil,
+            oldest_id: oldest ? oldest[1] : nil,
+            has_more: has_more
+          })
+          return
+        end
+
+        if oldest && (mark[:oldest_at].nil? || compare_boundary(oldest, [mark[:oldest_at], mark[:oldest_id]]) < 0)
+          mark[:oldest_at] = oldest[0]
+          mark[:oldest_id] = oldest[1]
+          mark[:has_more] = has_more
+          write_history_mark(model, partition, mark)
+        elsif !has_more && mark[:has_more]
+          mark[:has_more] = false
+          write_history_mark(model, partition, mark)
+        end
       end
 
-      # A page is fully local when the beginning of history was already
-      # reached, or when `limit` rows older than `before` exist locally within
-      # the contiguous region above the mark.
-      def page_local?(mark, window, partition, before_at, before_id, limit)
-        return true if mark[:has_more] == false
+      def handle_windowed_history(query, response)
+        if response.empty?
+          return local_history_page(
+            query[:model], query[:window], query[:partition],
+            query[:before_at], query[:before_id], query[:limit]
+          ) || { ok: false, applied: 0, has_more: false }
+        end
 
+        page = JSON.parse(response)
+        observe_server_time(page["server_time"])
+        apply_history_page(
+          query[:model], query[:partition],
+          Array(page["records"]),
+          has_more: page["has_more"] == true
+        )
+      end
+
+      def handle_opaque_history(key, response)
+        meta_key = HISTORY_KEY_PREFIX + key
+        if response.empty?
+          mark = SyncMetadata.get(meta_key)
+          return { ok: !mark.nil?, applied: 0, has_more: mark == "more" }
+        end
+
+        page = JSON.parse(response)
+        observe_server_time(page["server_time"])
+        records = Array(page["records"])
+        more = page["has_more"] == true
+        SyncMetadata.transaction do
+          records.each { |record| apply_record(record) }
+          SyncMetadata.set(meta_key, more ? "more" : "end")
+        end
+        { ok: true, applied: records.size, has_more: more }
+      end
+
+      def oldest_record_boundary(model, records)
+        oldest = nil
+        records.each do |raw|
+          record = raw.is_a?(Hash) ? raw.deep_stringify_keys : nil
+          next unless record
+          next if record["type"] && record["type"] != model.name
+
+          attrs = record["attributes"]
+          next unless attrs.is_a?(Hash) && attrs["created_at"]
+
+          id = record["id"] || attrs["id"]
+          next if id.nil?
+
+          candidate = [parse_time(attrs["created_at"].to_s), id.to_s]
+          oldest = candidate if oldest.nil? || compare_boundary(candidate, oldest) < 0
+        end
+        oldest
+      end
+
+      # Serve a page from SQLite when the durable mark proves contiguity: either
+      # the beginning of history was already reached (has_more == false), or
+      # `limit` local rows below `before` sit at or above the low-water mark.
+      def local_history_page(model, window, partition, before_at, before_id, limit)
+        mark = history_mark(model, partition)
+        return nil unless mark
+
+        if mark[:has_more] == false
+          # has_more from the served page, not the partition-wide mark: rows
+          # remain below this page when the local probe overflows `limit`.
+          # Echoing the mark alone reports "beginning reached" for any
+          # mid-history page after the true beginning was loaded.
+          rows = local_page(window, partition, before_at, before_id, limit + 1)
+          return { ok: true, applied: 0, has_more: rows.size > limit }
+        end
+
+        return nil if mark[:oldest_at].nil?
+
+        boundary = [mark[:oldest_at], mark[:oldest_id]]
         rows = local_page(window, partition, before_at, before_id, limit)
-        rows.size >= limit && rows.all? { |at, id| ([at, id] <=> [mark[:oldest_at], mark[:oldest_id]]) >= 0 }
+        return nil unless rows.size >= limit && rows.all? { |row| compare_boundary(row, boundary) >= 0 }
+
+        { ok: true, applied: 0, has_more: true }
+      end
+
+      def evict_model_window(model, window)
+        evicted = false
+        SyncMetadata.transaction do
+          scope = window.beyond_window(model.where.not(sync_state: "pending"))
+          if window.partition_by
+            affected = scope.pluck(window.partition_by).uniq
+            if affected.any? && scope.delete_all.positive?
+              evicted = true
+              invalidate_history_marks(model, partitions: affected)
+            end
+          elsif scope.delete_all.positive?
+            evicted = true
+            invalidate_history_marks(model)
+          end
+        end
+        evicted
+      end
+
+      def invalidate_history_marks(model, partitions: nil)
+        partition_set = partitions ? partitions.map(&:to_s) : nil
+        window_prefix = "#{HISTORY_WINDOW_PREFIX}#{model.name}"
+
+        SyncMetadata.all.each do |entry|
+          key = entry.key
+          next unless key.start_with?(HISTORY_KEY_PREFIX)
+
+          if key == window_prefix
+            entry.destroy if partition_set.nil?
+          elsif key.start_with?("#{window_prefix}/")
+            partition = key.delete_prefix("#{window_prefix}/")
+            entry.destroy if partition_set.nil? || partition_set.include?(partition)
+          elsif legacy_model_history_key?(key, model.name, partition_set)
+            entry.destroy
+          end
+        end
+      end
+
+      def legacy_model_history_key?(key, model_name, partition_set)
+        raw = key.delete_prefix(HISTORY_KEY_PREFIX)
+        return false unless raw.include?("=")
+
+        params = decode_query_params(raw)
+        return false unless params && params["type"] == model_name
+        return true if partition_set.nil?
+
+        partition = params["partition"]
+        partition.nil? || partition_set.include?(partition)
+      end
+
+      def parse_windowed_history_key(key)
+        return nil unless key.include?("=")
+
+        params = decode_query_params(key)
+        return nil unless params
+        return nil if params["search"] || params["thread"]
+
+        type = params["type"]
+        return nil if type.nil? || type.empty?
+
+        model = InstantRecord.synced_model(type)
+        window = model&.instant_record_sync_window
+        return nil unless window
+
+        before_created_at = params["before_created_at"]
+        before_id = params["before_id"]
+        return nil if before_created_at.nil? || before_created_at.empty? || before_id.nil? || before_id.empty?
+
+        partition = params["partition"]
+        return nil if window.partition_by && (partition.nil? || partition.empty?)
+
+        raw_limit = params["limit"].to_i
+        {
+          model: model,
+          window: window,
+          partition: window.partition_by ? partition.to_s : nil,
+          before_at: parse_time(before_created_at),
+          before_id: before_id.to_s,
+          limit: raw_limit.positive? ? raw_limit : window.limit
+        }
+      rescue ArgumentError
+        nil
+      end
+
+      # Pure-Ruby application/x-www-form-urlencoded parser so WASM and Native
+      # builds do not pull in Ruby's URI package on the WasmBridge.history path.
+      def decode_query_params(raw)
+        params = {}
+        raw.split("&").each do |pair|
+          next if pair.empty?
+
+          eq = pair.index("=")
+          return nil unless eq
+
+          key = decode_query_component(pair[0...eq])
+          val = decode_query_component(pair[(eq + 1)..] || "")
+          params[key] = val
+        end
+        params
+      end
+
+      def decode_query_component(str)
+        text = str.tr("+", " ")
+        return text unless text.include?("%")
+
+        bytes = text.b
+        out = +"".b
+        i = 0
+        len = bytes.bytesize
+        while i < len
+          byte = bytes.getbyte(i)
+          if byte == 37 && i + 2 < len
+            hex = bytes.byteslice(i + 1, 2)
+            if hex.match?(/\A[0-9A-Fa-f]{2}\z/)
+              out << hex.to_i(16)
+              i += 3
+              next
+            end
+          end
+          out << byte
+          i += 1
+        end
+        out.force_encoding(Encoding::UTF_8)
+      end
+
+      # Returns -1, 0, or 1 (never nil) so Spinel AOT can compare directly with 0.
+      def compare_boundary(a, b)
+        return -1 if a[0] < b[0]
+        return 1 if a[0] > b[0]
+        return -1 if a[1] < b[1]
+        return 1 if a[1] > b[1]
+
+        0
+      end
+
+      # Normalize Ruby Time, ActiveSupport::TimeWithZone, ISO 8601 strings, and
+      # bare SQLite UTC datetime strings ("YYYY-MM-DD HH:MM:SS.ffffff") to UTC
+      # so boundary comparisons never drift on non-UTC host machines.
+      def parse_time(value)
+        return value.utc if value.is_a?(Time)
+        return value.to_time.utc if !value.is_a?(String) && value.respond_to?(:to_time)
+
+        text = value.to_s.strip
+        raise ArgumentError, "blank timestamp" if text.empty?
+
+        if text.match?(/(?:Z|[+-]\d{2}:?\d{2}|UTC)\z/i)
+          Time.parse(text).utc
+        else
+          Time.parse("#{text} UTC").utc
+        end
       end
 
       # Keyset page below (before_at, before_id), newest first, as
@@ -1167,7 +1445,7 @@ module InstantRecord
           .keyset_below(at: before_at, id: before_id, partition: partition)
           .limit(limit)
           .pluck(:created_at, window.model.primary_key)
-          .map { |at, id| [at.to_time, id.to_s] }
+          .map { |at, id| [parse_time(at), id.to_s] }
       end
 
       def history_path(model, partition, before_at, before_id, limit)

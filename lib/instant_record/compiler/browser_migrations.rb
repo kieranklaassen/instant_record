@@ -11,6 +11,12 @@ require_relative "runner"
 module InstantRecord
   class Compiler
     class BrowserMigrations
+      def self.schema_ddl(root:, migration_paths: nil)
+        planned = plan(root: root, baseline: nil, migration_paths: migration_paths)
+        statements = planned.fetch("migrations").sort_by { |version, _| version.to_i }.flat_map(&:last)
+        { version: planned["version"], statements: statements }
+      end
+
       def self.plan(root:, baseline: nil, migration_paths: nil, only_files: nil)
         schema_path = File.join(root, "db/schema.rb")
         raise BuildError, "Missing #{schema_path}" unless File.file?(schema_path)

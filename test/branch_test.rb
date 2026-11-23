@@ -74,7 +74,7 @@ class BranchTest < Minitest::Test
   def with_file_sqlite
     original_config = ActiveRecord::Base.connection_db_config.configuration_hash.dup
     saved_ddl = ActiveRecord::Base.connection.select_values(
-      "SELECT sql FROM sqlite_master WHERE type IN ('table', 'index') AND name NOT LIKE 'sqlite_%' AND sql IS NOT NULL"
+      "SELECT sql FROM sqlite_master WHERE type IN ('table', 'index') AND name NOT LIKE 'sqlite_%' AND sql IS NOT NULL ORDER BY type DESC, name ASC"
     )
     Dir.mktmpdir("ir_branch_test_") do |dir|
       db_path = File.join(dir, "main.sqlite3")

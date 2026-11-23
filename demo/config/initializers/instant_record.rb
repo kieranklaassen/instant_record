@@ -55,3 +55,18 @@ InstantRecord.configure do |config|
     DemoAsker.new(visitor, person, member)
   end
 end
+
+# The compiled demo includes MailEntry alongside the engine's Syncable models.
+InstantRecord::Shell.models = %w[AssistantChat AssistantTurn AuthNote Channel ChatUser Issue MailEntry Message Note]
+InstantRecord::Shell.identity_serializer = ->(asker) { [asker&.token, asker&.person_id, asker&.member] }
+InstantRecord::Shell.identity_deserializer = ->(tuple) { DemoAsker.new(*tuple) }
+InstantRecord::Shell.register(:mailbox) do |inbox|
+  if (mailbox = Mailbox.find_by(id: inbox))
+    {
+      partition: mailbox.id,
+      revision: -> { InstantRecord::Change.maximum(:id) || 0 },
+      identity_key: nil,
+      snapshot: -> { mailbox.first_sync }
+    }
+  end
+end

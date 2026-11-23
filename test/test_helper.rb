@@ -3,6 +3,7 @@ require "active_record"
 require "instant_record"
 require "instant_record/sync_scope"
 require "instant_record/files"
+require "instant_record/outbox_upcaster"
 
 ActiveRecord::Base.establish_connection(adapter: "sqlite3", database: ":memory:")
 

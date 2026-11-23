@@ -1,4 +1,5 @@
 require "json"
+require "instant_record/outbox_upcaster"
 
 module InstantRecord
   # Applies one client mutation authoritatively: record write, version bump,
@@ -38,6 +39,8 @@ module InstantRecord
     def apply
       return apply_mutator if mutator_intent?
 
+      @mutation, @changes = OutboxUpcaster.apply_global(@mutation, @changes)
+
       model = InstantRecord.synced_model(@mutation[:record_type])
       if model && (part = model.instant_record_sync_partition)
         part_value = part.extract(@partition)
@@ -58,6 +61,8 @@ module InstantRecord
       end
 
       return record_result(status: "rejected", reason: "unknown record type") unless model
+
+      @changes = OutboxUpcaster.apply_for_model(model, @changes, @mutation)
 
       # Its own savepoint when a caller holds a transaction open, so a write
       # that is refused after it was made is undone either way.

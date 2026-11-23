@@ -209,11 +209,13 @@ class CompilerTest < ActiveSupport::TestCase
       count = InstantRecord::Compiler::GemVendor.vendor(gem_src: GEM_ROOT, app_dir: app, demo: true)
       assert_equal 22, count
       assert File.file?(File.join(app, "lib/instant_record/client/rebaser.rb"))
+      assert File.file?(File.join(app, "lib/instant_record/inertia.rb"))
       assert File.file?(File.join(app, "lib/instant_record/read_tracker.rb"))
       assert File.file?(File.join(app, "lib/instant_record/sync_partition.rb"))
       assert File.file?(File.join(app, "lib/instant_record/sync_notice.rb"))
       assert File.file?(File.join(app, "lib/instant_record/hlc.rb"))
       assert_includes File.read(File.join(app, "lib/instant_record/host.rb")), "def browser? = true"
+      assert_includes File.read(File.join(app, "lib/instant_record/host.rb")), "def load_inertia_renderer = nil"
       assert_includes File.read(File.join(app, "lib/instant_record/host.rb")), "id.blank?"
       assert_includes File.read(File.join(app, "lib/instant_record/host.rb")), 'Db.exec("SAVEPOINT "'
       assert_includes File.read(File.join(app, "lib/instant_record.rb")), "def browser? = Host.browser?"
@@ -234,6 +236,9 @@ class CompilerTest < ActiveSupport::TestCase
       vendored_code = vendored_actions.lines.reject { |l| l.lstrip.start_with?("#") }.join
       refute_match(/\b(?:public_send|send|constantize)\b/, vendored_code)
       assert File.file?(File.join(app, "sig/instant_record/native.rbs"))
+      assert File.file?(File.join(app, "sig/instant_record/inertia.rbs"))
+      assert File.file?(File.join(app, "lib/instant_record/inertia.rb"))
+      refute_includes File.read(File.join(app, "lib/instant_record/inertia.rb")), "instant_record/inertia/renderer"
       assert_includes File.read(File.join(app, "app/views/todo/issues/index.html.erb")), '<% content_for(:demo_scope, "todo") %>'
       assert_includes File.read(File.join(app, "app/helpers/slack_helper.rb")), '"/slack/reset?instant_record_network=1"'
       assert_includes File.read(File.join(app, "app/helpers/auth_helper.rb")), '"/instant_record/bootstrap?instant_record_network=1"'
@@ -486,19 +491,28 @@ class CompilerTest < ActiveSupport::TestCase
         demo: false,
         models: ["Note"],
         migration_plan: plan,
-        pipeline_dir: PIPELINE_DIR
+        pipeline_dir: PIPELINE_DIR,
+        shell_fingerprint: "abc123fingerprint"
       )
 
       wasm_main = File.read(File.join(emit, "main_wasm.rb"))
       assert_includes wasm_main, "module WasmBridge"
+      assert_includes wasm_main, "InstantRecord::Client.handle_history("
       assert_includes wasm_main, 'File.read("/host/in")'
       assert_includes wasm_main, "InstantRecord::ReadTracker.track"
       assert_includes wasm_main, "InstantRecord::Client.capture_local_changes"
       assert_includes wasm_main, "X-Instant-Record-Reads: "
       assert_includes wasm_main, 'if previous < "00000020261120000001"'
+      assert_includes wasm_main, 'Db.exec("BEGIN IMMEDIATE")'
+      assert_includes wasm_main, 'Db.exec("COMMIT")'
+      assert_includes wasm_main, 'Db.exec("ROLLBACK")'
+      assert_includes wasm_main, "def self.export_outbox"
+      assert_includes wasm_main, "def self.import_outbox"
+      assert_includes wasm_main, 'File.exist?("/host/recovery") && File.read("/host/recovery") == "extract_outbox"'
       assert_includes wasm_main, '\#{x}\#@y\#$z'
       assert_includes wasm_main, "InstantRecord.sync(Note)"
       assert_includes wasm_main, "InstantRecord::Client.streaming = true"
+      assert_includes wasm_main, 'fingerprint: "abc123fingerprint"'
       assert_includes wasm_main, "def self.notices"
       assert_includes wasm_main, "notices="
       assert_includes wasm_main, "def self.branch_outbox"
@@ -509,23 +523,80 @@ class CompilerTest < ActiveSupport::TestCase
         app_dir: app,
         demo: false,
         models: ["Note"],
-        migration_plan: plan
+        migration_plan: plan,
+        shell_fingerprint: "abc123fingerprint"
       )
 
       assert_equal ["inbox_list"], screens
       native_main = File.read(File.join(emit, "main_native.rb"))
       assert_includes native_main, "module NativeBridge"
+      assert_includes native_main, "InstantRecord::Client.handle_history("
       assert_includes native_main, "def self.branch_outbox"
       assert_includes native_main, "def self.branch_replay"
       assert_includes native_main, 'when "inbox_list" then InboxListScreen.new(params)'
+      assert_includes native_main, 'Db.exec("BEGIN IMMEDIATE")'
       assert_includes native_main, 'NativeHost.ir_host_give("reads", InstantRecord::ReadTracker.serialize(reads))'
       assert_includes native_main, 'InstantRecord::SyncMetadata.set("schema_version", "00000020261120000001")'
       assert_includes native_main, "InstantRecord::Client.streaming = false"
+      assert_includes native_main, 'fingerprint: "abc123fingerprint"'
 
       host = File.read(File.join(emit, "app/models/instant_record/host.rb"))
       assert_includes host, "NativeHost.ir_host_take(name)"
       assert_includes host, "NativeHost.ir_host_give(name, body)"
     end
+  end
+
+  test "EntryBuilder wraps each migration version in an atomic SQLite transaction that rolls back on mid-step failure" do
+    plan = {
+      "version" => 2,
+      "baseline" => nil,
+      "migrations" => {
+        "1" => [
+          'CREATE TABLE "widgets" ("id" varchar NOT NULL PRIMARY KEY, "name" varchar NOT NULL)',
+          'INSERT INTO "widgets" ("id", "name") VALUES (\'w-1\', \'alpha\')'
+        ],
+        "2" => [
+          'ALTER TABLE "widgets" ADD COLUMN "priority" integer NOT NULL DEFAULT 0',
+          'INSERT INTO "widgets" ("id", "name", "priority") VALUES (\'w-1\', \'duplicate-pk\', 9)'
+        ]
+      }
+    }
+
+    code = InstantRecord::Compiler::EntryBuilder.migrations(
+      demo: false,
+      plan: plan,
+      previous: '"00000000000000000000"',
+      applied: 'applied_versions << "<<version>>"'
+    )
+
+    conn = ActiveRecord::ConnectionAdapters::SQLite3Adapter.new({ adapter: "sqlite3", database: ":memory:" })
+    raw = conn.raw_connection
+    db_mod = Module.new do
+      define_singleton_method(:exec) { |sql| raw.execute_batch(sql) }
+    end
+
+    runner = Module.new
+    runner.const_set(:Db, db_mod)
+    applied_versions = []
+    restored = true
+
+    # Step 1 commits atomically; step 2 fails on its 2nd statement and rolls back its ALTER TABLE.
+    error = assert_raises(SQLite3::ConstraintException) do
+      runner.module_eval(<<~RUBY)
+        restored = #{restored}
+        applied_versions = ObjectSpace._id2ref(#{applied_versions.object_id})
+        #{code}
+      RUBY
+    end
+    assert_match(/UNIQUE constraint failed/, error.message)
+
+    # Step 1 was committed and stamped; step 2's ALTER TABLE was rolled back cleanly.
+    assert_equal ["00000000000000000001"], applied_versions
+    columns = conn.select_all('PRAGMA table_info("widgets")').map { |r| r["name"] }
+    assert_equal %w[id name], columns
+    assert_equal 1, conn.select_value('SELECT COUNT(*) FROM "widgets"')
+  ensure
+    conn&.disconnect!
   end
 
   test "EntryBuilder discovers sync_actions and emits static Spinel case dispatch with zero send or constantize" do
@@ -698,6 +769,7 @@ class CompilerTest < ActiveSupport::TestCase
       end
 
       assert_equal Pathname(app_root).realpath.join("tmp/instant_record/compiled/web/dist"), output
+      assert File.file?(File.join(app_root, "db/instant_record_lock.json")), "first compile should emit db/instant_record_lock.json"
       assert File.file?(output.join("index.html"))
       assert File.file?(output.join("instant-record-release.json"))
       assert File.file?(output.join("instant_record.manifest.json"))
@@ -738,18 +810,29 @@ class CompilerTest < ActiveSupport::TestCase
       end
       assert_equal new_modules, File.readlink(Pathname(app_root).realpath.join("tmp/instant_record/compiled/web/node_modules"))
 
-      # Native host build runs end-to-end and outputs libinstant_record_app.a + host.
+      # Native host build runs end-to-end and outputs libinstant_record_app.a + host + typed contracts.
+      custom_swift = File.join(dir, "exported/Contracts.swift")
       native_out = with_path(fake[:bin_dir]) do
         InstantRecord::Compiler.build_native(
           root: app_root,
           models: ["Task"],
           toolchain: fake[:toolchain_file],
-          endpoint: "/instant_record"
+          endpoint: "/instant_record",
+          swift_out: custom_swift,
+          kotlin: true,
+          kotlin_package: "com.acme.tasks"
         )
       end
       assert File.file?(native_out.join("libinstant_record_app.a"))
       assert File.file?(native_out.join("host"))
       assert File.file?(native_out.join(InstantRecord::Compiler::NativeBuild.shared_library_name))
+      assert File.file?(native_out.join("generated/InstantRecordContracts.swift"))
+      assert File.file?(native_out.join("generated/InstantRecordContracts.kt"))
+      assert File.file?(custom_swift)
+      assert_includes native_out.join("generated/InstantRecordContracts.swift").read, "public struct TasksViewProps"
+      assert_includes native_out.join("generated/InstantRecordContracts.kt").read, "package com.acme.tasks"
+      assert_includes native_out.join("generated/InstantRecordContracts.kt").read, "data class TasksViewProps"
+      refute_includes native_out.join("app-src/app/screens/tasks_screen.rb").read, "contract"
 
       # Both WasmBuild and NativeBuild compile sqlite3.c with FTS5 enabled.
       calls = File.read(fake[:call_log]).lines
@@ -832,7 +915,22 @@ class CompilerTest < ActiveSupport::TestCase
     File.write(File.join(app_root, "Gemfile"), "source 'https://rubygems.org'\n")
     File.write(File.join(app_root, "config/routes.rb"), "Rails.application.routes.draw { root 'tasks#index' }\n")
     File.write(File.join(app_root, "app/models/task.rb"), "class Task < ApplicationRecord\n  include InstantRecord::Syncable\nend\n")
-    File.write(File.join(app_root, "app/screens/tasks_screen.rb"), "class TasksScreen < InstantRecord::Native::Screen\n  def body; navigation(title: 'Tasks') {}; end\nend\n")
+    File.write(File.join(app_root, "app/screens/tasks_screen.rb"), <<~RUBY)
+      class TasksScreen < InstantRecord::Native::Screen
+        contract "TasksView" do |c|
+          c.string :heading
+          c.int :count
+          c.action :refresh
+        end
+
+        def body
+          swift "TasksView" do
+            prop "heading", "Tasks"
+            number "count", 0
+          end
+        end
+      end
+    RUBY
     File.write(File.join(app_root, "app/views/layouts/application.html.erb"), <<~HTML)
       <html><head>
         <link rel="preconnect" href="https://fonts.example.test">

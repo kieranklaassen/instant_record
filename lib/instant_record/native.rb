@@ -1,5 +1,6 @@
 require "instant_record/native/node"
 require "instant_record/native/screen"
+require "instant_record/native/contract"
 
 module InstantRecord
   # Screens of a native app, written in Ruby (InstantRecord::Native::Screen).

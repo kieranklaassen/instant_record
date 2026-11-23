@@ -62,7 +62,8 @@ module InstantRecord
             plan = {
               push: push,
               mutation_ids: mutations.map { |m| m[:id] },
-              bootstrap: !InstantRecord::Client.bootstrapped?
+              bootstrap: !InstantRecord::Client.bootstrapped?,
+              fingerprint: "<<shell_fingerprint>>"
             }
             plan[:headers] = headers unless headers.empty?
             plan[:next_release_ms] = next_ms unless next_ms.nil?
@@ -110,25 +111,14 @@ module InstantRecord
           end
 
           # History has its own keyset and must not advance the live change cursor.
-          # Keep the page receipt in the same SQLite transaction as its records.
+          # Route through Client's durable SQLite history ledger so CRuby, WASM,
+          # and Native share one contiguity model and eviction invalidates it.
           def self.history
             input = JSON.parse(<<read:in>>)
-            key = "history:" + input["key"].to_s
-            response = input["response"].to_s
-            if response.empty?
-              mark = InstantRecord::SyncMetadata.get(key)
-              result = { ok: !mark.nil?, applied: 0, has_more: mark == "more" }
-            else
-              page = JSON.parse(response)
-              InstantRecord::Client.observe_server_time(page["server_time"])
-              records = Array(page["records"])
-              more = page["has_more"] == true
-              InstantRecord::OutboxMutation.transaction do
-                records.each { |record| InstantRecord::Client.apply_record(record) }
-                InstantRecord::SyncMetadata.set(key, more ? "more" : "end")
-              end
-              result = { ok: true, applied: records.size, has_more: more }
-            end
+            result = InstantRecord::Client.handle_history(
+              key: input["key"].to_s,
+              response: input["response"].to_s
+            )
             <<write:out>>JSON.generate(result))
             0
           end
@@ -166,6 +156,65 @@ module InstantRecord
             0
           end
 
+          # Extract pending outbox rows directly from SQLite so a drifted or
+          # unmigratable database can be rebuilt cleanly without losing offline writes.
+          def self.export_outbox
+            rows = []
+            begin
+              SqliteAdapter.each_row("SELECT id, record_type, record_id, operation, changes_payload, base_version, created_at, updated_at FROM instant_record_outbox ORDER BY created_at, id") do |row|
+                payload = row["changes_payload"]
+                rows << {
+                  "id" => row["id"].to_s,
+                  "record_type" => row["record_type"].to_s,
+                  "record_id" => row["record_id"].to_s,
+                  "operation" => row["operation"].to_s,
+                  "changes_payload" => payload.nil? ? "{}" : payload.to_s,
+                  "base_version" => row["base_version"].to_s.to_i,
+                  "created_at" => row["created_at"].to_s,
+                  "updated_at" => row["updated_at"].to_s
+                }
+              end
+            rescue StandardError
+              rows = []
+            end
+            <<write:out>>JSON.generate(rows))
+            0
+          end
+
+          # Re-insert preserved outbox rows into a freshly rebuilt database in
+          # one atomic SQLite transaction, keeping original ids and order.
+          def self.import_outbox
+            rows = JSON.parse(<<read:in>>)
+            inserted = 0
+            Db.exec("BEGIN IMMEDIATE")
+            begin
+              rows.each do |row|
+                payload = row["changes_payload"]
+                sql = "INSERT OR IGNORE INTO instant_record_outbox " \
+                  "(id, record_type, record_id, operation, changes_payload, base_version, created_at, updated_at) VALUES (" +
+                  Db.escape_string(row["id"].to_s) + ", " +
+                  Db.escape_string(row["record_type"].to_s) + ", " +
+                  Db.escape_string(row["record_id"].to_s) + ", " +
+                  Db.escape_string(row["operation"].to_s) + ", " +
+                  Db.escape_string(payload.nil? ? "{}" : payload.to_s) + ", " +
+                  row["base_version"].to_i.to_s + ", " +
+                  Db.escape_string(row["created_at"].to_s) + ", " +
+                  Db.escape_string(row["updated_at"].to_s) + ")"
+                Db.exec(sql)
+                inserted += 1
+              end
+              Db.exec("COMMIT")
+            rescue StandardError
+              begin
+                Db.exec("ROLLBACK")
+              rescue StandardError
+              end
+              raise
+            end
+            <<write:out>>JSON.generate({ imported: inserted }))
+            0
+          end
+
           # Staging branch diff: OutboxMutations recorded after `exclude_ids`.
           def self.branch_outbox
             raw = <<read:in>>.strip
@@ -190,17 +239,20 @@ module InstantRecord
 
       DATABASE = <<~'RUBY'
         restored = File.exist?(db_path) && File.size(db_path) > 0
+        recovery = <<recovery>>
         SqliteAdapter.configure(db_path)
         ActiveRecord.adapter = SqliteAdapter
-        <<pragmas>>Schema.statements.each { |sql| SqliteAdapter.execute_ddl(sql) } unless restored
+        <<pragmas>>unless recovery
+          Schema.statements.each { |sql| SqliteAdapter.execute_ddl(sql) } unless restored
         <<migrations>>
-        # Earlier demos saved a cursor before Note was a synced model. Rehydrate once
-        # on a model-set change, preserving all local rows and pending mutations.
-        model_set = "<<model_set>>"
-        if InstantRecord::SyncMetadata.get("compiled_models") != model_set
-          Schema.statements.each { |sql| SqliteAdapter.execute_ddl(sql) } if restored
-          InstantRecord::SyncMetadata.where(key: "cursor").delete_all if restored
-          InstantRecord::SyncMetadata.set("compiled_models", model_set)
+          # Earlier demos saved a cursor before Note was a synced model. Rehydrate once
+          # on a model-set change, preserving all local rows and pending mutations.
+          model_set = "<<model_set>>"
+          if InstantRecord::SyncMetadata.get("compiled_models") != model_set
+            Schema.statements.each { |sql| SqliteAdapter.execute_ddl(sql) } if restored
+            InstantRecord::SyncMetadata.where(key: "cursor").delete_all if restored
+            InstantRecord::SyncMetadata.set("compiled_models", model_set)
+          end
         end
       RUBY
 
@@ -416,9 +468,25 @@ module InstantRecord
         steps = ["if restored", "  previous = #{previous}"]
         migrations_map = plan.fetch("migrations", {})
         migrations_map.sort_by { |version, _| version.to_i }.each do |version, statements|
-          steps << %(  if previous < "#{format('%020d', version.to_i)}")
-          statements.each do |sql|
-            steps << "    Db.exec(#{ruby_string_literal(sql)})"
+          padded = format("%020d", version.to_i)
+          steps << %(  if previous < "#{padded}")
+          if statements.any?
+            steps << '    Db.exec("BEGIN IMMEDIATE")'
+            steps << "    begin"
+            statements.each do |sql|
+              steps << "      Db.exec(#{ruby_string_literal(sql)})"
+            end
+            steps << '      Db.exec("COMMIT")'
+            steps << "    rescue StandardError"
+            steps << "      begin"
+            steps << '        Db.exec("ROLLBACK")'
+            steps << "      rescue StandardError"
+            steps << "      end"
+            steps << "      raise"
+            steps << "    end"
+          end
+          unless applied.empty?
+            steps << "    " + applied.gsub("<<version>>") { padded }
           end
           steps << "  end"
         end
@@ -445,13 +513,14 @@ module InstantRecord
         result
       end
 
-      def bridge(name, read:, write:, entries: "")
-        fill(BRIDGE, { "bridge" => name, "entries" => entries }, read: read, write: write)
+      def bridge(name, read:, write:, entries: "", shell_fingerprint: "")
+        fill(BRIDGE, { "bridge" => name, "entries" => entries, "shell_fingerprint" => shell_fingerprint.to_s }, read: read, write: write)
       end
 
-      def database(pragmas:, steps:, models:)
+      def database(pragmas:, steps:, models:, recovery: "false")
         lines = pragmas.map { |pragma| %(SqliteAdapter.execute_ddl("PRAGMA #{pragma}")\n) }.join
-        fill(DATABASE, { "pragmas" => lines, "migrations" => steps, "model_set" => models.sort.join(",") })
+        indented_steps = steps.empty? ? "" : indent(steps, "  ")
+        fill(DATABASE, { "pragmas" => lines, "migrations" => indented_steps, "model_set" => models.sort.join(","), "recovery" => recovery })
       end
 
       def start(streaming:, comment:, models:, demo: false, manifest: nil, sync_windows: nil, endpoint: nil, mount_path: nil)
@@ -461,7 +530,7 @@ module InstantRecord
         fill(START, { "config" => cfg, "windows" => declarations, "models" => models.join(", "), "streaming" => flag })
       end
 
-      def write_wasm_entry(emit_dir:, demo: false, manifest: nil, models: nil, migration_plan:, pipeline_dir:, app_dir: nil, sync_windows: nil, endpoint: nil, mount_path: nil)
+      def write_wasm_entry(emit_dir:, demo: false, manifest: nil, models: nil, migration_plan:, pipeline_dir:, app_dir: nil, sync_windows: nil, endpoint: nil, mount_path: nil, shell_fingerprint: "")
         if demo
           FileUtils.cp(
             File.join(pipeline_dir, "sqlite_release.rb"),
@@ -482,13 +551,15 @@ module InstantRecord
           bridge(
             "WasmBridge",
             read: ->(name) { %(File.read("/host/#{name}")) },
-            write: ->(name) { "File.write(\"/host/#{name}\", " }
+            write: ->(name) { "File.write(\"/host/#{name}\", " },
+            shell_fingerprint: shell_fingerprint
           ) +
           "\ndb_path = Main.default_db_path\n" +
           database(
             pragmas: ["locking_mode = EXCLUSIVE", "journal_mode = MEMORY", "cache_size = -4000"],
             steps: migrations(demo: demo, plan: migration_plan, previous: 'File.read("/host/schema_version")'),
-            models: resolved_models
+            models: resolved_models,
+            recovery: 'File.exist?("/host/recovery") && File.read("/host/recovery") == "extract_outbox"'
           ) +
           start(
             streaming: true,
@@ -673,7 +744,7 @@ module InstantRecord
         raise BuildError, e.message
       end
 
-      def write_native_entry(tree_dir:, app_dir:, demo: false, manifest: nil, models: nil, migration_plan:, sync_windows: nil, endpoint: nil, mount_path: nil)
+      def write_native_entry(tree_dir:, app_dir:, demo: false, manifest: nil, models: nil, migration_plan:, sync_windows: nil, endpoint: nil, mount_path: nil, shell_fingerprint: "")
         wasm_main = File.read(File.join(tree_dir, "main_wasm.rb"))
         unless wasm_main.scan(BANNER).length == 1
           raise BuildError, "main_wasm.rb has no entry to start from"
@@ -706,7 +777,8 @@ module InstantRecord
             "NativeBridge",
             read: ->(name) { %(NativeHost.ir_host_take("#{name}")) },
             write: ->(name) { "NativeHost.ir_host_give(\"#{name}\", " },
-            entries: NATIVE_ENTRIES
+            entries: NATIVE_ENTRIES,
+            shell_fingerprint: shell_fingerprint
           ) +
           fill(NATIVE_DATABASE, { "database" => indent(db_body, "    ") }) +
           "\nNativeDatabase.open(Main.default_db_path)\n" +

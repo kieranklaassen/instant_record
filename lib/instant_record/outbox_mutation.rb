@@ -83,6 +83,9 @@ module InstantRecord
           changes: changes_payload,
           base_version: base_version
         }
+        if has_attribute?(:schema_version) && self[:schema_version].present?
+          payload[:schema_version] = self[:schema_version]
+        end
         if (stamp = hlc)
           payload[:hlc] = stamp
         end
