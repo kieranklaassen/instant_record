@@ -22,12 +22,33 @@ module InstantRecord
       end
     end
 
+    # A piece larger than the store's configured chunk size. `limit` is the
+    # largest piece accepted in bytes.
+    class ChunkTooLarge < StandardError
+      attr_reader :limit
+
+      def initialize(limit)
+        @limit = limit
+        super("a piece may be at most #{limit} bytes")
+      end
+    end
+
     UPLOAD = /\A[\w-]{1,64}\z/
+
+    # Default upload/download piece size: 512 KiB, safely below common 1-2 MB
+    # reverse-proxy body ceilings (such as nginx's 1m default).
+    DEFAULT_CHUNK_SIZE = 512 * 1024
 
     attr_reader :root
 
-    def initialize(root)
+    def initialize(root, chunk_size: nil)
       @root = File.expand_path(root.to_s)
+      @chunk_size = chunk_size.nil? ? nil : validate_chunk_size!(chunk_size)
+    end
+
+    def chunk_size
+      configured = @chunk_size || (defined?(InstantRecord) && InstantRecord.config.file_chunk_size) || DEFAULT_CHUNK_SIZE
+      validate_chunk_size!(configured)
     end
 
     def exist?(key) = File.file?(path(key))
@@ -43,6 +64,9 @@ module InstantRecord
     # and nothing is written: the lock makes two senders of one upload take
     # turns, and the second finds the partial already past its piece.
     def append(key, upload, io, at:, length:)
+      limit = chunk_size
+      raise ChunkTooLarge.new(limit) if length > limit
+
       target = partial(key, upload)
       FileUtils.mkdir_p(File.dirname(target))
       File.open(target, File::RDWR | File::CREAT | File::BINARY) do |file|
@@ -106,6 +130,12 @@ module InstantRecord
       raise ArgumentError, "not an upload's name: #{upload.inspect}" unless UPLOAD.match?(upload.to_s)
 
       "#{path(key)}.#{upload}.part"
+    end
+
+    def validate_chunk_size!(value)
+      raise ArgumentError, "chunk_size must be a positive integer, got #{value.inspect}" unless value.is_a?(Integer) && value.positive?
+
+      value
     end
 
     def partials(key)

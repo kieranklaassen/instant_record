@@ -3,6 +3,8 @@
 # same state.
 module Slack
   module Seeds
+    extend InstantRecord::RuntimeScoped
+
     FAKE_USERS = [
       { id: "bot-ursula", name: "Ursula Grid", handle: "ursula" },
       { id: "bot-max", name: "Max Baseline", handle: "max" },
@@ -43,103 +45,105 @@ module Slack
       "Content precedes form. Form complies."
     ].freeze
 
-    module_function
+    server_only do
+      module_function
 
-    def backfill_counts
-      base = ENV.fetch("SLACK_BACKFILL_MESSAGES") { Rails.env.test? ? 12 : 5000 }.to_i
-      {
-        "channel-general" => base,
-        "channel-random" => base / 10,
-        "channel-design" => base / 10
-      }
-    end
-
-    def backfill_id(channel_id, index)
-      "#{BACKFILL_PREFIX}#{channel_id}-#{format('%05d', index)}"
-    end
-
-    def apply
-      ChatUser.find_or_create_by!(id: ChatUser::VISITOR_ID) do |u|
-        u.name = "You"
-        u.handle = "you"
-        u.bot = false
+      def backfill_counts
+        base = ENV.fetch("SLACK_BACKFILL_MESSAGES") { Rails.env.test? ? 12 : 5000 }.to_i
+        {
+          "channel-general" => base,
+          "channel-random" => base / 10,
+          "channel-design" => base / 10
+        }
       end
 
-      FAKE_USERS.each do |attrs|
-        ChatUser.find_or_create_by!(id: attrs[:id]) do |u|
-          u.name = attrs[:name]
-          u.handle = attrs[:handle]
-          u.bot = true
+      def backfill_id(channel_id, index)
+        "#{BACKFILL_PREFIX}#{channel_id}-#{format('%05d', index)}"
+      end
+
+      def apply
+        ChatUser.find_or_create_by!(id: ChatUser::VISITOR_ID) do |u|
+          u.name = "You"
+          u.handle = "you"
+          u.bot = false
+        end
+
+        FAKE_USERS.each do |attrs|
+          ChatUser.find_or_create_by!(id: attrs[:id]) do |u|
+            u.name = attrs[:name]
+            u.handle = attrs[:handle]
+            u.bot = true
+          end
+        end
+
+        CHANNELS.each do |attrs|
+          Channel.find_or_create_by!(id: attrs[:id]) do |c|
+            c.name = attrs[:name]
+            c.kind = "channel"
+          end
+        end
+
+        FAKE_USERS.each do |attrs|
+          Channel.find_or_create_by!(id: "dm-#{attrs[:id]}") do |c|
+            c.name = attrs[:handle]
+            c.kind = "dm"
+            c.dm_user_id = attrs[:id]
+          end
+        end
+
+        WELCOME.each do |channel_id, (user_id, body)|
+          Message.find_or_create_by!(id: "welcome-#{channel_id}") do |m|
+            m.channel_id = channel_id
+            m.chat_user_id = user_id
+            m.body = body
+          end
+        end
+
+        FAKE_USERS.each do |attrs|
+          Message.find_or_create_by!(id: "welcome-dm-#{attrs[:id]}") do |m|
+            m.channel_id = "dm-#{attrs[:id]}"
+            m.chat_user_id = attrs[:id]
+            m.body = "This is our DM. Say something and I will reply — even if you post it offline."
+          end
+        end
+
+        apply_backfill
+      end
+
+      def apply_backfill
+        now = Time.current
+        backfill_counts.each do |channel_id, count|
+          next if count.zero?
+          # Sentinel is the LAST row: its presence means the whole batch
+          # committed. Checking the first row would treat a crash mid-insert as
+          # "done" and permanently skip the tail; insert_all's duplicate skip
+          # makes the retry idempotent.
+          next if Message.exists?(id: backfill_id(channel_id, count))
+
+          rows = (1..count).map do |i|
+            at = now - BACKFILL_SPAN + (BACKFILL_SPAN * i / (count + 1))
+            {
+              id: backfill_id(channel_id, i),
+              channel_id: channel_id,
+              chat_user_id: FAKE_USERS[i % FAKE_USERS.size][:id],
+              body: "#{BACKFILL_LINES[i % BACKFILL_LINES.size]} (##{i})",
+              server_version: 1,
+              sync_state: "synced",
+              created_at: at,
+              updated_at: at
+            }
+          end
+          rows.each_slice(1_000) { |slice| Message.insert_all(slice) }
         end
       end
 
-      CHANNELS.each do |attrs|
-        Channel.find_or_create_by!(id: attrs[:id]) do |c|
-          c.name = attrs[:name]
-          c.kind = "channel"
-        end
+      def seed_ids
+        user_ids = [ChatUser::VISITOR_ID] + FAKE_USERS.map { |u| u[:id] }
+        channel_ids = CHANNELS.map { |c| c[:id] } + FAKE_USERS.map { |u| "dm-#{u[:id]}" }
+        message_ids = WELCOME.keys.map { |id| "welcome-#{id}" } +
+          FAKE_USERS.map { |u| "welcome-dm-#{u[:id]}" }
+        { users: user_ids, channels: channel_ids, messages: message_ids }
       end
-
-      FAKE_USERS.each do |attrs|
-        Channel.find_or_create_by!(id: "dm-#{attrs[:id]}") do |c|
-          c.name = attrs[:handle]
-          c.kind = "dm"
-          c.dm_user_id = attrs[:id]
-        end
-      end
-
-      WELCOME.each do |channel_id, (user_id, body)|
-        Message.find_or_create_by!(id: "welcome-#{channel_id}") do |m|
-          m.channel_id = channel_id
-          m.chat_user_id = user_id
-          m.body = body
-        end
-      end
-
-      FAKE_USERS.each do |attrs|
-        Message.find_or_create_by!(id: "welcome-dm-#{attrs[:id]}") do |m|
-          m.channel_id = "dm-#{attrs[:id]}"
-          m.chat_user_id = attrs[:id]
-          m.body = "This is our DM. Say something and I will reply — even if you post it offline."
-        end
-      end
-
-      apply_backfill
-    end
-
-    def apply_backfill
-      now = Time.current
-      backfill_counts.each do |channel_id, count|
-        next if count.zero?
-        # Sentinel is the LAST row: its presence means the whole batch
-        # committed. Checking the first row would treat a crash mid-insert as
-        # "done" and permanently skip the tail; insert_all's duplicate skip
-        # makes the retry idempotent.
-        next if Message.exists?(id: backfill_id(channel_id, count))
-
-        rows = (1..count).map do |i|
-          at = now - BACKFILL_SPAN + (BACKFILL_SPAN * i / (count + 1))
-          {
-            id: backfill_id(channel_id, i),
-            channel_id: channel_id,
-            chat_user_id: FAKE_USERS[i % FAKE_USERS.size][:id],
-            body: "#{BACKFILL_LINES[i % BACKFILL_LINES.size]} (##{i})",
-            server_version: 1,
-            sync_state: "synced",
-            created_at: at,
-            updated_at: at
-          }
-        end
-        rows.each_slice(1_000) { |slice| Message.insert_all(slice) }
-      end
-    end
-
-    def seed_ids
-      user_ids = [ChatUser::VISITOR_ID] + FAKE_USERS.map { |u| u[:id] }
-      channel_ids = CHANNELS.map { |c| c[:id] } + FAKE_USERS.map { |u| "dm-#{u[:id]}" }
-      message_ids = WELCOME.keys.map { |id| "welcome-#{id}" } +
-        FAKE_USERS.map { |u| "welcome-dm-#{u[:id]}" }
-      { users: user_ids, channels: channel_ids, messages: message_ids }
     end
   end
 end

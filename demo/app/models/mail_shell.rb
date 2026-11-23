@@ -12,7 +12,7 @@ require "sqlite3"
 class MailShell
   FORMAT = 1
 
-  # The models the compiled demo syncs (InstantRecord::Compiler::EntryBuilder::DEMO_MODELS).
+  # The models the compiled demo syncs (emitted in instant_record.manifest.json).
   # The browser rebuilds its schema and forgets its cursor when its own list
   # differs from the one saved in its database, so the list is part of the
   # fingerprint and a build with another list never asks for this file.

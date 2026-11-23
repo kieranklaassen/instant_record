@@ -1,4 +1,10 @@
 class MailEntry < ApplicationRecord
+  extend InstantRecord::RuntimeScoped
+
+  browser_only do
+    include InstantRecord::Syncable
+  end
+
   PAGE_SIZE = 50
   FILL_PAGE_SIZE = 200
   # The most rows one live query of the list returns.

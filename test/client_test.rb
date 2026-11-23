@@ -63,7 +63,9 @@ class ClientTest < Minitest::Test
     end
 
     assert reconciled
-    assert_equal ["Note:#{note.id}"], InstantRecord::Client.changed_records
+    assert_equal [{ "type" => "Note", "id" => note.id, "op" => "update" }],
+      InstantRecord::Client.changed_records.map { |d| d.slice("type", "id", "op") }
+    assert_equal "server title", InstantRecord::Client.changed_records.sole.dig("attrs", "title")
     note.reload
     assert_equal "server title", note.title
     assert_equal "synced", note.sync_state
@@ -102,7 +104,8 @@ class ClientTest < Minitest::Test
     end
 
     assert reconciled
-    assert_equal ["Note:#{note.id}"], InstantRecord::Client.changed_records
+    assert_equal [{ "type" => "Note", "id" => note.id, "op" => "destroy" }],
+      InstantRecord::Client.changed_records.map { |d| d.slice("type", "id", "op") }
     refute @model.exists?(note.id)
     assert_equal 0, InstantRecord.pending_count
   end
@@ -122,7 +125,9 @@ class ClientTest < Minitest::Test
     end
 
     assert reconciled
-    assert_equal ["Note:#{note.id}"], InstantRecord::Client.changed_records
+    assert_equal [{ "type" => "Note", "id" => note.id, "op" => "create" }],
+      InstantRecord::Client.changed_records.map { |d| d.slice("type", "id", "op") }
+    assert_equal "protected", InstantRecord::Client.changed_records.sole.dig("attrs", "title")
     restored = @model.find(note.id)
     assert_equal "protected", restored.title
     assert_equal "synced", restored.sync_state
@@ -178,7 +183,9 @@ class ClientTest < Minitest::Test
     end
 
     assert reconciled
-    assert_equal ["Note:#{note.id}"], InstantRecord::Client.changed_records
+    assert_equal [{ "type" => "Note", "id" => note.id, "op" => "update" }],
+      InstantRecord::Client.changed_records.map { |d| d.slice("type", "id", "op") }
+    assert_equal "the line that won", InstantRecord::Client.changed_records.sole.dig("attrs", "title")
     note.reload
     assert_equal "the line that won", note.title,
       "a row cannot be synced against a value the server threw away"

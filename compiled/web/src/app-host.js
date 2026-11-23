@@ -9,7 +9,7 @@
 //                         and the records it can list after it (changes.js)
 // Works the same in Node (tests) and in a browser worker; only `exchange` differs.
 import { WASI, File, OpenFile, Directory, PreopenDirectory, ConsoleStdout } from "@bjorn3/browser_wasi_shim";
-import { readNotice } from "./changes.js";
+import { parseReads, readNotice } from "./changes.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -201,27 +201,41 @@ export class AppHost {
     input.set(encoder.encode(head));
     input.set(payload, head.length);
 
+    this.notifyFile.data = new Uint8Array();
+    this.hostDir.contents.set("notify", this.notifyFile);
     const result = this.call("wasm_request", input);
     const text = decoder.decode(result.out);
     const split = text.indexOf("\n\n");
     const lines = (split < 0 ? text : text.slice(0, split)).split("\n");
     const headers = [];
+    let reads = null;
     for (const line of lines.slice(1)) {
       const colon = line.indexOf(": ");
       if (colon < 0) continue;
       const name = line.slice(0, colon);
       const value = line.slice(colon + 2);
-      if (name.toLowerCase() === "set-cookie") {
+      const lower = name.toLowerCase();
+      if (lower === "set-cookie") {
         const pair = value.split(";")[0];
         const equals = pair.indexOf("=");
         if (/max-age=0/i.test(value)) this.cookies.delete(pair.slice(0, equals));
         else this.cookies.set(pair.slice(0, equals), pair.slice(equals + 1));
       } else {
+        if (lower === "x-instant-record-reads") reads = parseReads(value);
         headers.push([name, value]);
       }
     }
     const status = Number(lines[0]) || 500;
-    return { status, headers, body: split < 0 ? "" : text.slice(split + 2), exit: result.exit, errors: result.errors };
+    const notifyEntry = this.hostDir.contents.get("notify") || this.notifyFile;
+    return {
+      status,
+      headers,
+      body: split < 0 ? "" : text.slice(split + 2),
+      reads,
+      ...readNotice(decoder.decode(notifyEntry.data)),
+      exit: result.exit,
+      errors: result.errors,
+    };
   }
 
   // One pass of the gem's own sync loop (InstantRecord::Client.sync_pass).
@@ -245,10 +259,45 @@ export class AppHost {
     }
     const text = decoder.decode(result.out);
     const notifyEntry = this.hostDir.contents.get("notify") || this.notifyFile;
+    const nextRelease = /next_release_ms=(\d+)/.exec(text);
     return {
       changed: text.startsWith("changed"),
       pending: Number(/pending=(\d+)/.exec(text)?.[1] ?? -1),
+      held: Number(/held=(\d+)/.exec(text)?.[1] ?? 0),
+      nextReleaseMs: nextRelease ? Number(nextRelease[1]) : null,
       cursor: Number(/cursor=(\d+)/.exec(text)?.[1] ?? 0),
+      ...readNotice(decoder.decode(notifyEntry.data)),
+      exchanges: this.exchanges,
+      exit: result.exit,
+      errors: result.errors,
+    };
+  }
+
+  // Merge pre-fetched push/bootstrap responses into SQLite by mutation_id
+  // without discarding acks when newer local edits landed during the fetch.
+  applySync(endpoint, { push = null, bootstrap = null } = {}) {
+    this.notifyFile.data = new Uint8Array();
+    this.hostDir.contents.set("notify", this.notifyFile);
+    this.exchanges = [];
+    const payload = JSON.stringify({
+      endpoint: endpoint || "",
+      push,
+      bootstrap,
+    });
+    const result = this.call("wasm_sync", encoder.encode(payload));
+    if (result.exit !== 0) throw new Error(result.errors.join("\n") || "Failed to apply sync responses");
+    const text = decoder.decode(result.out);
+    const notifyEntry = this.hostDir.contents.get("notify") || this.notifyFile;
+    const nextRelease = /next_release_ms=(\d+)/.exec(text);
+    return {
+      changed: text.startsWith("changed"),
+      pending: Number(/pending=(\d+)/.exec(text)?.[1] ?? -1),
+      held: Number(/held=(\d+)/.exec(text)?.[1] ?? 0),
+      nextReleaseMs: nextRelease ? Number(nextRelease[1]) : null,
+      cursor: Number(/cursor=(\d+)/.exec(text)?.[1] ?? 0),
+      progressed: /progressed=1\b/.test(text),
+      failed: /failed=1\b/.test(text),
+      quarantined: Number(/quarantined=(\d+)/.exec(text)?.[1] ?? 0),
       ...readNotice(decoder.decode(notifyEntry.data)),
       exchanges: this.exchanges,
       exit: result.exit,
@@ -279,6 +328,18 @@ export class AppHost {
     return JSON.parse(decoder.decode(result.out));
   }
 
+  notices(request = { action: "list" }) {
+    this.notifyFile.data = new Uint8Array();
+    this.hostDir.contents.set("notify", this.notifyFile);
+    const result = this.call("wasm_notices", encoder.encode(JSON.stringify(request)));
+    if (result.exit !== 0) throw new Error(result.errors.join("\n") || String(result.exit));
+    const notifyEntry = this.hostDir.contents.get("notify") || this.notifyFile;
+    return {
+      ...JSON.parse(decoder.decode(result.out)),
+      ...readNotice(decoder.decode(notifyEntry.data)),
+    };
+  }
+
   // Extract OutboxMutations recorded after `excludeIds` on the active SQLite database.
   branchOutbox(excludeIds = []) {
     const result = this.call("wasm_branch_outbox", encoder.encode(JSON.stringify({ exclude_ids: excludeIds })));
@@ -305,10 +366,14 @@ export class AppHost {
   syncState() {
     const result = this.call("wasm_cursor", new Uint8Array());
     const text = decoder.decode(result.out);
+    const nextRelease = /next_release_ms=(\d+)/.exec(text);
     return {
       bootstrapped: text.includes("bootstrap=ready"),
       cursor: Number(/cursor=(\d+)/.exec(text)?.[1] ?? 0),
       pending: Number(/pending=(\d+)/.exec(text)?.[1] ?? 0),
+      held: Number(/held=(\d+)/.exec(text)?.[1] ?? 0),
+      nextReleaseMs: nextRelease ? Number(nextRelease[1]) : null,
+      notices: Number(/notices=(\d+)/.exec(text)?.[1] ?? 0),
       // The name the server gave whoever this browser synced as, when it tells people apart.
       identity: /identity=(\S+)/.exec(text)?.[1] ?? "",
     };

@@ -350,8 +350,13 @@ class NativeScreenTest < ActiveSupport::TestCase
     client.forget_database
 
     assert_empty client.changed_records
-    client.note_change("Letter", "b2")
-    assert_equal "records_changed\nLetter:b2", client.changes_notice
+    client.note_change("Letter", "b2", op: "create", changed_columns: ["subject"], attrs: { "subject" => "Hi" })
+    lines = client.changes_notice.split("\n")
+    assert_equal "records_changed", lines.first
+    assert_equal(
+      { "type" => "Letter", "id" => "b2", "op" => "create", "changed_columns" => ["subject"], "attrs" => { "subject" => "Hi" } },
+      JSON.parse(lines[1])
+    )
   ensure
     client.forget_database
   end

@@ -66,6 +66,9 @@ export const localHttpClient = {
     if (only) page.searchParams.set("_only", only)
     const response = await fetch(page, { signal })
     if (!response.ok) throw failure(response.status, url)
-    return { status: 200, data: await response.text(), headers: { "x-inertia": "true", "content-type": "application/json" } }
+    const responseHeaders = { "x-inertia": "true", "content-type": "application/json" }
+    const reads = response.headers?.get?.("x-instant-record-reads")
+    if (reads) responseHeaders["x-instant-record-reads"] = reads
+    return { status: 200, data: await response.text(), headers: responseHeaders }
   },
 }

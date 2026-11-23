@@ -7,6 +7,12 @@ require_relative "compiler/toolchain"
 require_relative "compiler/path_scrubber"
 require_relative "compiler/browser_migrations"
 require_relative "compiler/schema_lock"
+require_relative "compiler/manifest"
+require_relative "compiler/route_analyzer"
+require_relative "compiler/reachability_tracer"
+require_relative "compiler/ast_lowerer"
+require_relative "compiler/host_adapters"
+require_relative "compiler/static_linter"
 require_relative "compiler/app_stage"
 require_relative "compiler/gem_vendor"
 require_relative "compiler/entry_builder"
@@ -14,6 +20,7 @@ require_relative "compiler/wasm_tree"
 require_relative "compiler/source_pages"
 require_relative "compiler/wasm_build"
 require_relative "compiler/native_build"
+require_relative "compiler/fts5_smoke"
 
 module InstantRecord
   # Compiles a Rails app (or this repository's demo) into a static Wasm browser
@@ -30,7 +37,7 @@ module InstantRecord
       toolchain || ENV.fetch("INSTANT_RECORD_TOOLCHAIN") { gem_root.join("compiled/toolchain.env").to_s }
     end
 
-    def self.build(root:, models:, toolchain:, endpoint:, sync_windows: nil, mount_path: nil, baseline: nil, migration_paths: nil)
+    def self.build(root:, toolchain:, endpoint:, models: nil, sync_windows: nil, mount_path: nil, baseline: nil, migration_paths: nil, island: nil, overrides: nil)
       with_workspace(root: root, toolchain: toolchain, stage_web: true) do |shared|
         WasmBuild.new(
           **shared,
@@ -39,7 +46,9 @@ module InstantRecord
           endpoint: endpoint,
           mount_path: mount_path,
           baseline: baseline,
-          migration_paths: migration_paths || shared[:migration_paths]
+          migration_paths: migration_paths || shared[:migration_paths],
+          island: island,
+          overrides: overrides
         ).run
       end
     end
@@ -47,7 +56,7 @@ module InstantRecord
     # The same app as libraries a native host links: for this machine, or
     # with target "iphonesimulator" or "iphoneos" for the iOS simulator or
     # an iPhone. Returns the folder that holds them.
-    def self.build_native(root:, models:, toolchain:, endpoint:, target: nil, sync_windows: nil, mount_path: nil, baseline: nil, migration_paths: nil)
+    def self.build_native(root:, toolchain:, endpoint:, models: nil, target: nil, sync_windows: nil, mount_path: nil, baseline: nil, migration_paths: nil, island: nil, overrides: nil, out: $stdout)
       with_workspace(root: root, toolchain: toolchain, stage_web: false) do |shared|
         NativeBuild.new(
           **shared,
@@ -57,38 +66,59 @@ module InstantRecord
           mount_path: mount_path,
           target: target,
           baseline: baseline,
-          migration_paths: migration_paths || shared[:migration_paths]
+          migration_paths: migration_paths || shared[:migration_paths],
+          island: island,
+          overrides: overrides,
+          out: out
         ).run
       end
     end
 
     # Build the repository's own demo into compiled/web/dist.
-    def self.build_demo(toolchain: nil, endpoint: nil, shell_snapshot: nil)
+    def self.build_demo(toolchain: nil, endpoint: nil, shell_snapshot: nil, island: nil)
       WasmBuild.new(
         workspace: gem_root.join("compiled"),
         gem_root: gem_root,
         toolchain: demo_toolchain(toolchain),
         endpoint: endpoint,
-        shell_snapshot: shell_snapshot
+        shell_snapshot: shell_snapshot,
+        island: island
       ).run
     end
 
     # Build the repository's own demo into compiled/.build-native[/target].
-    def self.build_demo_native(target: nil, toolchain: nil, endpoint: nil)
+    def self.build_demo_native(target: nil, toolchain: nil, endpoint: nil, island: nil, out: $stdout)
       NativeBuild.new(
         workspace: gem_root.join("compiled"),
         gem_root: gem_root,
         toolchain: demo_toolchain(toolchain),
         endpoint: endpoint,
-        target: target
+        target: target,
+        island: island,
+        out: out
       ).run
     end
 
-    def self.doctor(toolchain:, target: :wasm, web_dir: nil, root: nil, baseline: nil, migration_paths: nil, models: nil)
+    # Analyze a Rails app's local-first island(s) and return its Manifest without compiling.
+    def self.manifest(root:, island: nil, overrides: nil, native: false, migration_paths: nil)
+      AppStage.analyze(
+        source: root,
+        native: native,
+        island: island,
+        overrides: overrides,
+        migration_paths: migration_paths
+      ).manifest
+    end
+
+    def self.doctor(toolchain:, target: :wasm, web_dir: nil, root: nil, app_root: nil, baseline: nil, migration_paths: nil, models: nil, island: nil, overrides: nil)
       report = Toolchain.load(toolchain).doctor(target: target, web_dir: web_dir)
-      if root && File.file?(File.join(root.to_s, "db/schema.rb"))
+      if app_root
+        report = report.with_lint(lint(app_root, staged: false, island: island, overrides: overrides))
+      end
+      schema_root = root || app_root
+      if schema_root && File.file?(File.join(schema_root.to_s, "db/schema.rb"))
         schema_report = SchemaLock.verify(
-          root: root,
+          root: schema_root,
           baseline: baseline,
           migration_paths: migration_paths,
           models: models
@@ -112,8 +142,32 @@ module InstantRecord
       SchemaLock.verify(root: root, baseline: baseline, migration_paths: migration_paths, models: models)
     end
 
+    def self.lint(root, staged: false, exclude: nil, island: nil, overrides: nil)
+      resolved = Pathname(root)
+      only_files = nil
+      if !staged && exclude.nil? && resolved.join("config/routes.rb").file?
+        analysis = AppStage.analyze(source: resolved, native: true, island: island, overrides: overrides)
+        if analysis.manifest.island?
+          staged_map = analysis.manifest.staged
+          only_files = (
+            Array(staged_map["controllers"]) +
+            Array(staged_map["models"]) +
+            Array(staged_map["helpers"]) +
+            Array(staged_map["screens"]) +
+            Array(staged_map["files"]) +
+            %w[config/application.rb config/importmap.rb]
+          ).select { |rel| rel.end_with?(".rb") }.uniq
+        end
+      end
+      StaticLinter.lint(root, staged: staged, exclude: Array(exclude), only_files: only_files)
+    end
+
     def self.scrub_path(path, prefix)
       PathScrubber.scrub(path, prefix)
+    end
+
+    def self.verify_fts5(toolchain: nil, target: :native)
+      Fts5Smoke.run(toolchain: demo_toolchain(toolchain), target: target)
     end
 
     def self.with_workspace(root:, toolchain:, stage_web:)

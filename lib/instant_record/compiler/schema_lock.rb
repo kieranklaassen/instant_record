@@ -27,6 +27,7 @@ module InstantRecord
       INTERNAL_TABLES = %w[
         instant_record_outbox
         instant_record_sync_metadata
+        instant_record_sync_notices
         instant_record_changes
         instant_record_applied_mutations
         ar_internal_metadata

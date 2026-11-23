@@ -27,7 +27,8 @@
 
 const ROOT = "instant-record-files"
 const META = "meta"
-const PIECE = 4 * 1024 * 1024
+// 512 KiB stays safely below common 1-2 MB reverse-proxy request body ceilings.
+export const DEFAULT_CHUNK_SIZE = 512 * 1024
 const CHANGED = "instant-record:records-changed"
 const RETRY_BASE_MS = 2000
 const RETRY_CAP_MS = 60000
@@ -83,7 +84,11 @@ export class FileStore {
     this.scope = options.scope ?? page.scope ?? ""
     // Files of different accounts in one browser stay apart under a name.
     this.name = options.name ? safe(options.name) : ""
-    this.pieceSize = options.pieceSize || PIECE
+    const configuredChunkSize = options.chunkSize ?? options.pieceSize ?? page.chunkSize ?? page.pieceSize ?? DEFAULT_CHUNK_SIZE
+    if (!Number.isInteger(configuredChunkSize) || configuredChunkSize <= 0) {
+      throw new RangeError("chunkSize must be a positive integer")
+    }
+    this.pieceSize = configuredChunkSize
     // The most bytes to hold here. Past it, or near the browser's own limit,
     // files the server holds are dropped to make room.
     this.budget = options.budget ?? Infinity
@@ -102,6 +107,15 @@ export class FileStore {
   // a page. Without one, `open` still reads from the server and keeps nothing.
   get supported() {
     return typeof this.storage?.getDirectory === "function"
+  }
+
+  get chunkSize() {
+    return this.pieceSize
+  }
+
+  set chunkSize(value) {
+    if (!Number.isInteger(value) || value <= 0) throw new RangeError("chunkSize must be a positive integer")
+    this.pieceSize = value
   }
 
   // ── writing ────────────────────────────────────────────────────────────────
@@ -376,9 +390,11 @@ export class FileStore {
         if (head.status === 404) throw new FileMissing(type, id)
         if (!head.ok) throw new Error(`The server answered ${head.status} for ${type} ${id}`)
         await this.#drop({ type, id })
+        const advertised = Number(head.headers.get("x-instant-record-chunk-size"))
+        const piece = Number.isInteger(advertised) && advertised > 0 ? Math.min(this.pieceSize, advertised) : this.pieceSize
         meta = {
           type, id, name: "", contentType: head.headers.get("content-type") || "",
-          size: Number(head.headers.get("content-length")), piece: this.pieceSize, upload: null,
+          size: Number(head.headers.get("content-length")), piece, upload: null,
           complete: false, uploaded: true, pinned: false, addedAt: Date.now(), usedAt: Date.now(),
         }
         if (!(meta.size > 0)) throw new Error(`The server gave no size for ${type} ${id}`)
@@ -458,22 +474,36 @@ export class FileStore {
     // sync pass, and this is asked again after it.
     if (standing.status === 404) return false
     if (!standing.ok) throw new Error(`The server answered ${standing.status}`)
-    let { complete, offset } = await standing.json()
+    let { complete, offset, chunk_size: serverChunkSize } = await standing.json()
+    let step = Number.isInteger(serverChunkSize) && serverChunkSize > 0 ? Math.min(this.pieceSize, serverChunkSize) : this.pieceSize
 
     for (let turns = 0; !complete; turns++) {
       // Every turn moves the offset forward. One that does not is a server
       // and a browser that disagree, which no number of tries will settle.
-      if (turns > Math.ceil(meta.size / this.pieceSize) + 8) throw new Error("The upload is not moving")
+      if (turns > Math.ceil(meta.size / step) + 8) throw new Error("The upload is not moving")
       const reply = await this.#ask(this.serverUrl(meta.type, meta.id, { upload: meta.upload, offset, size: meta.size }), {
         method: "PUT", headers: { "content-type": "application/octet-stream" },
-        body: blob.slice(offset, offset + this.pieceSize),
+        body: blob.slice(offset, offset + step),
       })
       if (reply.status === 404) return false
       if (reply.status === 409) {
-        offset = (await reply.json()).offset
+        const conflict = await reply.json()
+        offset = conflict.offset
+        if (Number.isInteger(conflict.chunk_size) && conflict.chunk_size > 0) step = Math.min(step, conflict.chunk_size)
         continue
       }
-      if ([400, 413, 415, 422].includes(reply.status)) {
+      if (reply.status === 413) {
+        const body = await reply.json().catch(() => ({}))
+        if (Number.isInteger(body.chunk_size) && body.chunk_size > 0 && body.chunk_size < step) {
+          step = body.chunk_size
+          continue
+        }
+        const failed = body.error || "refused (413)"
+        await this.#mark(meta.type, meta.id, { failed })
+        this.#announce("failed", meta, { reason: failed })
+        return false
+      }
+      if ([400, 415, 422].includes(reply.status)) {
         // The server will not take this file however often it is sent.
         const failed = (await reply.json().catch(() => ({}))).error || `refused (${reply.status})`
         await this.#mark(meta.type, meta.id, { failed })
@@ -481,7 +511,9 @@ export class FileStore {
         return false
       }
       if (!reply.ok) throw new Error(`The server answered ${reply.status}`)
-      ;({ complete, offset } = await reply.json())
+      const accepted = await reply.json()
+      ;({ complete, offset } = accepted)
+      if (Number.isInteger(accepted.chunk_size) && accepted.chunk_size > 0) step = Math.min(step, accepted.chunk_size)
       this.#tell({ event: "progress", type: meta.type, id: meta.id, sent: offset, size: meta.size })
     }
     await this.#mark(meta.type, meta.id, { uploaded: true })

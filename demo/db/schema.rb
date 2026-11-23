@@ -127,13 +127,34 @@ ActiveRecord::Schema[8.1].define(version: 2026_11_22_000100) do
     t.string "operation", null: false
     t.string "record_id", null: false
     t.string "record_type", null: false
+    t.datetime "release_at"
+    t.text "rollback_payload"
     t.datetime "updated_at", null: false
+    t.index ["release_at"], name: "index_instant_record_outbox_on_release_at"
   end
 
   create_table "instant_record_sync_metadata", primary_key: "key", id: :string, force: :cascade do |t|
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
     t.string "value"
+  end
+
+  create_table "instant_record_sync_notices", id: :string, force: :cascade do |t|
+    t.text "attempted_changes"
+    t.datetime "created_at", null: false
+    t.datetime "dismissed_at"
+    t.string "kind", null: false
+    t.string "mutation_id"
+    t.string "operation", null: false
+    t.string "reason", default: "", null: false
+    t.string "record_id", null: false
+    t.string "record_type", null: false
+    t.text "server_attributes"
+    t.integer "server_version", default: 0, null: false
+    t.datetime "updated_at", null: false
+    t.index ["dismissed_at", "created_at"], name: "idx_on_dismissed_at_created_at_56c2ef3c71"
+    t.index ["mutation_id"], name: "index_instant_record_sync_notices_on_mutation_id"
+    t.index ["record_type", "record_id"], name: "index_instant_record_sync_notices_on_record_type_and_record_id"
   end
 
   create_table "issues", id: :string, force: :cascade do |t|

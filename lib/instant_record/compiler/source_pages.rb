@@ -36,7 +36,7 @@ module InstantRecord
 
           case key
           when "email"
-            files << ["app/frontend/pages/Email/Inbox.jsx", root.join("app/frontend/pages/Email/Inbox.jsx")]
+            files << ["app/frontend/pages/Email/Inbox.jsx", demo_root.join("app/frontend/pages/Email/Inbox.jsx")]
           when "assistant"
             %w[
               app/javascript/controllers/assistant_chat_controller.js

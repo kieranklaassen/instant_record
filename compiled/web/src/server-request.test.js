@@ -48,5 +48,8 @@ test("isLocalUrl routes app pages locally and passes static, release, service-wo
   assert.equal(isLocalUrl(u("/instant_record/files/Recording/1"), origin, "/instant_record"), false);
   assert.equal(isLocalUrl(u("/sync/files/Recording/1"), origin, "/sync"), false);
   assert.equal(isLocalUrl(u("/sync/mutations"), origin, "/sync"), false);
+  assert.equal(isLocalUrl(u("/instant_record/sync_notices"), origin, "/instant_record"), true);
+  assert.equal(isLocalUrl(u("/instant_record/sync_notices.json"), origin, "/instant_record"), true);
+  assert.equal(isLocalUrl(u("/sync/sync_notices/n-1/retry"), origin, "/sync"), true);
   assert.equal(isLocalUrl(new URL("https://api.example/issues"), origin, "/instant_record"), false);
 });
