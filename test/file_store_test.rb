@@ -86,6 +86,34 @@ class FileStoreTest < Minitest::Test
     assert_equal 0, @store.offset("clip/one", "first")
   end
 
+  def test_an_upload_finishing_after_the_existence_check_wins
+    append("first", at: 0, upload: "first")
+    append("second", at: 0, upload: "second")
+    other_store = InstantRecord::FileStore.new(@root)
+    checked = ->(key) do
+      refute other_store.exist?(key)
+      other_store.finish(key, "second")
+      false
+    end
+
+    @store.define_singleton_method(:exist?) { |key| checked.call(key) }
+    begin
+      assert @store.finish("clip/one", "first")
+    ensure
+      @store.singleton_class.remove_method(:exist?)
+    end
+
+    assert_equal "second", File.binread(@store.path("clip/one"))
+    assert_equal 0, @store.offset("clip/one", "first")
+    assert_equal 0, @store.offset("clip/one", "second")
+    assert @store.finish("clip/one", "first"), "finishing again is harmless"
+  end
+
+  def test_finishing_a_missing_upload_does_not_create_a_file
+    assert_raises(Errno::ENOENT) { @store.finish("clip/one", "missing") }
+    refute @store.exist?("clip/one")
+  end
+
   def test_delete_takes_the_file_and_its_partials_and_nothing_else
     append("kept", at: 0, key: "clip/one-more")
     append("gone", at: 0)

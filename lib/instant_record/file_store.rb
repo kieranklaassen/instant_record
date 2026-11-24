@@ -92,11 +92,16 @@ module InstantRecord
     # wins, and a file that is already there is left as it is.
     def finish(key, upload)
       source = partial(key, upload)
-      if exist?(key)
-        FileUtils.rm_f(source)
-      else
-        File.rename(source, path(key))
+      unless exist?(key)
+        begin
+          # Publish without replacing another upload that finished after
+          # the existence check. Both paths are on the same filesystem.
+          File.link(source, path(key))
+        rescue Errno::EEXIST
+          # Another upload won; its file stays intact.
+        end
       end
+      FileUtils.rm_f(source)
       true
     end
 
