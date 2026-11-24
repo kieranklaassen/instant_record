@@ -74,12 +74,14 @@ module InstantRecord
         raise Misplaced.new(file.size) unless file.size == at
 
         file.seek(at)
-        written = IO.copy_stream(io, file, length)
-        unless written == length
-          # A piece cut short on the way is dropped whole, so the partial only
-          # ever holds pieces that arrived in full.
+        begin
+          written = IO.copy_stream(io, file, length)
+          raise Misplaced.new(at) unless written == length
+        rescue StandardError
+          # Drop a failed piece whole, including bytes copied before a read
+          # error, so it can be retried at the same offset.
           file.truncate(at)
-          raise Misplaced.new(at)
+          raise
         end
         file.fsync
         at + written
