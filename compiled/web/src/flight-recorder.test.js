@@ -14,6 +14,18 @@ import { sha256Hex } from "./sha256.js";
 import { redactSqliteBytes } from "./sqlite-redactor.js";
 import * as minimalWasi from "./wasi-minimal.js";
 
+test("government identifiers are sensitive while foreign keys and safe overrides are preserved", () => {
+  const redactor = new Redactor({ salt: "test" });
+  for (const column of ["tax_id", "national_id", "billing_tax_id", "customer_national_id"]) {
+    assert.equal(redactor.isPiiColumn("users", column), true, column);
+  }
+  for (const column of ["id", "user_id", "account_id", "created_at"]) {
+    assert.equal(redactor.isPiiColumn("users", column), false, column);
+  }
+  const safe = new Redactor({ safeColumns: { users: ["tax_id"] } });
+  assert.equal(safe.isPiiColumn("users", "tax_id"), false);
+});
+
 const AppHost = createAppHostClass(minimalWasi);
 
 function makeSampleSqliteDb() {

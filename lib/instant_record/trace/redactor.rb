@@ -50,6 +50,7 @@ module InstantRecord
         table = resolve_table_name(table_or_model)
         return false if @explicit_safe[table]&.include?(col) || @explicit_safe["*"]&.include?(col)
         return true if @explicit_pii[table]&.include?(col) || @explicit_pii["*"]&.include?(col)
+        return true if /(^|_)(tax|national)_id\z/i.match?(col)
         return false if STRUCTURAL_SAFE_COLUMNS.include?(col) || col.end_with?("_id", "_at")
 
         DEFAULT_PII_PATTERNS.any? { |pattern| pattern.match?(col) }
