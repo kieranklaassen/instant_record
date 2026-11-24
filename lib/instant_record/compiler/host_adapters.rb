@@ -6,6 +6,8 @@ require_relative "ast_lowerer"
 require_relative "runner"
 
 module InstantRecord
+  NETWORK_MARKER = "instant_record_network=1".freeze unless const_defined?(:NETWORK_MARKER)
+
   class Compiler
     # Swappable target host-adapter modules installed by GemVendor when staging
     # an app for AOT compilation. Each adapter provides the compiled
