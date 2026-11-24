@@ -118,7 +118,12 @@ module InstantRecord
     # Answers how many were removed.
     def sweep(before:)
       stale = Dir.glob("**/*.part", base: root).map { |file| File.join(root, file) }
-        .select { |file| File.mtime(file) < before }
+        .select do |file|
+          File.mtime(file) < before
+        rescue Errno::ENOENT
+          # An upload may finish or be discarded after the directory scan.
+          false
+        end
       FileUtils.rm_f(stale)
       stale.size
     end

@@ -138,6 +138,30 @@ class FileStoreTest < Minitest::Test
     assert_equal 3, @store.offset("clip/one", "new")
   end
 
+  def test_sweep_continues_when_a_partial_disappears_after_the_scan
+    append("gone", at: 0, upload: "gone")
+    append("old", at: 0, upload: "old")
+    append("new", at: 0, upload: "new")
+    old = "#{@store.path('clip/one')}.old.part"
+    gone = "#{@store.path('clip/one')}.gone.part"
+    File.utime(Time.now - 3 * 86_400, Time.now - 3 * 86_400, old)
+    original_mtime = File.method(:mtime)
+    File.define_singleton_method(:mtime) do |path|
+      File.unlink(path) if path == gone
+      original_mtime.call(path)
+    end
+
+    begin
+      assert_equal 1, @store.sweep(before: Time.now - 86_400)
+    ensure
+      File.define_singleton_method(:mtime, original_mtime)
+    end
+
+    refute File.exist?(gone)
+    refute File.exist?(old)
+    assert_equal 3, @store.offset("clip/one", "new")
+  end
+
   def test_an_upload_is_named_plainly
     assert_raises(ArgumentError) { append("x", at: 0, upload: "../../etc/passwd") }
     assert_raises(ArgumentError) { @store.offset("clip/one", "") }
