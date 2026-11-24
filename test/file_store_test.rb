@@ -50,6 +50,28 @@ class FileStoreTest < Minitest::Test
     assert_equal 5, @store.offset("clip/one", "first")
   end
 
+  def test_a_read_error_drops_the_piece_and_allows_retry
+    append("hello", at: 0)
+    failure = IOError.new("upload disconnected")
+    source = Object.new
+    reads = 0
+    source.define_singleton_method(:read) do |length, buffer|
+      reads += 1
+      raise failure if reads > 1
+
+      buffer.replace(" wo")
+    end
+
+    error = assert_raises(IOError) do
+      @store.append("clip/one", "first", source, at: 5, length: 6)
+    end
+    assert_same failure, error
+    assert_equal 5, @store.offset("clip/one", "first")
+    assert_equal 11, append(" world", at: 5)
+    @store.finish("clip/one", "first")
+    assert_equal "hello world", File.binread(@store.path("clip/one"))
+  end
+
   def test_two_uploads_of_one_record_do_not_mix
     append("aaaa", at: 0, upload: "first")
     append("bb", at: 0, upload: "second")
