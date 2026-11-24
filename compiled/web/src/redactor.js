@@ -105,6 +105,7 @@ export class Redactor {
     const table = this.resolveTableName(tableOrModel);
     if (this.explicitSafe.get(table)?.has(col) || this.explicitSafe.get("*")?.has(col)) return false;
     if (this.explicitPii.get(table)?.has(col) || this.explicitPii.get("*")?.has(col)) return true;
+    if (/(^|_)(tax|national)_id$/.test(col)) return true;
     if (STRUCTURAL_SAFE_COLUMNS.has(col) || col.endsWith("_id") || col.endsWith("_at")) return false;
     return DEFAULT_PII_PATTERNS.some((pattern) => pattern.test(col));
   }

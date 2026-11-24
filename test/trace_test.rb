@@ -9,6 +9,19 @@ require "tmpdir"
 require "instant_record/trace"
 
 class TraceTest < Minitest::Test
+  def test_government_identifiers_are_redacted_without_changing_foreign_keys
+    redactor = InstantRecord::Trace::Redactor.new(salt: "test")
+    %w[tax_id national_id billing_tax_id customer_national_id].each do |column|
+      assert redactor.pii_column?("users", column), column
+      refute_equal "123456789", redactor.redact_attributes("users", column => "123456789")[column]
+    end
+    %w[id user_id account_id created_at].each do |column|
+      refute redactor.pii_column?("users", column), column
+    end
+    safe = InstantRecord::Trace::Redactor.new(safe_columns: { "users" => ["tax_id"] })
+    refute safe.pii_column?("users", "tax_id")
+  end
+
   def test_schema_extractor_reads_tables_columns_and_timestamps
     schema_rb = <<~RUBY
       ActiveRecord::Schema[8.1].define(version: 2026_11_21_000001) do
