@@ -34,6 +34,7 @@ module InstantRecord
 
         def feed(chunk)
           @buffer << chunk
+          @buffer.gsub!("\r\n", "\n")
 
           while (separator = @buffer.index("\n\n"))
             raw_event = @buffer.slice!(0, separator + 2)

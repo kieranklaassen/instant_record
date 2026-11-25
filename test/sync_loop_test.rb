@@ -967,6 +967,20 @@ class SseParserTest < Minitest::Test
     assert_equal [{ "a" => 1, "cursor" => 7 }, { "a" => 2, "cursor" => 8 }], events
   end
 
+  def test_handles_crlf_events_at_every_chunk_boundary
+    stream = "id: 7\r\ndata: {\"a\":1}\r\n\r\nid: 8\r\ndata: {\"a\":2}\r\n\r\n"
+
+    (0..stream.length).each do |boundary|
+      events = []
+      parser = InstantRecord::Client::Transport::SseParser.new { |event| events << event }
+      parser.feed(stream[0...boundary])
+      parser.feed(stream[boundary..])
+
+      assert_equal [{ "a" => 1, "cursor" => 7 }, { "a" => 2, "cursor" => 8 }], events,
+        "split at byte #{boundary}"
+    end
+  end
+
   def test_ignores_blocks_without_data
     events = []
     parser = InstantRecord::Client::Transport::SseParser.new { |e| events << e }
