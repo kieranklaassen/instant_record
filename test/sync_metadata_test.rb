@@ -82,6 +82,26 @@ class SyncMetadataTest < Minitest::Test
     assert_operator row.updated_at, :>, long_ago
   end
 
+  # The read is inside the savepoint too, so a caller that rescues a failed
+  # write can go on with its transaction.
+  def test_postgres_writes_inside_a_savepoint
+    adapter = Meta.connection_pool.with_connection(&:itself)
+    adapter.define_singleton_method(:adapter_name) { "PostgreSQL" }
+    statements = on_server do
+      Meta.transaction do
+        Meta.get("warm")
+        sql_statements { Meta.set("k", "one") }
+      end
+    end
+
+    assert_match(/\ASAVEPOINT/, statements.first)
+    assert_match(/\ARELEASE SAVEPOINT/, statements.last)
+    assert_equal 4, statements.size
+    assert_equal "one", Meta.get("k")
+  ensure
+    adapter&.singleton_class&.send(:remove_method, :adapter_name)
+  end
+
   def test_overwrite_keeps_created_at_and_moves_updated_at
     on_server do
       Meta.set("k", "one")
