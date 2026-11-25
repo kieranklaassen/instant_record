@@ -39,8 +39,8 @@ module InstantRecord
           while (separator = @buffer.index("\n\n"))
             raw_event = @buffer.slice!(0, separator + 2)
 
-            id = raw_event[/^id: (.+)$/, 1]
-            data = raw_event[/^data: (.+)$/, 1]
+            id = raw_event[/^id: ?(.+)$/, 1]
+            data = raw_event[/^data: ?(.+)$/, 1]
             next unless data
 
             event = JSON.parse(data)
