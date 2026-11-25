@@ -77,13 +77,13 @@ module InstantRecord
         begin
           written = IO.copy_stream(io, file, length)
           raise Misplaced.new(at) unless written == length
+          file.fsync
         rescue StandardError
           # Drop a failed piece whole, including bytes copied before a read
-          # error, so it can be retried at the same offset.
+          # or flush error, so it can be retried at the same offset.
           file.truncate(at)
           raise
         end
-        file.fsync
         at + written
       end
     end

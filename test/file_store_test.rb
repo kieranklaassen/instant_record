@@ -72,6 +72,30 @@ class FileStoreTest < Minitest::Test
     assert_equal "hello world", File.binread(@store.path("clip/one"))
   end
 
+  def test_a_flush_error_drops_the_piece_and_allows_retry
+    append("hello", at: 0)
+    failure = IOError.new("flush failed")
+    original_open = File.method(:open)
+    File.define_singleton_method(:open) do |*args, &block|
+      original_open.call(*args) do |file|
+        file.define_singleton_method(:fsync) { raise failure }
+        block.call(file)
+      end
+    end
+
+    begin
+      error = assert_raises(IOError) { append(" world", at: 5) }
+      assert_same failure, error
+    ensure
+      File.define_singleton_method(:open, original_open)
+    end
+
+    assert_equal 5, @store.offset("clip/one", "first")
+    assert_equal 11, append(" world", at: 5)
+    @store.finish("clip/one", "first")
+    assert_equal "hello world", File.binread(@store.path("clip/one"))
+  end
+
   def test_two_uploads_of_one_record_do_not_mix
     append("aaaa", at: 0, upload: "first")
     append("bb", at: 0, upload: "second")
