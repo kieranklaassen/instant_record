@@ -445,7 +445,7 @@ module InstantRecord
               visible = InstantRecord::SyncScope.visible(model, asker)
               window = model.instant_record_sync_window
               rows = window ? window.in_window(visible) : visible
-              rows.map { |record| InstantRecord.record_payload(record) }
+              InstantRecord.record_payloads(rows)
             end
             {
               cursor: cursor,
@@ -511,7 +511,7 @@ module InstantRecord
             .to_a
 
           payload = {
-            records: rows.first(limit).map { |r| InstantRecord.record_payload(r) },
+            records: InstantRecord.record_payloads(rows.first(limit)),
             has_more: rows.size > limit
           }
           { status: 200, headers: { "content-type" => "application/json" }, body: JSON.generate(payload) }
