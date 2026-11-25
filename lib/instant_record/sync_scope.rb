@@ -2,6 +2,7 @@ require "digest"
 require "instant_record/syncable"
 require "instant_record/sync_partition"
 require "instant_record/sync_shape"
+require "instant_record/payload_batch"
 
 module InstantRecord
   module Syncable
@@ -230,14 +231,16 @@ module InstantRecord
       # revocation to one that did.
       def events_for(changes, identity, partition: nil)
         current = visible_records(changes, identity, partition: partition)
-        changes.map do |change|
-          model = ruled_model(change.record_type)
-          next [change.id, change.as_event] if change.operation == "destroy" || model.nil?
+        payloads = current.keys.zip(InstantRecord.record_payloads(current.values)).to_h
+        models = changes.map { |change| ruled_model(change.record_type) unless change.operation == "destroy" }
+        stamps = PayloadBatch.change_stamps(changes.zip(models).filter_map { |change, model| change if model.nil? })
+        changes.zip(models).map do |change, model|
+          next [change.id, PayloadBatch.event(change, stamps[change.id])] if model.nil?
 
-          record = current[[change.record_type, change.record_id]]
+          payload = payloads[[change.record_type, change.record_id]]
           event =
-            if record
-              InstantRecord.record_payload(record).merge(operation: change.operation)
+            if payload
+              payload.merge(operation: change.operation)
             else
               { type: change.record_type, id: change.record_id, operation: "destroy", version: 0, attributes: {} }
             end

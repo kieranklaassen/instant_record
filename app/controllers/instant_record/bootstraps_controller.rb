@@ -50,11 +50,11 @@ module InstantRecord
     def serialize_rows(model, identity, partition)
       visible = SyncScope.visible(model, identity, partition: partition)
       if (shape = model.instant_record_sync_shape)
-        shape.bootstrap_records(visible).map { |record| InstantRecord.record_payload(record) }
+        InstantRecord.record_payloads(shape.bootstrap_records(visible))
       elsif (window = model.instant_record_sync_window)
-        window.in_window(visible).map { |record| InstantRecord.record_payload(record) }
+        InstantRecord.record_payloads(window.in_window(visible))
       else
-        visible.map { |record| InstantRecord.record_payload(record) }
+        InstantRecord.record_payloads(visible)
       end
     end
   end
