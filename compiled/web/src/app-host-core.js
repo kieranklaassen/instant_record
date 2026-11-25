@@ -480,9 +480,11 @@ export function createAppHostClass({ WASI, File, OpenFile, Directory, PreopenDir
         );
       }
       const notifyEntry = this.hostDir.contents.get("notify") || this.notifyFile;
+      // The answer's own list, spread last: a change notice carries only the
+      // notices recorded during this call, usually none.
       return {
-        ...JSON.parse(decoder.decode(result.out)),
         ...readNotice(decoder.decode(notifyEntry.data)),
+        ...JSON.parse(decoder.decode(result.out)),
         exit: result.exit,
         errors: result.errors,
         events: result.events,
