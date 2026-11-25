@@ -14,16 +14,18 @@ module InstantRecord
         record.update!(value: value.to_s)
       else
         text = value.to_s
-        return true if find_by(key: key)&.value == text
-
-        # One write, so a concurrent insert of the key is overwritten rather than
-        # raised, and no savepoint is needed inside a caller's transaction. Its
-        # values go in the SQL text, so only plain ones take it: SQLite ends a
-        # statement at a NUL, and other encodings do not join UTF-8 SQL.
+        # upsert's values go in the SQL text, so only plain ones take it: SQLite
+        # ends a statement at a NUL, and other encodings do not join UTF-8 SQL.
         plain = [key.to_s, text].all? do |part|
           [Encoding::UTF_8, Encoding::US_ASCII].include?(part.encoding) && !part.include?("\0")
         end
-        if plain && connection_pool.with_connection { |db| db.adapter_name.match?(/sqlite|postg/i) }
+        # SQLite leaves a transaction usable after a failed statement. Elsewhere
+        # the savepoint does that for a caller that rescues the error.
+        if plain && connection_pool.with_connection { |db| db.adapter_name.match?(/sqlite/i) }
+          return true if find_by(key: key)&.value == text
+
+          # One write, so a concurrent insert of the key is overwritten rather
+          # than raised.
           now = Time.now.utc
           unscoped.upsert(
             { key: key, value: text, created_at: now, updated_at: now },
