@@ -947,6 +947,17 @@ class SyncLoopTest < Minitest::Test
 end
 
 class SseParserTest < Minitest::Test
+  def test_joins_multiline_data_across_chunks
+    events = []
+    parser = InstantRecord::Client::Transport::SseParser.new { |event| events << event }
+
+    parser.feed("id: 42\ndata: {\n: comment\ndata:\n")
+    assert_empty events
+    parser.feed('data: "type":"Memo",' + "\ndata:" + '"id":"m-1"}' + "\n\n")
+
+    assert_equal [{ "type" => "Memo", "id" => "m-1", "cursor" => 42 }], events
+  end
+
   def test_accepts_fields_with_or_without_the_optional_space
     ["", " "].product(["", " "]).each do |id_space, data_space|
       events = []

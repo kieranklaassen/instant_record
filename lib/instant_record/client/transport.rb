@@ -40,8 +40,8 @@ module InstantRecord
             raw_event = @buffer.slice!(0, separator + 2)
 
             id = raw_event[/^id: ?(.+)$/, 1]
-            data = raw_event[/^data: ?(.+)$/, 1]
-            next unless data
+            data = raw_event.scan(/^data: ?(.*)$/).flatten.join("\n")
+            next if data.empty?
 
             event = JSON.parse(data)
             event["cursor"] = id.to_i if id
