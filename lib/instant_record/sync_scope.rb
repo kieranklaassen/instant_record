@@ -3,6 +3,7 @@ require "instant_record/syncable"
 require "instant_record/sync_partition"
 require "instant_record/sync_shape"
 require "instant_record/payload_batch"
+require "instant_record/read_tracker_scan"
 
 module InstantRecord
   module Syncable
