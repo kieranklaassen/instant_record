@@ -90,9 +90,10 @@ module InstantRecord
     end
 
     def local_island_path?(path)
-      return true unless File.file?(@manifest)
+      stat = File.stat(@manifest)
+      return true unless stat.file?
 
-      routes = local_routes
+      routes = local_routes(stat)
       return true if routes.empty?
 
       normalized = path.to_s.gsub(%r{/+}, "/")
@@ -103,9 +104,9 @@ module InstantRecord
     end
 
     # Empty when the manifest leaves every path to the browser.
-    def local_routes
+    def local_routes(current)
       identity, routes = @kept.first
-      return routes if identity && identity == manifest_identity(File.stat(@manifest))
+      return routes if identity && identity == manifest_identity(current)
 
       File.open(@manifest) do |file|
         # Taken before the read, so a write during it changes the identity.

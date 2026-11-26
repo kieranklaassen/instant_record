@@ -1,6 +1,7 @@
 require_relative "test_helper"
 require_relative "../lib/instant_record/compiled_site"
 require "rack/mock"
+require "timeout"
 require "tmpdir"
 
 class CompiledSiteTest < Minitest::Test
@@ -206,6 +207,17 @@ class CompiledSiteTest < Minitest::Test
     assert_equal "Rails", get("/b")
     File.delete(@root)
     2.times { assert_equal "Not found: /index.html\n", get("/b").sub(/File not found/, "Not found") }
+  end
+
+  def test_a_manifest_that_is_not_a_file_is_not_opened
+    serve(island("/a"))
+    file = File.join(@root, "instant_record.manifest.json")
+    site.ahead = 3
+    assert_equal "Rails", get("/b")
+    File.delete(file)
+    # Opening one waits for a writer.
+    File.mkfifo(file)
+    Timeout.timeout(5) { 2.times { assert_equal "local", get("/b") } }
   end
 
   def test_a_frozen_instance_answers
