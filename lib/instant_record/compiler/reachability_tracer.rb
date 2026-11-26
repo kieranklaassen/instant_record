@@ -258,57 +258,54 @@ module InstantRecord
         end
 
         def extract_render(node)
-          args = Array(node.arguments&.arguments)
-          return if args.empty?
+          first = node.arguments&.arguments&.first
+          return unless first
 
+          # Read every option before anything is recorded: this raises on a key that is not valid text.
           opts = extract_keyword_hash(node)
           return if (opts.keys & NON_TEMPLATE_RENDER_KEYS).any?
 
+          line = node.location.start_line
+          in_template = @is_view || @is_helper
+
           if opts.key?(:partial)
-            val = opts[:partial]
-            if val.is_a?(String) || val.is_a?(Symbol)
-              @renders << { kind: :partial, target: val.to_s, line: node.location.start_line }
-            else
-              record_dynamic_warning("render", node.location.start_line,
-                "Dynamic partial render; declare targets in include: { partials: [...] }.")
-            end
+            record_render(:partial, opts[:partial], line) ||
+              record_dynamic_warning("render", line, "Dynamic partial render; declare targets in include: { partials: [...] }.")
           elsif opts.key?(:template)
-            val = opts[:template]
-            if val.is_a?(String) || val.is_a?(Symbol)
-              @renders << { kind: :template, target: val.to_s, line: node.location.start_line }
-            else
-              record_dynamic_warning("render", node.location.start_line,
-                "Dynamic template render; declare targets in include: { views: [...] }.")
-            end
+            record_render(:template, opts[:template], line) ||
+              record_dynamic_warning("render", line, "Dynamic template render; declare targets in include: { views: [...] }.")
           elsif opts.key?(:action)
-            val = opts[:action]
-            if val.is_a?(String) || val.is_a?(Symbol)
-              @renders << { kind: :template, target: val.to_s, line: node.location.start_line }
-            end
-          else
-            first = args.first
-            unless first.is_a?(Prism::KeywordHashNode) || first.is_a?(Prism::HashNode)
-              if first.is_a?(Prism::StringNode) || first.is_a?(Prism::SymbolNode)
-                kind = (@is_view || @is_helper) ? :partial : :template
-                @renders << { kind: kind, target: first.unescaped, line: node.location.start_line }
-              else
-                record_dynamic_warning("render", node.location.start_line,
-                  "Dynamic render expression; declare targets in include: { partials: [...] } or include: { views: [...] }.")
-              end
-            end
+            record_render(:template, opts[:action], line)
+          elsif !hash_node?(first)
+            record_render(in_template ? :partial : :template, literal_name(first), line) ||
+              record_dynamic_warning("render", line,
+                "Dynamic render expression; declare targets in include: { partials: [...] } or include: { views: [...] }.")
           end
 
           # Independently handle `layout:` option (e.g. `render partial: "row", layout: "card"`).
-          if opts.key?(:layout)
-            layout_val = opts[:layout]
-            if layout_val.is_a?(String) || layout_val.is_a?(Symbol)
-              if @is_view || @is_helper || opts.key?(:partial)
-                @renders << { kind: :partial, target: layout_val.to_s, line: node.location.start_line }
-              else
-                @layouts << { target: layout_val.to_s, line: node.location.start_line }
-              end
-            end
+          layout = opts[:layout]
+          if in_template || opts.key?(:partial)
+            record_render(:partial, layout, line)
+          elsif layout.is_a?(String) || layout.is_a?(Symbol)
+            @layouts << { target: layout.to_s, line: line }
           end
+        end
+
+        def record_render(kind, target, line)
+          return false unless target.is_a?(String) || target.is_a?(Symbol)
+
+          @renders << { kind: kind, target: target.to_s, line: line }
+          true
+        end
+
+        # The text of a string or symbol node. Unlike +literal+, keeps the source's
+        # encoding: an ASCII Symbol drops it, and messages quote the name by it.
+        def literal_name(node)
+          node.unescaped if node.is_a?(Prism::StringNode) || node.is_a?(Prism::SymbolNode)
+        end
+
+        def hash_node?(node)
+          node.is_a?(Prism::KeywordHashNode) || node.is_a?(Prism::HashNode)
         end
 
         def extract_layout(node)
@@ -365,7 +362,7 @@ module InstantRecord
         def extract_keyword_hash(call)
           opts = {}
           Array(call.arguments&.arguments).each do |arg|
-            next unless arg.is_a?(Prism::KeywordHashNode) || arg.is_a?(Prism::HashNode)
+            next unless hash_node?(arg)
 
             arg.elements.each do |assoc|
               next unless assoc.is_a?(Prism::AssocNode)
