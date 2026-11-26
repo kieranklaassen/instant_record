@@ -25,7 +25,8 @@ class ReadTrackerScanTest < Minitest::Test
   VALUES = ["?", "$1", "'x'", "'a''b'", "'é''日'", "''", "'('", "'OR'", "42", "NULL", "'un", "(SELECT ?)"].freeze
   COLUMNS = ["owner", "items.owner", "\"items\".\"owner_id\"", "id", "LOWER(title)"].freeze
   SOURCES = ["items", "\"items\"", "items i", "items JOIN labels l ON l.item_id = items.id", "(SELECT * FROM labels) t"].freeze
-  ENDINGS = ["", "", " ORDER BY x LIMIT ?", " GROUP BY x", ";", " UNION SELECT * FROM labels WHERE owner = ?"].freeze
+  ENDINGS = ["", "", " ORDER BY x LIMIT ?", " GROUP BY x", ";", " UNION SELECT * FROM labels WHERE owner = ?",
+    " UNION ALL SELECT * FROM items", " INTERSECT SELECT * FROM items", " EXCEPT SELECT * FROM items"].freeze
 
   EDGES = [
     "", "'", "''", "'''", "''''", "(", ")", "()", "(')')", "((a) AND (b))", "(a) AND (b)", "((a)", "a)(", ",", ",,", "a,", "'a,b',(c,d),e",
@@ -34,7 +35,12 @@ class ReadTrackerScanTest < Minitest::Test
     "SELECT 'q''s' FROM items WHERE owner = ? ORDER BY id",
     "WITH t AS (SELECT * FROM labels WHERE owner = 'z') SELECT * FROM items WHERE owner = 'é'",
     "-- it's (\nSELECT * FROM items WHERE (owner = ?)",
-    "SELECT * FROM items WHERE owner = 'x' UNION SELECT * FROM items WHERE owner = 'y'"
+    "SELECT * FROM items WHERE owner = 'x' UNION SELECT * FROM items WHERE owner = 'y'",
+    "SELECT * FROM items WHERE owner = 'x' UNION ALL SELECT * FROM items",
+    "SELECT * FROM items WHERE owner = 'x' INTERSECT SELECT * FROM items",
+    "SELECT * FROM items EXCEPT SELECT * FROM items WHERE owner = 'x'",
+    "SELECT union_id FROM items WHERE owner = 'a UNION b' AND id IN (SELECT 1 EXCEPT SELECT 2)",
+    "SELECT * FROM items WHERE owner = 'x' AND \"union\" = 'é''EXCEPT'"
   ].freeze
 
   # Binds that are the same text, or only look it, as another.
