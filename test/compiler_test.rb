@@ -753,6 +753,64 @@ class CompilerTest < ActiveSupport::TestCase
     end
   end
 
+  test "WasmTree rewrites only what its patches name, in every folder they cover" do
+    form_attrs = '#{ActionView::ViewHelpers.tag_attr("form", { data: { turbo: false, action: "submit->issues#submit" } })}'
+    button = 'class=\"#{"button_to"}\">'
+    stats, tree = build_wasm_tree(
+      "config/nested/queue.rb" => "Queue.new\nrequire \"timeout\"\n",
+      "runtime/timeout_only.rb" => "require \"timeout\"\n",
+      "runtime/sqlite_adapter.rb" => "  def self.select_rows(sql, binds)\n    def query(sql)\n  def other(sql)\n",
+      "app/models/admin/note.rb" => <<~RUBY,
+        if name == "read_at"
+          if respond_to?(:read_at=)
+            self.read_at = value
+        if !(creating) || @updated_at_raw.nil? || @updated_at_raw.empty?
+      RUBY
+      "app/models/plain.rb" => "Thread.new\n",
+      "app/views/admin/list.rb" => "each_with_index\nActionView::ViewHelpers.raw(_cap)\n",
+      "app/views/button.rb" => form_attrs + button,
+      "app/views/plain.rb" => "ActionView::ViewHelpers.raw(_cap)\n#{button}",
+      "runtime/cable.rb" => "kept\n",
+      "test/skipped.rb" => ""
+    )
+
+    assert_equal({ touched: 2, pruned_lines: 0 }, stats)
+    expected = {
+      "main_wasm.rb" => "WasmMutex.new\n",
+      "config/nested/queue.rb" => "WasmQueue.new\n# require \"timeout\"  (wasm: see runtime/wasm_threads.rb)\n",
+      "runtime/timeout_only.rb" => "# require \"timeout\"  (wasm: see runtime/wasm_threads.rb)\n",
+      "runtime/sqlite_adapter.rb" => <<~RUBY.gsub(/^/, "  "),
+        def self.select_rows(sql, binds)
+          InstantRecord::ReadTracker.record_sql(sql)
+          def query(sql)
+            InstantRecord::ReadTracker.record_sql(sql)
+        def other(sql)
+      RUBY
+      "app/models/admin/note.rb" => <<~RUBY,
+        if name == "read_at"
+          if respond_to?(:read_at=)
+            self.read_at = ActiveSupport.cast_datetime(value)
+        if (!(creating) && !InstantRecord::Client.applying_remote?) || @updated_at_raw.nil? || @updated_at_raw.empty?
+      RUBY
+      "app/models/plain.rb" => "Thread.new\n",
+      "app/views/admin/list.rb" => "each_with_index\nio << _cap\n",
+      "app/views/button.rb" => 'class=\"#{"button_to"}\" data-turbo=\"false\" data-action=\"submit-&gt;issues#submit\">',
+      "app/views/plain.rb" => "ActionView::ViewHelpers.raw(_cap)\n#{button}",
+      "runtime/cable.rb" => "kept\n"
+    }
+    assert_equal expected, tree.slice(*expected.keys)
+    refute_includes tree, "test/skipped.rb"
+  end
+
+  test "WasmTree leaves a tracked adapter alone and needs main_wasm.rb but no app or config" do
+    tracked = "def self.query(sql)\n  InstantRecord::ReadTracker.record_sql(sql)\nend\n"
+    _stats, tree = build_wasm_tree("runtime/sqlite_adapter.rb" => tracked)
+
+    assert_equal tracked, tree["runtime/sqlite_adapter.rb"]
+    refute_includes build_wasm_tree({}).last, "runtime/sqlite_adapter.rb"
+    assert_raises(Errno::ENOENT) { build_wasm_tree("main_wasm.rb" => nil) }
+  end
+
   test "Compiler.build and Compiler.build_native run end-to-end with a stub toolchain and cache unchanged builds" do
     Dir.mktmpdir do |dir|
       fake = create_fake_toolchain(dir)
@@ -898,6 +956,28 @@ class CompilerTest < ActiveSupport::TestCase
   end
 
   private
+
+  # Builds the smallest emit WasmTree accepts plus the given files (nil drops one), and returns the
+  # stats with every Ruby file of the tree by path.
+  def build_wasm_tree(files)
+    Dir.mktmpdir do |dir|
+      emit = File.join(dir, "emit")
+      tree = File.join(dir, "tree")
+      {
+        "boot.rb" => "require_relative \"runtime/db\"\n",
+        "main_wasm.rb" => "Mutex.new\n",
+        "runtime/message_digest.rb" => "  def self.aes_256_gcm_encrypt\n",
+        "runtime/db.rb" => "",
+        "runtime/active_record/base.rb" => "    def has_changes_to_save?\n"
+      }.merge(files).compact.each do |rel, text|
+        path = File.join(emit, rel)
+        FileUtils.mkdir_p(File.dirname(path))
+        File.write(path, text)
+      end
+      stats = InstantRecord::Compiler::WasmTree.build(source: emit, target: tree)
+      [stats, Dir.glob("**/*.rb", base: tree).to_h { |rel| [rel, File.read(File.join(tree, rel))] }]
+    end
+  end
 
   def with_path(prepend_dir)
     old_path = ENV["PATH"]

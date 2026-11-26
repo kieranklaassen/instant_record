@@ -336,8 +336,7 @@ module InstantRecord
         FileUtils.rm_rf(@target)
         FileCopy.copy_tree(@source, @target, ignore: IGNORE_PATTERNS)
 
-        paths = runtime_paths
-        touched = adapt_threading_and_timeout(paths)
+        touched = adapt_threading_and_timeout
         patch_message_digest
         patch_sqlite_shims
         patch_read_tracking
@@ -354,25 +353,26 @@ module InstantRecord
 
       private
 
-      def runtime_paths
-        paths = %w[boot.rb main_wasm.rb].map { |name| File.join(@target, name) }
-        %w[runtime config].each do |folder|
-          dir = File.join(@target, folder)
-          next unless File.directory?(dir)
-
-          paths.concat(Dir.glob("**/*.rb", base: dir).sort.map { |rel| File.join(dir, rel) })
-        end
-        paths
+      def ruby_files(folder)
+        dir = File.join(@target, folder)
+        Dir.glob("**/*.rb", base: dir).sort.map { |rel| File.join(dir, rel) }
       end
 
-      def adapt_threading_and_timeout(paths)
+      def rewrite(path)
+        text = File.read(path)
+        updated = yield text
+        File.write(path, updated) if updated != text
+      end
+
+      def adapt_threading_and_timeout
+        entries = %w[boot.rb main_wasm.rb].map { |name| File.join(@target, name) }
         touched = 0
-        paths.each do |path|
-          text = File.read(path)
-          renamed = text.gsub(THREAD_CONSTANT_RE, 'Wasm\0')
-          touched += 1 if renamed != text
-          updated = renamed.gsub('require "timeout"', '# require "timeout"  (wasm: see runtime/wasm_threads.rb)')
-          File.write(path, updated) if updated != text
+        (entries + ruby_files("runtime") + ruby_files("config")).each do |path|
+          rewrite(path) do |text|
+            renamed = text.gsub(THREAD_CONSTANT_RE, 'Wasm\0')
+            touched += 1 if renamed != text
+            renamed.gsub('require "timeout"', '# require "timeout"  (wasm: see runtime/wasm_threads.rb)')
+          end
         end
         File.write(File.join(@target, "runtime/wasm_threads.rb"), WASM_THREADS_RB)
         touched
@@ -401,51 +401,40 @@ module InstantRecord
         path = File.join(@target, "runtime/sqlite_adapter.rb")
         return unless File.file?(path)
 
-        text = File.read(path)
         hook = "InstantRecord::ReadTracker.record_sql(sql)"
-        return if text.include?(hook)
+        rewrite(path) do |text|
+          next text if text.include?(hook)
 
-        updated = text.gsub(
-          /^(\s*def (?:self\.)?(?:each_row|select_all|select_rows|select_value|select_values|query|exec_query)\(sql\b[^\n]*\)\n)/
-        ) do
-          line = Regexp.last_match(1)
-          indent = line[/\A(\s*)/, 1]
-          "#{line}#{indent}  #{hook}\n"
+          text.gsub(
+            /^(\s*)def (?:self\.)?(?:each_row|select_all|select_rows|select_value|select_values|query|exec_query)\(sql\b[^\n]*\)\n/,
+            "\\0\\1  #{hook}\n"
+          )
         end
-        File.write(path, updated) if updated != text
       end
 
       def patch_model_datetime_casts
-        models_dir = File.join(@target, "app/models")
-        return unless File.directory?(models_dir)
-
-        Dir.glob("**/*.rb", base: models_dir).sort.each do |rel|
-          path = File.join(models_dir, rel)
-          text = File.read(path)
-          fixed = text.gsub(
-            /(if name == "(\w+_at)"\n\s+if respond_to\?\(:\2=\)\n\s+self\.\2 = )value\n/,
-            '\1ActiveSupport.cast_datetime(value)' + "\n"
-          )
-          File.write(path, fixed) if fixed != text
+        ruby_files("app/models").each do |path|
+          rewrite(path) do |text|
+            text.gsub(
+              /(if name == "(\w+_at)"\n\s+if respond_to\?\(:\2=\)\n\s+self\.\2 = )value\n/,
+              '\1ActiveSupport.cast_datetime(value)' + "\n"
+            )
+          end
         end
       end
 
+      # Roundhouse's generated fill_timestamps unconditionally stamps
+      # updated_at = db_now on every UPDATE, clobbering the server's
+      # authoritative timestamp during upsert_from_server. Preserve the
+      # incoming server timestamp while applying_remote? is active.
       def patch_model_remote_timestamps
-        models_dir = File.join(@target, "app/models")
-        return unless File.directory?(models_dir)
-
-        Dir.glob("**/*.rb", base: models_dir).sort.each do |rel|
-          path = File.join(models_dir, rel)
-          text = File.read(path)
-          # Roundhouse's generated fill_timestamps unconditionally stamps
-          # updated_at = db_now on every UPDATE, clobbering the server's
-          # authoritative timestamp during upsert_from_server. Preserve the
-          # incoming server timestamp while applying_remote? is active.
-          fixed = text.gsub(
-            "if !(creating) || @updated_at_raw.nil? || @updated_at_raw.empty?",
-            "if (!(creating) && !InstantRecord::Client.applying_remote?) || @updated_at_raw.nil? || @updated_at_raw.empty?"
-          )
-          File.write(path, fixed) if fixed != text
+        ruby_files("app/models").each do |path|
+          rewrite(path) do |text|
+            text.gsub(
+              "if !(creating) || @updated_at_raw.nil? || @updated_at_raw.empty?",
+              "if (!(creating) && !InstantRecord::Client.applying_remote?) || @updated_at_raw.nil? || @updated_at_raw.empty?"
+            )
+          end
         end
       end
 
@@ -459,25 +448,21 @@ module InstantRecord
       end
 
       def patch_emitted_views
-        views_dir = File.join(@target, "app/views")
-        return unless File.directory?(views_dir)
-
         bogus = '#{ActionView::ViewHelpers.tag_attr("form", { data: { turbo: false, action: "submit->issues#submit" } })}'
-        Dir.glob("**/*.rb", base: views_dir).sort.each do |rel|
-          path = File.join(views_dir, rel)
-          text = File.read(path)
-          updated = text
-          if updated.include?("each_with_index") && updated.include?("ActionView::ViewHelpers.raw(_cap)")
-            updated = updated.gsub("ActionView::ViewHelpers.raw(_cap)", "io << _cap")
+        ruby_files("app/views").each do |path|
+          rewrite(path) do |text|
+            if text.include?("each_with_index") && text.include?("ActionView::ViewHelpers.raw(_cap)")
+              text = text.gsub("ActionView::ViewHelpers.raw(_cap)", "io << _cap")
+            end
+            if text.include?(bogus)
+              text = text.gsub(bogus, "")
+              text = text.gsub(
+                'class=\"#{"button_to"}\">',
+                'class=\"#{"button_to"}\" data-turbo=\"false\" data-action=\"submit-&gt;issues#submit\">'
+              )
+            end
+            text
           end
-          if updated.include?(bogus)
-            updated = updated.gsub(bogus, "")
-            updated = updated.gsub(
-              'class=\"#{"button_to"}\">',
-              'class=\"#{"button_to"}\" data-turbo=\"false\" data-action=\"submit-&gt;issues#submit\">'
-            )
-          end
-          File.write(path, updated) if updated != text
         end
       end
 
