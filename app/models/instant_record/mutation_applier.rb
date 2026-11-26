@@ -496,7 +496,7 @@ module InstantRecord
       end
 
       # Catch any unlogged direct server column update (e.g. update_columns).
-      live_attrs = InstantRecord.wire_attributes(record.attributes)
+      live_attrs = as_logged(InstantRecord.wire_attributes(record.attributes))
       touch_changed_columns(server_touched, prev_attrs, live_attrs, hlc: record_hlc, unlogged: true)
 
       server_touched
@@ -514,6 +514,17 @@ module InstantRecord
 
     def change_attributes(change)
       change.attributes_payload.is_a?(Hash) ? change.attributes_payload : {}
+    end
+
+    # The attributes with dates and decimals as they read back from the log,
+    # which is JSON and has neither type. A decimal it has only null for
+    # (an infinite one) stays what it is, and so does every other type: those
+    # equal what was logged already, or lose part of themselves in JSON.
+    def as_logged(attributes)
+      typed = attributes.select { |_column, value| value.instance_of?(Date) || value.is_a?(BigDecimal) }
+      return attributes if typed.empty?
+
+      attributes.merge(Change.type_for_attribute("attributes_payload").cast(typed).compact)
     end
 
     def touch_changed_columns(server_touched, prev_attrs, curr_attrs, hlc:, unlogged: false)
