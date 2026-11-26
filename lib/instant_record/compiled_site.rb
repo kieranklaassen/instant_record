@@ -1,5 +1,6 @@
 require "json"
 require "rack/files"
+require "rack/mime"
 require "rack/request"
 require "rack/sendfile"
 
@@ -10,6 +11,9 @@ module InstantRecord
     # A tab can receive the old HTML just before a deploy and request its
     # content-addressed worker or Wasm just after the release link switches.
     FINGERPRINTED = %r{\A/(?:app-[0-9a-f]+\.wasm|harness/[\w.-]+-[\w-]{8}\.js)\z}
+
+    # Best first.
+    ENCODINGS = { "br" => ".br", "gzip" => ".gz" }.freeze
 
     # A manifest changed more recently than this is read again on each request: a
     # second write within one timestamp tick would leave its stat the same.
@@ -39,7 +43,8 @@ module InstantRecord
       manifest = path == "/instant-record-release.json" || path == "/instant_record.manifest.json"
       html = request.get_header("HTTP_ACCEPT").to_s.include?("text/html")
       return @app.call(env) unless asset || manifest || (html && local_island_path?(path))
-      status, headers, body = @files.call(asset || manifest ? env : env.merge("PATH_INFO" => "/index.html"))
+      file_env = asset || manifest ? env : env.merge("PATH_INFO" => "/index.html")
+      status, headers, body = precompressed(file_env) || @files.call(file_env)
       immutable = FINGERPRINTED.match?(path)
       if status == 404 && immutable
         Dir.glob(File.join(@releases, "[a-f0-9]" * 64)).each do |release|
@@ -49,11 +54,40 @@ module InstantRecord
           break
         end
       end
+      headers["vary"] = "accept-encoding"
       headers["cache-control"] = immutable && [200, 206, 304].include?(status) ? "public, max-age=31536000, immutable" : "no-cache"
       [status, headers, body]
     end
 
     private
+
+    # The build writes .br and .gz copies next to what compresses (WasmBuild#precompress).
+    # A build without them, or a ranged request, is served as it is.
+    def precompressed(env)
+      return if env["HTTP_RANGE"]
+
+      path = env["PATH_INFO"]
+      ENCODINGS.each do |encoding, extension|
+        next unless accepts?(env["HTTP_ACCEPT_ENCODING"], encoding)
+
+        status, headers, body = @files.call(env.merge("PATH_INFO" => path + extension))
+        unless [200, 304].include?(status)
+          body.close if body.respond_to?(:close)
+          next
+        end
+        headers["content-type"] = Rack::Mime.mime_type(File.extname(path), "application/octet-stream") if status == 200
+        headers["content-encoding"] = encoding if status == 200
+        return [status, headers, body]
+      end
+      nil
+    end
+
+    def accepts?(header, encoding)
+      header.to_s.downcase.split(",").any? do |item|
+        name, *params = item.split(";").map(&:strip)
+        name == encoding && params.none? { |param| param.match?(/\Aq=0(?:\.0*)?\z/) }
+      end
+    end
 
     def local_island_path?(path)
       return true unless File.file?(@manifest)

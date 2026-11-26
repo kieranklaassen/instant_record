@@ -10,6 +10,11 @@ const manifest = parseManifest(import.meta.env.VITE_MANIFEST);
 let releaseRequired;
 // A built shell has already started the worker from its first inline script (WasmBuild#inject_preloads).
 const worker = window.__worker || new Worker(workerUrl, { type: "module" });
+// A worker that cannot load answers nothing, so the boot would wait forever behind "Loading…".
+worker.addEventListener("error", event => {
+  const loading = document.getElementById("instant-record-loading");
+  if (loading) loading.textContent = "The app could not start. Reload to try again. " + (event.message || "");
+});
 const waiting = new Map();
 let nextId = 1;
 let historyFill = null;

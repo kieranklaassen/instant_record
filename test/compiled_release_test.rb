@@ -88,4 +88,28 @@ class CompiledReleaseTest < Minitest::Test
       assert_equal "Rails", app.get("https://browser.test/billing/invoices", "HTTP_ACCEPT" => "text/html").body
     end
   end
+
+  def test_precompressed_copies_are_served_to_browsers_that_accept_them
+    Dir.mktmpdir do |dir|
+      root = Pathname(dir)
+      { "app-a.wasm" => "raw", "app-a.wasm.br" => "brotli", "app-a.wasm.gz" => "gzip", "index.html" => "page", "index.html.gz" => "zpage" }
+        .each { |name, body| root.join(name).write(body) }
+      app = Rack::MockRequest.new(InstantRecord::CompiledSite.new(->(_env) { [200, {}, ["Rails"]] },
+        host: "browser.test", root: dir, sync_path: "/instant_record"))
+      get = ->(accept, extra = {}) { app.get("https://browser.test/app-a.wasm", { "HTTP_ACCEPT_ENCODING" => accept }.merge(extra)) }
+
+      best = get.call("gzip, deflate, br")
+      assert_equal ["brotli", "br", "application/wasm", "accept-encoding"],
+        [best.body, best["content-encoding"], best["content-type"], best["vary"]]
+      assert_includes best["cache-control"], "immutable"
+      assert_equal "gzip", get.call("gzip, br;q=0").body
+      [get.call(nil), get.call("identity"), get.call("br", "HTTP_RANGE" => "bytes=0-1")].each do |plain|
+        assert_nil plain["content-encoding"]
+        assert_includes %w[raw ra], plain.body
+      end
+      page = app.get("https://browser.test/items", "HTTP_ACCEPT" => "text/html", "HTTP_ACCEPT_ENCODING" => "br, gzip")
+      assert_equal ["zpage", "gzip", "text/html", "no-cache"],
+        [page.body, page["content-encoding"], page["content-type"], page["cache-control"]]
+    end
+  end
 end

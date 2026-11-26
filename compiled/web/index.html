@@ -15,6 +15,11 @@
     </script>
   </head>
   <body>
+    <p id="instant-record-loading" role="status">Loading…</p>
+    <style>
+      #instant-record-loading { font: 16px/1.5 system-ui, sans-serif; color: GrayText; text-align: center; margin: 30vh 16px 0; animation: instant-record-loading 0s .4s both; }
+      @keyframes instant-record-loading { from { visibility: hidden; } to { visibility: visible; } }
+    </style>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>
