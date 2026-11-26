@@ -16,6 +16,32 @@ module InstantRecord
     # whatever the write did is rolled back with it.
     NotPermitted = Class.new(StandardError)
 
+    # An update that found no row to change, as when a concurrent destroy
+    # removed it. Active Record saves it without a complaint, and logging it
+    # would bring the record back. Raised inside the transaction, as above.
+    RowGone = Class.new(StandardError)
+
+    # A replayed sync_action's frame, where such an update is the action's
+    # record not being found.
+    class ActionFrame < SyncActions::ServerFrame
+      def finalize_update!(record)
+        unless MutationApplier.row_updated?(record)
+          model = record.class
+          raise ActiveRecord::RecordNotFound.new(
+            "Couldn't find #{model.name} with '#{model.primary_key}'=#{record.id.inspect}", model.name, model.primary_key, record.id
+          )
+        end
+
+        super
+      end
+    end
+
+    # The flag Active Record decides its commit callbacks by: it stands until
+    # the transaction the record was saved in ends.
+    def self.row_updated?(record)
+      record.send(:_trigger_update_callback)
+    end
+
     # Columns that carry bookkeeping/timestamps rather than user-edited fields.
     NON_DATA_COLUMNS = %w[id server_version sync_state created_at updated_at].freeze
 
@@ -70,6 +96,8 @@ module InstantRecord
         InstantRecord.applying_client_mutation { perform(model) }
       end
       record_result(**result)
+    rescue RowGone
+      record_result(status: "rejected", reason: "record not found")
     rescue NotPermitted
       record_result(status: "rejected", reason: "not permitted", server_attributes: server_attributes_for(model))
     rescue ActiveRecord::RecordInvalid => e
@@ -116,7 +144,7 @@ module InstantRecord
       end
 
       SyncActions.install_active_job_guard!
-      frame = SyncActions::ServerFrame.new(
+      frame = ActionFrame.new(
         mutation_id: @mutation_id.to_s,
         identity: @identity,
         scope: @scope,
@@ -335,7 +363,7 @@ module InstantRecord
       record.assign_attributes(safe_changes)
       record.server_version += 1
       record.sync_state = "synced"
-      record.save!
+      save_update!(record)
       # Again after the write: a change of owner or audience must leave the
       # record somewhere the sender may still write.
       permit!(model)
@@ -383,7 +411,7 @@ module InstantRecord
       record.updated_at = [record.updated_at, applied_time].compact.max if record.respond_to?(:updated_at=)
       record.server_version += 1
       record.sync_state = "synced"
-      record.save!
+      save_update!(record)
       permit!(model)
       log_change(record, "update", hlc: applied_hlc)
 
@@ -394,6 +422,15 @@ module InstantRecord
         hlc: applied_hlc,
         server_attributes: InstantRecord.wire_attributes(record.attributes)
       }
+    end
+
+    # In a transaction of the model's own, which the save joins: a model in
+    # another database would otherwise end its transaction with the save.
+    def save_update!(record)
+      record.transaction do
+        record.save!
+        raise RowGone unless self.class.row_updated?(record)
+      end
     end
 
     # Inspect Change rows since `base_version` to determine the base snapshot
