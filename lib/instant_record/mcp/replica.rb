@@ -333,73 +333,48 @@ module InstantRecord
           when nil
             clauses << "#{col_sql} IS NULL"
           when Array
-            if condition.empty?
-              clauses << "1 = 0"
-            else
-              placeholders = condition.map { "?" }.join(", ")
-              clauses << "#{col_sql} IN (#{placeholders})"
-              condition.each { |item| binds << bind_value(item) }
-            end
+            clauses << in_clause(col_sql, condition, binds)
           when Hash
-            condition.each do |raw_op, value|
-              op = raw_op.to_s
-              unless OPERATORS.include?(op)
-                raise ArgumentError, "Unsupported filter operator #{op.inspect} for column #{col}. Allowed: #{OPERATORS.join(', ')}"
-              end
-
-              case op
-              when "eq"
-                if value.nil?
-                  clauses << "#{col_sql} IS NULL"
-                else
-                  clauses << "#{col_sql} = ?"
-                  binds << bind_value(value)
-                end
-              when "ne"
-                if value.nil?
-                  clauses << "#{col_sql} IS NOT NULL"
-                else
-                  clauses << "#{col_sql} != ?"
-                  binds << bind_value(value)
-                end
-              when "gt"
-                clauses << "#{col_sql} > ?"
-                binds << bind_value(value)
-              when "gte"
-                clauses << "#{col_sql} >= ?"
-                binds << bind_value(value)
-              when "lt"
-                clauses << "#{col_sql} < ?"
-                binds << bind_value(value)
-              when "lte"
-                clauses << "#{col_sql} <= ?"
-                binds << bind_value(value)
-              when "like"
-                clauses << "CAST(#{col_sql} AS TEXT) LIKE ? ESCAPE '\\'"
-                binds << "%#{escape_like(value.to_s.downcase)}%"
-              when "in"
-                list = Array(value)
-                if list.empty?
-                  clauses << "1 = 0"
-                else
-                  clauses << "#{col_sql} IN (#{list.map { '?' }.join(', ')})"
-                  list.each { |item| binds << bind_value(item) }
-                end
-              when "is_null"
-                clauses << (value ? "#{col_sql} IS NULL" : "#{col_sql} IS NOT NULL")
-              when "not_null"
-                clauses << (value ? "#{col_sql} IS NOT NULL" : "#{col_sql} IS NULL")
-              end
-            end
+            condition.each { |op, value| clauses << operator_clause(col, col_sql, op.to_s, value, binds) }
           else
-            clauses << "#{col_sql} = ?"
-            binds << bind_value(condition)
+            clauses << bound("#{col_sql} = ?", condition, binds)
           end
         end
 
         return ["", []] if clauses.empty?
 
         [" WHERE #{clauses.join(' AND ')}", binds]
+      end
+
+      def operator_clause(col, col_sql, op, value, binds)
+        case op
+        when "eq" then value.nil? ? "#{col_sql} IS NULL" : bound("#{col_sql} = ?", value, binds)
+        when "ne" then value.nil? ? "#{col_sql} IS NOT NULL" : bound("#{col_sql} != ?", value, binds)
+        when "gt" then bound("#{col_sql} > ?", value, binds)
+        when "gte" then bound("#{col_sql} >= ?", value, binds)
+        when "lt" then bound("#{col_sql} < ?", value, binds)
+        when "lte" then bound("#{col_sql} <= ?", value, binds)
+        when "like"
+          bound("CAST(#{col_sql} AS TEXT) LIKE ? ESCAPE '\\'", "%#{escape_like(value.to_s.downcase)}%", binds)
+        when "in" then in_clause(col_sql, Array(value), binds)
+        when "is_null" then value ? "#{col_sql} IS NULL" : "#{col_sql} IS NOT NULL"
+        when "not_null" then value ? "#{col_sql} IS NOT NULL" : "#{col_sql} IS NULL"
+        else
+          raise ArgumentError, "Unsupported filter operator #{op.inspect} for column #{col}. Allowed: #{OPERATORS.join(', ')}"
+        end
+      end
+
+      def in_clause(col_sql, list, binds)
+        return "1 = 0" if list.empty?
+
+        placeholders = list.map { "?" }.join(", ")
+        list.each { |item| binds << bind_value(item) }
+        "#{col_sql} IN (#{placeholders})"
+      end
+
+      def bound(sql, value, binds)
+        binds << bind_value(value)
+        sql
       end
 
       def build_order(order, valid_cols)
