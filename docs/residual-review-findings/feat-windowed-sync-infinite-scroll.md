@@ -2,6 +2,8 @@
 
 Branch `feat/windowed-sync-infinite-scroll`. Findings from the ce-code-review and ce-simplify-code passes that were **not** applied, with the reason each was left. Actionable P0/P1/P2 findings and the security P0 were fixed in commit `00643bd`; this file is the durable record for the remainder (no external tracker is configured for this repo).
 
+No longer true of the code: pending rows now take no slot in the eviction window (they are left out before ranking), and the two service-worker items below (double VM, cold-boot detection) describe a runtime that has been replaced. The rest stands.
+
 ## Deferred by design
 
 - **Deep-jump contiguity mark poisoning (P2, anchor 50, advisory).** `InstantRecord.fetch_history`'s local-first short-circuit tracks one per-partition low-water mark. A caller that fetches a page far below the current frontier (skipping an unfetched gap) can extend the mark across that gap, so a later page inside the gap is served locally with holes. The Slack demo paginates strictly sequentially and never hits this; it only affects a gem consumer calling `fetch_history` with arbitrary non-adjacent `before` cursors. Fixing it properly means tracking multiple contiguous regions (or fetched ranges) rather than a single oldest tuple — a larger design change than this branch warrants. `client.rb` `extend_history_mark` / `page_local?`.
