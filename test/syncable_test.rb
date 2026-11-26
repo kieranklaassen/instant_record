@@ -105,6 +105,44 @@ class SyncableTest < Minitest::Test
     assert_equal "v2", change.attributes_payload["title"]
   end
 
+  # An update that waited on another connection's destroy finds no row.
+  def test_a_server_update_of_a_removed_row_logs_nothing_and_leaves_no_clock
+    todo = on_server { @model.create!(title: "v1") }
+    on_server { @model.find(todo.id).destroy! }
+    metadata = InstantRecord::SyncMetadata.order(:key).pluck(:key, :value)
+
+    assert on_server { todo.update!(title: "v2") }
+
+    assert_equal %w[create destroy], InstantRecord::Change.order(:id).pluck(:operation)
+    assert_nil InstantRecord::HLC.record_hlc("Todo", todo.id)
+    assert_equal metadata, InstantRecord::SyncMetadata.order(:key).pluck(:key, :value)
+  end
+
+  def test_a_server_update_of_a_row_created_and_removed_in_one_transaction_logs_nothing
+    on_server do
+      @model.transaction do
+        todo = @model.create!(title: "v1")
+        @model.find(todo.id).destroy!
+        todo.update!(title: "v2")
+      end
+    end
+
+    assert_equal %w[create destroy], InstantRecord::Change.order(:id).pluck(:operation)
+  end
+
+  def test_a_server_update_after_one_that_found_no_row_is_still_logged
+    todo = on_server { @model.create!(title: "v1") }
+    on_server { @model.find(todo.id).destroy! }
+    on_server { todo.update!(title: "v2") }
+    on_server { @model.create!(id: todo.id, title: "again") }
+
+    on_server { todo.update!(title: "v3") }
+
+    assert_equal %w[create destroy create update], InstantRecord::Change.order(:id).pluck(:operation)
+    assert_equal "v3", InstantRecord::Change.order(:id).last.attributes_payload["title"]
+    assert_equal InstantRecord::Change.order(:id).last.hlc, InstantRecord::HLC.record_hlc("Todo", todo.id)
+  end
+
   def test_server_destroy_logs_destroy_change
     todo = on_server { @model.create!(title: "doomed") }
     InstantRecord::Change.delete_all
