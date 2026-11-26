@@ -1,5 +1,6 @@
 require "json"
 require "instant_record/outbox_upcaster"
+require "instant_record/payload_batch"
 
 module InstantRecord
   # Applies one client mutation authoritatively: record write, version bump,
@@ -44,6 +45,11 @@ module InstantRecord
 
     # Columns that carry bookkeeping/timestamps rather than user-edited fields.
     NON_DATA_COLUMNS = %w[id server_version sync_state created_at updated_at].freeze
+
+    # Server-side SyncMetadata: for one clock a record was logged under by a
+    # merge, the clock its sender wrote at, the columns nobody else had touched,
+    # and the server clock of the merge.
+    MERGE_PREFIX = "hlc_mrg:".freeze
 
     # `identity` is the sender (SyncScope.identity). `partition` is the active
     # multi-tenant partition (SyncScope.partition), required by models that
@@ -355,7 +361,8 @@ module InstantRecord
 
       # No concurrent version bump (or legacy caller with no base_version /
       # metadata-only touch): compare clamped HLCs.
-      if record_hlc.present? && HLC.compare(incoming_hlc, record_hlc) < 0
+      known_hlc = base_version && base_version >= record.server_version ? record_hlc : merge_clock(record, record_hlc, incoming_hlc)
+      if known_hlc.present? && HLC.compare(incoming_hlc, known_hlc) < 0
         return skipped_result(record, record_hlc)
       end
 
@@ -375,21 +382,27 @@ module InstantRecord
     def perform_three_way_merge(model, record, user_columns, base_version, incoming_hlc, record_hlc, server_now)
       base_attrs, server_touched = inspect_changes_since(record, base_version, record_hlc)
       incoming_node = HLC.node(incoming_hlc)
+      own_touched = (touched_since_own_create(record, incoming_node, record_hlc) if base_version.zero?) || server_touched
+      notes = merge_notes(record, server_touched.values_at(*user_columns) + own_touched.values_at(*user_columns))
 
       winning = {}
+      uncontested = []
       user_columns.each do |col|
         col_info = server_touched[col]
+        own_info = own_touched[col]
 
         # Not a conflict when the server did not touch this column since base_version
         # (a disjoint concurrent edit), or when only this client node did and this write
-        # is strictly newer: its sequential offline mutations share the same base_version
-        # until the first one lands.
-        if col_info.nil? || same_node_sequential?(incoming_node, incoming_hlc, col_info)
+        # is strictly newer: the offline mutations it queued share one base_version.
+        if own_info.nil? || same_node_sequential?(incoming_node, incoming_hlc, col, own_info, notes)
           winning[col] = @changes[col]
+          uncontested << col
           next
         end
 
-        incoming_wins = col_info[:hlc].nil? || HLC.compare(incoming_hlc, col_info[:hlc]) >= 0
+        # What a merge took is dated by the merge, whichever clock it was logged under.
+        col_hlc = notes.dig(col_info[:hlc], "merged") || col_info[:hlc]
+        incoming_wins = col_hlc.nil? || HLC.compare(incoming_hlc, col_hlc) >= 0
 
         case model.instant_record_merge_policy(col)
         when :server_wins
@@ -404,7 +417,12 @@ module InstantRecord
 
       return skipped_result(record, record_hlc) if winning.empty?
 
-      applied_hlc = HLC.advance_past(record_hlc, incoming_hlc, now: server_now, node: HLC::SERVER_NODE)
+      merged_hlc = HLC.advance_past(record_hlc, incoming_hlc, now: server_now, node: HLC::SERVER_NODE)
+      # The next edit of a client's own run keeps the client's clock, as the first
+      # did: a server clock would outrank the edits still queued behind it.
+      own_run = uncontested == user_columns && client_node?(incoming_node) &&
+        HLC.node(record_hlc) == incoming_node && HLC.compare(incoming_hlc, record_hlc) > 0
+      applied_hlc = own_run ? incoming_hlc : merged_hlc
       applied_time = HLC.physical_time(applied_hlc) || server_now
 
       record.assign_attributes(winning)
@@ -414,6 +432,7 @@ module InstantRecord
       save_update!(record)
       permit!(model)
       log_change(record, "update", hlc: applied_hlc)
+      note_merge(record, applied_hlc, "from" => incoming_hlc, "merged" => merged_hlc, "columns" => uncontested)
 
       {
         status: "applied",
@@ -435,7 +454,7 @@ module InstantRecord
 
     # Inspect Change rows since `base_version` to determine the base snapshot
     # and every column modified on the server since that version, along with
-    # the HLC and contributing writer nodes for each modified column.
+    # the HLC of its last change and those of all of them, for each modified column.
     def inspect_changes_since(record, base_version, record_hlc)
       record_changes = Change.where(record_type: record.class.name, record_id: record.id)
       base_change = record_changes.where(version: base_version).order(:id).last if base_version.positive?
@@ -448,6 +467,23 @@ module InstantRecord
         .order(:version, :id)
         .to_a
 
+      [base_attrs, columns_touched(record, base_attrs, changes_since, record_hlc)]
+    end
+
+    # What was touched since the client itself created the record, whose queued
+    # edits have no base version. Nil when the record is not its creation.
+    def touched_since_own_create(record, node, record_hlc)
+      return unless client_node?(node)
+
+      logged = Change.where(record_type: record.class.name, record_id: record.id)
+      create = logged.where(operation: "create").order(:id).last
+      return unless create && HLC.node(create.hlc) == node
+
+      changes = logged.after(create.id).where.not(operation: "destroy").to_a
+      columns_touched(record, change_attributes(create), changes, record_hlc)
+    end
+
+    def columns_touched(record, base_attrs, changes_since, record_hlc)
       hlc_map = HLC.change_hlcs(changes_since.map(&:id))
       server_touched = {}
       prev_attrs = base_attrs
@@ -455,15 +491,15 @@ module InstantRecord
       changes_since.each do |change|
         curr_attrs = change_attributes(change)
         c_hlc = hlc_map[change.id] || HLC.from_time(curr_attrs["updated_at"] || change.created_at, node: HLC::SERVER_NODE)
-        touch_changed_columns(server_touched, prev_attrs, curr_attrs, hlc: c_hlc, node: HLC.node(c_hlc))
+        touch_changed_columns(server_touched, prev_attrs, curr_attrs, hlc: c_hlc)
         prev_attrs = curr_attrs
       end
 
       # Catch any unlogged direct server column update (e.g. update_columns).
       live_attrs = InstantRecord.wire_attributes(record.attributes)
-      touch_changed_columns(server_touched, prev_attrs, live_attrs, hlc: record_hlc, node: HLC::SERVER_NODE)
+      touch_changed_columns(server_touched, prev_attrs, live_attrs, hlc: record_hlc, unlogged: true)
 
-      [base_attrs, server_touched]
+      server_touched
     end
 
     # Without a base to compare with, any column may have changed, and the
@@ -473,29 +509,65 @@ module InstantRecord
       # in columns that have been read.
       record.attributes
 
-      Hash.new({ hlc: record_hlc, nodes: [HLC.node(record_hlc)].compact })
+      Hash.new({ hlc: record_hlc, clocks: [record_hlc].compact })
     end
 
     def change_attributes(change)
       change.attributes_payload.is_a?(Hash) ? change.attributes_payload : {}
     end
 
-    def touch_changed_columns(server_touched, prev_attrs, curr_attrs, hlc:, node:)
+    def touch_changed_columns(server_touched, prev_attrs, curr_attrs, hlc:, unlogged: false)
       ((curr_attrs.keys | prev_attrs.keys) - NON_DATA_COLUMNS).each do |col|
         next if curr_attrs[col] == prev_attrs[col]
 
-        entry = (server_touched[col] ||= { nodes: [] })
+        entry = (server_touched[col] ||= { clocks: [] })
         entry[:hlc] = hlc
-        entry[:nodes] << node if node && !entry[:nodes].include?(node)
+        entry[:clocks] << hlc if hlc
+        entry[:unlogged] = true if unlogged
       end
     end
 
-    def same_node_sequential?(incoming_node, incoming_hlc, col_info)
-      return false if incoming_node.nil? || incoming_node == HLC::SERVER_NODE || incoming_node == HLC::LEGACY_NODE
+    # The clocks that touched the column, each as its sender wrote it, are all
+    # this client's and the last is older than the incoming one.
+    def same_node_sequential?(incoming_node, incoming_hlc, col, col_info, notes)
+      return false if !client_node?(incoming_node) || col_info[:unlogged] || col_info[:hlc].nil?
 
-      col_info[:nodes] == [incoming_node] &&
-        col_info[:hlc].present? &&
-        HLC.compare(incoming_hlc, col_info[:hlc]) > 0
+      clocks = col_info[:clocks].map { |clock| sender_clock(clock, col, notes) }
+      clocks.all? { |clock| HLC.node(clock) == incoming_node } && HLC.compare(incoming_hlc, clocks.last) > 0
+    end
+
+    # A merge vouches only for the columns it took uncontested. Any other its
+    # change shows (a contested one, one changed by hand) is the server's: nil.
+    def sender_clock(clock, col, notes)
+      note = notes[clock]
+      return clock if note.nil?
+
+      note["from"] if note["columns"].include?(col)
+    end
+
+    def client_node?(node)
+      !node.nil? && node != HLC::SERVER_NODE && node != HLC::LEGACY_NODE
+    end
+
+    # Notes of earlier merges, by the clock each was logged under.
+    def merge_notes(record, touched)
+      clocks_by_key = touched.compact.flat_map { |entry| entry[:clocks] }.index_by { |clock| merge_key(record, clock) }
+      PayloadBatch.stamps(clocks_by_key.keys).to_h { |key, value| [clocks_by_key[key], JSON.parse(value)] }
+    end
+
+    # The record's clock as anyone but the client whose run it is may date it.
+    def merge_clock(record, record_hlc, incoming_hlc)
+      return record_hlc if HLC.node(record_hlc) == HLC.node(incoming_hlc)
+
+      merge_notes(record, [{ clocks: [record_hlc].compact }]).dig(record_hlc, "merged") || record_hlc
+    end
+
+    def note_merge(record, hlc, note)
+      SyncMetadata.set(merge_key(record, hlc), JSON.generate(note)) if note["columns"].any?
+    end
+
+    def merge_key(record, hlc)
+      "#{MERGE_PREFIX}#{record.class.name}:#{record.id}:#{hlc}"
     end
 
     # 3-way collection union for `sync_merge :col, :union`:
