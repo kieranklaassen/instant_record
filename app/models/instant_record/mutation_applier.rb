@@ -345,48 +345,31 @@ module InstantRecord
     end
 
     def perform_three_way_merge(model, record, user_columns, base_version, incoming_hlc, record_hlc, server_now)
-      base_attrs, server_touched, has_base = inspect_changes_since(record, base_version, record_hlc)
-      live_attrs = InstantRecord.wire_attributes(record.attributes)
+      base_attrs, server_touched = inspect_changes_since(record, base_version, record_hlc)
       incoming_node = HLC.node(incoming_hlc)
 
       winning = {}
       user_columns.each do |col|
-        col_info =
-          if has_base
-            server_touched[col]
-          else
-            { value: live_attrs[col], hlc: record_hlc, nodes: [HLC.node(record_hlc)].compact }
-          end
+        col_info = server_touched[col]
 
-        if col_info.nil?
-          # Disjoint concurrent edit: server did not touch this column since base_version.
+        # Not a conflict when the server did not touch this column since base_version
+        # (a disjoint concurrent edit), or when only this client node did and this write
+        # is strictly newer: its sequential offline mutations share the same base_version
+        # until the first one lands.
+        if col_info.nil? || same_node_sequential?(incoming_node, incoming_hlc, col_info)
           winning[col] = @changes[col]
           next
         end
 
-        # Same client node's sequential offline mutations share the same base_version
-        # until the first one lands; treat strictly newer writes from the same client
-        # node as sequential rather than a concurrent conflict.
-        if same_node_sequential?(incoming_node, incoming_hlc, col_info)
-          winning[col] = @changes[col]
-          next
-        end
+        incoming_wins = col_info[:hlc].nil? || HLC.compare(incoming_hlc, col_info[:hlc]) >= 0
 
-        policy = model.instant_record_merge_policy(col)
-        case policy
+        case model.instant_record_merge_policy(col)
         when :server_wins
           # Server's already-committed value wins on same-column collision.
         when :lww
-          if col_info[:hlc].nil? || HLC.compare(incoming_hlc, col_info[:hlc]) >= 0
-            winning[col] = @changes[col]
-          end
+          winning[col] = @changes[col] if incoming_wins
         when :union
-          merged_val = merge_union(
-            has_base ? base_attrs[col] : nil,
-            record.public_send(col),
-            @changes[col],
-            incoming_wins: col_info[:hlc].nil? || HLC.compare(incoming_hlc, col_info[:hlc]) >= 0
-          )
+          merged_val = merge_union(base_attrs[col], record.public_send(col), @changes[col], incoming_wins: incoming_wins)
           winning[col] = merged_val if merged_val != record.public_send(col)
         end
       end
@@ -417,19 +400,12 @@ module InstantRecord
     # and every column modified on the server since that version, along with
     # the HLC and contributing writer nodes for each modified column.
     def inspect_changes_since(record, base_version, record_hlc)
-      base_change =
-        if base_version.positive?
-          Change
-            .where(record_type: record.class.name, record_id: record.id, version: base_version)
-            .order(:id)
-            .last
-        end
+      record_changes = Change.where(record_type: record.class.name, record_id: record.id)
+      base_change = record_changes.where(version: base_version).order(:id).last if base_version.positive?
+      return [{}, every_column_touched(record, record_hlc)] unless base_change
 
-      return [{}, {}, false] unless base_change
-
-      base_attrs = base_change.attributes_payload.is_a?(Hash) ? base_change.attributes_payload : {}
-      changes_since = Change
-        .where(record_type: record.class.name, record_id: record.id)
+      base_attrs = change_attributes(base_change)
+      changes_since = record_changes
         .where("version > ?", base_version)
         .where.not(operation: "destroy")
         .order(:version, :id)
@@ -440,41 +416,47 @@ module InstantRecord
       prev_attrs = base_attrs
 
       changes_since.each do |change|
-        curr_attrs = change.attributes_payload.is_a?(Hash) ? change.attributes_payload : {}
+        curr_attrs = change_attributes(change)
         c_hlc = hlc_map[change.id] || HLC.from_time(curr_attrs["updated_at"] || change.created_at, node: HLC::SERVER_NODE)
-        c_node = HLC.node(c_hlc)
-
-        ((curr_attrs.keys | prev_attrs.keys) - NON_DATA_COLUMNS).each do |col|
-          next if curr_attrs[col] == prev_attrs[col]
-
-          entry = (server_touched[col] ||= { nodes: [] })
-          entry[:value] = curr_attrs[col]
-          entry[:hlc] = c_hlc
-          entry[:nodes] << c_node if c_node && !entry[:nodes].include?(c_node)
-        end
-
+        touch_changed_columns(server_touched, prev_attrs, curr_attrs, hlc: c_hlc, node: HLC.node(c_hlc))
         prev_attrs = curr_attrs
       end
 
       # Catch any unlogged direct server column update (e.g. update_columns).
       live_attrs = InstantRecord.wire_attributes(record.attributes)
-      ((live_attrs.keys | prev_attrs.keys) - NON_DATA_COLUMNS).each do |col|
-        next if live_attrs[col] == prev_attrs[col]
+      touch_changed_columns(server_touched, prev_attrs, live_attrs, hlc: record_hlc, node: HLC::SERVER_NODE)
+
+      [base_attrs, server_touched]
+    end
+
+    # Without a base to compare with, any column may have changed, and the
+    # record's own clock is the only one known: the same answer for any column.
+    def every_column_touched(record, record_hlc)
+      # Read for its effect on the save: Rails looks for in-place changes only
+      # in columns that have been read.
+      record.attributes
+
+      Hash.new({ hlc: record_hlc, nodes: [HLC.node(record_hlc)].compact })
+    end
+
+    def change_attributes(change)
+      change.attributes_payload.is_a?(Hash) ? change.attributes_payload : {}
+    end
+
+    def touch_changed_columns(server_touched, prev_attrs, curr_attrs, hlc:, node:)
+      ((curr_attrs.keys | prev_attrs.keys) - NON_DATA_COLUMNS).each do |col|
+        next if curr_attrs[col] == prev_attrs[col]
 
         entry = (server_touched[col] ||= { nodes: [] })
-        entry[:value] = live_attrs[col]
-        entry[:hlc] = record_hlc
-        entry[:nodes] << HLC::SERVER_NODE unless entry[:nodes].include?(HLC::SERVER_NODE)
+        entry[:hlc] = hlc
+        entry[:nodes] << node if node && !entry[:nodes].include?(node)
       end
-
-      [base_attrs, server_touched, true]
     end
 
     def same_node_sequential?(incoming_node, incoming_hlc, col_info)
       return false if incoming_node.nil? || incoming_node == HLC::SERVER_NODE || incoming_node == HLC::LEGACY_NODE
-      return false if col_info[:nodes].empty?
 
-      col_info[:nodes].all? { |n| n == incoming_node } &&
+      col_info[:nodes] == [incoming_node] &&
         col_info[:hlc].present? &&
         HLC.compare(incoming_hlc, col_info[:hlc]) > 0
     end
@@ -486,7 +468,7 @@ module InstantRecord
     #   - Comma-separated strings (e.g. "bug, urgent")
     def merge_union(base_val, server_val, client_val, incoming_wins:)
       if server_val.is_a?(Array) || client_val.is_a?(Array)
-        return merge_array_union(base_val.is_a?(Array) ? base_val : nil, Array(server_val), Array(client_val))
+        return merge_array_union(base_val.is_a?(Array) ? base_val : [], Array(server_val), Array(client_val))
       end
 
       if server_val.is_a?(Hash) || client_val.is_a?(Hash)
@@ -498,34 +480,30 @@ module InstantRecord
         )
       end
 
-      if json_array_string?(server_val) || json_array_string?(client_val)
-        s_arr = parse_json_array(server_val)
-        c_arr = parse_json_array(client_val)
-        b_arr = parse_json_array(base_val, fallback: nil)
+      if json_string?(server_val, Array) || json_string?(client_val, Array)
+        s_arr = parse_json(server_val, Array) || []
+        c_arr = parse_json(client_val, Array) || []
+        b_arr = parse_json(base_val, Array) || []
         return JSON.generate(merge_array_union(b_arr, s_arr, c_arr))
       end
 
-      if json_object_string?(server_val) || json_object_string?(client_val)
-        s_hash = parse_json_object(server_val)
-        c_hash = parse_json_object(client_val)
-        b_hash = parse_json_object(base_val, fallback: nil)
+      if json_string?(server_val, Hash) || json_string?(client_val, Hash)
+        s_hash = parse_json(server_val, Hash) || {}
+        c_hash = parse_json(client_val, Hash) || {}
+        b_hash = parse_json(base_val, Hash)
         return JSON.generate(merge_hash_union(b_hash, s_hash, c_hash, incoming_wins: incoming_wins))
       end
 
       separator = server_val.to_s.include?(", ") || client_val.to_s.include?(", ") ? ", " : ","
-      b_list = base_val.nil? ? nil : split_csv(base_val)
-      merged = merge_array_union(b_list, split_csv(server_val), split_csv(client_val))
+      merged = merge_array_union(split_csv(base_val), split_csv(server_val), split_csv(client_val))
       merged.join(separator)
     end
 
+    # An unknown base is an empty one: nothing can have been removed from it.
     def merge_array_union(base_arr, server_arr, client_arr)
-      if base_arr.nil?
-        (server_arr | client_arr)
-      else
-        client_added = client_arr - base_arr
-        client_removed = base_arr - client_arr
-        ((server_arr - client_removed) | client_added)
-      end
+      client_added = client_arr - base_arr
+      client_removed = base_arr - client_arr
+      (server_arr - client_removed) | client_added
     end
 
     def merge_hash_union(base_hash, server_hash, client_hash, incoming_wins:)
@@ -549,36 +527,21 @@ module InstantRecord
       merged
     end
 
-    def json_array_string?(value)
-      value.is_a?(String) && value.lstrip.start_with?("[") && JSON.parse(value).is_a?(Array)
-    rescue JSON::ParserError
-      false
+    # A string that spells out a JSON Array or Hash.
+    def json_string?(value, type)
+      opening = type == Array ? "[" : "{"
+      value.is_a?(String) && value.lstrip.start_with?(opening) && !parse_json(value, type).nil?
     end
 
-    def parse_json_array(value, fallback: [])
-      return fallback if value.nil? || value == ""
-      return value if value.is_a?(Array)
+    # The Array or Hash that `value` is or spells out in JSON, else nil.
+    def parse_json(value, type)
+      return nil if value.nil? || value == ""
+      return value if value.is_a?(type)
 
       parsed = JSON.parse(value.to_s)
-      parsed.is_a?(Array) ? parsed : fallback
+      parsed if parsed.is_a?(type)
     rescue JSON::ParserError
-      fallback
-    end
-
-    def json_object_string?(value)
-      value.is_a?(String) && value.lstrip.start_with?("{") && JSON.parse(value).is_a?(Hash)
-    rescue JSON::ParserError
-      false
-    end
-
-    def parse_json_object(value, fallback: {})
-      return fallback if value.nil? || value == ""
-      return value if value.is_a?(Hash)
-
-      parsed = JSON.parse(value.to_s)
-      parsed.is_a?(Hash) ? parsed : fallback
-    rescue JSON::ParserError
-      fallback
+      nil
     end
 
     def split_csv(value)
