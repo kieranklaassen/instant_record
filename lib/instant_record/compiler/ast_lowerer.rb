@@ -191,61 +191,31 @@ module InstantRecord
 
       def collect_edits(source, root)
         edits = []
-        visit(source, root, edits, parent: nil, statement_context: false, value_preserving_last: false)
+        visit(source, root, edits)
         edits
       end
 
-      def visit(source, node, edits, parent:, statement_context:, value_preserving_last:)
-        return if node.nil?
-
-        case node
-        when Prism::StatementsNode
-          visit_statements(source, node, edits, parent: parent)
-        when Prism::CallNode
-          return if handle_call(source, node, edits, statement_context: statement_context, value_preserving_last: value_preserving_last)
-
-          visit_children(source, node, edits)
-        when Prism::IfNode
-          return if handle_if(source, node, edits, statement_context: statement_context, value_preserving_last: value_preserving_last)
-
-          visit_children(source, node, edits)
-        when Prism::UnlessNode
-          return if handle_unless(source, node, edits, statement_context: statement_context, value_preserving_last: value_preserving_last)
-
-          visit_children(source, node, edits)
-        when Prism::AndNode
-          return if handle_and(source, node, edits)
-
-          visit_children(source, node, edits)
-        when Prism::OrNode
-          return if handle_or(source, node, edits)
-
-          visit_children(source, node, edits)
-        else
-          visit_children(source, node, edits)
+      # The walk does not go below an edit. A `removable` node may be dropped with its
+      # lines; any other leaves `nil`.
+      def visit(source, node, edits, removable: false)
+        if (edit = edit_for(source, node, removable: removable))
+          edits << edit
+          return
         end
-      end
 
-      def visit_statements(source, node, edits, parent:)
-        body = node.body
-        preserve_last = body.length > 1 && value_returning_owner?(parent)
-        body.each_with_index do |stmt, index|
-          is_last = index == body.length - 1
-          visit(
-            source,
-            stmt,
-            edits,
-            parent: node,
-            statement_context: true,
-            value_preserving_last: preserve_last && is_last
-          )
-        end
-      end
-
-      def visit_children(source, node, edits)
         node.compact_child_nodes.each do |child|
-          visit(source, child, edits, parent: node, statement_context: false, value_preserving_last: false)
+          if child.is_a?(Prism::StatementsNode)
+            visit_statements(source, child, edits, owner: node)
+          else
+            visit(source, child, edits)
+          end
         end
+      end
+
+      def visit_statements(source, node, edits, owner:)
+        body = node.body
+        returned = body.last if body.length > 1 && value_returning_owner?(owner)
+        body.each { |stmt| visit(source, stmt, edits, removable: !stmt.equal?(returned)) }
       end
 
       def value_returning_owner?(node)
@@ -255,188 +225,115 @@ module InstantRecord
           node.is_a?(Prism::ParenthesesNode)
       end
 
-      def handle_call(source, node, edits, statement_context:, value_preserving_last:)
+      def edit_for(source, node, removable:)
+        case node
+        when Prism::CallNode
+          call_edit(source, node, removable: removable)
+        when Prism::IfNode
+          if_edit(source, node, removable: removable)
+        when Prism::UnlessNode
+          value = browser_predicate_value(node.predicate)
+          branch_edit(source, node, taken: !value, otherwise: node.else_clause, removable: removable) unless value.nil?
+        when Prism::AndNode
+          short_circuit_edit(source, node, stops_at: false)
+        when Prism::OrNode
+          short_circuit_edit(source, node, stops_at: true)
+        end
+      end
+
+      def call_edit(source, node, removable:)
         if scoped_block_call?(node)
           if keep_block?(node.name)
-            edits << unwrap_block_edit(source, node, statement_context: statement_context, value_preserving_last: value_preserving_last)
+            unwrap_block_edit(source, node, removable: removable)
           else
-            edits << remove_node_edit(source, node, statement_context: statement_context, value_preserving_last: value_preserving_last)
+            remove_node_edit(source, node, removable: removable)
           end
-          return true
+        elsif @rewrite_syncable_include && syncable_include_call?(node)
+          replace_node_edit(node.arguments.arguments.first, "Syncable")
+        else
+          value = browser_predicate_value(node)
+          replace_node_edit(node, value.to_s) unless value.nil?
         end
-
-        if @rewrite_syncable_include && syncable_include_call?(node)
-          arg = node.arguments.arguments.first
-          edits << Edit.new(
-            start_offset: arg.location.start_offset,
-            end_offset: arg.location.end_offset,
-            replacement: "Syncable"
-          )
-          return true
-        end
-
-        if (folded = browser_predicate_value(node))
-          edits << Edit.new(
-            start_offset: node.location.start_offset,
-            end_offset: node.location.end_offset,
-            replacement: folded == :true ? "true" : "false"
-          )
-          return true
-        end
-
-        false
       end
 
-      def handle_and(source, node, edits)
-        lhs = browser_predicate_value(node.left)
-        return false unless lhs
+      def short_circuit_edit(source, node, stops_at:)
+        left = browser_predicate_value(node.left)
+        return if left.nil?
 
-        replacement =
-          if lhs == :false
-            "false"
-          else
-            lower_slice(source, node.right.location.start_offset, node.right.location.end_offset)
-          end
-        edits << Edit.new(
-          start_offset: node.location.start_offset,
-          end_offset: node.location.end_offset,
-          replacement: replacement
-        )
-        true
+        replace_node_edit(node, left == stops_at ? left.to_s : lower_node(source, node.right))
       end
 
-      def handle_or(source, node, edits)
-        lhs = browser_predicate_value(node.left)
-        return false unless lhs
+      def if_edit(source, node, removable:)
+        return elsif_edit(source, node) if node.if_keyword_loc&.slice == "elsif"
 
-        replacement =
-          if lhs == :true
-            "true"
-          else
-            lower_slice(source, node.right.location.start_offset, node.right.location.end_offset)
-          end
-        edits << Edit.new(
-          start_offset: node.location.start_offset,
-          end_offset: node.location.end_offset,
-          replacement: replacement
-        )
-        true
-      end
-
-      def handle_if(source, node, edits, statement_context:, value_preserving_last:)
-        # Handle `elsif` clauses differently: they sit inside an outer `if` whose
-        # predicate was NOT statically folded.
-        if node.if_keyword_loc&.slice == "elsif"
-          return handle_elsif(source, node, edits)
-        end
-
-        pred = browser_predicate_value(node.predicate)
-        return false unless pred
+        value = browser_predicate_value(node.predicate)
+        return if value.nil?
 
         # Ternary: `cond ? a : b`
         if node.if_keyword_loc.nil?
-          chosen = pred == :true ? node.statements : node.subsequent&.statements
-          replacement = chosen ? lower_slice(source, chosen.location.start_offset, chosen.location.end_offset) : "nil"
-          edits << Edit.new(
-            start_offset: node.location.start_offset,
-            end_offset: node.location.end_offset,
-            replacement: replacement
-          )
-          return true
+          chosen = value ? node.statements : node.subsequent&.statements
+          return replace_node_edit(node, chosen ? lower_node(source, chosen) : "nil")
         end
 
-        # Modifier `stmt if cond`
-        if node.end_keyword_loc.nil?
-          if pred == :true
-            body = node.statements
-            replacement = lower_slice(source, body.location.start_offset, body.location.end_offset)
-            edits << Edit.new(
-              start_offset: node.location.start_offset,
-              end_offset: node.location.end_offset,
-              replacement: replacement
-            )
-          else
-            edits << remove_node_edit(source, node, statement_context: statement_context, value_preserving_last: value_preserving_last)
-          end
-          return true
-        end
-
-        # Full `if ... [elsif ...] [else ...] end`
-        if pred == :true
-          edits << replace_branch_edit(
-            source,
-            node,
-            open_end_offset: node.then_keyword_loc ? node.then_keyword_loc.end_offset : node.predicate.location.end_offset,
-            close_start_offset: node.subsequent ? node.subsequent.location.start_offset : node.end_keyword_loc.start_offset,
-            statements: node.statements,
-            statement_context: statement_context,
-            value_preserving_last: value_preserving_last
-          )
-        elsif node.subsequent.is_a?(Prism::ElseNode)
-          else_node = node.subsequent
-          edits << replace_branch_edit(
-            source,
-            node,
-            open_end_offset: else_node.else_keyword_loc.end_offset,
-            close_start_offset: node.end_keyword_loc.start_offset,
-            statements: else_node.statements,
-            statement_context: statement_context,
-            value_preserving_last: value_preserving_last
-          )
-        elsif node.subsequent.is_a?(Prism::IfNode)
-          # `if false ... elsif cond2 ... end` -> lower `if cond2 ... end`
-          sub = node.subsequent
-          promoted = "if" + self.class.byteslice(source, sub.if_keyword_loc.end_offset, node.location.end_offset - sub.if_keyword_loc.end_offset)
-          lowered = lower(promoted)
-          edits << Edit.new(
-            start_offset: node.location.start_offset,
-            end_offset: node.location.end_offset,
-            replacement: lowered
-          )
-        else
-          edits << remove_node_edit(source, node, statement_context: statement_context, value_preserving_last: value_preserving_last)
-        end
-
-        true
+        branch_edit(source, node, taken: value, otherwise: node.subsequent, removable: removable)
       end
 
-      def handle_elsif(source, node, edits)
-        pred = browser_predicate_value(node.predicate)
-        return false unless pred
+      # Lowers an `if` or `unless` whose body is known to run (`taken`) or not.
+      # `otherwise` is its `else` or `elsif` clause.
+      def branch_edit(source, node, taken:, otherwise:, removable:)
+        # Modifier `stmt if cond` or `stmt unless cond`
+        if node.end_keyword_loc.nil?
+          return remove_node_edit(source, node, removable: removable) unless taken
 
-        # Locate the outer `end` that closes this `if`/`elsif` chain.
-        chain_end = find_elsif_chain_end(node)
-        if pred == :true
-          open_end = node.then_keyword_loc ? node.then_keyword_loc.end_offset : node.predicate.location.end_offset
-          close_start = node.subsequent ? node.subsequent.location.start_offset : chain_end
-          body_raw = self.class.byteslice(source, open_end, close_start - open_end)
-          lowered_body = lower(body_raw)
-          replacement = "else#{lowered_body}"
-          edits << Edit.new(
-            start_offset: node.location.start_offset,
-            end_offset: chain_end,
-            replacement: replacement
-          )
-        else
-          if node.subsequent
-            sub_raw = self.class.byteslice(source, node.subsequent.location.start_offset, chain_end - node.subsequent.location.start_offset)
-            # Lower subsequent recursively by wrapping in a dummy `if __x__\n...\nend` if needed
-            lowered_sub = lower_subsequent_clause(sub_raw)
-            edits << Edit.new(
-              start_offset: node.location.start_offset,
-              end_offset: chain_end,
-              replacement: lowered_sub
-            )
-          else
-            # Drop trailing dead `elsif` cleanly up to the closing `end` line
-            start_pos = self.class.only_whitespace_before_on_line?(source, node.location.start_offset) ?
-              self.class.line_start_of(source, node.location.start_offset) : node.location.start_offset
-            end_pos = self.class.line_start_of(source, chain_end)
-            edits << Edit.new(start_offset: start_pos, end_offset: end_pos, replacement: "")
-          end
+          return replace_node_edit(node, lower_node(source, node.statements))
         end
 
-        true
+        if taken
+          keep_branch_edit(
+            source, node, node.statements,
+            open_end: predicate_end(node),
+            close_start: (otherwise&.location || node.end_keyword_loc).start_offset,
+            removable: removable
+          )
+        elsif otherwise.is_a?(Prism::ElseNode)
+          keep_branch_edit(
+            source, node, otherwise.statements,
+            open_end: otherwise.else_keyword_loc.end_offset,
+            close_start: node.end_keyword_loc.start_offset,
+            removable: removable
+          )
+        elsif otherwise
+          # `if false ... elsif cond2 ... end` -> lower `if cond2 ... end`
+          replace_node_edit(node, lower("if" + slice(source, otherwise.if_keyword_loc.end_offset, node.location.end_offset)))
+        else
+          remove_node_edit(source, node, removable: removable)
+        end
+      end
+
+      # An `elsif` sits inside an outer `if` whose predicate was not folded, so its
+      # edit reaches to the `end` that closes the whole chain.
+      def elsif_edit(source, node)
+        value = browser_predicate_value(node.predicate)
+        return if value.nil?
+
+        start = node.location.start_offset
+        chain_end = find_elsif_chain_end(node)
+        if value
+          close_start = node.subsequent&.location&.start_offset || chain_end
+          replacement = "else#{lower_slice(source, predicate_end(node), close_start)}"
+          Edit.new(start_offset: start, end_offset: chain_end, replacement: replacement)
+        elsif node.subsequent
+          replacement = lower_subsequent_clause(slice(source, node.subsequent.location.start_offset, chain_end))
+          Edit.new(start_offset: start, end_offset: chain_end, replacement: replacement)
+        else
+          # Drop trailing dead `elsif` cleanly up to the closing `end` line
+          start = self.class.line_start_of(source, start) if self.class.only_whitespace_before_on_line?(source, start)
+          Edit.new(start_offset: start, end_offset: self.class.line_start_of(source, chain_end), replacement: "")
+        end
+      end
+
+      def predicate_end(node)
+        (node.then_keyword_loc || node.predicate.location).end_offset
       end
 
       def find_elsif_chain_end(node)
@@ -449,58 +346,11 @@ module InstantRecord
         node.location.end_offset
       end
 
+      # An `elsif` or `else` does not parse on its own.
       def lower_subsequent_clause(sub_raw)
         wrapper = "if __ir_keep__\n#{sub_raw}end\n"
         lowered = lower(wrapper)
         lowered.delete_prefix("if __ir_keep__\n").delete_suffix("end\n")
-      end
-
-      def handle_unless(source, node, edits, statement_context:, value_preserving_last:)
-        pred = browser_predicate_value(node.predicate)
-        return false unless pred
-
-        # Modifier `stmt unless cond`
-        if node.end_keyword_loc.nil?
-          if pred == :false
-            body = node.statements
-            replacement = lower_slice(source, body.location.start_offset, body.location.end_offset)
-            edits << Edit.new(
-              start_offset: node.location.start_offset,
-              end_offset: node.location.end_offset,
-              replacement: replacement
-            )
-          else
-            edits << remove_node_edit(source, node, statement_context: statement_context, value_preserving_last: value_preserving_last)
-          end
-          return true
-        end
-
-        # Block `unless cond ... [else ...] end`
-        if pred == :false
-          edits << replace_branch_edit(
-            source,
-            node,
-            open_end_offset: node.then_keyword_loc ? node.then_keyword_loc.end_offset : node.predicate.location.end_offset,
-            close_start_offset: node.else_clause ? node.else_clause.location.start_offset : node.end_keyword_loc.start_offset,
-            statements: node.statements,
-            statement_context: statement_context,
-            value_preserving_last: value_preserving_last
-          )
-        elsif node.else_clause
-          edits << replace_branch_edit(
-            source,
-            node,
-            open_end_offset: node.else_clause.else_keyword_loc.end_offset,
-            close_start_offset: node.end_keyword_loc.start_offset,
-            statements: node.else_clause.statements,
-            statement_context: statement_context,
-            value_preserving_last: value_preserving_last
-          )
-        else
-          edits << remove_node_edit(source, node, statement_context: statement_context, value_preserving_last: value_preserving_last)
-        end
-
-        true
       end
 
       def scoped_block_call?(node)
@@ -528,122 +378,84 @@ module InstantRecord
         name == "InstantRecord::Syncable" || name == "::InstantRecord::Syncable"
       end
 
+      # true or false when the runtime decides `node`, nil when it does not.
       def browser_predicate_value(node)
         case node
         when Prism::ParenthesesNode
           stmts = node.body&.body
           stmts && stmts.length == 1 ? browser_predicate_value(stmts.first) : nil
         when Prism::CallNode
-          if node.name == :browser? && node.arguments.nil? && node.block.nil?
+          return unless node.arguments.nil? && node.block.nil?
+
+          if node.name == :browser?
             recv = self.class.constant_name(node.receiver)
-            if recv == "InstantRecord" || recv == "::InstantRecord"
-              return @runtime == :client ? :true : :false
-            end
-          elsif node.name == :! && node.arguments.nil? && node.block.nil?
+            @runtime == :client if recv == "InstantRecord" || recv == "::InstantRecord"
+          elsif node.name == :!
             inner = browser_predicate_value(node.receiver)
-            return inner == :true ? :false : :true if inner
+            inner.nil? ? nil : !inner
           end
-          nil
         when Prism::AndNode
-          lhs = browser_predicate_value(node.left)
-          return :false if lhs == :false
-          return browser_predicate_value(node.right) if lhs == :true
-
-          nil
+          left = browser_predicate_value(node.left)
+          left ? browser_predicate_value(node.right) : left
         when Prism::OrNode
-          lhs = browser_predicate_value(node.left)
-          return :true if lhs == :true
-          return browser_predicate_value(node.right) if lhs == :false
-
-          nil
+          left = browser_predicate_value(node.left)
+          left == false ? browser_predicate_value(node.right) : left
         end
       end
 
-      def unwrap_block_edit(source, call_node, statement_context:, value_preserving_last:)
+      def unwrap_block_edit(source, call_node, removable:)
         block = call_node.block
-        if block.body.nil?
-          return remove_node_edit(source, call_node, statement_context: statement_context, value_preserving_last: value_preserving_last)
-        end
+        return remove_node_edit(source, call_node, removable: removable) if block.body.nil?
 
         opening = block.opening_loc
         closing = block.closing_loc
-        multiline = opening.start_line != closing.start_line
-
-        if multiline && full_line_node?(source, call_node)
-          open_end = self.class.line_end_after(source, opening.end_offset)
-          close_start = self.class.line_start_of(source, closing.start_offset)
-          inner_raw = self.class.byteslice(source, open_end, close_start - open_end)
-          lowered_inner = lower(inner_raw)
-          indent = self.class.leading_indent(source, call_node.location.start_offset)
-          replacement = self.class.reindent_block(lowered_inner, target_indent: indent)
-
-          if replacement.empty?
-            return remove_node_edit(source, call_node, statement_context: statement_context, value_preserving_last: value_preserving_last)
-          end
-
-          Edit.new(
-            start_offset: self.class.line_start_of(source, call_node.location.start_offset),
-            end_offset: self.class.line_end_after(source, call_node.location.end_offset),
-            replacement: replacement
-          )
+        if opening.start_line != closing.start_line && full_line_node?(source, call_node)
+          body_start = self.class.line_end_after(source, opening.end_offset)
+          body_end = self.class.line_start_of(source, closing.start_offset)
+          keep_lines_edit(source, call_node, body_start, body_end, removable: removable)
         else
-          body_loc = block.body.location
-          replacement = lower_slice(source, body_loc.start_offset, body_loc.end_offset)
-          Edit.new(
-            start_offset: call_node.location.start_offset,
-            end_offset: call_node.location.end_offset,
-            replacement: replacement
-          )
+          replace_node_edit(call_node, lower_node(source, block.body))
         end
       end
 
-      def replace_branch_edit(source, node, open_end_offset:, close_start_offset:, statements:, statement_context:, value_preserving_last:)
-        if statements.nil?
-          return remove_node_edit(source, node, statement_context: statement_context, value_preserving_last: value_preserving_last)
+      def keep_branch_edit(source, node, statements, open_end:, close_start:, removable:)
+        return remove_node_edit(source, node, removable: removable) if statements.nil?
+
+        if full_line_node?(source, node)
+          body_start = self.class.line_end_after(source, open_end)
+          body_end = self.class.line_start_of(source, close_start)
+          return keep_lines_edit(source, node, body_start, body_end, removable: removable) if body_end > body_start
         end
 
-        if full_line_node?(source, node) && node.location.start_line != node.location.end_line
-          body_start = self.class.line_end_after(source, open_end_offset)
-          body_end = self.class.line_start_of(source, close_start_offset)
-          if body_end > body_start
-            inner_raw = self.class.byteslice(source, body_start, body_end - body_start)
-            lowered_inner = lower(inner_raw)
-            indent = self.class.leading_indent(source, node.location.start_offset)
-            replacement = self.class.reindent_block(lowered_inner, target_indent: indent)
-            if replacement.empty?
-              return remove_node_edit(source, node, statement_context: statement_context, value_preserving_last: value_preserving_last)
-            end
+        replace_node_edit(node, lower_node(source, statements))
+      end
 
-            return Edit.new(
-              start_offset: self.class.line_start_of(source, node.location.start_offset),
-              end_offset: self.class.line_end_after(source, node.location.end_offset),
-              replacement: replacement
-            )
-          end
+      def keep_lines_edit(source, node, body_start, body_end, removable:)
+        indent = self.class.leading_indent(source, node.location.start_offset)
+        body = self.class.reindent_block(lower_slice(source, body_start, body_end), target_indent: indent)
+        return remove_node_edit(source, node, removable: removable) if body.empty?
+
+        replace_lines_edit(source, node, body)
+      end
+
+      def remove_node_edit(source, node, removable:)
+        if removable && full_line_node?(source, node)
+          replace_lines_edit(source, node, "")
+        else
+          replace_node_edit(node, "nil")
         end
+      end
 
-        replacement = lower_slice(source, statements.location.start_offset, statements.location.end_offset)
+      def replace_node_edit(node, replacement)
+        Edit.new(start_offset: node.location.start_offset, end_offset: node.location.end_offset, replacement: replacement)
+      end
+
+      def replace_lines_edit(source, node, replacement)
         Edit.new(
-          start_offset: node.location.start_offset,
-          end_offset: node.location.end_offset,
+          start_offset: self.class.line_start_of(source, node.location.start_offset),
+          end_offset: self.class.line_end_after(source, node.location.end_offset),
           replacement: replacement
         )
-      end
-
-      def remove_node_edit(source, node, statement_context:, value_preserving_last:)
-        if statement_context && !value_preserving_last && full_line_node?(source, node)
-          Edit.new(
-            start_offset: self.class.line_start_of(source, node.location.start_offset),
-            end_offset: self.class.line_end_after(source, node.location.end_offset),
-            replacement: ""
-          )
-        else
-          Edit.new(
-            start_offset: node.location.start_offset,
-            end_offset: node.location.end_offset,
-            replacement: "nil"
-          )
-        end
       end
 
       def full_line_node?(source, node)
@@ -651,8 +463,16 @@ module InstantRecord
           self.class.only_whitespace_or_comment_after_on_line?(source, node.location.end_offset)
       end
 
+      def lower_node(source, node)
+        lower_slice(source, node.location.start_offset, node.location.end_offset)
+      end
+
       def lower_slice(source, start_offset, end_offset)
-        lower(self.class.byteslice(source, start_offset, end_offset - start_offset))
+        lower(slice(source, start_offset, end_offset))
+      end
+
+      def slice(source, start_offset, end_offset)
+        self.class.byteslice(source, start_offset, end_offset - start_offset)
       end
     end
   end

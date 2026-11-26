@@ -7,6 +7,748 @@ class AstLowererTest < ActiveSupport::TestCase
   HostAdapters = InstantRecord::Compiler::HostAdapters
   GemVendor = InstantRecord::Compiler::GemVendor
 
+  # A source, then what the client and the server runtime make of it.
+  LOWERINGS = <<~'CASES'
+    x = InstantRecord.browser? ? a : b
+    --
+    x = a
+    --
+    x = b
+    ====
+    x = (InstantRecord.browser? ? (a; b) : b)
+    --
+    x = ((a; b))
+    --
+    x = (b)
+    ====
+    a = InstantRecord.browser? && b
+    a = InstantRecord.browser? || b
+    --
+    a = b
+    a = true
+    --
+    a = false
+    a = b
+    ====
+    a = b && InstantRecord.browser?
+    a = b || InstantRecord.browser?
+    --
+    a = b && true
+    a = b || true
+    --
+    a = b && false
+    a = b || false
+    ====
+    a = !InstantRecord.browser? && (InstantRecord.browser? ? c : d)
+    --
+    a = false
+    --
+    a = (d)
+    ====
+    a = (::InstantRecord.browser?)
+    b = not(InstantRecord.browser?)
+    c = !(x; InstantRecord.browser?)
+    --
+    a = (true)
+    b = false
+    c = !(x; true)
+    --
+    a = (false)
+    b = true
+    c = !(x; false)
+    ====
+    a = InstantRecord.browser?(1)
+    b = Other.browser?
+    c = InstantRecord.browser? { 1 }
+    --
+    a = InstantRecord.browser?(1)
+    b = Other.browser?
+    c = InstantRecord.browser? { 1 }
+    --
+    a = InstantRecord.browser?(1)
+    b = Other.browser?
+    c = InstantRecord.browser? { 1 }
+    ====
+    a if InstantRecord.browser? && InstantRecord.browser?
+    b if InstantRecord.browser? || x
+    c if InstantRecord.browser? && x
+    d unless InstantRecord.browser? && x
+    e if x && InstantRecord.browser?
+    --
+    a
+    b
+    c if x
+    d unless x
+    e if x && true
+    --
+    b if x
+    d
+    e if x && false
+    ====
+    a if InstantRecord.browser? # note
+    b unless InstantRecord.browser?
+    --
+    a # note
+    --
+    b
+    ====
+    x = (a if InstantRecord.browser?)
+    y = (b unless InstantRecord.browser?)
+    --
+    x = (a)
+    y = (nil)
+    --
+    x = (nil)
+    y = (b)
+    ====
+    a; b if InstantRecord.browser?; c unless InstantRecord.browser?
+    --
+    a; b; nil
+    --
+    a; nil; c
+    ====
+    def m
+      a
+      b if InstantRecord.browser?
+    end
+    def n
+      b unless InstantRecord.browser?
+    end
+    --
+    def m
+      a
+      b
+    end
+    def n
+    end
+    --
+    def m
+      a
+      nil
+    end
+    def n
+      b
+    end
+    ====
+    x { |y|
+      a
+      b if InstantRecord.browser?
+    }
+    -> {
+      a
+      b unless InstantRecord.browser?
+    }
+    (
+      a
+      b if InstantRecord.browser?
+    )
+    --
+    x { |y|
+      a
+      b
+    }
+    -> {
+      a
+      nil
+    }
+    (
+      a
+      b
+    )
+    --
+    x { |y|
+      a
+      nil
+    }
+    -> {
+      a
+      b
+    }
+    (
+      a
+      nil
+    )
+    ====
+    def m
+      a
+      b if InstantRecord.browser?
+    rescue E
+      c
+      d if InstantRecord.browser?
+    end
+    --
+    def m
+      a
+      b
+    rescue E
+      c
+      d
+    end
+    --
+    def m
+      a
+    rescue E
+      c
+    end
+    ====
+    class C
+      if InstantRecord.browser?
+          a
+
+          b if InstantRecord.browser?
+      else
+        c
+      end
+      z
+    end
+    --
+    class C
+      a
+
+      b
+      z
+    end
+    --
+    class C
+      c
+      z
+    end
+    ====
+    class C
+      unless InstantRecord.browser?
+        a
+      else
+        c
+        d unless InstantRecord.browser?
+      end
+      z
+    end
+    --
+    class C
+      c
+      z
+    end
+    --
+    class C
+      a
+      z
+    end
+    ====
+    if InstantRecord.browser?
+      a
+    end
+    unless InstantRecord.browser?
+      a
+    end
+    z
+    --
+    a
+    z
+    --
+    a
+    z
+    ====
+    if InstantRecord.browser?
+    else
+      a
+    end
+    unless InstantRecord.browser?
+      b
+    else
+    end
+    z
+    --
+    z
+    --
+    a
+    b
+    z
+    ====
+    if InstantRecord.browser? then a else b end
+    unless InstantRecord.browser? then c else d end
+    --
+    a
+    d
+    --
+    b
+    c
+    ====
+    x = if InstantRecord.browser?
+      a
+    else
+      b
+    end
+    y = unless InstantRecord.browser?
+      a
+    end
+    --
+    x = a
+    y = nil
+    --
+    x = b
+    y = a
+    ====
+    if InstantRecord.browser? then
+      a
+    else
+      b
+    end
+    --
+    a
+    --
+    b
+    ====
+    if InstantRecord.browser? then a
+    else b
+    end
+    --
+    a
+    --
+    b
+    ====
+    if InstantRecord.browser?
+      a
+    elsif x
+      b if InstantRecord.browser?
+    else
+      c
+    end
+    --
+    a
+    --
+    if x
+    else
+      c
+    end
+    ====
+    if InstantRecord.browser?
+      a
+    elsif InstantRecord.browser?
+      b
+    end
+    --
+    a
+    --
+
+    ====
+    if x
+      a
+    elsif InstantRecord.browser?
+      b if InstantRecord.browser?
+    elsif y
+      c
+    else
+      d
+    end
+    --
+    if x
+      a
+    else
+      b
+    end
+    --
+    if x
+      a
+    elsif y
+      c
+    else
+      d
+    end
+    ====
+    if x
+      a
+    elsif InstantRecord.browser? then b
+    end
+    --
+    if x
+      a
+    else b
+    end
+    --
+    if x
+      a
+    end
+    ====
+    if x
+      a
+    elsif !InstantRecord.browser?
+      b
+    end
+    --
+    if x
+      a
+    end
+    --
+    if x
+      a
+    else
+      b
+    end
+    ====
+    if x
+      a
+    elsif InstantRecord.browser?
+      b
+    end
+    --
+    if x
+      a
+    else
+      b
+    end
+    --
+    if x
+      a
+    end
+    ====
+    if x
+      a
+    elsif y
+      InstantRecord.browser?
+    else
+      b unless InstantRecord.browser?
+    end
+    --
+    if x
+      a
+    elsif y
+      true
+    else
+    end
+    --
+    if x
+      a
+    elsif y
+      false
+    else
+      b
+    end
+    ====
+    class C
+      browser_only do
+          a
+          server_only { b }
+      end # end
+      server_only do
+        c
+        client_only { d }
+      end
+    end
+    --
+    class C
+      a
+    end
+    --
+    class C
+      c
+    end
+    ====
+    browser_only { a if InstantRecord.browser? }
+    server_only { b }
+    self.client_only { c }
+    other.server_only { d }
+    server_only(1) { e }
+    server_only
+    server_only(&f)
+    --
+    a
+    c
+    other.server_only { d }
+    server_only(1) { e }
+    server_only
+    server_only(&f)
+    --
+    b
+    other.server_only { d }
+    server_only(1) { e }
+    server_only
+    server_only(&f)
+    ====
+    browser_only { }
+    server_only do
+    end
+    client_only do
+      # only a comment
+    end
+    z
+    --
+    z
+    --
+    z
+    ====
+    client_only do
+      server_only { a }
+    end
+    server_only do
+      client_only { b }
+    end
+    z
+    --
+    z
+    --
+    z
+    ====
+    x = browser_only do
+      a
+    end
+    y = server_only { b }
+    z(client_only { c })
+    --
+    x = a
+    y = nil
+    z(c)
+    --
+    x = nil
+    y = b
+    z(nil)
+    ====
+    def m
+      a
+      server_only { b }
+    end
+    --
+    def m
+      a
+      nil
+    end
+    --
+    def m
+      a
+      b
+    end
+    ====
+    include InstantRecord::Syncable
+    include ::InstantRecord::Syncable
+    include InstantRecord::Syncable, Other
+    Base.include InstantRecord::Syncable
+    include Syncable
+    include
+    --
+    include Syncable
+    include Syncable
+    include InstantRecord::Syncable, Other
+    Base.include InstantRecord::Syncable
+    include Syncable
+    include
+    --
+    include Syncable
+    include Syncable
+    include InstantRecord::Syncable, Other
+    Base.include InstantRecord::Syncable
+    include Syncable
+    include
+    ====
+    if InstantRecord.browser?; a; end; b
+    --
+    a; b
+    --
+    nil; b
+    ====
+    def (
+    --
+    def (
+    --
+    def (
+    ====
+    def m
+      a if InstantRecord.browser?
+      b unless InstantRecord.browser?
+      c
+    end
+    --
+    def m
+      a
+      c
+    end
+    --
+    def m
+      b
+      c
+    end
+    ====
+    f(InstantRecord.browser?) if InstantRecord.browser?
+    g(InstantRecord.browser?) unless InstantRecord.browser?
+    --
+    f(true)
+    --
+    g(false)
+    ====
+    class C
+      if x
+        a
+      elsif InstantRecord.browser?
+        b
+      end
+    end
+    --
+    class C
+      if x
+        a
+      else
+        b
+      end
+    end
+    --
+    class C
+      if x
+        a
+      end
+    end
+    ====
+    if x then a; elsif InstantRecord.browser? && y
+      b
+    end
+    --
+    if x then a; elsif y
+      b
+    end
+    --
+    if x then a; end
+    ====
+    a if (InstantRecord.browser?; x)
+    b if x || InstantRecord.browser?
+    --
+    a if (true; x)
+    b if x || true
+    --
+    a if (false; x)
+    b if x || false
+    ====
+    if InstantRecord.browser?
+      server_only { a }
+    else
+      client_only { b }
+    end
+    z
+    --
+    z
+    --
+    z
+    ====
+    def m
+      a
+      if InstantRecord.browser?
+        server_only { b }
+      else
+        client_only { c }
+      end
+    end
+    --
+    def m
+      a
+      nil
+    end
+    --
+    def m
+      a
+      nil
+    end
+    ====
+    def m
+      a
+      if InstantRecord.browser?
+        b
+      end
+    end
+    --
+    def m
+      a
+      b
+    end
+    --
+    def m
+      a
+      nil
+    end
+    ====
+    def m
+      a
+      unless InstantRecord.browser?
+        b
+      end
+    end
+    --
+    def m
+      a
+      nil
+    end
+    --
+    def m
+      a
+      b
+    end
+    ====
+    def m
+      a
+      if InstantRecord.browser?
+      else
+        b
+      end
+    end
+    --
+    def m
+      a
+      nil
+    end
+    --
+    def m
+      a
+      b
+    end
+    ====
+    def m
+      a
+      browser_only { }
+    end
+    --
+    def m
+      a
+      nil
+    end
+    --
+    def m
+      a
+      nil
+    end
+    ====
+    def m
+      a
+      client_only do
+        server_only { b }
+      end
+    end
+    --
+    def m
+      a
+      nil
+    end
+    --
+    def m
+      a
+      nil
+    end
+    ====
+    x = InstantRecord.browser? ? f(InstantRecord.browser?) : g(InstantRecord.browser?)
+    --
+    x = f(true)
+    --
+    x = g(false)
+  CASES
+
+  test "lowers each form to exactly this, for both runtimes" do
+    LOWERINGS.split("====\n").each do |lowering|
+      source, client, server = lowering.split("--\n", -1)
+      { client: client, server: server }.each do |runtime, expected|
+        assert_equal expected, AstLowerer.lower(source, runtime: runtime, rewrite_syncable_include: true), "#{runtime}:\n#{source}"
+      end
+    end
+  end
+
+  test "refuses to write a lowering that is not Ruby" do
+    error = assert_raises(InstantRecord::Compiler::BuildError) { AstLowerer.lower("if x then a; elsif !InstantRecord.browser? then b; end\n") }
+    assert_match(/\AAST lowering produced invalid Ruby: /, error.message)
+  end
+
   test "strips server_only and unwraps browser_only and client_only for both do/end and brace blocks" do
     source = <<~RUBY
       class SampleController < ApplicationController
@@ -216,6 +958,7 @@ class AstLowererTest < ActiveSupport::TestCase
     assert_includes lowered, "# Example: include InstantRecord::Syncable"
     assert_includes lowered, 'DOC = "include InstantRecord::Syncable"'
     assert_includes lowered, "  include Syncable\n"
+    assert_equal source, AstLowerer.lower(source)
     assert Prism.parse(lowered).success?
   end
 
