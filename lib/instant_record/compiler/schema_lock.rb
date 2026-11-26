@@ -130,66 +130,72 @@ module InstantRecord
         end
 
         def verify(root:, baseline: nil, migration_paths: nil, models: nil, lock_path: nil)
-          target = lock_path || path(root)
-          checks = []
-          replayed_versions = []
+          report = Report.new(lock_path: lock_path || path(root), checks: [], replayed_versions: [])
 
+          lock = check_lockfile(report)
+          return report unless lock
+
+          plan = check_plan(report, root: root, baseline: baseline, migration_paths: migration_paths)
+          return report unless plan
+
+          # A wrong schema version or baseline is reported, but does not stop the replay.
+          check_schema_version(report, lock, plan)
+          return report unless check_migration_history(report, lock, plan)
+
+          replay_upgrade_ladder!(report, lock, index_models(models))
+          report
+        end
+
+        private
+
+        def add_check(report, name, status, detail)
+          report.checks << Check.new(name: name, status: status, detail: detail)
+        end
+
+        def check_lockfile(report)
+          target = report.lock_path
           unless File.file?(target)
-            checks << Check.new(
-              name: "lockfile",
-              status: :error,
-              detail: "missing #{target} (run `bin/rails instant_record:schema:lock`)"
-            )
-            return Report.new(lock_path: target, checks: checks, replayed_versions: replayed_versions)
+            add_check(report, "lockfile", :error, "missing #{target} (run `bin/rails instant_record:schema:lock`)")
+            return
           end
 
           lock = parse_lockfile(target)
           unless lock.is_a?(Hash) && lock["lockfile_version"] == LOCKFILE_VERSION && lock["versions"].is_a?(Array)
-            checks << Check.new(name: "lockfile", status: :error, detail: "invalid or unsupported lockfile format")
-            return Report.new(lock_path: target, checks: checks, replayed_versions: replayed_versions)
-          end
-          checks << Check.new(name: "lockfile", status: :ok, detail: "v#{lock['lockfile_version']} (#{lock['versions'].size} versions)")
-
-          begin
-            plan = BrowserMigrations.plan(root: root, baseline: baseline, migration_paths: migration_paths)
-          rescue BuildError => e
-            checks << Check.new(name: "migrations plan", status: :error, detail: e.message)
-            return Report.new(lock_path: target, checks: checks, replayed_versions: replayed_versions)
+            add_check(report, "lockfile", :error, "invalid or unsupported lockfile format")
+            return
           end
 
-          if lock["schema_version"] != plan["version"]
-            checks << Check.new(
-              name: "schema version",
-              status: :error,
-              detail: "lockfile is at #{lock['schema_version']}, db/schema.rb is at #{plan['version']} (run `bin/rails instant_record:schema:lock`)"
-            )
-          elsif lock["baseline"] != plan["baseline"]
-            checks << Check.new(
-              name: "schema baseline",
-              status: :error,
-              detail: "lockfile baseline #{lock['baseline'].inspect} differs from configured #{plan['baseline'].inspect}"
-            )
-          else
-            checks << Check.new(name: "schema version", status: :ok, detail: plan["version"].to_s)
-          end
-
-          drift_errors = compare_versions(plan, lock)
-          if drift_errors.empty?
-            checks << Check.new(name: "migration history", status: :ok, detail: "all #{lock['versions'].size} locked versions immutable and current")
-          else
-            drift_errors.each do |msg|
-              checks << Check.new(name: "migration history", status: :error, detail: msg)
-            end
-            return Report.new(lock_path: target, checks: checks, replayed_versions: replayed_versions)
-          end
-
-          model_index = index_models(models)
-          replay_upgrade_ladder!(lock, model_index, checks, replayed_versions)
-
-          Report.new(lock_path: target, checks: checks, replayed_versions: replayed_versions)
+          add_check(report, "lockfile", :ok, "v#{lock['lockfile_version']} (#{lock['versions'].size} versions)")
+          lock
         end
 
-        private
+        def check_plan(report, **options)
+          BrowserMigrations.plan(**options)
+        rescue BuildError => e
+          add_check(report, "migrations plan", :error, e.message)
+          nil
+        end
+
+        def check_schema_version(report, lock, plan)
+          if lock["schema_version"] != plan["version"]
+            add_check(report, "schema version", :error,
+              "lockfile is at #{lock['schema_version']}, db/schema.rb is at #{plan['version']} (run `bin/rails instant_record:schema:lock`)")
+          elsif lock["baseline"] != plan["baseline"]
+            add_check(report, "schema baseline", :error,
+              "lockfile baseline #{lock['baseline'].inspect} differs from configured #{plan['baseline'].inspect}")
+          else
+            add_check(report, "schema version", :ok, plan["version"].to_s)
+          end
+        end
+
+        def check_migration_history(report, lock, plan)
+          drift_errors = compare_versions(plan, lock)
+          drift_errors.each { |message| add_check(report, "migration history", :error, message) }
+          return false if drift_errors.any?
+
+          add_check(report, "migration history", :ok, "all #{lock['versions'].size} locked versions immutable and current")
+          true
+        end
 
         def parse_lockfile(path)
           JSON.parse(File.read(path))
@@ -271,79 +277,74 @@ module InstantRecord
           []
         end
 
-        def replay_upgrade_ladder!(lock, model_index, checks, replayed_versions)
+        def replay_upgrade_ladder!(report, lock, model_index)
           versions = lock["versions"].sort_by { |entry| entry["version"].to_i }
           baseline_sql = Array(lock["baseline_schema_sql"])
 
-          # Reference HEAD schema built cleanly from start -> HEAD.
-          head_schema = nil
-          begin
-            with_sqlite do |conn|
-              baseline_sql.each { |sql| execute_sql(conn, sql) }
-              versions.each { |entry| apply_version_transactionally!(conn, entry["version"], entry["statements"]) }
-              verify_integrity!(conn)
-              head_schema = introspect_tables(conn)
-            end
-            checks << Check.new(
-              name: "fresh HEAD schema",
-              status: :ok,
-              detail: "#{head_schema.size} table(s), PRAGMA integrity_check ok"
-            )
-          rescue StandardError => e
-            checks << Check.new(name: "fresh HEAD schema", status: :error, detail: e.message)
-            return
-          end
-
-          return if versions.empty?
+          head_schema = check_fresh_head_schema(report, baseline_sql, versions)
+          return if head_schema.nil? || versions.empty?
 
           head_version = lock["schema_version"]
 
           # Replay from EVERY historical version V_i (plus baseline if present) up to HEAD.
           starting_points = []
           unless baseline_sql.empty?
-            starting_points << { version: lock["baseline"], schema_sql: baseline_sql, next_index: 0 }
+            starting_points << { version: lock["baseline"], schema_sql: baseline_sql, remaining: versions }
           end
           versions.each_with_index do |entry, idx|
-            starting_points << { version: entry["version"], schema_sql: Array(entry["schema_sql"]), next_index: idx + 1 }
+            starting_points << { version: entry["version"], schema_sql: Array(entry["schema_sql"]), remaining: versions.drop(idx + 1) }
           end
 
           starting_points.each do |start|
-            from_version = start[:version]
-            remaining = versions[start[:next_index]..] || []
-            replayed_versions << from_version
+            report.replayed_versions << start[:version]
+            check_replay(report, start, head_version, head_schema, model_index)
+          end
+        end
 
-            begin
-              seeded_ids = []
-              with_sqlite do |conn|
-                start[:schema_sql].each { |sql| execute_sql(conn, sql) }
-                ensure_gem_tables!(conn, remaining)
+        # Reference HEAD schema built cleanly from start -> HEAD.
+        def check_fresh_head_schema(report, baseline_sql, versions)
+          head_schema = with_sqlite do |conn|
+            baseline_sql.each { |sql| execute_sql(conn, sql) }
+            versions.each { |entry| apply_version_transactionally!(conn, entry["version"], entry["statements"]) }
+            verify_integrity!(conn)
+            introspect_tables(conn)
+          end
+          add_check(report, "fresh HEAD schema", :ok, "#{head_schema.size} table(s), PRAGMA integrity_check ok")
+          head_schema
+        rescue StandardError => e
+          add_check(report, "fresh HEAD schema", :error, e.message)
+          nil
+        end
 
-                seeded = seed_rows_and_outbox!(conn, from_version, model_index)
-                seeded_ids = seeded.map { |m| m[:id] }
+        def check_replay(report, start, head_version, head_schema, model_index)
+          name = "replay #{start[:version]}"
+          preserved = replay_to_head!(start, head_version, head_schema, model_index)
+          add_check(report, name, :ok,
+            "#{start[:remaining].size} step(s) -> #{head_version}, #{preserved} pending outbox row(s) preserved & compatible")
+        rescue StandardError => e
+          add_check(report, name, :error, e.message)
+        end
 
-                remaining.each do |step|
-                  apply_version_transactionally!(conn, step["version"], step["statements"])
-                end
+        def replay_to_head!(start, head_version, head_schema, model_index)
+          from_version = start[:version]
+          remaining = start[:remaining]
 
-                verify_integrity!(conn)
-                surviving = table_exists?(conn, "instant_record_outbox") ? read_outbox_rows(conn) : []
-                verify_outbox_survival!(from_version, seeded_ids, surviving)
-                verify_schema_parity!(from_version, head_schema, introspect_tables(conn))
-                verify_outbox_compatibility!(from_version, head_version, surviving, head_schema, model_index)
-              end
+          with_sqlite do |conn|
+            start[:schema_sql].each { |sql| execute_sql(conn, sql) }
+            ensure_gem_tables!(conn, remaining)
+            seeded_ids = seed_rows_and_outbox!(conn, from_version, model_index).map { |m| m[:id] }
 
-              checks << Check.new(
-                name: "replay #{from_version}",
-                status: :ok,
-                detail: "#{remaining.size} step(s) -> #{head_version}, #{seeded_ids.size} pending outbox row(s) preserved & compatible"
-              )
-            rescue StandardError => e
-              checks << Check.new(
-                name: "replay #{from_version}",
-                status: :error,
-                detail: e.message
-              )
+            remaining.each do |step|
+              apply_version_transactionally!(conn, step["version"], step["statements"])
             end
+
+            verify_integrity!(conn)
+            surviving = table_exists?(conn, "instant_record_outbox") ? read_outbox_rows(conn) : []
+            verify_outbox_survival!(from_version, seeded_ids, surviving)
+            verify_schema_parity!(from_version, head_schema, introspect_tables(conn))
+            verify_outbox_compatibility!(from_version, head_version, surviving, head_schema, model_index)
+
+            seeded_ids.size
           end
         end
 
