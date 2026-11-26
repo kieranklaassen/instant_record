@@ -2,6 +2,7 @@ require "test_helper"
 require "instant_record/mcp"
 require "fileutils"
 require "json"
+require "timeout"
 require "tmpdir"
 
 class McpHostProcessTest < ActiveSupport::TestCase
@@ -107,6 +108,12 @@ class McpHostProcessTest < ActiveSupport::TestCase
       host = InstantRecord::Mcp::HostProcess.new(binary: crasher, database: File.join(dir, "a.sqlite3"))
       err = assert_raises(InstantRecord::Mcp::HostCrashedError) { host.call("cursor", "") }
       assert_match(/Native host/, err.message)
+
+      Timeout.timeout(5) { sleep 0.01 while host.alive? }
+      [-> { host.call("cursor", "") }, -> { host.open(File.join(dir, "b.sqlite3")) }, -> { host.boot(File.join(dir, "b.sqlite3")) }].each do |call|
+        err = assert_raises(InstantRecord::Mcp::HostCrashedError, &call)
+        assert_equal "Native host pipe error: Broken pipe", err.message
+      end
       host.close
     end
   end
