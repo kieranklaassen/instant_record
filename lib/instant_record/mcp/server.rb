@@ -413,10 +413,11 @@ module InstantRecord
         @output.flush
       end
 
-      # An id such as 1e999 parses to a number JSON cannot write.
+      # An id such as 1e999 parses to a number JSON cannot write, and one nested
+      # 100 deep is read but not written.
       def generate(payload)
         JSON.generate(payload)
-      rescue JSON::GeneratorError => e
+      rescue JSON::GeneratorError, JSON::NestingError => e
         JSON.generate(error_response(nil, INTERNAL_ERROR, e.message))
       end
     end

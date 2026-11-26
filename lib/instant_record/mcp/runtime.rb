@@ -183,21 +183,24 @@ module InstantRecord
             "values" => str_values
           )
           result = @host.call("action", input)
-          pos = parse_cursor(@host.call("cursor", "").out)
+          errors = {}
+          pending = after_write(errors, "pending") { pending_count }
           rendered =
             if render
-              JSON.parse(@host.call("render", JSON.generate("screen" => screen.to_s, "params" => str_params)).out)
+              after_write(errors, "rendered") do
+                parse_writable_json(@host.call("render", JSON.generate("screen" => screen.to_s, "params" => str_params)).out)
+              end
             end
 
           {
             "ok" => true,
             "screen" => screen.to_s,
             "action" => action.to_s,
-            "pending" => pos["pending"].to_i,
+            "pending" => pending,
             "notice" => result.notice,
             "rendered" => rendered,
             "elapsed_ms" => elapsed_ms(started)
-          }
+          }.merge(errors)
         end
 
         payload["sync"] = sync_after_write if sync
@@ -222,11 +225,12 @@ module InstantRecord
           raw_http = build_raw_http_request(verb, request_path, raw_body, resolved_content_type, headers)
           result = @host.call("request", raw_http)
           parsed = parse_raw_http_response(result.out)
-          pos = parse_cursor(@host.call("cursor", "").out)
+          errors = {}
+          pending = after_write(errors, "pending") { pending_count }
 
           parsed_json = nil
           if parsed[:headers]["content-type"].to_s.include?("json") && !parsed[:body].empty?
-            parsed_json = JSON.parse(parsed[:body]) rescue nil
+            parsed_json = parse_writable_json(parsed[:body]) rescue nil
           end
 
           {
@@ -235,10 +239,10 @@ module InstantRecord
             "headers" => parsed[:headers],
             "body" => parsed[:body],
             "json" => parsed_json,
-            "pending" => pos["pending"].to_i,
+            "pending" => pending,
             "notice" => result.notice,
             "elapsed_ms" => elapsed_ms(started)
-          }
+          }.merge(errors)
         end
 
         payload["sync"] = sync_after_write if sync && payload["ok"]
@@ -258,21 +262,31 @@ module InstantRecord
           raise ArgumentError, "No sync endpoint configured for history fetch." if target.nil?
           raise Error, "Client is in offline mode" if offline?
 
-          raw_reply = @exchange.call("GET #{target}/records?#{query}\n")
-          status_line, body = raw_reply.to_s.split("\n", 2)
+          # HTTP bodies come tagged as binary.
+          raw_reply = @exchange.call("GET #{target}/records?#{query}\n").to_s.b
+          status_line, body = raw_reply.split("\n", 2)
           status = status_line.to_i
-          if status < 200 || status >= 300
+          body = String.new(body.to_s, encoding: Encoding::UTF_8)
+          error =
+            if status == 0
+              "History server unreachable (offline)"
+            elsif status < 200 || status >= 300
+              "History request returned HTTP #{status}"
+            elsif !body.valid_encoding?
+              "History response is not valid UTF-8"
+            end
+          if error
             return {
               "ok" => false,
               "key" => key.to_s,
               "offline" => status == 0,
               "http_status" => status,
-              "error" => status == 0 ? "History server unreachable (offline)" : "History request returned HTTP #{status}",
+              "error" => error,
               "elapsed_ms" => elapsed_ms(started)
             }
           end
 
-          result = @host.call("history", JSON.generate("key" => key.to_s, "response" => body.to_s))
+          result = @host.call("history", JSON.generate("key" => key.to_s, "response" => body))
           parsed = JSON.parse(result.out)
           parsed.merge("key" => key.to_s, "http_status" => status, "elapsed_ms" => elapsed_ms(started))
         end
@@ -317,6 +331,23 @@ module InstantRecord
         sync
       rescue MissingEndpoint, Error, SystemCallError, IOError => e
         { "ok" => false, "error" => e.message }
+      end
+
+      def after_write(errors, name)
+        yield
+      rescue Error, SystemCallError, IOError, JSON::JSONError => e
+        errors["#{name}_error"] = String.new(e.message, encoding: Encoding::UTF_8).scrub
+        nil
+      end
+
+      def pending_count
+        parse_cursor(@host.call("cursor", "").out)["pending"]&.to_i
+      end
+
+      # Some JSON parses to values JSON cannot write (1e999, or "\udc00" in json
+      # 2), or nests too deep to write inside an answer.
+      def parse_writable_json(text)
+        JSON.parse(text).tap { |value| JSON.generate([value]) }
       end
 
       def parse_cursor(raw)

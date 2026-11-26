@@ -57,9 +57,7 @@ module InstantRecord
         @mutex.synchronize do
           ensure_open!
           payload = input.to_s.b
-          write_all("call #{entry_name} #{payload.bytesize}\n")
-          write_all(payload) unless payload.empty?
-          @stdin.flush
+          write_frame("call #{entry_name} #{payload.bytesize}\n", payload)
           read_reply
         end
       end
@@ -145,9 +143,7 @@ module InstantRecord
         @mutex.synchronize do
           ensure_open!
           bytes = path.b
-          write_all("#{verb} #{bytes.bytesize}\n")
-          write_all(bytes)
-          @stdin.flush
+          write_frame("#{verb} #{bytes.bytesize}\n", bytes)
           read_reply
         end
       end
@@ -173,8 +169,8 @@ module InstantRecord
 
             out_len = Integer(parts[1])
             notice_len = Integer(parts[2])
-            out = read_exact(@stdout, out_len).force_encoding(Encoding::UTF_8)
-            notice = read_exact(@stdout, notice_len).force_encoding(Encoding::UTF_8)
+            out = read_text(out_len)
+            notice = read_text(notice_len)
             raise failed_exchange if failed_exchange
 
             return Result.new(out: out, notice: notice)
@@ -191,15 +187,13 @@ module InstantRecord
               failed_exchange ||= exchange_error(e)
               answer = HttpExchange::OFFLINE_REPLY
             end
-            write_all("#{answer.bytesize}\n")
-            write_all(answer)
-            @stdin.flush
+            write_frame("#{answer.bytesize}\n", answer)
           when "error"
             raise HostCrashedError, "Malformed error frame from native host: #{line.inspect}" unless parts.size >= 2
 
             err_len = Integer(parts[1])
             # The host cuts a long message by bytes, perhaps inside a character.
-            message = read_exact(@stdout, err_len).force_encoding(Encoding::UTF_8).scrub
+            message = read_text(err_len)
             raise failed_exchange || HostError.new(message)
           else
             raise HostCrashedError, "Unexpected response from native host: #{line.inspect}"
@@ -216,6 +210,8 @@ module InstantRecord
         ExchangeError.new("Sync request failed: #{error.class}: #{message}")
       end
 
+      def read_text(length) = read_exact(@stdout, length).force_encoding(Encoding::UTF_8).scrub
+
       def read_exact(io, length)
         return "".b if length <= 0
 
@@ -231,6 +227,14 @@ module InstantRecord
           remaining -= chunk.bytesize
         end
         buffer
+      end
+
+      def write_frame(header, bytes)
+        write_all(header)
+        write_all(bytes)
+        @stdin.flush
+      rescue Errno::EPIPE, IOError => e
+        raise HostCrashedError, "Native host pipe error: #{e.message}"
       end
 
       def write_all(bytes)

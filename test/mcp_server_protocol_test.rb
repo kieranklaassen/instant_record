@@ -285,9 +285,13 @@ class McpServerProtocolTest < ActiveSupport::TestCase
     @runtime = RecordingRuntime.new(RuntimeError.new("bad \xFF".b))
     assert_equal [error(-32603, "bad \u{FFFD}"), result({})], exchange(tool_request("status", {}), request("ping"))
 
-    failed, pong = exchange_lines(%({"jsonrpc":"2.0","id":1e999,"method":"ping"}\n#{JSON.generate(request('ping'))}\n))
-    assert_equal [nil, -32603], [JSON.parse(failed)["id"], JSON.parse(failed).dig("error", "code")]
-    assert_equal result({}), pong
+    # Some json versions refuse the nested id when they read it.
+    { "1e999" => [-32603], "#{'[' * 100}#{']' * 100}" => [-32603, -32700] }.each do |id, codes|
+      failed, pong = exchange_lines(%({"jsonrpc":"2.0","id":#{id},"method":"ping"}\n#{JSON.generate(request('ping'))}\n))
+      assert_nil JSON.parse(failed)["id"]
+      assert_includes codes, JSON.parse(failed).dig("error", "code")
+      assert_equal result({}), pong
+    end
   end
 
   private

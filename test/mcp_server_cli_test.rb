@@ -238,15 +238,131 @@ class McpServerCliTest < ActiveSupport::TestCase
     end
   end
 
+  test "a cursor read or re-render that fails after a write leaves the write's result and one queued write" do
+    failures = [
+      InstantRecord::Mcp::HostError.new("failed"), InstantRecord::Mcp::HostCrashedError.new("failed"), IOError.new("failed")
+    ]
+    action = ["instant_record_action", { screen: "issues", action: "close", args: { id: "i-1" }, render: true }]
+    request = ["instant_record_request", { method: "POST", path: "/todo/issues", body: "issue[title]=Once" }]
+
+    failures.product([["cursor", action], ["cursor", request], ["render", action]]).each_with_index do |(failure, (entry, call)), index|
+      data = kept_write(failing_runtime("kept#{index}", entry => failure), *call)
+      if entry == "cursor"
+        assert data.key?("pending")
+        assert_equal [nil, "failed"], data.values_at("pending", "pending_error")
+        refute data.key?("rendered_error")
+        assert_equal "screen", data.dig("rendered", "kind") if call == action
+      else
+        assert_equal [1, nil, "failed"], data.values_at("pending", "rendered", "rendered_error")
+        refute data.key?("pending_error")
+      end
+    end
+
+    both = kept_write(failing_runtime("both", "cursor" => failures.first, "render" => failures.first), *action)
+    assert_equal %w[failed failed], both.values_at("pending_error", "rendered_error")
+
+    runtime = failing_runtime("cli", "cursor" => failures.first)
+    out = StringIO.new
+    code = InstantRecord::Mcp::Cli.run(%w[action issues close --arg id=i-1], env: {}, stdout: out, stderr: StringIO.new, runtime_factory: ->(_) { runtime })
+    assert_equal [0, true, nil, "failed"], [code, *JSON.parse(out.string).values_at("ok", "pending", "pending_error")]
+  end
+
+  test "a re-render JSON cannot read or write leaves the write's result" do
+    ["not json", *UNWRITABLE_JSON].each_with_index do |tree, index|
+      runtime = failing_runtime("tree#{index}", "render" => tree)
+      data = kept_write(runtime, "instant_record_action", { screen: "issues", action: "close", args: { id: "i-1" }, render: true })
+      assert_equal [1, nil], data.values_at("pending", "rendered")
+      assert_kind_of String, data["rendered_error"]
+    end
+  end
+
+  test "a cursor reply without a count leaves pending unknown" do
+    data = kept_write(failing_runtime("blank", "cursor" => ""), "instant_record_request", { method: "POST", path: "/todo/issues", body: "issue[title]=Once" })
+    assert_equal [true, nil], [data.key?("pending"), data["pending"]]
+  end
+
+  test "a bug in a cursor read or re-render after a write is not hidden" do
+    [NoMethodError, ArgumentError, TypeError].each do |bug|
+      %w[cursor render].each do |entry|
+        runtime = failing_runtime("#{bug}#{entry}", entry => bug.new("bug"))
+        assert_raises(bug) { runtime.perform_action(screen: "issues", action: "close", render: true) }
+        next unless entry == "cursor"
+
+        assert_raises(bug) { runtime.app_request(method: "POST", path: "/todo/issues", body: "issue[title]=Once") }
+      end
+    end
+  end
+
+  test "an app response that is not UTF-8 leaves the write's result" do
+    data = raw_response("200\nContent-Type: application/json\nX-Name: caf\xE9\n\n{\"a\":\"\xE9\u00E9\"}")
+
+    assert_equal "caf\u{FFFD}", data.dig("headers", "x-name")
+    assert_equal "{\"a\":\"\u{FFFD}\u00E9\"}", data["body"]
+    assert_equal({ "a" => "\u{FFFD}\u00E9" }, data["json"])
+    assert_equal "records_changed\nIssue:\u{FFFD}", data["notice"]
+  end
+
+  test "an app response holding JSON that cannot be written again keeps its body and has no json" do
+    UNWRITABLE_JSON.each do |body|
+      data = raw_response("200\nContent-Type: application/json\n\n#{body}")
+      assert_equal [body, nil], data.values_at("body", "json")
+    end
+  end
+
+  test "a history page is read as UTF-8, and one that is not is reported and not applied" do
+    page = ->(title) { JSON.generate(records: [{ type: "Issue", id: "i-9", version: 1, attributes: { id: "i-9", title: title } }], has_more: false) }
+    bad = page.call("bad ?").b.sub("?", "\xE9".b)
+    replies = [page.call("caf\u00E9").b, bad, bad.dup.force_encoding(Encoding::UTF_8)]
+    exchange = InstantRecord::Mcp::HttpExchange.new(adapter: ->(*) { [200, replies.shift] })
+    runtime = InstantRecord::Mcp::Runtime.new(host_binary: @host_bin, database_path: @db_path, endpoint: "http://sync.test", exchange: exchange)
+    (@runtimes ||= []) << runtime
+
+    assert_equal [true, 1], runtime.fetch_history(key: "older", query: "q=1").values_at("ok", "applied")
+    2.times do
+      assert_equal [false, 200, "History response is not valid UTF-8"],
+        runtime.fetch_history(key: "older", query: "q=1").values_at("ok", "http_status", "error")
+    end
+    assert_equal ["caf\u00E9"], runtime.query_records(model: "Issue")["rows"].map { |row| row["title"] }
+  end
+
   private
+
+  # Each parses (the first only in json 2), but holds what JSON.generate refuses
+  # once it is in an answer.
+  UNWRITABLE_JSON = ['["\udc00"]', "[1e999]", "#{'[' * 100}#{']' * 100}"].freeze
+  private_constant :UNWRITABLE_JSON
+
+  def kept_write(runtime, tool, arguments)
+    call = { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: tool, arguments: arguments } }
+    output = StringIO.new
+    InstantRecord::Mcp::Server.new(runtime, input: StringIO.new("#{JSON.generate(call)}\n"), output: output, err: StringIO.new).run
+    response = JSON.parse(output.string)
+    assert_equal false, response.dig("result", "isError"), output.string
+    data = parse_tool_json(response)
+    assert_equal true, data["ok"]
+    assert_equal 1, runtime.outbox["count"]
+    data
+  end
+
+  # Queues one write in an app that answers with exactly these bytes.
+  def raw_response(bytes)
+    kept_write(failing_runtime("raw#{@runtimes.to_a.size}"), "instant_record_request", { method: "POST", path: "/raw", body: bytes.unpack1("H*") })
+  end
 
   # A runtime on the real test host, whose "sync" entry raises `failure`.
   def failing_sync_runtime(name, endpoint, failure)
+    failing_runtime(name, endpoint: endpoint, "sync" => failure)
+  end
+
+  # A runtime on the real test host, where an entry raises or answers as given.
+  def failing_runtime(name, endpoint: nil, **entries)
     host = InstantRecord::Mcp::HostProcess.new(binary: @host_bin, database: File.join(@dir, "#{name}.sqlite3"))
     host.define_singleton_method(:call) do |entry, input = ""|
-      raise failure if failure && entry == "sync"
-
-      super(entry, input)
+      case (answer = entries[entry])
+      when nil then super(entry, input)
+      when Exception then raise answer
+      else InstantRecord::Mcp::HostProcess::Result.new(out: answer, notice: "")
+      end
     end
     runtime = InstantRecord::Mcp::Runtime.new(database_path: host.database_path, endpoint: endpoint, host_process: host)
     (@runtimes ||= []) << runtime
@@ -393,7 +509,11 @@ class McpServerCliTest < ActiveSupport::TestCase
           when "request"
             head, body = input.split("\r\n\r\n", 2)
             verb, req_path = head.lines.first.split(" ", 3)
-            if verb == "POST" && req_path == "/todo/issues"
+            if verb == "POST" && req_path == "/raw"
+              now = Time.now.utc.iso8601
+              db.execute("INSERT INTO instant_record_outbox VALUES (?, 'Issue', 'raw', 'update', '{}', 1, ?, ?)", [SecureRandom.uuid, now, now])
+              send_ok([body].pack("H*"), "records_changed\nIssue:\xFF")
+            elsif verb == "POST" && req_path == "/todo/issues"
               form = URI.decode_www_form(body.to_s).to_h
               title = form["issue[title]"].to_s.strip
               if title.empty?
