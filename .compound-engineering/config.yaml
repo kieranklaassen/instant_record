@@ -1,11 +1,13 @@
 autonomous_profile: hands-off
-autonomous_motions: [main-red, backlog, stack, climb]
+autonomous_motions: [main-red, backlog, stack, climb, create]
+autonomous_overrides:
+  - { motion: create, max: pr }
 autonomous_landing: direct
 autonomous_ci: ignored
 autonomous_merge_method: merge
 autonomous_checks:
   - run: "bundle install --quiet && bundle exec rake test"
-  - run: "cd demo && bundle install --quiet && bin/rails test"
+  - run: "cd demo && bundle install --quiet && npm ci --no-audit --no-fund && d=$(mktemp -d /tmp/pg.XXXXXX) && initdb -D $d/data -U postgres -A trust >/dev/null && { postgres -D $d/data -k $d -c listen_addresses= >$d/log 2>&1 & p=$!; trap 'kill -INT $p; wait $p; rm -rf $d' EXIT; export PGHOST=$d PGUSER=postgres; for i in $(seq 60); do pg_isready -q && break; sleep 1; done; createdb demo_test && bin/rails test; }"
     paths: "demo/**"
 autonomous_landing_steps:
   - "Branch from `main` (`feat/…`, `fix/…`, `chore/…`) and commit there. Never commit on `main` itself."
