@@ -82,7 +82,7 @@ module InstantRecord
         total = connection.get_first_value("SELECT COUNT(*) FROM #{table_sql}#{where_sql}", binds).to_i
 
         sql = "SELECT #{selected} FROM #{table_sql}#{where_sql}#{order_sql} LIMIT ? OFFSET ?"
-        rows = connection.execute(sql, binds + [clamped_limit, clamped_offset]).map { |row| normalize_row(row) }
+        rows = connection.execute(sql, binds + [clamped_limit, clamped_offset]).dup
 
         {
           "model" => info.name,
@@ -107,7 +107,7 @@ module InstantRecord
           "model" => info.name,
           "table" => info.table,
           "id" => id,
-          "record" => row ? normalize_row(row) : nil,
+          "record" => row,
           "elapsed_ms" => elapsed_ms(started)
         }
       end
@@ -143,10 +143,11 @@ module InstantRecord
           remaining = clamped_limit - matches.size
           clauses = []
           binds = []
+          # LIKE folds ASCII case itself.
           patterns.each do |pattern|
             per_col = searchable.map do |col|
               binds << pattern
-              "LOWER(CAST(#{quote_ident(col)} AS TEXT)) LIKE ? ESCAPE '\\'"
+              "CAST(#{quote_ident(col)} AS TEXT) LIKE ? ESCAPE '\\'"
             end
             clauses << "(#{per_col.join(' OR ')})"
           end
@@ -164,8 +165,7 @@ module InstantRecord
           rows = connection.execute(sql, binds + [remaining])
           pk = info.primary_key || "id"
 
-          rows.each do |raw|
-            row = normalize_row(raw)
+          rows.each do |row|
             matched_cols = searchable.select do |col|
               val = row[col]
               next false if val.nil?
@@ -202,8 +202,7 @@ module InstantRecord
         rows = connection.execute(
           "SELECT * FROM \"instant_record_outbox\" ORDER BY \"created_at\" ASC, \"id\" ASC LIMIT ?",
           [clamped]
-        ).map do |raw|
-          row = normalize_row(raw)
+        ).map do |row|
           if row["changes_payload"].is_a?(String) && !row["changes_payload"].empty?
             row["changes"] = JSON.parse(row["changes_payload"]) rescue row["changes_payload"]
           end
@@ -376,7 +375,7 @@ module InstantRecord
                 clauses << "#{col_sql} <= ?"
                 binds << bind_value(value)
               when "like"
-                clauses << "LOWER(CAST(#{col_sql} AS TEXT)) LIKE ? ESCAPE '\\'"
+                clauses << "CAST(#{col_sql} AS TEXT) LIKE ? ESCAPE '\\'"
                 binds << "%#{escape_like(value.to_s.downcase)}%"
               when "in"
                 list = Array(value)
@@ -474,14 +473,6 @@ module InstantRecord
         when true then 1
         when false then 0
         else value
-        end
-      end
-
-      def normalize_row(row)
-        row.each_with_object({}) do |(key, value), acc|
-          next if key.is_a?(Integer)
-
-          acc[key.to_s] = value
         end
       end
 
