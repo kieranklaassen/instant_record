@@ -62,10 +62,11 @@ module InstantRecord
 
       # The stamps of many changes, by change id. A change that has none is left out.
       def change_stamps(changes)
-        ids = changes.map(&:id)
-        keys = ids.map { |id| "#{HLC::CHANGE_PREFIX}#{id}" }
-        found = stamps(keys)
-        ids.zip(keys).to_h { |id, key| [id, found[key]] }.compact
+        keys = {}
+        changes.each { |change| keys[change.id] = "#{HLC::CHANGE_PREFIX}#{change.id}" }
+        found = stamps(keys.values)
+        keys.transform_values! { |key| found[key] }.compact!
+        keys
       end
     end
   end

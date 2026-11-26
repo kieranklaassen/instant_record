@@ -229,14 +229,20 @@ module InstantRecord
       # record's state as it stands, never the logged payload, which may
       # predate the record being shared. A record the asker may not see is sent
       # as an empty destroy: nothing to a client that never held it, a
-      # revocation to one that did.
+      # revocation to one that did. Each event is a hash of its own, the
+      # caller's to add to.
       def events_for(changes, identity, partition: nil)
         current = visible_records(changes, identity, partition: partition)
         payloads = current.keys.zip(InstantRecord.record_payloads(current.values)).to_h
-        models = changes.map { |change| ruled_model(change.record_type) unless change.operation == "destroy" }
-        stamps = PayloadBatch.change_stamps(changes.zip(models).filter_map { |change, model| change if model.nil? })
-        changes.zip(models).map do |change, model|
-          next [change.id, PayloadBatch.event(change, stamps[change.id])] if model.nil?
+        # Each logged type is looked up once per batch, and never kept past it:
+        # a reload, a new rule or InstantRecord.sync shows in the next one.
+        models = Hash.new { |known, type| known[type] = ruled_model(type) }
+        logged = changes.select { |change| change.operation == "destroy" || models[change.record_type].nil? }
+        stamps = PayloadBatch.change_stamps(logged)
+        changes.map do |change|
+          if change.operation == "destroy" || models[change.record_type].nil?
+            next [change.id, PayloadBatch.event(change, stamps[change.id])]
+          end
 
           payload = payloads[[change.record_type, change.record_id]]
           event =
