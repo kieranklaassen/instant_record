@@ -93,6 +93,13 @@ module InstantRecord
             tables = db.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
               .map { |row| row["name"] }
 
+            # One transaction, or every UPDATE commits and syncs on its own. A
+            # virtual table keeps per-row commits, because what its module stores
+            # can depend on where they fall. On an error, close discards the
+            # transaction; a ROLLBACK here could fail and hide that error.
+            batch = db.get_first_value("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND rootpage = 0").zero?
+            db.execute("BEGIN") if batch
+
             tables.each do |table|
               next if %w[schema_migrations ar_internal_metadata].include?(table)
 
@@ -105,6 +112,7 @@ module InstantRecord
               end
             end
 
+            db.execute("COMMIT") if batch
             db.execute("VACUUM")
           ensure
             db.close
