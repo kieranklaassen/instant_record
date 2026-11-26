@@ -40,8 +40,10 @@ module InstantRecord
           return 2
         end
 
-        cmd_options = {}
-        cmd_parser = build_command_parser(command, cmd_options, options)
+        cmd_parser = OptionParser.new("Usage: instant_record_mcp #{command} [options]")
+        call = define_command(command, cmd_parser)
+        cmd_parser.on("--pretty", "Pretty-print JSON output") { options[:pretty] = true }
+        cmd_parser.on("-h", "--help", "Show help") { options[:help] = true }
         cmd_parser.parse!(args)
 
         if options[:help]
@@ -56,7 +58,12 @@ module InstantRecord
             @stderr.puts("[instant_record:mcp] initial sync: #{sync_res['error'] || sync_res['summary']}")
           end
 
-          execute_command(command, args, cmd_options, options, runtime)
+          if command == "serve"
+            Server.new(runtime, input: @stdin, output: @stdout, err: @stderr).run
+            return 0
+          end
+
+          print_result(call.call(runtime, args), pretty: options[:pretty])
         ensure
           runtime.close
         end
@@ -71,33 +78,36 @@ module InstantRecord
       private
 
       def default_options
-        env_headers =
-          if @env["INSTANT_RECORD_HEADERS"] && !@env["INSTANT_RECORD_HEADERS"].empty?
-            JSON.parse(@env["INSTANT_RECORD_HEADERS"])
-          else
-            {}
-          end
-
-        scope = @env["INSTANT_RECORD_SCOPE"] || @defaults[:scope]
+        headers = @env["INSTANT_RECORD_HEADERS"].to_s
+        env_headers = headers.empty? ? {} : JSON.parse(headers)
+        scope = setting("INSTANT_RECORD_SCOPE", :scope)
         root = @defaults[:root] || Dir.pwd
 
         {
-          host: @env["INSTANT_RECORD_HOST"] || @defaults[:host] || Mcp.default_host_path(root),
-          db: @env["INSTANT_RECORD_DB"] || @defaults[:db] || Mcp.default_database_path(root, scope: scope),
-          endpoint: @env["INSTANT_RECORD_ENDPOINT"] || @defaults[:endpoint],
-          token: @env["INSTANT_RECORD_TOKEN"] || @defaults[:token],
-          cookie: @env["INSTANT_RECORD_COOKIE"] || @defaults[:cookie],
+          host: setting("INSTANT_RECORD_HOST", :host) || Mcp.default_host_path(root),
+          db: setting("INSTANT_RECORD_DB", :db) || Mcp.default_database_path(root, scope: scope),
+          endpoint: setting("INSTANT_RECORD_ENDPOINT", :endpoint),
+          token: setting("INSTANT_RECORD_TOKEN", :token),
+          cookie: setting("INSTANT_RECORD_COOKIE", :cookie),
           scope: scope,
           headers: (@defaults[:headers] || {}).merge(env_headers),
-          offline: truthy?(@env["INSTANT_RECORD_OFFLINE"]) || !!@defaults[:offline],
-          sync_on_start: truthy?(@env["INSTANT_RECORD_SYNC_ON_START"]) || !!@defaults[:sync_on_start],
-          build: truthy?(@env["INSTANT_RECORD_BUILD"]) || !!@defaults[:build],
-          timeout: (@env["INSTANT_RECORD_TIMEOUT"] || @defaults[:timeout] || HttpExchange::DEFAULT_TIMEOUT).to_f,
+          offline: flag("INSTANT_RECORD_OFFLINE", :offline),
+          sync_on_start: flag("INSTANT_RECORD_SYNC_ON_START", :sync_on_start),
+          build: flag("INSTANT_RECORD_BUILD", :build),
+          timeout: (setting("INSTANT_RECORD_TIMEOUT", :timeout) || HttpExchange::DEFAULT_TIMEOUT).to_f,
           models: @defaults[:models],
           screens: @defaults[:screens] || [],
           pretty: false,
           help: false
         }
+      end
+
+      def setting(variable, key)
+        @env[variable] || @defaults[key]
+      end
+
+      def flag(variable, key)
+        truthy?(@env[variable]) || !!@defaults[key]
       end
 
       def build_global_parser(options)
@@ -109,12 +119,7 @@ module InstantRecord
           opts.on("--token TOKEN", "Bearer auth token") { |v| options[:token] = v }
           opts.on("--cookie COOKIE", "Session Cookie header value") { |v| options[:cookie] = v }
           opts.on("--scope SCOPE", "Sync scope query parameter") { |v| options[:scope] = v }
-          opts.on("--header HEADER", "Extra HTTP header ('Name: Value'), repeatable") do |v|
-            name, value = v.split(":", 2)
-            raise ArgumentError, "Header must be 'Name: Value'" if value.nil?
-
-            options[:headers][name.strip] = value.strip
-          end
+          opts.on("--header HEADER", "Extra HTTP header ('Name: Value'), repeatable") { |v| assign_header(options[:headers], v) }
           opts.on("--offline", "Disable network sync requests") { options[:offline] = true }
           opts.on("--sync-on-start", "Run a sync pass before executing or serving") { options[:sync_on_start] = true }
           opts.on("--timeout SECONDS", Float, "HTTP sync timeout in seconds") { |v| options[:timeout] = v }
@@ -124,58 +129,123 @@ module InstantRecord
         end
       end
 
-      def build_command_parser(command, cmd_options, global_options)
-        OptionParser.new do |opts|
-          opts.banner = "Usage: instant_record_mcp #{command} [options]"
-          case command
-          when "query"
-            cmd_options[:where] = {}
-            opts.on("-w", "--where KEY=VALUE", "Filter condition (repeatable)") { |v| assign_kv(cmd_options[:where], v) }
-            opts.on("--where-json JSON", "Filter object as JSON") { |v| cmd_options[:where].merge!(JSON.parse(v)) }
-            opts.on("--order SPEC", "Sort order (e.g. 'created_at desc')") { |v| cmd_options[:order] = v }
-            opts.on("--columns LIST", "Comma-separated column names") { |v| cmd_options[:columns] = v.split(",").map(&:strip) }
-            opts.on("--limit N", Integer, "Max rows to return") { |v| cmd_options[:limit] = v }
-            opts.on("--offset N", Integer, "Row offset") { |v| cmd_options[:offset] = v }
-          when "search"
-            cmd_options[:models] = []
-            opts.on("-m", "--model NAME", "Restrict search to model (repeatable)") { |v| cmd_options[:models] << v }
-            opts.on("--columns LIST", "Comma-separated columns to search") { |v| cmd_options[:columns] = v.split(",").map(&:strip) }
-            opts.on("--limit N", Integer, "Max matches to return") { |v| cmd_options[:limit] = v }
-          when "outbox"
-            opts.on("--limit N", Integer, "Max outbox mutations to return") { |v| cmd_options[:limit] = v }
-          when "render"
-            cmd_options[:params] = {}
-            opts.on("-p", "--param KEY=VALUE", "Screen param (repeatable)") { |v| assign_kv(cmd_options[:params], v) }
-          when "action"
-            cmd_options[:params] = {}
-            cmd_options[:args] = {}
-            cmd_options[:values] = {}
-            opts.on("-p", "--param KEY=VALUE", "Screen param (repeatable)") { |v| assign_kv(cmd_options[:params], v) }
-            opts.on("-a", "--arg KEY=VALUE", "Action arg (repeatable)") { |v| assign_kv(cmd_options[:args], v) }
-            opts.on("-v", "--value KEY=VALUE", "Form field value (repeatable)") { |v| assign_kv(cmd_options[:values], v) }
-            opts.on("--render", "Re-render the screen after performing the action") { cmd_options[:render] = true }
-            opts.on("--sync", "Sync with the server after performing the action") { cmd_options[:sync] = true }
-          when "request"
-            cmd_options[:headers] = {}
-            opts.on("-d", "--data BODY", "Raw request body") { |v| cmd_options[:body] = v }
-            opts.on("--json JSON", "JSON object body (sets Content-Type: application/json)") do |v|
-              cmd_options[:body] = JSON.generate(JSON.parse(v))
-              cmd_options[:content_type] = "application/json"
-            end
-            opts.on("--content-type TYPE", "Content-Type header") { |v| cmd_options[:content_type] = v }
-            opts.on("-H", "--header HEADER", "HTTP header ('Name: Value')") do |v|
-              name, value = v.split(":", 2)
-              raise ArgumentError, "Header must be 'Name: Value'" if value.nil?
+      # Adds the command's options to `opts` and returns the call it makes, to run
+      # once they are parsed.
+      def define_command(command, opts)
+        case command
+        when "sync" then ->(runtime, args) { runtime.sync(endpoint: args.first) }
+        when "status" then ->(runtime, _args) { runtime.status }
+        when "models" then ->(runtime, _args) { runtime.list_models }
+        when "query" then define_query(opts)
+        when "get" then define_get
+        when "search" then define_search(opts)
+        when "outbox" then define_outbox(opts)
+        when "render" then define_render(opts)
+        when "action" then define_action(opts)
+        when "request" then define_request(opts)
+        when "history" then define_history(opts)
+        end
+      end
 
-              cmd_options[:headers][name.strip] = value.strip
-            end
-            opts.on("--sync", "Sync with the server after a successful request") { cmd_options[:sync] = true }
-          when "history"
-            opts.on("--query QUERY", "/records query string to fetch from the server") { |v| cmd_options[:query] = v }
-          end
+      def define_query(opts)
+        where = {}
+        options = { order: nil, columns: nil, limit: Replica::DEFAULT_LIMIT, offset: 0 }
+        opts.on("-w", "--where KEY=VALUE", "Filter condition (repeatable)") { |v| assign_kv(where, v) }
+        opts.on("--where-json JSON", "Filter object as JSON") { |v| where.merge!(JSON.parse(v)) }
+        opts.on("--order SPEC", "Sort order (e.g. 'created_at desc')") { |v| options[:order] = v }
+        opts.on("--columns LIST", "Comma-separated column names") { |v| options[:columns] = split_list(v) }
+        opts.on("--limit N", Integer, "Max rows to return") { |v| options[:limit] = v }
+        opts.on("--offset N", Integer, "Row offset") { |v| options[:offset] = v }
 
-          opts.on("--pretty", "Pretty-print JSON output") { global_options[:pretty] = true }
-          opts.on("-h", "--help", "Show help") { global_options[:help] = true }
+        lambda do |runtime, args|
+          model = args.first or raise ArgumentError, "Usage: query <Model> [options]"
+          runtime.query_records(model: model, where: where, **options)
+        end
+      end
+
+      def define_get
+        lambda do |runtime, args|
+          model, id = args
+          raise ArgumentError, "Usage: get <Model> <id>" unless model && id
+
+          runtime.get_record(model: model, id: id)
+        end
+      end
+
+      def define_search(opts)
+        models = []
+        options = { columns: nil, limit: Replica::DEFAULT_LIMIT }
+        opts.on("-m", "--model NAME", "Restrict search to model (repeatable)") { |v| models << v }
+        opts.on("--columns LIST", "Comma-separated columns to search") { |v| options[:columns] = split_list(v) }
+        opts.on("--limit N", Integer, "Max matches to return") { |v| options[:limit] = v }
+
+        lambda do |runtime, args|
+          query = args.join(" ").strip
+          raise ArgumentError, "Usage: search <query> [options]" if query.empty?
+
+          runtime.search_records(query: query, models: models.empty? ? nil : models, **options)
+        end
+      end
+
+      def define_outbox(opts)
+        limit = 100
+        opts.on("--limit N", Integer, "Max outbox mutations to return") { |v| limit = v }
+
+        ->(runtime, _args) { runtime.outbox(limit: limit) }
+      end
+
+      def define_render(opts)
+        params = {}
+        opts.on("-p", "--param KEY=VALUE", "Screen param (repeatable)") { |v| assign_kv(params, v) }
+
+        lambda do |runtime, args|
+          screen = args.first or raise ArgumentError, "Usage: render <screen> [--param k=v]"
+          runtime.render_screen(screen: screen, params: params)
+        end
+      end
+
+      def define_action(opts)
+        options = { params: {}, args: {}, values: {}, render: false, sync: false }
+        opts.on("-p", "--param KEY=VALUE", "Screen param (repeatable)") { |v| assign_kv(options[:params], v) }
+        opts.on("-a", "--arg KEY=VALUE", "Action arg (repeatable)") { |v| assign_kv(options[:args], v) }
+        opts.on("-v", "--value KEY=VALUE", "Form field value (repeatable)") { |v| assign_kv(options[:values], v) }
+        opts.on("--render", "Re-render the screen after performing the action") { options[:render] = true }
+        opts.on("--sync", "Sync with the server after performing the action") { options[:sync] = true }
+
+        lambda do |runtime, args|
+          screen, action = args
+          raise ArgumentError, "Usage: action <screen> <action> [--param k=v] [--arg k=v] [--value k=v]" unless screen && action
+
+          runtime.perform_action(screen: screen, action: action, **options)
+        end
+      end
+
+      def define_request(opts)
+        options = { body: nil, content_type: nil, headers: {}, sync: false }
+        opts.on("-d", "--data BODY", "Raw request body") { |v| options[:body] = v }
+        opts.on("--json JSON", "JSON object body (sets Content-Type: application/json)") do |v|
+          options[:body] = JSON.generate(JSON.parse(v))
+          options[:content_type] = "application/json"
+        end
+        opts.on("--content-type TYPE", "Content-Type header") { |v| options[:content_type] = v }
+        opts.on("-H", "--header HEADER", "HTTP header ('Name: Value')") { |v| assign_header(options[:headers], v) }
+        opts.on("--sync", "Sync with the server after a successful request") { options[:sync] = true }
+
+        lambda do |runtime, args|
+          method, path = args
+          raise ArgumentError, "Usage: request <METHOD> <path> [--data ...]" unless method && path
+
+          runtime.app_request(method: method, path: path, **options)
+        end
+      end
+
+      def define_history(opts)
+        query = nil
+        opts.on("--query QUERY", "/records query string to fetch from the server") { |v| query = v }
+
+        lambda do |runtime, args|
+          key = args.first or raise ArgumentError, "Usage: history <key> [--query ...]"
+          runtime.fetch_history(key: key, query: query)
         end
       end
 
@@ -203,85 +273,8 @@ module InstantRecord
         )
       end
 
-      def execute_command(command, args, cmd_options, options, runtime)
-        if command == "serve"
-          Server.new(runtime, input: @stdin, output: @stdout, err: @stderr).run
-          return 0
-        end
-
-        result =
-          case command
-          when "status"
-            runtime.status
-          when "sync"
-            runtime.sync(endpoint: args.first)
-          when "models"
-            runtime.list_models
-          when "query"
-            model = args.shift or raise ArgumentError, "Usage: query <Model> [options]"
-            runtime.query_records(
-              model: model,
-              where: cmd_options[:where] || {},
-              order: cmd_options[:order],
-              columns: cmd_options[:columns],
-              limit: cmd_options[:limit] || Replica::DEFAULT_LIMIT,
-              offset: cmd_options[:offset] || 0
-            )
-          when "get"
-            model = args.shift
-            id = args.shift
-            raise ArgumentError, "Usage: get <Model> <id>" unless model && id
-
-            runtime.get_record(model: model, id: id)
-          when "search"
-            query = args.join(" ").strip
-            raise ArgumentError, "Usage: search <query> [options]" if query.empty?
-
-            runtime.search_records(
-              query: query,
-              models: cmd_options[:models]&.empty? ? nil : cmd_options[:models],
-              columns: cmd_options[:columns],
-              limit: cmd_options[:limit] || Replica::DEFAULT_LIMIT
-            )
-          when "outbox"
-            runtime.outbox(limit: cmd_options[:limit] || 100)
-          when "render"
-            screen = args.shift or raise ArgumentError, "Usage: render <screen> [--param k=v]"
-            runtime.render_screen(screen: screen, params: cmd_options[:params] || {})
-          when "action"
-            screen = args.shift
-            action = args.shift
-            raise ArgumentError, "Usage: action <screen> <action> [--param k=v] [--arg k=v] [--value k=v]" unless screen && action
-
-            runtime.perform_action(
-              screen: screen,
-              action: action,
-              params: cmd_options[:params] || {},
-              args: cmd_options[:args] || {},
-              values: cmd_options[:values] || {},
-              render: !!cmd_options[:render],
-              sync: !!cmd_options[:sync]
-            )
-          when "request"
-            method = args.shift
-            path = args.shift
-            raise ArgumentError, "Usage: request <METHOD> <path> [--data ...]" unless method && path
-
-            runtime.app_request(
-              method: method,
-              path: path,
-              body: cmd_options[:body],
-              content_type: cmd_options[:content_type],
-              headers: cmd_options[:headers] || {},
-              sync: !!cmd_options[:sync]
-            )
-          when "history"
-            key = args.shift or raise ArgumentError, "Usage: history <key> [--query ...]"
-            runtime.fetch_history(key: key, query: cmd_options[:query])
-          end
-
-        json = options[:pretty] ? JSON.pretty_generate(result) : JSON.generate(result)
-        @stdout.puts(json)
+      def print_result(result, pretty:)
+        @stdout.puts(pretty ? JSON.pretty_generate(result) : JSON.generate(result))
         result.is_a?(Hash) && result["ok"] == false ? 1 : 0
       end
 
@@ -290,6 +283,17 @@ module InstantRecord
         raise ArgumentError, "Expected KEY=VALUE, got #{pair.inspect}" if value.nil? || key.empty?
 
         hash[key] = value
+      end
+
+      def assign_header(headers, line)
+        name, value = line.split(":", 2)
+        raise ArgumentError, "Header must be 'Name: Value'" if value.nil?
+
+        headers[name.strip] = value.strip
+      end
+
+      def split_list(list)
+        list.split(",").map(&:strip)
       end
 
       def truthy?(value)
