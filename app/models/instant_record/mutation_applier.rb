@@ -1,3 +1,4 @@
+require "instant_record/action_replay"
 require "instant_record/column_merge"
 require "instant_record/outbox_upcaster"
 
@@ -5,6 +6,7 @@ module InstantRecord
   # Applies one client mutation authoritatively: record write, version bump,
   # change-log row, and idempotency-ledger row, in one transaction. This is
   # the server half of the sync protocol; the HTTP layer above it is thin.
+  # A sync_action is replayed by ActionReplay instead.
   #
   # Conflict resolution uses server-anchored string-encoded HLCs (with extreme
   # forward clock skew clamped to server UTC) and 3-way column-level merging
@@ -21,27 +23,13 @@ module InstantRecord
     # would bring the record back. Raised inside the transaction, as above.
     RowGone = Class.new(StandardError)
 
-    # A replayed sync_action's frame, where such an update is the action's
-    # record not being found.
-    class ActionFrame < SyncActions::ServerFrame
-      def finalize_update!(record)
-        unless MutationApplier.row_updated?(record)
-          model = record.class
-          raise ActiveRecord::RecordNotFound.new(
-            "Couldn't find #{model.name} with '#{model.primary_key}'=#{record.id.inspect}", model.name, model.primary_key, record.id
-          )
-        end
-
-        super
-      end
-    end
-
     # The flag Active Record decides its commit callbacks by: it stands until
     # the transaction the record was saved in ends.
     def self.row_updated?(record)
       record.send(:_trigger_update_callback)
     end
 
+    ActionFrame = ActionReplay::Frame
     NON_DATA_COLUMNS = ColumnMerge::NON_DATA_COLUMNS
     MERGE_PREFIX = ColumnMerge::Notes::PREFIX
 
@@ -63,7 +51,7 @@ module InstantRecord
 
     # Replayed mutation ids return their original result without re-applying.
     def apply
-      return apply_mutator if mutator_intent?
+      return replay_action if mutator_intent?
 
       @mutation, @changes = OutboxUpcaster.apply_global(@mutation, @changes)
 
@@ -129,138 +117,8 @@ module InstantRecord
       @mutation[:mutator].present? || @mutation[:operation].to_s == "mutator"
     end
 
-    # Authoritatively replay a custom sync_action inside one transaction with
-    # AppliedMutation idempotency, unified auth, commit-guarded ActiveJob
-    # enqueueing, and visible post-rollback server records on rejection.
-    def apply_mutator
-      if (existing = AppliedMutation.find_by(mutation_id: @mutation_id))
-        return replayed_mutator(existing.result_payload.symbolize_keys)
-      end
-
-      mutator_name = @mutation[:mutator].to_s
-      entry = SyncActions.resolve(mutator_name)
-      unless entry && mutator_allowed?(entry[:klass])
-        return record_result(status: "rejected", reason: "unknown mutator", records: [])
-      end
-
-      SyncActions.install_active_job_guard!
-      frame = ActionFrame.new(
-        mutation_id: @mutation_id.to_s,
-        identity: @identity,
-        scope: @scope,
-        partition: @partition,
-        enforcing: true
-      )
-      args = SyncActions.normalize_args(@mutation[:args] || {})
-
-      ActiveRecord::Base.transaction(requires_new: true) do
-        InstantRecord.applying_client_mutation do
-          SyncActions.with_server_frame(frame) do
-            authorize_action!(entry, args)
-            SyncActions.dispatch(mutator_name, args)
-          end
-        end
-        record_applied_mutator!(status: "applied", records: frame.applied_records)
-      end
-    rescue NotPermitted => e
-      reason = (e.message.nil? || e.message == e.class.name) ? "not permitted" : e.message
-      record_result(status: "rejected", reason: reason, records: visible_records_for(frame&.touched_refs || []))
-    rescue MutationRejected => e
-      record_result(status: "rejected", reason: e.message, records: visible_records_for(frame&.touched_refs || []))
-    rescue ActiveRecord::RecordInvalid => e
-      refs = (frame&.touched_refs || []).dup
-      if e.record&.class&.respond_to?(:instant_record_syncable?) && e.record.class.instant_record_syncable? && e.record.id.present?
-        refs << [e.record.class.name, e.record.id]
-      end
-      record_result(status: "rejected", reason: e.record.errors.full_messages.to_sentence,
-        records: visible_records_for(refs))
-    rescue ActiveRecord::RecordNotFound => e
-      refs = (frame&.touched_refs || []).dup
-      refs << [e.model, e.id] if e.respond_to?(:model) && e.model.present? && e.respond_to?(:id) && e.id.present?
-      record_result(status: "rejected", reason: e.message, records: visible_records_for(refs))
-    rescue ActiveRecord::RecordNotUnique
-      if (existing = AppliedMutation.find_by(mutation_id: @mutation_id))
-        return replayed_mutator(existing.result_payload.symbolize_keys)
-      end
-
-      record_result(status: "rejected", reason: "id already exists", records: visible_records_for(frame&.touched_refs || []))
-    rescue ArgumentError, ActiveModel::UnknownAttributeError => e
-      record_result(status: "rejected", reason: e.message, records: visible_records_for(frame&.touched_refs || []))
-    end
-
-    # Raises RecordNotUnique on concurrent duplicate mutation_id so the
-    # wrapping savepoint rolls back duplicate domain writes and jobs.
-    def record_applied_mutator!(**result)
-      payload = result.merge(mutation_id: @mutation_id)
-      record = AppliedMutation.create!(mutation_id: @mutation_id, result_payload: payload)
-      record.result_payload.symbolize_keys
-    end
-
-    def mutator_allowed?(klass)
-      return true unless InstantRecord.synced_models.any?
-      return true unless klass.respond_to?(:instant_record_syncable?) && klass.instant_record_syncable?
-
-      !InstantRecord.synced_model(klass.name).nil?
-    end
-
-    def authorize_action!(entry, args)
-      authorizer = entry[:klass].instant_record_action_authorizer(entry[:action])
-      return unless authorizer
-
-      permitted =
-        if authorizer.arity == 3 || authorizer.arity < -2
-          authorizer.call(entry[:action], @identity, args)
-        else
-          authorizer.call(@identity, args)
-        end
-      raise NotPermitted unless permitted
-    end
-
-    # Authoritative post-rollback rows visible to the requester, so a rejected
-    # mutator never leaks hidden records and gives the client exact server state.
-    def visible_records_for(refs)
-      seen = {}
-      records = []
-      refs.each do |type, id|
-        next if type.nil? || id.nil?
-
-        key = "#{type}:#{id}"
-        next if seen[key]
-
-        seen[key] = true
-        model = InstantRecord.synced_model(type.to_s)
-        next unless model
-
-        record = SyncScope.visible(model, @identity, partition: @partition).find_by(id: id)
-        records << InstantRecord.record_payload(record) if record
-      end
-      records
-    end
-
-    # Re-filter stored mutator result records through what this requester may
-    # see, matching row-level replay privacy guarantees.
-    def replayed_mutator(result)
-      stored = result[:records]
-      return result unless stored.is_a?(Array)
-
-      filtered = stored.filter_map do |entry|
-        rec = entry.stringify_keys
-        model = InstantRecord.synced_model(rec["type"])
-        next rec unless model && SyncScope.scoped?(model)
-
-        if rec["operation"] == "destroy"
-          nil
-        else
-          record = SyncScope.visible(model, @identity, partition: @partition).find_by(id: rec["id"])
-          next unless record
-
-          payload = InstantRecord.record_payload(record).deep_stringify_keys
-          payload["operation"] = rec["operation"] if rec["operation"]
-          payload
-        end
-      end
-
-      result.merge(records: filtered)
+    def replay_action
+      ActionReplay.new(@mutation, @mutation_id, identity: @identity, scope: @scope, partition: @partition).apply
     end
 
     def perform(model)
@@ -547,14 +405,8 @@ module InstantRecord
       raise NotPermitted unless SyncScope.writable(model, @identity, partition: @partition).exists?(id: @mutation[:record_id])
     end
 
-    # create_or_find_by leans on the unique index: a concurrent duplicate
-    # returns the already-recorded result instead of applying twice.
     def record_result(**result)
-      payload = result.merge(mutation_id: @mutation_id)
-      record = AppliedMutation.create_or_find_by(mutation_id: @mutation_id) do |applied|
-        applied.result_payload = payload
-      end
-      record.result_payload.symbolize_keys
+      AppliedMutation.record(@mutation_id, **result)
     end
   end
 end
