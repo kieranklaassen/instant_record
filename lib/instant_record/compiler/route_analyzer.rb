@@ -397,8 +397,10 @@ module InstantRecord
       end
 
       def container_header(node)
-        header_end = (node.block.parameters&.location || node.block.opening_loc).end_offset
-        node.location.slice.byteslice(0, header_end - node.location.start_offset).strip
+        # The parameters of a block that uses _1 or it span the whole block.
+        parameters = node.block.parameters
+        header = parameters.is_a?(Prism::BlockParametersNode) ? parameters.location : node.block.opening_loc
+        node.location.slice.byteslice(0, header.end_offset - node.location.start_offset).strip
       end
 
       def reindent_slice(slice)

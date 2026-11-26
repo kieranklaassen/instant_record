@@ -494,6 +494,33 @@ class RouteAnalyzerTest < ActiveSupport::TestCase
     RUBY
   end
 
+  ["_1", "it"].each do |parameter|
+    test "a container that draws a file may use #{parameter}" do
+      skip "Ruby 3.3 has no it parameter" if parameter == "it" && RUBY_VERSION < "3.4"
+
+      result = analyze_draw(<<~RUBY, drawn: { "x" => "get 'x', to: 'xs#show'" })
+        local_first do
+          scope("a") do
+            #{parameter}.draw_nothing
+            draw(:x)
+          end
+          scope("b") { #{parameter}; draw(:x) }
+        end
+      RUBY
+
+      assert_equal <<~RUBY, result.local_routes_source
+        Rails.application.routes.draw do
+          scope("a") do
+            get 'x', to: 'xs#show'
+          end
+          scope("b") {
+            get 'x', to: 'xs#show'
+          }
+        end
+      RUBY
+    end
+  end
+
   test "an on: that is not member or collection changes nothing" do
     ["true", "false", "1", "[:member]", "{ a: 1 }", ":other", "pick"].each do |on|
       assert_local_routes "resources(:posts, only: []) { get :a, on: #{on} }", "GET /posts/:post_id/a posts#a\n"

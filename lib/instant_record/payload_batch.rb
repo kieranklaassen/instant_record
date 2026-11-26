@@ -67,11 +67,12 @@ module InstantRecord
 
     class << self
       # Whether `rows` are the rows of one query, untouched. A loaded relation,
-      # an extended one and an association's collection can hold rows that came
-      # another way.
+      # one with methods of its own and an association's collection can hold
+      # rows that came another way.
       def alike?(rows)
         rows.is_a?(ActiveRecord::Relation) && !rows.is_a?(ActiveRecord::Associations::CollectionProxy) &&
-          !rows.loaded? && !rows.eager_loading? && rows.extending_values.empty?
+          !rows.loaded? && !rows.eager_loading? &&
+          rows.singleton_methods.empty? && rows.singleton_class.ancestors.second == rows.class
       end
 
       # Stamps by metadata key, as stored: the single reads send a stamp

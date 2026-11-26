@@ -123,6 +123,57 @@ class PayloadBatchTest < Minitest::Test
     assert_equal singles.to_json, InstantRecord.record_payloads(rows.spawn).to_json
   end
 
+  # As above, with the relation given the same by Object#extend, and by a
+  # method of its own. The extension's method may be private.
+  def test_a_relation_with_methods_of_its_own_is_the_single_payloads
+    hiding = Module.new { def attributes = super.except("owner") }
+    hide = ->(records) { records.each { |record| record.extend(hiding) if record.id.end_with?("-2") } }
+    open = Module.new { define_method(:records) { hide.call(super()) } }
+    hidden = Module.new do
+      define_method(:exec_queries) { |&block| hide.call(super(&block)) }
+      private :exec_queries
+    end
+    seed(@open, 4)
+
+    {
+      "extended" => ->(rows) { rows.extend(open) },
+      "extended in private" => ->(rows) { rows.extend(hidden) },
+      "by extending, in private" => ->(rows) { rows.extending(hidden) },
+      "its own" => ->(rows) { rows.tap { rows.define_singleton_method(:records) { hide.call(super()) } } }
+    }.each do |how, change|
+      singles = change.call(@open.order(:id)).to_a.map { |record| InstantRecord.record_payload(record) }
+
+      refute singles[2][:attributes].key?("owner"), how
+      assert_equal singles.to_json, InstantRecord.record_payloads(change.call(@open.order(:id))).to_json, how
+    end
+  end
+
+  # A collection puts the rows it was given in place of the ones it reads.
+  def test_an_associations_collection_is_the_single_payloads
+    children
+    given = @open.find("open-2")
+    given.extend(Module.new { def attributes = super.except("title") })
+    rows = @open.find("parent").children
+    on_server { rows << given }
+    refute rows.loaded?
+
+    batched = InstantRecord.record_payloads(rows)
+
+    assert_equal rows.map { |record| InstantRecord.record_payload(record) }.to_json, batched.to_json
+    assert_equal 1, batched.count { |payload| !payload[:attributes].key?("title") }
+  end
+
+  # The output is the same either way: these rows are asked one by one because
+  # Active Record makes them from a join.
+  def test_eager_loaded_rows_are_asked_one_by_one
+    children
+    rows = @open.where(owner: "parent").eager_load(:children).order(:id)
+    singles = rows.spawn.map { |record| InstantRecord.record_payload(record) }
+
+    assert_equal singles.to_json, InstantRecord.record_payloads(rows.spawn).to_json
+    assert_equal 4, columns_asked { InstantRecord.record_payloads(rows.spawn) }
+  end
+
   # The output is the same either way, so this is what says the rows of a
   # bootstrap are read by name.
   def test_a_relation_asks_one_row_of_a_class_for_its_columns
@@ -287,6 +338,14 @@ class PayloadBatchTest < Minitest::Test
   end
 
   private
+
+  # Four rows that belong to another, "parent".
+  def children
+    model = @open
+    model.has_many :children, -> { order(:id) }, anonymous_class: model, foreign_key: :owner
+    on_server { model.create!(id: "parent", title: "p", owner: "ada") }
+    seed(model, 4, owner: "parent")
+  end
 
   def get(controller, action, **params)
     app = Struct.new(:config).new(Struct.new(:eager_load).new(true))
