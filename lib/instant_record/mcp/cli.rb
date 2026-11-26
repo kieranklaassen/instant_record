@@ -79,7 +79,7 @@ module InstantRecord
 
       def default_options
         headers = @env["INSTANT_RECORD_HEADERS"].to_s
-        env_headers = headers.empty? ? {} : JSON.parse(headers)
+        env_headers = headers.empty? ? {} : json_object("INSTANT_RECORD_HEADERS", headers)
         scope = setting("INSTANT_RECORD_SCOPE", :scope)
         root = @defaults[:root] || Dir.pwd
 
@@ -151,7 +151,7 @@ module InstantRecord
         where = {}
         options = { order: nil, columns: nil, limit: Replica::DEFAULT_LIMIT, offset: 0 }
         opts.on("-w", "--where KEY=VALUE", "Filter condition (repeatable)") { |v| assign_kv(where, v) }
-        opts.on("--where-json JSON", "Filter object as JSON") { |v| where.merge!(JSON.parse(v)) }
+        opts.on("--where-json JSON", "Filter object as JSON") { |v| where.merge!(json_object("--where-json", v)) }
         opts.on("--order SPEC", "Sort order (e.g. 'created_at desc')") { |v| options[:order] = v }
         opts.on("--columns LIST", "Comma-separated column names") { |v| options[:columns] = split_list(v) }
         opts.on("--limit N", Integer, "Max rows to return") { |v| options[:limit] = v }
@@ -224,7 +224,7 @@ module InstantRecord
         options = { body: nil, content_type: nil, headers: {}, sync: false }
         opts.on("-d", "--data BODY", "Raw request body") { |v| options[:body] = v }
         opts.on("--json JSON", "JSON object body (sets Content-Type: application/json)") do |v|
-          options[:body] = JSON.generate(JSON.parse(v))
+          options[:body] = valid_json("--json") { JSON.generate(JSON.parse(v)) }
           options[:content_type] = "application/json"
         end
         opts.on("--content-type TYPE", "Content-Type header") { |v| options[:content_type] = v }
@@ -290,6 +290,20 @@ module InstantRecord
         raise ArgumentError, "Header must be 'Name: Value'" if value.nil?
 
         headers[name.strip] = value.strip
+      end
+
+      def json_object(name, text)
+        value = valid_json(name) { JSON.parse(text) }
+        raise ArgumentError, "Expected a JSON object for #{name}" unless value.is_a?(Hash)
+
+        value
+      end
+
+      # The parser's message can quote the input, which may hold credentials.
+      def valid_json(name)
+        yield
+      rescue JSON::JSONError
+        raise ArgumentError, "Expected valid JSON for #{name}"
       end
 
       def split_list(list)
