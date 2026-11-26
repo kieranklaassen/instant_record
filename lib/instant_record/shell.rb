@@ -1,3 +1,4 @@
+require "bigdecimal"
 require "digest"
 require "fileutils"
 require "json"
@@ -427,6 +428,70 @@ module InstantRecord
         end
       end
 
+      # A column's default as a SQLite literal, or nil when the SQLite column
+      # would read it back as another value. Rails hands over the database's
+      # string or, from 8.1.0 to 8.1.3.1, sometimes the value; the type reads both.
+      def sqlite_default(connection, column)
+        return if column.default.nil? || column.default_function
+
+        type = column.respond_to?(:fetch_cast_type) ? column.fetch_cast_type(connection) : connection.lookup_cast_type_from_column(column)
+        value = type.deserialize(column.default)
+
+        case column.type
+        when :json, :jsonb
+          return if value.nil? && column.default.to_s.strip != "null" # it could not be decoded
+
+          # A json column has numeric affinity: a longer bare integer turns double.
+          sqlite_quote(JSON.generate(value)) unless value.is_a?(Integer) && !sqlite_integer?(value)
+        when :boolean
+          sqlite_value(value).to_s if value == true || value == false
+        when :integer, :bigint, :oid
+          value.to_s if sqlite_integer?(value)
+        when :float
+          sqlite_float(value)
+        when :decimal
+          sqlite_decimal(value)
+        when :date
+          sqlite_quote(connection.quoted_date(value)) if value.is_a?(Date)
+        when :datetime
+          sqlite_quote(value.getutc.strftime(DB_TIME)) if value.acts_like?(:time)
+        else
+          readable = value.is_a?(String) && !value.include?("\0") && (column.type != :binary || value.ascii_only?)
+          sqlite_quote(value) if readable
+        end
+      rescue JSON::GeneratorError, JSON::NestingError
+        nil # a number JSON has no form for, or more levels than it takes
+      rescue ArgumentError
+        raise if %i[json jsonb].include?(column.type)
+
+        nil # a range without its start
+      end
+
+      # Plain digits, as the SQLite adapter reads no default with an exponent.
+      def sqlite_float(value)
+        return unless value.is_a?(Numeric)
+
+        number = BigDecimal(value.to_s)
+        return if number.nan?
+
+        number.infinite? ? sqlite_quote(value.to_s) : number.to_s("F")
+      end
+
+      # SQLite keeps a decimal as an integer or a double.
+      def sqlite_decimal(value)
+        return unless value.is_a?(Numeric)
+
+        number = BigDecimal(value.to_s)
+        return unless number.finite?
+        return number.to_i.to_s if number.frac.zero? && sqlite_integer?(number.to_i)
+
+        number.to_s("F") if ActiveRecord::Type::Decimal.new.deserialize(number.to_f) == number
+      end
+
+      def sqlite_integer?(value) = value.is_a?(Integer) && value.bit_length < 64
+
+      def sqlite_quote(text) = "'#{SQLite3::Database.quote(text)}'"
+
       def extract_schema_version(schema_path)
         match = File.read(schema_path).match(/\.define\s*\(\s*version:\s*([\d_]+)/)
         match ? Integer(match[1], 10) : nil
@@ -439,7 +504,10 @@ module InstantRecord
           columns = connection.columns(table).map do |column|
             sql = %("#{column.name}" #{SQLITE_TYPES.fetch(column.type, "text")})
             sql << " NOT NULL" unless column.null
-            sql << " DEFAULT #{connection.quote(column.default)}" if column.default && !column.default_function
+            default = sqlite_default(connection, column)
+            # Left out, it would refuse every row that does not set the column.
+            default ||= connection.quote(column.default) if !column.null && column.default && !column.default_function
+            sql << " DEFAULT #{default}" if default
             sql << " PRIMARY KEY AUTOINCREMENT" if keys == [column.name] && %i[integer bigint].include?(column.type)
             sql
           end
