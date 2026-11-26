@@ -224,6 +224,9 @@ module InstantRecord
         where_clause, where_offset = extract_outer_where(sql)
         return result unless where_clause
 
+        # The other parts of a compound query read rows the first WHERE does not limit.
+        return result if contains_top_level_keyword?(sql, "UNION") || contains_top_level_keyword?(sql, "INTERSECT") || contains_top_level_keyword?(sql, "EXCEPT")
+
         # A top-level OR in the outer WHERE means any single branch can match
         # rows outside the other branch's partition predicate.
         return result if contains_top_level_keyword?(where_clause, "OR")
