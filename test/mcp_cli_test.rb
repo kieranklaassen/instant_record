@@ -135,12 +135,42 @@ class McpCliTest < ActiveSupport::TestCase
     assert_equal [2, "Error: ambiguous option: --o\n", nil], [run.code, run.err, run.options]
   end
 
-  test "JSON options that do not parse raise" do
-    [%w[query --where-json {], %w[request --json {]].each do |argv|
-      assert_raises(JSON::ParserError) { cli(argv) }
+  test "JSON options that do not parse are option errors without a runtime" do
+    { "--where-json" => %w[query Issue], "--json" => %w[request POST /issues] }.each do |option, command|
+      ["{", "", "{\n\"a\":\nx}", "#{'[' * 200}#{']' * 200}"].each do |json|
+        run = cli([*command, option, json])
+        assert_equal [2, "", "Error: Expected valid JSON for #{option}\n", nil], [run.code, run.out, run.err, run.options], json
+      end
     end
-    assert_raises(TypeError) { cli(%w[query --where-json null]) }
-    assert_raises(JSON::ParserError) { cli(%w[status], env: { "INSTANT_RECORD_HEADERS" => "{" }) }
+
+    run = cli(%w[request POST /issues --json 1e999])
+    assert_equal [2, "", "Error: Expected valid JSON for --json\n", nil], [run.code, run.out, run.err, run.options]
+  end
+
+  test "--where-json takes only an object" do
+    ["null", "1", '"s"', "true", "[]", '[["a","b"]]'].each do |json|
+      run = cli(["query", "Issue", "--where-json", json])
+      assert_equal [2, "", "Error: Expected a JSON object for --where-json\n", nil], [run.code, run.out, run.err, run.options], json
+    end
+  end
+
+  test "--json takes any JSON value" do
+    ["null", "1", '"s"', "true", "[]", '[{"a":1}]'].each do |json|
+      run = cli(["request", "POST", "/issues", "--json", json])
+      assert_equal [0, ""], [run.code, run.err], json
+      assert_equal [json, "application/json"], run.calls.first.last.values_at(:body, :content_type)
+    end
+  end
+
+  test "INSTANT_RECORD_HEADERS takes only a JSON object, and is not repeated in the error" do
+    { "{" => "valid JSON", " " => "valid JSON", "Authorization: secret" => "valid JSON", "null" => "a JSON object",
+      "1" => "a JSON object", '"s"' => "a JSON object", "[]" => "a JSON object", '[["a","b"]]' => "a JSON object" }.each do |headers, expected|
+      [%w[status], %w[--help], []].each do |argv|
+        run = cli(argv, env: { "INSTANT_RECORD_HEADERS" => headers })
+        assert_equal [2, "", "Error: Expected #{expected} for INSTANT_RECORD_HEADERS\n", nil],
+                     [run.code, run.out, run.err, run.options], headers
+      end
+    end
   end
 
   test "an unknown command names the known ones" do
@@ -257,9 +287,14 @@ class McpCliTest < ActiveSupport::TestCase
   end
 
   test "other errors pass through, with the runtime closed" do
-    runtime = FakeRuntime.new(status: RuntimeError.new("boom"))
-    assert_raises(RuntimeError) { cli(%w[status], runtime: runtime) }
-    assert_equal [[:status, {}], [:close, {}]], runtime.calls
+    commands = { status: %w[status], query_records: %w[query Issue --where-json {}], app_request: %w[request POST /issues --json {}] }
+    [RuntimeError.new("boom"), JSON::ParserError.new("host JSON"), TypeError.new("host type")].each do |error|
+      commands.each do |name, argv|
+        runtime = FakeRuntime.new(name => error)
+        assert_same error, assert_raises(error.class) { cli(argv, runtime: runtime) }
+        assert_equal [name, :close], runtime.calls.map(&:first)
+      end
+    end
   end
 
   test "--sync-on-start reports the summary or the error, and skips sync itself" do
