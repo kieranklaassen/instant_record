@@ -1,0 +1,302 @@
+[
+  {
+    "name": "instant_record_status",
+    "description": "Inspect local SQLite replica sync cursor, pending outbox count, identity, models, and available screens (<1ms offline).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "instant_record_sync",
+    "description": "Run a sync pass against the configured Rails server: push pending local outbox mutations and pull latest scoped changes.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "type": "string",
+          "description": "Optional sync endpoint URL override."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "instant_record_models",
+    "description": "List all synced models in the local SQLite replica with table names, columns, row counts, and pending write counts (<1ms offline).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "instant_record_query",
+    "description": "Query synced model records from the local SQLite replica with structured filters, sorting, column projection, and pagination (<1ms offline).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string",
+          "description": "Synced model or table name (e.g. Issue, Note, MailEntry)."
+        },
+        "where": {
+          "type": "object",
+          "description": "Column filters: exact values, arrays (IN), null (IS NULL), or operator objects ({eq, ne, gt, gte, lt, lte, like, in, is_null, not_null})."
+        },
+        "order": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ],
+          "description": "Sort order such as 'created_at desc' or ['created_at desc', 'id desc']."
+        },
+        "columns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional subset of columns to return."
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500,
+          "default": 50
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        }
+      },
+      "required": [
+        "model"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "instant_record_get",
+    "description": "Fetch a single synced record by model and primary key ID from the local SQLite replica (<1ms offline).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string",
+          "description": "Synced model or table name."
+        },
+        "id": {
+          "type": "string",
+          "description": "Primary key value."
+        }
+      },
+      "required": [
+        "model",
+        "id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "instant_record_search",
+    "description": "Case-insensitive multi-term search across one or all synced models in the local SQLite replica (<1ms offline).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Search query string (whitespace-separated terms must all match)."
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional list of models to restrict search to."
+        },
+        "columns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional list of columns to search (when restricting to models that share those columns)."
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500,
+          "default": 50
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "instant_record_outbox",
+    "description": "Inspect locally queued offline outbox mutations waiting to sync to the server (<1ms offline).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500,
+          "default": 100
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "instant_record_render_screen",
+    "description": "Render a compiled native screen (app/screens/*_screen.rb) from the local SQLite replica as structured JSON (<1ms offline).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "screen": {
+          "type": "string",
+          "description": "Screen name (e.g. mailbox, thread)."
+        },
+        "params": {
+          "type": "object",
+          "description": "Screen parameters (string key/value pairs)."
+        }
+      },
+      "required": [
+        "screen"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "instant_record_action",
+    "description": "Execute a validated local native screen action (Screen#perform) inside the compiled host offline, running validations and queueing outbox mutations (<1ms offline).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "screen": {
+          "type": "string",
+          "description": "Screen name."
+        },
+        "action": {
+          "type": "string",
+          "description": "Action name passed to Screen#perform."
+        },
+        "params": {
+          "type": "object",
+          "description": "Screen parameters."
+        },
+        "args": {
+          "type": "object",
+          "description": "Action arguments."
+        },
+        "values": {
+          "type": "object",
+          "description": "Form field values."
+        },
+        "render": {
+          "type": "boolean",
+          "description": "Re-render the screen after the action.",
+          "default": false
+        },
+        "sync": {
+          "type": "boolean",
+          "description": "Run a sync pass immediately after the action.",
+          "default": false
+        }
+      },
+      "required": [
+        "screen",
+        "action"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "instant_record_request",
+    "description": "Dispatch a validated local HTTP request (GET/POST/PATCH/DELETE) through the compiled Rails app inside the native host offline, running controller & model validations and queueing outbox mutations (<1ms offline).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "GET",
+            "POST",
+            "PATCH",
+            "PUT",
+            "DELETE"
+          ],
+          "description": "HTTP method."
+        },
+        "path": {
+          "type": "string",
+          "description": "Application path (e.g. /todo/issues)."
+        },
+        "params": {
+          "type": "object",
+          "description": "Request parameters (encoded as query string for GET, form or JSON for writes)."
+        },
+        "body": {
+          "type": "string",
+          "description": "Optional raw request body."
+        },
+        "content_type": {
+          "type": "string",
+          "description": "Optional Content-Type header."
+        },
+        "headers": {
+          "type": "object",
+          "description": "Optional HTTP headers."
+        },
+        "sync": {
+          "type": "boolean",
+          "description": "Run a sync pass after a successful request.",
+          "default": false
+        }
+      },
+      "required": [
+        "method",
+        "path"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "instant_record_history",
+    "description": "Inspect local history pagination state or fetch an older keyset history page from the server into the local SQLite replica.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string",
+          "description": "History pagination key (e.g. older:support)."
+        },
+        "query": {
+          "type": "string",
+          "description": "Optional /records query string to fetch from the server."
+        },
+        "endpoint": {
+          "type": "string",
+          "description": "Optional sync endpoint override."
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "additionalProperties": false
+    }
+  }
+]
