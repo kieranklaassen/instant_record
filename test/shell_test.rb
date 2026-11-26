@@ -171,4 +171,157 @@ class ShellTest < ActiveSupport::TestCase
   ensure
     InstantRecord::Shell.sources.delete("custom_feed")
   end
+
+  test "connection DDL keeps the defaults a SQLite table can hold" do
+    ActiveRecord::Base.transaction do
+      ActiveRecord::Base.connection.create_table :shell_defaults, id: :string do |t|
+        t.boolean :on, default: true
+        t.boolean :off, default: false, null: false
+        t.boolean :unset
+        t.integer :zero, default: 0
+        t.integer :below, default: -7
+        t.decimal :price, precision: 10, scale: 2, default: "12.5"
+        t.float :ratio, default: 1.5
+        t.string :word, default: "007"
+        t.string :empty, default: ""
+        t.text :quoted, default: %q(it's "q" \\ 'x')
+        t.date :day, default: "2026-01-02"
+        t.datetime :moment, default: "2026-01-02 03:04:05"
+        t.json :object, default: { "a" => [1, nil, "it's"] }
+        t.json :scalar, default: "x"
+        t.datetime :now, default: -> { "CURRENT_TIMESTAMP" }
+      end
+
+      table = InstantRecord::Shell.send(:connection_schema_statements).find { |sql| sql.start_with?('CREATE TABLE "shell_defaults"') }
+      server = Class.new(ActiveRecord::Base) { self.table_name = "shell_defaults" }
+      ActiveRecord::Base.connection.execute("INSERT INTO shell_defaults (id) VALUES ('one')")
+      expected = server.find("one").attributes.except("now")
+
+      assert_equal(
+        {
+          "on" => [1, "integer"], "off" => [0, "integer"], "unset" => [nil, "null"], "zero" => [0, "integer"],
+          "below" => [-7, "integer"], "price" => [12.5, "real"], "ratio" => [1.5, "real"], "word" => ["007", "text"],
+          "empty" => ["", "text"], "quoted" => [%q(it's "q" \\ 'x'), "text"], "day" => ["2026-01-02", "text"],
+          "moment" => ["2026-01-02 03:04:05.000000", "text"], "object" => [%({"a":[1,null,"it's"]}), "text"],
+          "scalar" => ['"x"', "text"], "now" => [nil, "null"]
+        },
+        stored_defaults(table, server.column_names - ["id"])
+      )
+      assert_equal expected, read_defaults(table).except("now")
+      raise ActiveRecord::Rollback
+    end
+  end
+
+  # What PostgreSQL's columns hand over, as each Rails hands it over: the
+  # database's string, or (8.1.0 to 8.1.3.1) a value of a type that is not mutable.
+  test "a default the SQLite table cannot hold stays where a row would be refused without it" do
+    ActiveRecord::Base.transaction do
+      ActiveRecord::Base.connection.create_table :shell_kept, id: :string do |t|
+        t.time :opens, default: "10:00", null: false
+        t.time :closes, default: "18:00"
+      end
+      table = InstantRecord::Shell.send(:connection_schema_statements).find { |sql| sql.start_with?('CREATE TABLE "shell_kept"') }
+
+      assert_match(/"opens" \w+ NOT NULL DEFAULT '/, table)
+      assert_match(/"closes" \w+[,)]/, table)
+      raise ActiveRecord::Rollback
+    end
+  end
+
+  test "a JSON default that cannot be decoded is not passed over" do
+    broken = Object.new
+    def broken.deserialize(_default) = raise(ArgumentError, "wrong number of arguments")
+    column = Struct.new(:type, :default, :default_function, :cast_type) do
+      def fetch_cast_type(_connection) = cast_type
+    end
+
+    assert_raises(ArgumentError) { InstantRecord::Shell.send(:sqlite_default, ActiveRecord::Base.connection, column.new(:jsonb, "{}", nil, broken)) }
+    assert_nil InstantRecord::Shell.send(:sqlite_default, ActiveRecord::Base.connection, column.new(:numrange, "(1,5)", nil, broken))
+    assert_equal "0", InstantRecord::Shell.send(:sqlite_default, ActiveRecord::Base.connection, column.new(:oid, "0", nil, ActiveModel::Type::Integer.new(limit: 8)))
+  end
+
+  test "a column default becomes the literal its SQLite column reads back" do
+    type = ActiveRecord::Type
+    reads = Struct.new(:given) { def deserialize(_) = given }
+    refuses = Class.new { def deserialize(_) = raise(ArgumentError, "a Range cannot exclude its start") }.new
+    {
+      [:boolean, type::Boolean.new, "true"] => "1",
+      [:boolean, type::Boolean.new, "false"] => "0",
+      [:boolean, type::Boolean.new, true] => "1",
+      [:boolean, type::Boolean.new, false] => "0",
+      [:integer, type::Integer.new(limit: 8), "9007199254740993"] => "9007199254740993",
+      [:integer, type::Integer.new(limit: 8), -7] => "-7",
+      [:decimal, type::Decimal.new, "12.50"] => "12.5",
+      [:decimal, type::Decimal.new, BigDecimal("12.50")] => "12.5",
+      [:decimal, type::Decimal.new, "12345678901234567890.12345678901234567890"] => nil,
+      [:decimal, type::Decimal.new, "9007199254740993"] => "9007199254740993",
+      [:decimal, type::Decimal.new, "0.30000000000000004"] => nil,
+      [:decimal, type::Decimal.new, "NaN"] => nil,
+      [:float, type::Float.new, "1.5"] => "1.5",
+      [:float, type::Float.new, "0.30000000000000004"] => "0.30000000000000004",
+      [:float, type::Float.new, 1e30] => "1000000000000000000000000000000.0",
+      [:float, type::Float.new, "Infinity"] => "'Infinity'",
+      [:float, type::Float.new, "NaN"] => nil,
+      [:string, type::String.new, "it's"] => "'it''s'",
+      [:text, type::Text.new, "a\\b"] => "'a\\b'",
+      [:uuid, type::String.new, "00000000-0000-0000-0000-000000000001"] => "'00000000-0000-0000-0000-000000000001'",
+      [:date, type::Date.new, "2026-01-02"] => "'2026-01-02'",
+      [:date, type::Date.new, Date.new(2026, 1, 2)] => "'2026-01-02'",
+      [:date, reads.new(Float::INFINITY), "infinity"] => nil,
+      [:datetime, type::DateTime.new, "2026-01-02 03:04:05.1"] => "'2026-01-02 03:04:05.100000'",
+      [:datetime, reads.new(Float::INFINITY), "infinity"] => nil,
+      [:jsonb, type::Json.new, '{"a": 1}'] => %('{"a":1}'),
+      [:jsonb, type::Json.new, "false"] => "'false'",
+      [:jsonb, type::Json.new, "null"] => "'null'",
+      [:jsonb, type::Json.new, "bad"] => nil,
+      [:jsonb, reads.new(101.times.reduce([]) { |inner, _| [inner] }), "deep"] => nil,
+      [:jsonb, type::Json.new, '"x"'] => %('"x"'),
+      [:jsonb, type::Json.new, "9223372036854775808"] => nil,
+      [:jsonb, reads.new([]), "{}"] => "'[]'",
+      [:string, reads.new(%w[a b]), "{a,b}"] => nil,
+      [:integer, reads.new([1, 2]), "{1,2}"] => nil,
+      [:boolean, reads.new([true]), "{t}"] => nil,
+      [:time, type::Time.new, "03:04:05"] => nil,
+      [:numrange, refuses, "(1,5)"] => nil,
+      [:money, type::Decimal.new, "12.5"] => nil,
+      [:string, type::String.new, nil] => nil,
+      [:json, type::Json.new, nil] => nil,
+      [:json, type::Json.new, "1e400"] => nil,
+      [:integer, reads.new(2**63), "9223372036854775808"] => nil,
+      [:decimal, type::Decimal.new, "Infinity"] => nil,
+      [:binary, reads.new("hi".b), "\\x6869"] => "'hi'",
+      [:binary, reads.new("\xFF".b), "\\xff"] => nil,
+      [:binary, reads.new("\0".b), "\\x00"] => nil
+    }.each do |(kind, cast_type, default), literal|
+      column = Struct.new(:type, :default, :default_function, :cast_type) do
+        def fetch_cast_type(_) = cast_type
+      end.new(kind, default, nil, cast_type)
+      actual = InstantRecord::Shell.send(:sqlite_default, ActiveRecord::Base.connection, column)
+      literal.nil? ? assert_nil(actual, [kind, default].inspect) : assert_equal(literal, actual, [kind, default].inspect)
+    end
+  end
+
+  class Client < ActiveRecord::Base
+    self.abstract_class = true
+  end
+
+  private
+
+  def stored_defaults(table, names)
+    database = SQLite3::Database.new(":memory:")
+    database.execute(table)
+    database.execute("INSERT INTO shell_defaults (id) VALUES ('one')")
+    names.to_h { |name| [name, database.execute(%(SELECT "#{name}", typeof("#{name}") FROM shell_defaults)).first] }
+  ensure
+    database&.close
+  end
+
+  def read_defaults(table)
+    Client.establish_connection(adapter: "sqlite3", database: ":memory:")
+    Client.connection.execute(table)
+    Client.connection.execute("INSERT INTO shell_defaults (id) VALUES ('one')")
+    Class.new(Client) { self.table_name = "shell_defaults" }.find("one").attributes
+  ensure
+    Client.remove_connection
+  end
 end
