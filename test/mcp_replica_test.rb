@@ -93,7 +93,118 @@ class McpReplicaTest < ActiveSupport::TestCase
     assert_equal({ "title" => "Fix 100% invoice_total bug" }, mutation["changes"])
   end
 
+  test "search and the like filter fold ASCII case only and match every column as text" do
+    write do |db|
+      db.execute_batch(<<~SQL)
+        INSERT INTO notes VALUES ('n-2', 'CAFÉ Menu', 'x', 45678, 'synced', 'a', 'a');
+        INSERT INTO notes VALUES ('n-3', 'café menu', 'x', 3, 'synced', 'b', 'b');
+        INSERT INTO notes VALUES ('n-4', CAST('Blob LABEL' AS BLOB), 'x', 4, 'synced', 'c', 'c');
+      SQL
+    end
+
+    assert_equal %w[n-3 n-2], search_ids("MENU")
+    # Ruby folds the term's É to é; SQLite leaves a stored É as it is.
+    assert_equal ["n-3"], search_ids("CAFÉ")
+    assert_equal ["n-4"], search_ids("blob label")
+    assert_equal ["n-2"], search_ids("567", columns: ["server_version"])
+    assert_equal [], search_ids("back\\slash")
+
+    like = ->(column, text) { @replica.query(model: "Note", where: { column => { "like" => text } }, order: "id")["rows"].map { |r| r["id"] } }
+    assert_equal %w[n-2 n-3], like.("title", "mEnU")
+    assert_equal ["n-3"], like.("title", "CAFÉ")
+    assert_equal ["n-4"], like.("title", "label")
+    assert_equal ["n-2"], like.("server_version", "567")
+    assert_equal [], like.("title", "%")
+  end
+
+  test "each read returns its own plain rows with string keys in column order" do
+    columns = %w[id title body server_version sync_state created_at updated_at]
+    read = -> {
+      [@replica.find(model: "Note", id: "n-1")["record"],
+       @replica.query(model: "Note")["rows"].first,
+       @replica.search(query: "checklist")["matches"].first["record"]]
+    }
+
+    rows = read.call
+    rows.each do |row|
+      assert_instance_of Hash, row
+      assert_equal columns, row.keys
+      row["title"] = "changed by the caller"
+    end
+    assert_equal ["Release checklist"], read.call.map { |row| row["title"] }.uniq
+    assert_equal [], @replica.query(model: "Note", where: { "id" => "nope" })["rows"]
+    refute_predicate @replica.query(model: "Note")["rows"], :frozen?
+    refute_predicate @replica.outbox["mutations"], :frozen?
+    assert_equal({ "title" => "Release checklist", "id" => "n-1" },
+      @replica.query(model: "Note", columns: %w[title id title])["rows"].first)
+  end
+
+  test "outbox keeps an unparseable payload as text and leaves out an empty one" do
+    write do |db|
+      db.execute_batch(<<~SQL)
+        INSERT INTO instant_record_outbox VALUES ('m-2', 'Note', 'n-1', 'update', '{oops', 1, '2026-11-20T12:00:00Z', 'x');
+        INSERT INTO instant_record_outbox VALUES ('m-3', 'Note', 'n-1', 'delete', '', 1, '2026-11-20T13:00:00Z', 'x');
+      SQL
+    end
+
+    mutations = @replica.outbox["mutations"]
+    assert_equal %w[m-1 m-2 m-3], mutations.map { |m| m["id"] }
+    assert_equal "{oops", mutations[1]["changes"]
+    refute mutations[2].key?("changes")
+  end
+
+  test "opens the replica read-only" do
+    @replica.models
+    assert_raises(SQLite3::ReadOnlyException) do
+      @replica.send(:connection).execute("DELETE FROM notes")
+    end
+  end
+
+  test "a column added underneath shows up in rows at once and as a name after refresh_schema!" do
+    @replica.models
+    write { |db| db.execute("ALTER TABLE notes ADD COLUMN tag TEXT DEFAULT 'Fresh'") }
+
+    assert_equal "Fresh", @replica.find(model: "Note", id: "n-1")["record"]["tag"]
+    assert_raises(ArgumentError) { @replica.query(model: "Note", where: { "tag" => "Fresh" }) }
+    assert_equal [], search_ids("fresh")
+
+    @replica.refresh_schema!
+    assert_equal 1, @replica.query(model: "Note", where: { "tag" => "Fresh" })["total"]
+    assert_equal ["n-1"], search_ids("fresh")
+  end
+
+  test "a table dropped underneath is an SQL error naming the table" do
+    @replica.models
+    write { |db| db.execute("DROP TABLE notes") }
+
+    error = assert_raises(SQLite3::SQLException) { @replica.search(query: "release", models: ["Note"]) }
+    assert_match(/no such table: (main\.)?notes/, error.message)
+  end
+
+  test "a replaced file is read after reopen, the old one until then" do
+    @replica.models
+    replacement = File.join(@dir, "next.sqlite3")
+    seed_sqlite!(replacement)
+    write(replacement) { |db| db.execute("UPDATE notes SET title = 'Second file'") }
+    File.rename(replacement, @db_path)
+
+    assert_equal "Release checklist", @replica.find(model: "Note", id: "n-1")["record"]["title"]
+    @replica.reopen
+    assert_equal "Second file", @replica.find(model: "Note", id: "n-1")["record"]["title"]
+  end
+
   private
+
+  def write(path = @db_path)
+    db = SQLite3::Database.new(path)
+    yield db
+  ensure
+    db&.close
+  end
+
+  def search_ids(text, **options)
+    @replica.search(query: text, models: ["Note"], **options)["matches"].map { |m| m["id"] }
+  end
 
   def seed_sqlite!(path)
     db = SQLite3::Database.new(path)
