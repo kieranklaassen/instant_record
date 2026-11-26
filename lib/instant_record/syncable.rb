@@ -131,6 +131,14 @@ module InstantRecord
           self.class.current_transaction.after_rollback { event[:undone] = true }
         end
         private :note_cascaded
+
+        # Active Record runs after_update even when the UPDATE matched no row, as
+        # when a concurrent destroy removed it. Logging that would bring it back.
+        # The flag is the one Active Record decides its commit callbacks by.
+        define_method(:record_server_change) do |operation|
+          super(operation) unless operation == "update" && !_trigger_update_callback
+        end
+        private :record_server_change
       end
     end
 
