@@ -97,6 +97,62 @@ class TraceTest < Minitest::Test
     end
   end
 
+  def test_ruby_redactor_leaves_no_raw_pii_in_a_wal_mode_checkpoint_with_many_rows
+    raw = build_sqlite_bytes do |db|
+      db.execute("PRAGMA journal_mode = WAL")
+      db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)")
+      db.transaction do
+        600.times { |i| db.execute("INSERT INTO users (email) VALUES (?)", ["bob#{i}@private.example" + "x" * 200]) }
+      end
+      db.execute("DELETE FROM users WHERE id > 300")
+    end
+    assert_includes raw, "private.example".b
+
+    clean = InstantRecord::Trace::Redactor.new(salt: "test").redact_database(raw)[:bytes]
+
+    refute_includes clean, "private.example".b
+    read_sqlite_bytes(clean) do |db|
+      assert_equal "ok", db.get_first_value("PRAGMA integrity_check")
+      assert_equal 0, db.get_first_value("PRAGMA freelist_count")
+      assert_equal 300, db.get_first_value("SELECT count(*) FROM users WHERE email LIKE 'redacted-%' OR email LIKE '[redacted:%'")
+    end
+  end
+
+  def test_ruby_redactor_raises_the_trigger_error_when_a_trigger_rolls_back
+    raw = build_sqlite_bytes do |db|
+      db.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)")
+      db.execute("INSERT INTO users (email) VALUES ('bob@private.example')")
+      db.execute("CREATE TRIGGER stop BEFORE UPDATE ON users BEGIN SELECT RAISE(ROLLBACK, 'users are frozen'); END")
+    end
+
+    error = assert_raises(SQLite3::ConstraintException) do
+      InstantRecord::Trace::Redactor.new(salt: "test").redact_database(raw)
+    end
+    assert_match(/users are frozen/, error.message)
+  end
+
+  def test_ruby_redactor_commits_each_row_when_the_checkpoint_has_a_virtual_table
+    redactor = InstantRecord::Trace::Redactor.new(salt: "test")
+    emails = 5.times.map { |i| "bob#{i}@private.example" }
+    build = lambda do |&after|
+      build_sqlite_bytes do |db|
+        db.execute("CREATE VIRTUAL TABLE docs USING fts5(email)")
+        emails.each { |email| db.execute("INSERT INTO docs (email) VALUES (?)", [email]) }
+        after&.call(db)
+      end
+    end
+    expected = build.call do |db|
+      emails.each.with_index(1) do |email, rowid|
+        db.execute("UPDATE docs SET email = ? WHERE rowid = ?", [redactor.pseudonymize(email, "email"), rowid])
+      end
+    end
+
+    clean = redactor.redact_database(build.call)[:bytes]
+
+    index = ->(bytes) { read_sqlite_bytes(bytes) { |db| db.execute("SELECT id, hex(block) FROM docs_data ORDER BY id") } }
+    assert_equal index.call(expected), index.call(clean)
+  end
+
   def test_replayer_runs_deterministic_node_replay_and_reproduces_wasm_trap
     Dir.mktmpdir("irtrace-replay-") do |dir|
       wasm_path = File.join(dir, "app-test.wasm")
@@ -220,6 +276,27 @@ class TraceTest < Minitest::Test
       db.execute("INSERT INTO instant_record_sync_metadata VALUES ('identity', 'bob@private.example')")
       db.close
       File.binread(file)
+    end
+  end
+
+  def build_sqlite_bytes
+    Dir.mktmpdir("irtrace-src-") do |dir|
+      file = File.join(dir, "src.sqlite3")
+      db = SQLite3::Database.new(file)
+      yield db
+      db.close
+      File.binread(file)
+    end
+  end
+
+  def read_sqlite_bytes(bytes)
+    Dir.mktmpdir("irtrace-ruby-verify-") do |dir|
+      file = File.join(dir, "clean.sqlite3")
+      File.binwrite(file, bytes)
+      db = SQLite3::Database.new(file)
+      yield db
+    ensure
+      db&.close
     end
   end
 
