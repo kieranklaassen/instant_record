@@ -101,18 +101,12 @@ module InstantRecord
 
           edits = []
           walk_ast(parsed.value) do |node|
-            next unless node.is_a?(Prism::DefNode) && node.name == :mutate && node.parameters&.keyword_rest
+            next unless keyword_rest_def?(node, :mutate)
 
-            indent = AstLowerer.leading_indent(source, node.location.start_offset)
-            replacement = <<~RUBY.chomp
-              def mutate(mutator_name, args = {}, mutation_id: nil)
-              #{indent}  SyncActions.mutate(mutator_name, args, mutation_id: mutation_id)
-              #{indent}end
-            RUBY
-            edits << AstLowerer::Edit.new(
-              start_offset: node.location.start_offset,
-              end_offset: node.location.end_offset,
-              replacement: replacement
+            edits << replace_def_edit(
+              source, node,
+              signature: "mutate(mutator_name, args = {}, mutation_id: nil)",
+              body: "SyncActions.mutate(mutator_name, args, mutation_id: mutation_id)"
             )
           end
           File.write(path, AstLowerer.apply_edits(source, edits)) unless edits.empty?
@@ -132,57 +126,23 @@ module InstantRecord
           edits = []
           stub_inserted = false
           walk_ast(parsed.value) do |node|
-            if node.is_a?(Prism::ClassNode) && AstLowerer.constant_name(node.constant_path) == "ServerFrame"
+            if cruby_only_constant?(node)
               edits << delete_lines_edit(source, node)
-              next :skip
-            elsif node.is_a?(Prism::ModuleNode) && AstLowerer.constant_name(node.constant_path) == "ActiveJobCommitGuard"
-              edits << delete_lines_edit(source, node)
-              next :skip
-            elsif node.is_a?(Prism::DefNode) && node.name == :perform_sync_action && node.parameters&.keyword_rest
-              indent = AstLowerer.leading_indent(source, node.location.start_offset)
-              replacement = <<~RUBY.chomp
-                def perform_sync_action(action_name, args = {}, mutation_id: nil)
-                #{indent}  InstantRecord::SyncActions.mutate("\#{name}.\#{action_name}", args, mutation_id: mutation_id)
-                #{indent}end
-              RUBY
-              edits << AstLowerer::Edit.new(start_offset: node.location.start_offset, end_offset: node.location.end_offset, replacement: replacement)
-              next :skip
-            elsif node.is_a?(Prism::DefNode) && node.name == :mutate && node.parameters&.keyword_rest
-              indent = AstLowerer.leading_indent(source, node.location.start_offset)
-              # Rewrite parameter list and remove `merged = ...` line inside body.
-              sig_end = node.rparen_loc ? node.rparen_loc.end_offset : node.parameters.location.end_offset
-              edits << AstLowerer::Edit.new(
-                start_offset: node.location.start_offset,
-                end_offset: sig_end,
-                replacement: "def mutate(mutator_name, args = {}, mutation_id: nil)"
+            elsif keyword_rest_def?(node, :perform_sync_action)
+              edits << replace_def_edit(
+                source, node,
+                signature: "perform_sync_action(action_name, args = {}, mutation_id: nil)",
+                body: 'InstantRecord::SyncActions.mutate("#{name}.#{action_name}", args, mutation_id: mutation_id)'
               )
-              Array(node.body&.body).each do |stmt|
-                if stmt.is_a?(Prism::LocalVariableWriteNode) && stmt.name == :merged
-                  edits << delete_lines_edit(source, stmt)
-                elsif stmt.is_a?(Prism::LocalVariableWriteNode) && stmt.name == :normalized
-                  edits << AstLowerer::Edit.new(
-                    start_offset: stmt.location.start_offset,
-                    end_offset: stmt.location.end_offset,
-                    replacement: "normalized = normalize_args(args)"
-                  )
-                end
-              end
-              next :skip
+            elsif keyword_rest_def?(node, :mutate)
+              edits.concat(sync_mutate_edits(source, node))
             elsif node.is_a?(Prism::DefNode) && CRUBY_SYNC_ACTION_METHODS.include?(node.name)
-              if !stub_inserted
-                stub_inserted = true
-                indent = AstLowerer.leading_indent(source, node.location.start_offset)
-                stub = SPINEL_SYNC_ACTIONS_STUB.lines.map { |l| l.strip.empty? ? "\n" : "#{indent}#{l}" }.join
-                edits << AstLowerer::Edit.new(
-                  start_offset: AstLowerer.line_start_of(source, node.location.start_offset),
-                  end_offset: AstLowerer.line_end_after(source, node.location.end_offset),
-                  replacement: stub
-                )
-              else
-                edits << delete_lines_edit(source, node)
-              end
-              next :skip
+              edits << (stub_inserted ? delete_lines_edit(source, node) : sync_actions_stub_edit(source, node))
+              stub_inserted = true
+            else
+              next
             end
+            :skip
           end
 
           adapted = AstLowerer.apply_edits(source, edits)
@@ -191,13 +151,60 @@ module InstantRecord
           File.write(path, adapted)
         end
 
-        def delete_lines_edit(source, node)
+        def cruby_only_constant?(node)
+          case node
+          when Prism::ClassNode then AstLowerer.constant_name(node.constant_path) == "ServerFrame"
+          when Prism::ModuleNode then AstLowerer.constant_name(node.constant_path) == "ActiveJobCommitGuard"
+          end
+        end
+
+        def keyword_rest_def?(node, name)
+          node.is_a?(Prism::DefNode) && node.name == name && node.parameters&.keyword_rest
+        end
+
+        def sync_mutate_edits(source, node)
+          signature_end = node.rparen_loc || node.parameters.location
+          signature = AstLowerer::Edit.new(
+            start_offset: node.location.start_offset,
+            end_offset: signature_end.end_offset,
+            replacement: "def mutate(mutator_name, args = {}, mutation_id: nil)"
+          )
+          assignments = Array(node.body&.body).grep(Prism::LocalVariableWriteNode).filter_map do |write|
+            case write.name
+            when :merged then delete_lines_edit(source, write)
+            when :normalized then replace_node_edit(write, "normalized = normalize_args(args)")
+            end
+          end
+          [signature, *assignments]
+        end
+
+        def sync_actions_stub_edit(source, node)
+          indent = AstLowerer.leading_indent(source, node.location.start_offset)
+          replace_lines_edit(source, node, AstLowerer.reindent_block(SPINEL_SYNC_ACTIONS_STUB, target_indent: indent))
+        end
+
+        def replace_def_edit(source, node, signature:, body:)
+          indent = AstLowerer.leading_indent(source, node.location.start_offset)
+          replace_node_edit(node, "def #{signature}\n#{indent}  #{body}\n#{indent}end")
+        end
+
+        def replace_node_edit(node, replacement)
+          AstLowerer::Edit.new(
+            start_offset: node.location.start_offset,
+            end_offset: node.location.end_offset,
+            replacement: replacement
+          )
+        end
+
+        def replace_lines_edit(source, node, replacement)
           AstLowerer::Edit.new(
             start_offset: AstLowerer.line_start_of(source, node.location.start_offset),
             end_offset: AstLowerer.line_end_after(source, node.location.end_offset),
-            replacement: ""
+            replacement: replacement
           )
         end
+
+        def delete_lines_edit(source, node) = replace_lines_edit(source, node, "")
 
         def walk_ast(node, &block)
           return if node.nil?
@@ -455,23 +462,26 @@ module InstantRecord
 
           edits = []
           walk_nodes(parsed.value) do |node|
-            next unless node.is_a?(Prism::IfNode) && node.if_keyword_loc.nil?
-            next unless node.predicate.is_a?(Prism::InstanceVariableReadNode) && node.predicate.name == :@thread_parent
+            next unless thread_parent_ternary?(node)
 
-            else_body = node.subsequent&.statements&.body
-            next unless else_body&.length == 1 && else_body.first.is_a?(Prism::ArrayNode) && else_body.first.elements.empty?
+            replies = node.statements.body.first
+            fallback = node.subsequent.statements.body.first
+            next unless replies.is_a?(Prism::CallNode) && replies.name != :to_a
+            next unless fallback.is_a?(Prism::ArrayNode) && fallback.elements.empty?
 
-            then_body = node.statements&.body
-            next unless then_body&.length == 1 && then_body.first.is_a?(Prism::CallNode)
-            next if then_body.first.name == :to_a
-
-            end_off = then_body.first.location.end_offset
+            end_off = replies.location.end_offset
             edits << AstLowerer::Edit.new(start_offset: end_off, end_offset: end_off, replacement: ".to_a")
           end
 
           raise BuildError, "demo seam did not apply: #{rel}: @thread_parent ternary not found" if edits.empty?
 
           File.write(path, AstLowerer.apply_edits(source, edits))
+        end
+
+        # A ternary is an IfNode without a keyword; each branch is one statement.
+        def thread_parent_ternary?(node)
+          node.is_a?(Prism::IfNode) && node.if_keyword_loc.nil? &&
+            node.predicate.is_a?(Prism::InstanceVariableReadNode) && node.predicate.name == :@thread_parent
         end
 
         def resolve_demo_route(arg)
