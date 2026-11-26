@@ -206,6 +206,7 @@ class McpServerCliTest < ActiveSupport::TestCase
       require "json"
       require "securerandom"
       require "sqlite3"
+      require "time"
       require "uri"
 
       $stdin.binmode

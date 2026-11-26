@@ -14,23 +14,26 @@ module InstantRecord
         record.update!(value: value.to_s)
       else
         text = value.to_s
-        # upsert's values go in the SQL text, so only plain ones take it: SQLite
-        # ends a statement at a NUL, and other encodings do not join UTF-8 SQL.
+        # Only text SQLite compares as it was given takes the one statement.
         plain = [key.to_s, text].all? do |part|
           [Encoding::UTF_8, Encoding::US_ASCII].include?(part.encoding) && !part.include?("\0")
         end
         # SQLite leaves a transaction usable after a failed statement. Elsewhere
         # the savepoint does that for a caller that rescues the error.
         if plain && connection_pool.with_connection { |db| db.adapter_name.match?(/sqlite/i) }
-          return true if find_by(key: key)&.value == text
-
           # One write, so a concurrent insert of the key is overwritten rather
-          # than raised.
+          # than raised. Where the value is stored already it changes no row.
           now = Time.now.utc
-          unscoped.upsert(
-            { key: key, value: text, created_at: now, updated_at: now },
-            update_only: %i[value updated_at], returning: false, record_timestamps: false
-          )
+          binds = { "key" => key, "value" => text, "created_at" => now, "updated_at" => now }.map do |column, given|
+            ActiveRecord::Relation::QueryAttribute.new(column, given, type_for_attribute(column))
+          end
+          connection_pool.with_connection do |db|
+            db.update(
+              "INSERT INTO #{quoted_table_name} (\"key\", \"value\", \"created_at\", \"updated_at\") VALUES (?, ?, ?, ?) " \
+              "ON CONFLICT (\"key\") DO UPDATE SET \"value\" = excluded.\"value\", \"updated_at\" = excluded.\"updated_at\" " \
+              "WHERE \"value\" IS NOT excluded.\"value\"", "#{name} Upsert", binds
+            )
+          end
         else
           begin
             transaction(requires_new: true) do

@@ -223,14 +223,14 @@ class SyncMetadataTest < Minitest::Test
     assert_equal long_ago, row.created_at
   end
 
-  def test_the_server_reads_once_and_writes_once
+  def test_the_server_writes_in_one_statement
     on_server do
-      assert_equal 2, sql_statements { Meta.set("k", "one") }.size
-      assert_equal 2, sql_statements { Meta.set("k", "two") }.size
+      assert_equal 1, sql_statements { Meta.set("k", "one") }.size
+      assert_equal 1, sql_statements { Meta.set("k", "two") }.size
       assert_equal 1, sql_statements { Meta.set("k", "two") }.size
       Meta.transaction do
         Meta.get("k")
-        assert_equal 2, sql_statements { Meta.set("k", "three") }.size
+        assert_equal 1, sql_statements { Meta.set("k", "three") }.size
       end
     end
   end
