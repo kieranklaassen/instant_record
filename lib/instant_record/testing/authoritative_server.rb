@@ -55,20 +55,12 @@ module InstantRecord
           adapter = conn.adapter_name.downcase
           if adapter.include?("postgres")
             seq = conn.select_value("SELECT pg_get_serial_sequence('instant_record_changes', 'id')")
-            if seq
-              if target <= 0
-                conn.execute("SELECT setval(#{conn.quote(seq)}, 1, false)")
-              else
-                conn.execute("SELECT setval(#{conn.quote(seq)}, #{target}, true)")
-              end
-            end
+            value, used = target <= 0 ? [1, false] : [target, true]
+            conn.execute("SELECT setval(#{conn.quote(seq)}, #{value}, #{used})") if seq
           elsif adapter.include?("sqlite")
-            exists = conn.select_value("SELECT name FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'")
-            if exists
+            if conn.select_value("SELECT name FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'")
               updated = conn.update("UPDATE sqlite_sequence SET seq = #{target} WHERE name = 'instant_record_changes'")
-              if updated == 0
-                conn.execute("INSERT INTO sqlite_sequence (name, seq) VALUES ('instant_record_changes', #{target})")
-              end
+              conn.execute("INSERT INTO sqlite_sequence (name, seq) VALUES ('instant_record_changes', #{target})") if updated == 0
             end
           end
           target
@@ -100,9 +92,7 @@ module InstantRecord
               attributes_payload: InstantRecord.wire_attributes(record.attributes),
               scope: InstantRecord.scope_of(record)
             }
-            if cursor_id
-              change_attrs[:id] = Integer(cursor_id)
-            end
+            change_attrs[:id] = Integer(cursor_id) if cursor_id
             change = InstantRecord::Change.create!(change_attrs)
             { record: record, change: change }
           end
@@ -120,18 +110,12 @@ module InstantRecord
             attrs["updated_at"] ||= stamp
             model.create!(attrs.slice(*model.column_names))
           when "update"
-            record = model.find_by(id: id)
-            return nil unless record
-
-            attrs = attributes.transform_keys(&:to_s).merge("updated_at" => stamp)
-            record.update!(attrs.slice(*model.column_names))
-            record
+            model.find_by(id: id)&.tap do |record|
+              attrs = attributes.transform_keys(&:to_s).merge("updated_at" => stamp)
+              record.update!(attrs.slice(*model.column_names))
+            end
           when "destroy"
-            record = model.find_by(id: id)
-            return nil unless record
-
-            record.destroy!
-            record
+            model.find_by(id: id)&.tap(&:destroy!)
           else
             raise ArgumentError, "Unknown server_write operation: #{operation}"
           end
@@ -158,6 +142,9 @@ module InstantRecord
       # Drives a live mounted Rails application (CRuby + PostgreSQL) via Rack.
       class RackServer
         include SharedOperations
+
+        APP_PATHS = %w[/todo /auth /notes /slack /email /up].freeze
+        private_constant :APP_PATHS
 
         def initialize(app:, model_names: %w[Issue AuthNote])
           @app = app
@@ -189,18 +176,24 @@ module InstantRecord
         # reads the real Rails session cookie.
         def exchange(method, url, body = "", identity: nil, content_type: nil)
           uri = URI.parse(url.to_s)
-          path_with_query = uri.path.to_s
-          path_with_query = "#{@mount_path}#{path_with_query}" unless path_with_query.start_with?(@mount_path) || path_with_query.start_with?("/todo", "/auth", "/notes", "/slack", "/email", "/up")
-          path_with_query = "#{path_with_query}?#{uri.query}" if uri.query && !uri.query.empty?
+          path = uri.path.to_s
+          path = "#{@mount_path}#{path}" unless path.start_with?(@mount_path, *APP_PATHS)
+          path_with_query = uri.query.to_s.empty? ? path : "#{path}?#{uri.query}"
 
           cookie = cookie_for_identity(identity)
-          ct = content_type || (method.to_s.upcase == "POST" && body.to_s.lstrip.start_with?("{", "[") ? "application/json" : "application/x-www-form-urlencoded")
+          verb = method.to_s.upcase
+          content_type ||=
+            if verb == "POST" && body.to_s.lstrip.start_with?("{", "[")
+              "application/json"
+            else
+              "application/x-www-form-urlencoded"
+            end
 
           env = Rack::MockRequest.env_for(
             path_with_query,
-            method: method.to_s.upcase,
+            method: verb,
             input: body.to_s,
-            "CONTENT_TYPE" => ct,
+            "CONTENT_TYPE" => content_type,
             "HTTP_HOST" => "localhost",
             "HTTP_COOKIE" => cookie.to_s
           )
@@ -279,33 +272,13 @@ module InstantRecord
           FileUtils.remove_entry(@tmpdir) if @tmpdir && Dir.exist?(@tmpdir)
         end
 
-        def backend_label
-          with_server_shard { super }
-        end
-
-        def current_cursor
-          with_server_shard { super }
-        end
-
-        def set_cursor_floor(cursor_value)
-          with_server_shard { super }
-        end
-
-        def seed_boundary_record(**kwargs)
-          with_server_shard { super }
-        end
-
-        def server_write(**kwargs)
-          with_server_shard { super }
-        end
-
-        def visible_state(identity: nil)
-          with_server_shard { super }
-        end
-
-        def reset_data!
-          with_server_shard { super }
-        end
+        def backend_label = with_server_shard { super }
+        def current_cursor = with_server_shard { super }
+        def set_cursor_floor(cursor_value) = with_server_shard { super }
+        def seed_boundary_record(**kwargs) = with_server_shard { super }
+        def server_write(**kwargs) = with_server_shard { super }
+        def visible_state(identity: nil) = with_server_shard { super }
+        def reset_data! = with_server_shard { super }
 
         def identity_object(person_id)
           known = ROLE_BY_PERSON.key?(person_id.to_s) ? person_id.to_s : nil
@@ -320,24 +293,16 @@ module InstantRecord
             verb = method.to_s.upcase
             asker = identity_object(identity)
 
-            if verb == "GET" && path.end_with?("/bootstrap")
-              handle_bootstrap(asker)
-            elsif verb == "POST" && path.end_with?("/mutations")
-              handle_mutations(body, asker)
-            elsif verb == "GET" && path.end_with?("/events")
-              handle_events(params, asker)
-            elsif verb == "GET" && path.end_with?("/records")
-              handle_records(params, asker)
-            elsif verb == "GET" && path.end_with?("/todo")
-              handle_todo_index
-            elsif verb == "POST" && path.end_with?("/todo/issues")
-              handle_todo_create(body)
-            elsif verb == "PATCH" && path =~ %r{/todo/issues/([^/]+)\z}
-              handle_todo_update(Regexp.last_match(1), body)
-            elsif verb == "DELETE" && path =~ %r{/todo/issues/([^/]+)\z}
-              handle_todo_destroy(Regexp.last_match(1))
-            else
-              { status: 404, headers: {}, body: "Not Found: #{verb} #{path}" }
+            case "#{verb} #{path}"
+            when %r{\AGET .*/bootstrap\z} then handle_bootstrap(asker)
+            when %r{\APOST .*/mutations\z} then handle_mutations(body, asker)
+            when %r{\AGET .*/events\z} then handle_events(params, asker)
+            when %r{\AGET .*/records\z} then handle_records(params, asker)
+            when %r{\AGET .*/todo\z} then handle_todo_index
+            when %r{\APOST .*/todo/issues\z} then handle_todo_create(body)
+            when %r{\APATCH .*/todo/issues/([^/]+)\z} then handle_todo_update($1, body)
+            when %r{\ADELETE .*/todo/issues/([^/]+)\z} then handle_todo_destroy($1)
+            else respond(404, "Not Found: #{verb} #{path}")
             end
           end
         end
@@ -454,7 +419,7 @@ module InstantRecord
               server_time: InstantRecord::HLC.iso_now
             }
           end
-          { status: 200, headers: { "content-type" => "application/json" }, body: JSON.generate(payload) }
+          respond_json(payload)
         end
 
         def handle_mutations(body, asker)
@@ -476,14 +441,14 @@ module InstantRecord
               InstantRecord::MutationApplier.apply(mutation, asker)
             end
           end
-          { status: 200, headers: { "content-type" => "application/json" }, body: JSON.generate(results: results, server_time: InstantRecord::HLC.iso_now) }
+          respond_json(results: results, server_time: InstantRecord::HLC.iso_now)
         end
 
         def handle_events(params, asker)
           cursor = (params["after"] || 0).to_i
           if InstantRecord::SyncScope.stale?(params["identity"], asker)
-            body = "event: reset\ndata: #{JSON.generate(InstantRecord::SyncScope.reset_event(asker))}\n\n"
-            return { status: 200, headers: { "content-type" => "text/event-stream" }, body: body }
+            reset = JSON.generate(InstantRecord::SyncScope.reset_event(asker))
+            return respond(200, "event: reset\ndata: #{reset}\n\n", type: "text/event-stream")
           end
 
           changes = InstantRecord::Change.poll(cursor, scope: InstantRecord::SyncScope.token(asker))
@@ -491,18 +456,18 @@ module InstantRecord
           InstantRecord::SyncScope.events_for(changes, asker).each do |id, event|
             sse << "id: #{id}\nevent: change\ndata: #{JSON.generate(event)}\n\n"
           end
-          { status: 200, headers: { "content-type" => "text/event-stream" }, body: sse }
+          respond(200, sse, type: "text/event-stream")
         end
 
         def handle_records(params, asker)
           model = InstantRecord.synced_model(params["type"])
-          return { status: 404, headers: {}, body: "" } unless model
+          return respond(404) unless model
 
           window = model.instant_record_sync_window
-          return { status: 422, headers: {}, body: "" } unless window
+          return respond(422) unless window
 
           before_at = Time.zone.parse(params["before_created_at"].to_s)
-          return { status: 400, headers: {}, body: "" } if before_at.nil? || params["before_id"].to_s.empty?
+          return respond(400) if before_at.nil? || params["before_id"].to_s.empty?
 
           limit = (params["limit"].to_i > 0 ? params["limit"].to_i : window.limit).clamp(1, 200)
           rows = window.keyset_below(at: before_at, id: params["before_id"], partition: params["partition"])
@@ -514,33 +479,41 @@ module InstantRecord
             records: InstantRecord.record_payloads(rows.first(limit)),
             has_more: rows.size > limit
           }
-          { status: 200, headers: { "content-type" => "application/json" }, body: JSON.generate(payload) }
+          respond_json(payload)
         end
 
         def handle_todo_index
           issues = model_for("Issue").order(created_at: :desc)
           html = issues.map { |i| %(<li data-id="#{CGI.escapeHTML(i.id.to_s)}" class="#{i.state}">#{CGI.escapeHTML(i.title.to_s)}</li>) }.join("\n")
-          { status: 200, headers: { "content-type" => "text/html" }, body: "<ul class=\"issues\">#{html}</ul>" }
+          respond(200, %(<ul class="issues">#{html}</ul>), type: "text/html")
         end
 
         def handle_todo_create(body)
           fields = URI.decode_www_form(body.to_s).to_h
           title = fields["issue[title]"] || fields["title"]
           model_for("Issue").create!(title: title)
-          { status: 302, headers: { "location" => "/todo" }, body: "" }
+          redirect_to_todo
         end
 
         def handle_todo_update(id, body)
           fields = URI.decode_www_form(body.to_s).to_h
           issue = model_for("Issue").find(id)
           issue.update!(state: fields["done"] == "1" ? "done" : "open")
-          { status: 302, headers: { "location" => "/todo" }, body: "" }
+          redirect_to_todo
         end
 
         def handle_todo_destroy(id)
           model_for("Issue").find(id).destroy!
-          { status: 302, headers: { "location" => "/todo" }, body: "" }
+          redirect_to_todo
         end
+
+        def respond(status, body = "", type: nil)
+          { status: status, headers: type ? { "content-type" => type } : {}, body: body }
+        end
+
+        def respond_json(payload) = respond(200, JSON.generate(payload), type: "application/json")
+
+        def redirect_to_todo = { status: 302, headers: { "location" => "/todo" }, body: "" }
       end
     end
   end
