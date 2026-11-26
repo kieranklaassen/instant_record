@@ -3,8 +3,9 @@
 `bin/rails instant_record:compile` builds a static browser site from a Rails app.
 Roundhouse translates the Rails source, Spinel compiles it to WebAssembly, and a
 dedicated worker serves local requests from a persistent SQLite connection. The
-worker saves database snapshots in IndexedDB and sends pending mutations to the
-Rails sync endpoint. This backend uses an experimental compiler toolchain.
+worker keeps the database in the origin's private file system (OPFS), or as
+snapshots in IndexedDB where it cannot open that, and sends pending mutations
+to the Rails sync endpoint. This backend uses an experimental compiler toolchain.
 
 ## Install the toolchain
 
@@ -39,7 +40,9 @@ bin/rails instant_record:compile
 ```
 
 The task discovers named models using `InstantRecord.syncable_models`. It reads
-your routes, ERB views, models, controllers, helpers, assets and `db/schema.rb`,
+your routes, ERB views, models, controllers, helpers, assets and `db/schema.rb`.
+Where `config/routes.rb` has `local_first` blocks, only their routes and the code
+they reach are built; without one, the whole app is. The task
 then stages the browser build under `tmp/instant_record/compiled`. Run it again
 after changing the app. Keep server secrets and server-only logic out of code
 shipped to the browser.
@@ -91,8 +94,9 @@ companion file fails the build before publication.
 
 New profiles start at the dumped schema. Returning profiles run only pending
 steps before rendering, with each compiled migration version wrapped in an
-atomic SQLite transaction (`BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK`). The
-database and migration version commit together in one IndexedDB transaction. If
+atomic SQLite transaction (`BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK`). With IndexedDB
+storage the database and its version are saved in one transaction; with OPFS the
+version is kept in IndexedDB beside the database file. If
 a browser encounters schema drift, a release rollback, or a failed migration,
 the worker automatically extracts pending `instant_record_outbox` rows, rebuilds
 a clean database at the target schema, re-inserts the preserved outbox rows,
@@ -134,8 +138,9 @@ Offline and Slow connections.
 Spinel compiles code ahead of time. Arbitrary Ruby evaluation, multipart form file uploads (use `sync_file` with `frontend/files.js` instead),
 encrypted attributes, and server-only Rails subsystems are outside this browser
 backend. Tabs on the same origin and browser profile share
-one durable SQLite snapshot. Each write picks up the latest revision and saves
-the changed records and outbox together before the browser confirms the write.
+one SQLite database per scope: one tab's worker is elected leader, holds it and
+serves the others, and another takes over when it closes. A write saves
+the changed records and outbox together before the browser confirms it.
 Pending changes survive closing every tab and sync when the app reopens online.
 The demo's Ship v2 page runs its teaching migration on demand. Consumer apps
 apply their release migrations at boot. The sync server remains authoritative across clients.
@@ -214,7 +219,7 @@ What ran, on macOS arm64 with Xcode 27.2 and the iPhone 17 simulator on iOS
 26.5:
 
 - The library and host build on macOS with no change, and the test above
-  passes there (9 runs).
+  passes there.
 - Spinel's generated C, its runtime and SQLite compile and link for the
   simulator with one change: the iOS SDK has no `<sys/random.h>`, so the shim
   uses `arc4random_buf` on Apple platforms.
@@ -268,5 +273,5 @@ switch clean for it:
 - `nginx.conf` answers `/app.wasm` with 404. That stops the old worker from starting its app,
   and from opening its change stream, on that one last visit.
 
-Measured in Chrome: a returning browser shows the old worker's error text for about three
-seconds, reloads by itself, and is on this build after about four. A first visit is not affected.
+A returning browser shows the old worker's error text, reloads by itself, and is then on this
+build. A first visit is not affected.

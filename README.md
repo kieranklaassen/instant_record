@@ -25,8 +25,8 @@ The same model file loads into two Ruby runtimes, each with its own database:
 
 |  | In the browser | On the server |
 |---|---|---|
-| Ruby | Rails code compiled by Spinel to WebAssembly in a dedicated worker | CRuby + Puma |
-| Database | SQLite, persisted to IndexedDB | PostgreSQL |
+| Ruby | Rails code compiled by Spinel to WebAssembly in a dedicated worker | CRuby, under Puma or Falcon |
+| Database | SQLite, in the origin's private file system (OPFS), or in IndexedDB where a worker cannot open that | Your Rails database: SQLite or PostgreSQL |
 | Writes | **Optimistic** — instant local commit, queued for sync | **Authoritative** — validated, versioned, logged |
 | Your controllers & views | Run here when the page is served by the dedicated worker | Run here at `localhost:3000` |
 
@@ -37,7 +37,7 @@ flowchart LR
     VM --> DB[(SQLite)]
   end
   VM -->|mutations up| S[Your Rails app on a server]
-  S --> P[(Postgres)]
+  S --> P[(Server database)]
   S -->|changes down over SSE| VM
 ```
 
@@ -49,6 +49,10 @@ flowchart LR
 # Gemfile
 gem "instant_record"
 ```
+
+- **Rails 8.1.** The gemspec accepts any Rails 8, but the gem's migrations are `Migration[8.1]`: under Rails 8.0, `db:migrate` fails with `Unknown migration version "8.1"`.
+- **Ruby 3.3 or newer.**
+- **SQLite or PostgreSQL on the server.** The gem's tests run on SQLite and the demo's on PostgreSQL. No other database is tested.
 
 The browser build uses the [Roundhouse and Spinel toolchain](compiled/README.md#install-the-toolchain).
 
@@ -75,7 +79,7 @@ create_table :issues, id: :string do |t|
 end
 ```
 
-The gem's own tables (outbox, sync metadata, change log, idempotency ledger) install automatically as engine migrations — just run `bin/rails db:migrate`.
+The gem's own tables (outbox, sync metadata, change log, idempotency ledger, sync notices) come from its engine's migrations: run `bin/rails db:migrate`. No install step copies them.
 
 Rules that should only run on the server (authorization, quotas, anything the client shouldn't decide) stay in the same file, scoped with a block:
 
@@ -95,7 +99,7 @@ class Issue < ApplicationRecord
 end
 ```
 
-There's no server setup: the sync engine auto-mounts at `/instant_record` on the server — `POST /mutations` (batched, idempotent writes) and `GET /events` (SSE change stream) — and every model that includes `Syncable` is syncable. Two optional knobs:
+There's no server setup: the sync engine auto-mounts at `/instant_record` on the server — `POST /mutations` (batched, idempotent writes), `GET /events` (SSE change stream), `GET /bootstrap` (first load) and `GET /records` (older pages), among others — and every model that includes `Syncable` is syncable. Two optional knobs:
 
 ```ruby
 # config/application.rb — move or disable the mount
@@ -107,7 +111,7 @@ InstantRecord.sync(Issue, Todo)
 
 ### 3. Build the browser bundle
 
-Generate the toolchain config and starter initializer, fill in the tool paths in `config/instant_record_toolchain.env`, verify them with `instant_record:doctor`, and compile:
+The install generator copies two files, `config/instant_record_toolchain.env` and a commented `config/initializers/instant_record.rb`. Fill in the tool paths in the first, check them with `instant_record:doctor`, and compile:
 
 ```sh
 bin/rails generate instant_record:install
@@ -115,6 +119,8 @@ bin/rails db:migrate
 bin/rails instant_record:doctor
 bin/rails instant_record:compile
 ```
+
+Wrap the routes that should run in the browser in `local_first do ... end` in `config/routes.rb`: the build then takes only those routes and the code they reach. With no such block it takes the whole app. On the server the block changes nothing.
 
 Serve the generated site from `tmp/instant_record/compiled/web/dist`, or publish it directly from Rails with `config.instant_record.compiled_host` and `config.instant_record.build_on_precompile = :compiled`. See [building and deploying](compiled/README.md) for the toolchain and hosting settings.
 
@@ -155,7 +161,7 @@ Useful helpers:
 - `InstantRecord.server_url(path)` — the URL that reaches the authoritative server from either runtime, honouring a customised `mount_path`
 - `sync_file` — a record that carries a file, kept in the browser and sent to the server in the background (below)
 
-Convergence uses server-anchored string-encoded Hybrid Logical Clocks (HLCs) and 3-way column-level merging via `base_version`: disjoint concurrent column edits merge cleanly, while same-column collisions honor declarative `sync_merge` policies (`:lww` default, `:union`, or `:server_wins`). A model can also observe remote values dropped on the client:
+A model can choose how a column's conflicts resolve, and observe a value from the server that was dropped on the client:
 
 ```ruby
 class Issue < ApplicationRecord
@@ -171,9 +177,45 @@ class Issue < ApplicationRecord
 end
 ```
 
+#### How conflicts resolve
+
+A write of a record carries a Hybrid Logical Clock: a UTC time, a counter and the id of the browser (or the server) that made it. Writes a client's `sync_action` makes when the server applies it carry none; in a conflict they are dated by the record's `updated_at`. A browser corrects its clock by the server's time, and a clock more than `config.max_clock_drift` seconds (5 by default) ahead is pulled back to the server's. Earlier clocks are left as they are, so an offline edit keeps its age.
+
+An edit also carries the version of the record it was made on. When the record has moved on since, the server compares each edited column with the change log from that version:
+
+- **Nobody else changed the column:** the edit is kept, however old it is.
+- **Somebody else did:** the column's `sync_merge` policy decides.
+  - `:lww` (default): the write with the later clock wins; the incoming one wins a tie.
+  - `:union`: additions and removals are both applied, for arrays, hashes, JSON arrays and objects in text, and comma-separated text. A hash key both sides changed goes to the later write.
+  - `:server_wins`: the server's value stays.
+
+If a base version is no longer in the log, every column counts as changed by somebody else, dated by the record's clock, unless that clock is the sender's own. An edit that keeps nothing is answered with the server's row.
+
+**Edits queued offline.** Several edits of one column share a base version. Every one is kept, under every policy, while nobody else touches that column. Edits of other columns, by anyone, do not interrupt the queue. These still lose:
+
+- Once another client or the server changes the column, the policy decides for each edit still queued. Under `:lww` that means edits made before the other change are dropped. The first one made after it is kept, and dates the column by the time the server merged it, so the rest of that queue is dropped as well.
+- An edit whose clock is not later than the last one kept, under `:server_wins`; an older one under `:lww` too.
+- Another client's edit made before the server merged the queue, when it arrives after: a merged column is dated by the merge.
+
+**Values written around the models** (`update_columns`, SQL) are not logged when they are written. One that is there before a client's first edit of that version is logged with that edit, as if it were the client's, and the client's queue may overwrite it. One written after the first edit counts as the server's: `:server_wins` keeps it. Under `:lww` a later queued edit may replace it or be dropped, depending on what was merged before. Write a value that must hold through the model.
+
+#### What reaches other clients
+
+Creates, updates and destroys made through the models are logged and streamed. When a client's destroy takes other synced records with it (`dependent: :destroy`), each is logged too, children first, with its own scope and partition. These are not logged:
+
+- Rows a callback creates or updates while a client's mutation is applied, and rows it destroys while a client's create or update is applied. Writes made in a `sync_action` are logged.
+- Rows removed or changed without callbacks: by a foreign key, by `dependent: :nullify`, by a bulk update or delete, or by `update_columns`.
+- `touch`.
+
+An update that finds its row already destroyed is rejected with `record not found`, and what its callbacks wrote is undone. When the server applies a client's `sync_action`, it raises `ActiveRecord::RecordNotFound` there. A server-side update that finds no row logs nothing.
+
+#### What the endpoints send
+
+A change event and a record payload have the same form: `type`, `id`, `version`, `attributes` and, when the server has one, `hlc`. An event adds `operation`, and a destroy carries version 0 and no attributes. `GET /bootstrap` answers `cursor`, `records`, `identity` and `server_time`, with `fill` when a model declares a background history fill. `GET /records` answers `records`, `has_more`, `server_time` and, after a page with rows, `next_before` (a page of a `sync_window` model holds at most 200 rows). Every event carries `server_time`. `sync_state` is never sent.
+
 #### Server-only controller behavior: auth and scoping
 
-Controllers load in both runtimes too — the browser runs them against local data, the server against Postgres. Anything that depends on sessions, cookies, or secrets exists only on the server, so scope it there:
+Controllers load in both runtimes too — the browser runs them against local data, the server against its own database. Anything that depends on sessions, cookies, or secrets exists only on the server, so scope it there:
 
 ```ruby
 class IssuesController < ApplicationController
@@ -223,7 +265,7 @@ InstantRecord.config.scope_from = ->(request) { request.session[:user_id] }
 
 The default `scope_from` trusts a `scope` parameter, and the compiled site sends one: a random token it keeps in `localStorage`. That makes a browser its own scope with no sign-in, which is what the demo's Assistant uses. It is a capability, not authentication: anyone holding the token reads those rows. An app with accounts should read the scope from its session, as above.
 
-Limits, as built: a row's scope is fixed at create, a scoped model with a `sync_window` ranks its window before the scope is applied, and the Ruby client (`InstantRecord::Client`, which the native build uses) sends no scope yet.
+A row's scope is fixed at create. A scoped model with a `sync_window` gets its window within the scope. The Ruby client (`InstantRecord::Client`) sends `config.sync_scope`, when set, as the `X-Instant-Record-Scope` header, which the default `scope_from` reads.
 
 #### Rules a column cannot say: `syncable_to` and `writable_by`
 
@@ -253,21 +295,21 @@ Each block runs on the model, on the server, with whatever `scope_from` returned
 
 A session is a cookie, so the page and the sync endpoints must be one origin for it to arrive: serve the compiled site from the Rails app (`config.instant_record.compiled_host`) or put both behind one proxy. The mutations endpoint takes JSON only, so a cross-site form cannot write through someone's cookie. The demo's Auth page (`/auth`) is this section running: three people, a real session, and a panel that asks the sync server for everything.
 
-Limits, as built: record ids are not secret (a change to a hidden row reaches every client as an empty destroy naming its id, and a create that reuses a hidden row's id is refused); a validation that looks at other rows, such as uniqueness, answers a refused write with a message about rows the sender cannot see; a stream that is open when the session changes keeps its identity until it closes (a poll lasts at most the SSE window); a rule is one query per model per batch of changes; and a `syncable_to` model with a `sync_window` ranks its window before the rule is applied.
+Limits, as built: record ids are not secret (a change to a hidden row reaches every client as an empty destroy naming its id, and a create that reuses a hidden row's id is refused); a validation that looks at other rows, such as uniqueness, answers a refused write with a message about rows the sender cannot see; a stream that is open when the session changes keeps its identity until it closes (a poll lasts at most the SSE window); and a rule is one query per model per batch of changes.
 
 A `server_only` controller filter protects the server-rendered surface; it cannot and need not protect the browser's local rendering.
 
 ### 5. Sync just happens
 
-The dedicated worker drains queued writes and polls the Rails changes endpoint.
+The dedicated worker sends queued writes and follows the Rails change stream (`GET /events`). One worker per origin and scope holds the stream and shares what arrives with the other tabs. It closes the stream a few seconds after every tab is hidden and opens it again from its cursor.
 To host the sync server on a different origin, set `SYNC_ENDPOINT` when compiling.
 
 Behind the scenes:
 
-- **First load** — a new client hydrates from a bootstrap snapshot (current state plus the sync cursor, windowed per model — see below) and remembers its position, so later visits paint instantly from IndexedDB and fetch only what's new.
+- **First load** — a new client hydrates from a bootstrap snapshot (current state plus the sync cursor, windowed per model — see below) and remembers its position, so later visits paint from the local database and fetch only what's new.
 - **Every write** — committed locally first, then delivered to the server in the background. Offline just means "delivered later"; queued writes survive reloads.
-- **Other clients** — every accepted change streams to all connected clients over SSE, and their pages re-render from local data. Concurrent edits resolve last-write-wins.
-- **Rejections** — if the server refuses a write (failed validation, server-only rule), the client rolls the local record back to server state and stops retrying.
+- **Other clients** — every accepted change streams to all connected clients over SSE, and their pages re-render from local data. Concurrent edits are merged column by column ([below](#how-conflicts-resolve)).
+- **Rejections** — if the server refuses a write (failed validation, server-only rule), the client rolls the local record back to server state and stops retrying. The attempt is kept as a sync notice (`InstantRecord.sync_notices`), and so is an edit that lost every column it changed. An edit that lost only some of them leaves no notice.
 
 ### 6. Window large tables
 
@@ -286,7 +328,7 @@ Windows order by `(created_at, id)`, so a windowed model needs a `created_at` co
 Declaring a window changes three things:
 
 - **Fresh clients bootstrap.** A client that has never synced hydrates from `GET /instant_record/bootstrap` — current state, windowed per model, plus the change-log cursor — instead of replaying the whole change log. Windowless models still serialize in full.
-- **Boot-time eviction.** On a cold boot the browser trims each windowed model back to its window per partition. Rows with `sync_state: "pending"` are never evicted.
+- **Eviction.** `InstantRecord.start` in the browser arms a trim, on the next sync pass, of each windowed model back to its window per partition. Rows with `sync_state: "pending"` are never evicted. The compiled worker does not call it, so a compiled app keeps the pages it fetched unless its own code does.
 - **History pages on demand.** Older rows stream in through keyset cursors (never OFFSET), applied idempotently with no outbox noise:
 
 ```ruby
@@ -328,7 +370,7 @@ window.__spinel.worker.postMessage(
 
 **Render the top of the scrollback server-side.** A windowed view needs a slot above its oldest row — a scroll-up sentinel, or a "beginning of history" marker once there's nothing left. Render that slot in the initial HTML even when you don't yet know which it is, and let JavaScript fill it in place. Injecting it after a probe shifts every row below it by its height on each load.
 
-The Slack demo's infinite scroll is the reference wiring — IntersectionObserver sentinel, scroll anchoring, in-place DOM updates — in the Stimulus controller `demo/app/javascript/controllers/conversation_controller.js`.
+The Slack demo's infinite scroll is the reference wiring — a scroll check near the top, scroll anchoring, in-place DOM updates — in the Stimulus controller `demo/app/javascript/controllers/conversation_controller.js`.
 
 ### 7. Carry a file with a record
 
@@ -410,6 +452,14 @@ createInertiaApp({ ...instantRecord(), resolve, setup })
 
 In the compiled runtime, Inertia visits execute against the local SQLite database and reload only the props whose synced models changed. The package also exports `LiveList`, `useLiveWindow`, `useLiveParam`, `useLiveSearch`, `useHistory`, `useStableRows`, `useKeyboardNavigation`, `useShortcuts`, `useSelection`, `useUndoable`, and `write`.
 
+#### What a page read
+
+A tracked render answers with an `X-Instant-Record-Reads` header naming the tables and synced models its SQL read (`SELECT` and `WITH` queries, apart from schema queries and the outbox, sync metadata, change log and ledger). The server sends it for Inertia renders that read a table, the compiled runtime for every request, even one that read nothing. In the compiled runtime, live props skip a change to a table or model the page did not read.
+
+A read of a table is narrowed to the values of a column when *every* query on that table in the render limits that column with `=` or `IN` to known values, `AND`ed at the top level of its `WHERE`. The columns considered are `id`, any name ending in `_id`, and the columns named by `sync_window partition_by:` and `sync_scope`. Values from several queries are added together.
+
+Other conditions (a range, `NULL`, an expression) are passed over: they do not narrow, and do not stop another column from narrowing. It counts as a read of the whole table when any query on it has a top-level `OR` in its `WHERE`, or when no column is left that every query limits. A statement is judged by its first top-level `WHERE` alone. A table it reads more than once (a `UNION`, a self-join, a subquery on the same table) is narrowed by that `WHERE`, so a change only its other reads need can be missed. A change whose row does not carry the column, or that moves the row to another value, counts as touching the read.
+
 ### 9. Native iOS screens (experimental)
 
 Write iOS screens in Ruby under `app/screens` subclassing `InstantRecord::Native::Screen`, compile your app's models and screens to static libraries, and generate a thin SwiftUI Xcode project:
@@ -475,11 +525,11 @@ bundle exec instant_record_mcp serve \
   --cookie "_session=..."
 ```
 
-Exposed MCP tools (`<1ms` offline against local SQLite + persistent compiled `host`): `instant_record_status`, `instant_record_sync`, `instant_record_models`, `instant_record_query`, `instant_record_get`, `instant_record_search`, `instant_record_outbox`, `instant_record_render_screen`, `instant_record_action`, `instant_record_request`, and `instant_record_history`.
+Exposed MCP tools: `instant_record_status`, `instant_record_sync`, `instant_record_models`, `instant_record_query`, `instant_record_get`, `instant_record_search`, `instant_record_outbox`, `instant_record_render_screen`, `instant_record_action`, `instant_record_request`, and `instant_record_history`.
 
 ## Running the demo
 
-Install Ruby 3.3.3, PostgreSQL and the [compiler toolchain](compiled/README.md#install-the-toolchain).
+Install Ruby 3.3.3, Node and npm, PostgreSQL and the [compiler toolchain](compiled/README.md#install-the-toolchain).
 Copy `compiled/toolchain.env.example` to `compiled/toolchain.env` and fill in the tool paths.
 
 ```sh
@@ -491,6 +541,8 @@ bin/rails test
 SYNC_ENDPOINT=http://localhost:3000/instant_record ruby ../compiled/pipeline/build.rb
 bin/dev
 ```
+
+The gem's tests need no server: they run on in-memory SQLite. The demo's need a running PostgreSQL, and `bin/rails test` first builds the Inbox bundle with npm (`npm ci` when `node_modules` is missing, which leaves the lockfile alone).
 
 Open http://localhost:5173/ for the compiled demo. Rails serves sync on port 3000.
 
@@ -506,17 +558,9 @@ Things to try:
 
 ## Scaling the SSE stream
 
-The compiled demo checks for new changes once a second using short HTTP requests. Clients that choose to hold an SSE stream open need a server sized for their concurrent streams. The engine's stream endpoint is a plain Rack streaming body (no `ActionController::Live`, no thread per stream) that releases its database connection between polls, so it runs well on both servers; the ceiling is the server's concurrency model. Measured on the demo (M-series MacBook, dev mode):
+A browser holds one open stream per origin and scope, so a server is sized for that many open streams. The engine's stream endpoint is a plain Rack streaming body (no `ActionController::Live`) that releases its database connection between polls. Under Puma each open stream holds a request thread for its whole window, so a few streams can use up a small thread pool and starve writes. Under Falcon each stream is a fiber.
 
-| Server | Concurrent SSE clients | Result |
-|---|---|---|
-| Puma (3 threads default) | 2 | Works — p50 delivery 103ms |
-| Puma (3 threads default) | 3 | Streams consumed every thread; the sync write itself starved — 0 delivered |
-| Puma (3 threads default) | 50 | Server unresponsive for minutes (rails/rails#55762's failure mode) |
-| Falcon (fiber per request) | 200 | 200/200 delivered, p50 442ms, 0 errors |
-| Falcon (fiber per request) | 500 | 500/500 delivered, p50 378ms, ~13 MB RSS, 0 errors |
-
-**Recommendation:** Puma is fine for development and a handful of clients. For SSE-heavy deployments, run [Falcon](https://github.com/socketry/falcon) — streams become fibers, `sleep` and `pg` yield to the scheduler, and thousands of idle connections are cheap:
+**Recommendation:** Puma is fine for development and a handful of clients. For more, run [Falcon](https://github.com/socketry/falcon), as the demo's `bin/dev` does:
 
 ```ruby
 # Gemfile
@@ -532,34 +576,24 @@ config.active_support.isolation_level = :fiber if defined?(Falcon)
 bundle exec falcon serve --bind http://localhost:3000
 ```
 
-Clients that hold an open SSE stream (such as the native iOS `StreamClient` or custom `EventSource` consumers) receive changes as they are logged — measured at **130ms** from a server-side write, bounded by the server's 0.5s change-log poll. Reopening with `?after=<cursor>` (or `Last-Event-ID`) replays anything a dropped connection missed. The tail window is configurable via `config.instant_record.sse_window_seconds` (25s default for Puma; raise under Falcon) and `config.instant_record.sse_heartbeat_seconds` (15s default) emits `: hb` keepalives so proxies do not reap idle streams.
+The server looks at the change log every 0.5 seconds while a stream is open. Reopening with `?after=<cursor>` (or `Last-Event-ID`) replays anything a dropped connection missed, and `?window=0` sends what is new and closes. The window is `config.instant_record.sse_window_seconds` (25 by default, sized for Puma; raise it under Falcon), and `config.instant_record.sse_heartbeat_seconds` (15 by default) sends `: hb` comments so proxies do not close idle streams. `demo/script/sse_load_spike.rb` measures delivery under load on your own machine.
 
-By contrast, the compiled browser worker uses non-blocking `window=0` catch-up polls every second (returning immediately without holding a server thread, and skipping Wasm completely when empty), while draining the outbox on local writes, at boot, and on reconnect with exponential backoff. Reproduce the SSE load numbers with `demo/script/sse_load_spike.rb`.
+The worker sends queued writes when they are made, at boot and on reconnect, and retries with exponential backoff.
 
 ## What's proven
 
-Measured on the demo (Chrome, M-series MacBook):
+Shown on the demo:
 
 - The browser compiles and loads the Spinel WebAssembly module, opens SQLite and handles requests locally. Visit `/receipts` for measurements on your own device.
 - Instant optimistic create with local persistence across reloads.
 - Two independent clients converging through POST + SSE, including fresh-client catch-up.
 - Server rejection reconciled by rolling the local record back.
-- ~5,000 seeded messages in one channel: a fresh client bootstraps only the newest window per conversation, older pages stream in on scroll, and a cold boot evicts the local database back to the window.
+- ~5,000 seeded messages in one channel: a fresh client bootstraps only the newest window per conversation, and older pages stream in on scroll.
 - Browser tests exercise multi-tab offline writes, release upgrades, local migrations, retries and server reconciliation.
 
 ## Roadmap ideas
 
-Sketched but **not built**:
-
-```ruby
-# Model-level conflict resolution beyond last-write-wins
-class Issue < ApplicationRecord
-  include InstantRecord::Syncable
-  resolves_conflict_on :state, prefer: :closed
-end
-```
-
-Also out of scope for the PoC, on purpose: CRDTs, Postgres logical replication, multi-tab leader election, several files to a record or a file that changes (a record carries one file: `sync_file`), a sign-in of the gem's own (it scopes the sync endpoints by whatever your app's session says: `sync_scope`, `syncable_to`), and migration generators. The Inbox demo runs as an Inertia page in React, with its props kept live from the local database: `docs/solutions/2026-11-19-inbox-on-inertia.md` says what held and what the gem would need to offer it properly.
+Out of scope for the PoC, on purpose: CRDTs, Postgres logical replication, several files to a record or a file that changes (a record carries one file: `sync_file`), a sign-in of the gem's own (it scopes the sync endpoints by whatever your app's session says: `sync_scope`, `syncable_to`), and migration generators. The Inbox demo runs as an Inertia page in React, with its props kept live from the local database: `docs/solutions/2026-11-19-inbox-on-inertia.md` says what held and what the gem would need to offer it properly.
 
 ## History
 

@@ -4,6 +4,8 @@ Source: `ce-code-review` (mode:agent) run during the LFG pipeline for the Swiss 
 
 ## Residual Review Findings
 
+Fixed since: #1 and #3 (the reset URL comes from `InstantRecord.server_url`), #2 for destroys (a client's cascaded destroys are logged; what a callback creates or updates still is not), and #4 (the reply job locks the message and stops when it is gone).
+
 - P2 · `demo/app/helpers/slack_helper.rb:7-11` · Same-origin reset runs in the browser runtime, not the server — [#1](https://github.com/kieranklaassen/instant_record/issues/1)
 - P2 · `lib/instant_record/syncable.rb:46` · Cascaded destroys during client-mutation apply are never change-logged — [#2](https://github.com/kieranklaassen/instant_record/issues/2)
 - P3 · `demo/app/helpers/slack_helper.rb:10` · Reset URL derivation hardcodes the default mount path — [#3](https://github.com/kieranklaassen/instant_record/issues/3)

@@ -16,10 +16,10 @@ The server-rendered HTML partial (and its data attributes) that both the server 
 ## Demo conversation UI
 
 ### History sentinel
-An ephemeral element at the top of the message scroller that an IntersectionObserver watches to trigger loading older history. Prefetch extends the observer's root margin above the viewport so the next page starts loading before the reader hits the top. The sentinel is mounted on Stimulus connect and removed on disconnect so Turbo's page cache does not duplicate it.
+The server-rendered slot above the oldest message. It shows the state of history loading (idle, loading, offline, beginning reached) and is changed in place, so the list never shifts. It does not trigger the load; scrolling near the top does.
 
 ### Prefetch margin
-How far above the visible message viewport (in CSS pixels) the history sentinel counts as intersecting, so older pages load ahead of the scroll position. Exposed as a Stimulus value on the conversation root so the demo can tune it from the view; zero restores load-only-at-top behavior.
+How close to the top of the message scroller (in CSS pixels) the reader must be before the next older page loads. A constant in the conversation controller.
 
 ## Flagged ambiguities
 

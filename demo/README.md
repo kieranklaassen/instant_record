@@ -1,6 +1,9 @@
 # InstantRecord demos
 
+The demo runs on Ruby 3.3.3 with PostgreSQL, for development and for its tests.
+
 ```sh
+bundle install
 bin/rails db:prepare
 bin/rails server
 ```
@@ -16,7 +19,8 @@ npm run build   # once, or `npm run dev` to rebuild on change
 npm test        # the keyboard hook's unit tests
 ```
 
-`bin/rails test` and `bin/rails assets:precompile` build it first.
+`bin/rails test` and `bin/rails assets:precompile` build it first, running
+`npm ci` when `node_modules` is missing.
 
 ## Auth
 
