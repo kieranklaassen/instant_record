@@ -22,6 +22,10 @@ module InstantRecord
     class WasmBuild
       WASM_OPT_LEVEL = "-Oz"
       WASM_OPT_PASS = "-Oz"
+      # A Ruby rescue is a setjmp, and every call inside a function that holds one is
+      # wrapped. Inlining callees into it multiplies the wrapped calls: without this
+      # flag the generated code is nearly twice the size.
+      REACTOR_SIZE_CFLAGS = %w[-fno-inline].freeze
       SHELL_FORMAT = InstantRecord::Shell::FORMAT
       DEFAULT_SYNC_ENDPOINT = "http://127.0.0.1:3210/instant_record"
       SPINEL_PACKAGES = %w[json stringio zlib].freeze
@@ -520,7 +524,7 @@ module InstantRecord
 
         @runner.run(
           [
-            clang, *WASI_CFLAGS, "-mexec-model=reactor", WASM_OPT_LEVEL,
+            clang, *WASI_CFLAGS, "-mexec-model=reactor", WASM_OPT_LEVEL, *REACTOR_SIZE_CFLAGS,
             "-Wno-all", "-ffp-contract=off",
             "-DSP_INT_OVERFLOW_MODE_RAISE",
             "-I#{File.join(spinel_home, 'lib')}",
