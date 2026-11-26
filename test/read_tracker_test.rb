@@ -68,6 +68,41 @@ class ReadTrackerTest < Minitest::Test
     assert_equal({ "Memo" => { "owner" => ["maya"] } }, reads["partitions"])
   end
 
+  def test_compound_query_narrows_nothing
+    [
+      "UNION", "UNION ALL", "INTERSECT", "EXCEPT", "union\nall", "Except"
+    ].each do |operator|
+      [
+        "SELECT * FROM items WHERE owner = 'maya' #{operator} SELECT * FROM items",
+        "SELECT * FROM items #{operator} SELECT * FROM items WHERE owner = 'maya'",
+        "SELECT * FROM items WHERE owner = 'maya' #{operator} SELECT * FROM items WHERE owner = 'theo'",
+        "SELECT * FROM items WHERE owner IN ('maya', 'th''eo') #{operator} VALUES (1) ORDER BY 1 LIMIT 5"
+      ].each { |sql| assert_equal({}, reads_of(sql)["partitions"], sql) }
+    end
+
+    reads = reads_of("SELECT * FROM items WHERE owner = 'maya' UNION SELECT * FROM items")
+    assert_equal ["items"], reads["tables"]
+    other_owner = { "type" => "Memo", "id" => "1", "op" => "create", "attrs" => { "owner" => "theo" } }
+    assert InstantRecord::ReadTracker.affects?([other_owner], reads)
+  end
+
+  def test_compound_keywords_that_are_not_operators_keep_the_narrowing
+    [
+      "SELECT * FROM items WHERE owner = 'maya' AND title = 'a UNION b'",
+      "SELECT * FROM items WHERE owner = 'maya' AND title = 'it''s EXCEPT this'",
+      "SELECT ' INTERSECT ' FROM items WHERE owner = 'maya'",
+      "SELECT * FROM items WHERE items.owner = 'maya' AND id IN (SELECT item_id FROM labels UNION SELECT item_id FROM labels)",
+      "SELECT * FROM items WHERE (items.owner = 'maya') AND NOT EXISTS (SELECT 1 FROM labels EXCEPT SELECT 2)",
+      "SELECT union_id, reunion FROM items WHERE owner = 'maya' ORDER BY items.except_at, intersects",
+      "SELECT \"union_id\" FROM items WHERE owner = 'maya' AND \"items\".\"is_except\" = 1"
+    ].each { |sql| assert_equal({ "owner" => ["maya"] }, reads_of(sql)["partitions"]["Memo"], sql) }
+  end
+
+  def reads_of(sql)
+    InstantRecord::ReadTracker.track { InstantRecord::ReadTracker.record_sql(sql) }
+  end
+  private :reads_of
+
   def test_ignores_internal_tables_and_non_select_queries
     reads = InstantRecord::ReadTracker.track do
       InstantRecord::ReadTracker.record_sql("PRAGMA table_info(items)")

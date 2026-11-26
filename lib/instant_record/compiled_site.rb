@@ -15,6 +15,11 @@ module InstantRecord
     # Best first.
     ENCODINGS = { "br" => ".br", "gzip" => ".gz" }.freeze
 
+    # A manifest changed more recently than this is read again on each request: a
+    # second write within one timestamp tick would leave its stat the same.
+    SETTLE_SECONDS = 2
+    private_constant :SETTLE_SECONDS
+
     def initialize(app, host:, root:, sync_path:)
       @app = app
       @host = host
@@ -22,6 +27,9 @@ module InstantRecord
       @files = Rack::Files.new(root)
       @releases = File.dirname(root)
       @sync_path = sync_path
+      @manifest = File.join(root, "instant_record.manifest.json")
+      # Written in one step and outside the instance, which may be frozen.
+      @kept = [nil]
     end
 
     def call(env)
@@ -82,20 +90,57 @@ module InstantRecord
     end
 
     def local_island_path?(path)
-      manifest_file = File.join(@root, "instant_record.manifest.json")
-      return true unless File.file?(manifest_file)
+      return true unless File.file?(@manifest)
 
-      data = JSON.parse(File.read(manifest_file))
-      return true unless data["mode"] == "island"
-
-      routes = Array(data["local_routes"]).select { |r| r["method"].to_s.upcase == "GET" && r["path"] }
+      routes = local_routes
       return true if routes.empty?
 
       normalized = path.to_s.gsub(%r{/+}, "/")
       normalized = normalized.delete_suffix("/") if normalized.length > 1
-      routes.any? { |route| route_pattern_to_regex(route["path"]).match?(normalized) }
+      routes.any? { |route| (route.is_a?(Regexp) ? route : route_pattern_to_regex(route)).match?(normalized) }
     rescue JSON::ParserError, SystemCallError
       true
+    end
+
+    # Empty when the manifest leaves every path to the browser.
+    def local_routes
+      identity, routes = @kept.first
+      return routes if identity && identity == manifest_identity(File.stat(@manifest))
+
+      File.open(@manifest) do |file|
+        # Taken before the read, so a write during it changes the identity.
+        read_at = now
+        stat = file.stat
+        routes = parse_routes(file.read)
+        if [stat.mtime, stat.ctime].max < read_at - SETTLE_SECONDS
+          routes = routes.map { |pattern| kept_pattern(pattern) }
+          @kept[0] = [manifest_identity(stat), routes.freeze].freeze
+        end
+        routes
+      end
+    end
+
+    def now
+      Time.now
+    end
+
+    # ctime moves on every write, also when mtime is set back afterwards.
+    def manifest_identity(stat)
+      [stat.dev, stat.ino, stat.size, stat.mtime, stat.ctime]
+    end
+
+    def parse_routes(json)
+      data = JSON.parse(json)
+      return [] unless data["mode"] == "island"
+
+      Array(data["local_routes"]).select { |r| r["method"].to_s.upcase == "GET" && r["path"] }.map { |r| r["path"] }
+    end
+
+    # A pattern that cannot be built raises when a path reaches it, not before.
+    def kept_pattern(pattern)
+      route_pattern_to_regex(pattern)
+    rescue StandardError
+      pattern
     end
 
     def route_pattern_to_regex(pattern)

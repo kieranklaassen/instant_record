@@ -1,23 +1,37 @@
-require "json"
+require "instant_record/action_replay"
+require "instant_record/column_merge"
 require "instant_record/outbox_upcaster"
 
 module InstantRecord
   # Applies one client mutation authoritatively: record write, version bump,
   # change-log row, and idempotency-ledger row, in one transaction. This is
   # the server half of the sync protocol; the HTTP layer above it is thin.
+  # A sync_action is replayed by ActionReplay instead.
   #
   # Conflict resolution uses server-anchored string-encoded HLCs (with extreme
-  # forward clock skew clamped to server UTC) and 3-way column-level merging:
-  # inspecting Change rows since `base_version` lets disjoint concurrent column
-  # edits merge cleanly, while same-column collisions honor declarative
-  # `sync_merge :col, :lww | :union | :server_wins` policies.
+  # forward clock skew clamped to server UTC) and 3-way column-level merging
+  # (ColumnMerge): inspecting Change rows since `base_version` lets disjoint
+  # concurrent column edits merge cleanly, while same-column collisions honor
+  # declarative `sync_merge :col, :lww | :union | :server_wins` policies.
   class MutationApplier
     # A write the sender may not make. Raised inside the transaction, so
     # whatever the write did is rolled back with it.
     NotPermitted = Class.new(StandardError)
 
-    # Columns that carry bookkeeping/timestamps rather than user-edited fields.
-    NON_DATA_COLUMNS = %w[id server_version sync_state created_at updated_at].freeze
+    # An update that found no row to change, as when a concurrent destroy
+    # removed it. Active Record saves it without a complaint, and logging it
+    # would bring the record back. Raised inside the transaction, as above.
+    RowGone = Class.new(StandardError)
+
+    # The flag Active Record decides its commit callbacks by: it stands until
+    # the transaction the record was saved in ends.
+    def self.row_updated?(record)
+      record.send(:_trigger_update_callback)
+    end
+
+    ActionFrame = ActionReplay::Frame
+    NON_DATA_COLUMNS = ColumnMerge::NON_DATA_COLUMNS
+    MERGE_PREFIX = ColumnMerge::Notes::PREFIX
 
     # `identity` is the sender (SyncScope.identity). `partition` is the active
     # multi-tenant partition (SyncScope.partition), required by models that
@@ -37,7 +51,7 @@ module InstantRecord
 
     # Replayed mutation ids return their original result without re-applying.
     def apply
-      return apply_mutator if mutator_intent?
+      return replay_action if mutator_intent?
 
       @mutation, @changes = OutboxUpcaster.apply_global(@mutation, @changes)
 
@@ -70,6 +84,8 @@ module InstantRecord
         InstantRecord.applying_client_mutation { perform(model) }
       end
       record_result(**result)
+    rescue RowGone
+      record_result(status: "rejected", reason: "record not found")
     rescue NotPermitted
       record_result(status: "rejected", reason: "not permitted", server_attributes: server_attributes_for(model))
     rescue ActiveRecord::RecordInvalid => e
@@ -101,138 +117,8 @@ module InstantRecord
       @mutation[:mutator].present? || @mutation[:operation].to_s == "mutator"
     end
 
-    # Authoritatively replay a custom sync_action inside one transaction with
-    # AppliedMutation idempotency, unified auth, commit-guarded ActiveJob
-    # enqueueing, and visible post-rollback server records on rejection.
-    def apply_mutator
-      if (existing = AppliedMutation.find_by(mutation_id: @mutation_id))
-        return replayed_mutator(existing.result_payload.symbolize_keys)
-      end
-
-      mutator_name = @mutation[:mutator].to_s
-      entry = SyncActions.resolve(mutator_name)
-      unless entry && mutator_allowed?(entry[:klass])
-        return record_result(status: "rejected", reason: "unknown mutator", records: [])
-      end
-
-      SyncActions.install_active_job_guard!
-      frame = SyncActions::ServerFrame.new(
-        mutation_id: @mutation_id.to_s,
-        identity: @identity,
-        scope: @scope,
-        partition: @partition,
-        enforcing: true
-      )
-      args = SyncActions.normalize_args(@mutation[:args] || {})
-
-      ActiveRecord::Base.transaction(requires_new: true) do
-        InstantRecord.applying_client_mutation do
-          SyncActions.with_server_frame(frame) do
-            authorize_action!(entry, args)
-            SyncActions.dispatch(mutator_name, args)
-          end
-        end
-        record_applied_mutator!(status: "applied", records: frame.applied_records)
-      end
-    rescue NotPermitted => e
-      reason = (e.message.nil? || e.message == e.class.name) ? "not permitted" : e.message
-      record_result(status: "rejected", reason: reason, records: visible_records_for(frame&.touched_refs || []))
-    rescue MutationRejected => e
-      record_result(status: "rejected", reason: e.message, records: visible_records_for(frame&.touched_refs || []))
-    rescue ActiveRecord::RecordInvalid => e
-      refs = (frame&.touched_refs || []).dup
-      if e.record&.class&.respond_to?(:instant_record_syncable?) && e.record.class.instant_record_syncable? && e.record.id.present?
-        refs << [e.record.class.name, e.record.id]
-      end
-      record_result(status: "rejected", reason: e.record.errors.full_messages.to_sentence,
-        records: visible_records_for(refs))
-    rescue ActiveRecord::RecordNotFound => e
-      refs = (frame&.touched_refs || []).dup
-      refs << [e.model, e.id] if e.respond_to?(:model) && e.model.present? && e.respond_to?(:id) && e.id.present?
-      record_result(status: "rejected", reason: e.message, records: visible_records_for(refs))
-    rescue ActiveRecord::RecordNotUnique
-      if (existing = AppliedMutation.find_by(mutation_id: @mutation_id))
-        return replayed_mutator(existing.result_payload.symbolize_keys)
-      end
-
-      record_result(status: "rejected", reason: "id already exists", records: visible_records_for(frame&.touched_refs || []))
-    rescue ArgumentError, ActiveModel::UnknownAttributeError => e
-      record_result(status: "rejected", reason: e.message, records: visible_records_for(frame&.touched_refs || []))
-    end
-
-    # Raises RecordNotUnique on concurrent duplicate mutation_id so the
-    # wrapping savepoint rolls back duplicate domain writes and jobs.
-    def record_applied_mutator!(**result)
-      payload = result.merge(mutation_id: @mutation_id)
-      record = AppliedMutation.create!(mutation_id: @mutation_id, result_payload: payload)
-      record.result_payload.symbolize_keys
-    end
-
-    def mutator_allowed?(klass)
-      return true unless InstantRecord.synced_models.any?
-      return true unless klass.respond_to?(:instant_record_syncable?) && klass.instant_record_syncable?
-
-      !InstantRecord.synced_model(klass.name).nil?
-    end
-
-    def authorize_action!(entry, args)
-      authorizer = entry[:klass].instant_record_action_authorizer(entry[:action])
-      return unless authorizer
-
-      permitted =
-        if authorizer.arity == 3 || authorizer.arity < -2
-          authorizer.call(entry[:action], @identity, args)
-        else
-          authorizer.call(@identity, args)
-        end
-      raise NotPermitted unless permitted
-    end
-
-    # Authoritative post-rollback rows visible to the requester, so a rejected
-    # mutator never leaks hidden records and gives the client exact server state.
-    def visible_records_for(refs)
-      seen = {}
-      records = []
-      refs.each do |type, id|
-        next if type.nil? || id.nil?
-
-        key = "#{type}:#{id}"
-        next if seen[key]
-
-        seen[key] = true
-        model = InstantRecord.synced_model(type.to_s)
-        next unless model
-
-        record = SyncScope.visible(model, @identity, partition: @partition).find_by(id: id)
-        records << InstantRecord.record_payload(record) if record
-      end
-      records
-    end
-
-    # Re-filter stored mutator result records through what this requester may
-    # see, matching row-level replay privacy guarantees.
-    def replayed_mutator(result)
-      stored = result[:records]
-      return result unless stored.is_a?(Array)
-
-      filtered = stored.filter_map do |entry|
-        rec = entry.stringify_keys
-        model = InstantRecord.synced_model(rec["type"])
-        next rec unless model && SyncScope.scoped?(model)
-
-        if rec["operation"] == "destroy"
-          nil
-        else
-          record = SyncScope.visible(model, @identity, partition: @partition).find_by(id: rec["id"])
-          next unless record
-
-          payload = InstantRecord.record_payload(record).deep_stringify_keys
-          payload["operation"] = rec["operation"] if rec["operation"]
-          payload
-        end
-      end
-
-      result.merge(records: filtered)
+    def replay_action
+      ActionReplay.new(@mutation, @mutation_id, identity: @identity, scope: @scope, partition: @partition).apply
     end
 
     def perform(model)
@@ -298,7 +184,8 @@ module InstantRecord
 
         permit!(model) if record
         applied_hlc = resolve_incoming_hlc(server_now)
-        record&.destroy!
+        cascaded = record ? cascaded_destroys(record) { record.destroy! } : []
+        cascaded.each { |other| other.send(:record_server_change, "destroy") }
         HLC.receive(applied_hlc, now: server_now, node: HLC::SERVER_NODE)
         log_destroy(model, record, hlc: applied_hlc)
         { status: "applied" }
@@ -326,7 +213,8 @@ module InstantRecord
 
       # No concurrent version bump (or legacy caller with no base_version /
       # metadata-only touch): compare clamped HLCs.
-      if record_hlc.present? && HLC.compare(incoming_hlc, record_hlc) < 0
+      known_hlc = base_version && base_version >= record.server_version ? record_hlc : ColumnMerge::Notes.merge_clock(record, record_hlc, incoming_hlc)
+      if known_hlc.present? && HLC.compare(incoming_hlc, known_hlc) < 0
         return skipped_result(record, record_hlc)
       end
 
@@ -334,7 +222,7 @@ module InstantRecord
       record.assign_attributes(safe_changes)
       record.server_version += 1
       record.sync_state = "synced"
-      record.save!
+      save_update!(record)
       # Again after the write: a change of owner or audience must leave the
       # record somewhere the sender may still write.
       permit!(model)
@@ -344,64 +232,24 @@ module InstantRecord
     end
 
     def perform_three_way_merge(model, record, user_columns, base_version, incoming_hlc, record_hlc, server_now)
-      base_attrs, server_touched, has_base = inspect_changes_since(record, base_version, record_hlc)
-      live_attrs = InstantRecord.wire_attributes(record.attributes)
-      incoming_node = HLC.node(incoming_hlc)
+      merge = ColumnMerge.new(model, record, @changes, user_columns,
+        base_version: base_version, incoming_hlc: incoming_hlc, record_hlc: record_hlc).resolve
+      return skipped_result(record, record_hlc) if merge.winning.empty?
 
-      winning = {}
-      user_columns.each do |col|
-        col_info =
-          if has_base
-            server_touched[col]
-          else
-            { value: live_attrs[col], hlc: record_hlc, nodes: [HLC.node(record_hlc)].compact }
-          end
-
-        if col_info.nil?
-          # Disjoint concurrent edit: server did not touch this column since base_version.
-          winning[col] = @changes[col]
-          next
-        end
-
-        # Same client node's sequential offline mutations share the same base_version
-        # until the first one lands; treat strictly newer writes from the same client
-        # node as sequential rather than a concurrent conflict.
-        if same_node_sequential?(incoming_node, incoming_hlc, col_info)
-          winning[col] = @changes[col]
-          next
-        end
-
-        policy = model.instant_record_merge_policy(col)
-        case policy
-        when :server_wins
-          # Server's already-committed value wins on same-column collision.
-        when :lww
-          if col_info[:hlc].nil? || HLC.compare(incoming_hlc, col_info[:hlc]) >= 0
-            winning[col] = @changes[col]
-          end
-        when :union
-          merged_val = merge_union(
-            has_base ? base_attrs[col] : nil,
-            record.public_send(col),
-            @changes[col],
-            incoming_wins: col_info[:hlc].nil? || HLC.compare(incoming_hlc, col_info[:hlc]) >= 0
-          )
-          winning[col] = merged_val if merged_val != record.public_send(col)
-        end
-      end
-
-      return skipped_result(record, record_hlc) if winning.empty?
-
-      applied_hlc = HLC.advance_past(record_hlc, incoming_hlc, now: server_now, node: HLC::SERVER_NODE)
+      merged_hlc = HLC.advance_past(record_hlc, incoming_hlc, now: server_now, node: HLC::SERVER_NODE)
+      # The next edit of a client's own run keeps the client's clock, as the first
+      # did: a server clock would outrank the edits still queued behind it.
+      applied_hlc = merge.own_run? ? incoming_hlc : merged_hlc
       applied_time = HLC.physical_time(applied_hlc) || server_now
 
-      record.assign_attributes(winning)
+      record.assign_attributes(merge.winning)
       record.updated_at = [record.updated_at, applied_time].compact.max if record.respond_to?(:updated_at=)
       record.server_version += 1
       record.sync_state = "synced"
-      record.save!
+      save_update!(record)
       permit!(model)
       log_change(record, "update", hlc: applied_hlc)
+      ColumnMerge::Notes.write(record, applied_hlc, from: incoming_hlc, merged: merged_hlc, columns: merge.uncontested)
 
       {
         status: "applied",
@@ -412,176 +260,13 @@ module InstantRecord
       }
     end
 
-    # Inspect Change rows since `base_version` to determine the base snapshot
-    # and every column modified on the server since that version, along with
-    # the HLC and contributing writer nodes for each modified column.
-    def inspect_changes_since(record, base_version, record_hlc)
-      base_change =
-        if base_version.positive?
-          Change
-            .where(record_type: record.class.name, record_id: record.id, version: base_version)
-            .order(:id)
-            .last
-        end
-
-      return [{}, {}, false] unless base_change
-
-      base_attrs = base_change.attributes_payload.is_a?(Hash) ? base_change.attributes_payload : {}
-      changes_since = Change
-        .where(record_type: record.class.name, record_id: record.id)
-        .where("version > ?", base_version)
-        .where.not(operation: "destroy")
-        .order(:version, :id)
-        .to_a
-
-      hlc_map = HLC.change_hlcs(changes_since.map(&:id))
-      server_touched = {}
-      prev_attrs = base_attrs
-
-      changes_since.each do |change|
-        curr_attrs = change.attributes_payload.is_a?(Hash) ? change.attributes_payload : {}
-        c_hlc = hlc_map[change.id] || HLC.from_time(curr_attrs["updated_at"] || change.created_at, node: HLC::SERVER_NODE)
-        c_node = HLC.node(c_hlc)
-
-        ((curr_attrs.keys | prev_attrs.keys) - NON_DATA_COLUMNS).each do |col|
-          next if curr_attrs[col] == prev_attrs[col]
-
-          entry = (server_touched[col] ||= { nodes: [] })
-          entry[:value] = curr_attrs[col]
-          entry[:hlc] = c_hlc
-          entry[:nodes] << c_node if c_node && !entry[:nodes].include?(c_node)
-        end
-
-        prev_attrs = curr_attrs
+    # In a transaction of the model's own, which the save joins: a model in
+    # another database would otherwise end its transaction with the save.
+    def save_update!(record)
+      record.transaction do
+        record.save!
+        raise RowGone unless self.class.row_updated?(record)
       end
-
-      # Catch any unlogged direct server column update (e.g. update_columns).
-      live_attrs = InstantRecord.wire_attributes(record.attributes)
-      ((live_attrs.keys | prev_attrs.keys) - NON_DATA_COLUMNS).each do |col|
-        next if live_attrs[col] == prev_attrs[col]
-
-        entry = (server_touched[col] ||= { nodes: [] })
-        entry[:value] = live_attrs[col]
-        entry[:hlc] = record_hlc
-        entry[:nodes] << HLC::SERVER_NODE unless entry[:nodes].include?(HLC::SERVER_NODE)
-      end
-
-      [base_attrs, server_touched, true]
-    end
-
-    def same_node_sequential?(incoming_node, incoming_hlc, col_info)
-      return false if incoming_node.nil? || incoming_node == HLC::SERVER_NODE || incoming_node == HLC::LEGACY_NODE
-      return false if col_info[:nodes].empty?
-
-      col_info[:nodes].all? { |n| n == incoming_node } &&
-        col_info[:hlc].present? &&
-        HLC.compare(incoming_hlc, col_info[:hlc]) > 0
-    end
-
-    # 3-way collection union for `sync_merge :col, :union`:
-    #   - Arrays (native Postgres arrays, JSON/serialized arrays)
-    #   - JSON-encoded array strings (e.g. '["a","b"]' in SQLite text columns)
-    #   - Hashes / JSON objects (3-way key merge; LWW on colliding keys)
-    #   - Comma-separated strings (e.g. "bug, urgent")
-    def merge_union(base_val, server_val, client_val, incoming_wins:)
-      if server_val.is_a?(Array) || client_val.is_a?(Array)
-        return merge_array_union(base_val.is_a?(Array) ? base_val : nil, Array(server_val), Array(client_val))
-      end
-
-      if server_val.is_a?(Hash) || client_val.is_a?(Hash)
-        return merge_hash_union(
-          base_val.is_a?(Hash) ? base_val : nil,
-          server_val.is_a?(Hash) ? server_val : {},
-          client_val.is_a?(Hash) ? client_val : {},
-          incoming_wins: incoming_wins
-        )
-      end
-
-      if json_array_string?(server_val) || json_array_string?(client_val)
-        s_arr = parse_json_array(server_val)
-        c_arr = parse_json_array(client_val)
-        b_arr = parse_json_array(base_val, fallback: nil)
-        return JSON.generate(merge_array_union(b_arr, s_arr, c_arr))
-      end
-
-      if json_object_string?(server_val) || json_object_string?(client_val)
-        s_hash = parse_json_object(server_val)
-        c_hash = parse_json_object(client_val)
-        b_hash = parse_json_object(base_val, fallback: nil)
-        return JSON.generate(merge_hash_union(b_hash, s_hash, c_hash, incoming_wins: incoming_wins))
-      end
-
-      separator = server_val.to_s.include?(", ") || client_val.to_s.include?(", ") ? ", " : ","
-      b_list = base_val.nil? ? nil : split_csv(base_val)
-      merged = merge_array_union(b_list, split_csv(server_val), split_csv(client_val))
-      merged.join(separator)
-    end
-
-    def merge_array_union(base_arr, server_arr, client_arr)
-      if base_arr.nil?
-        (server_arr | client_arr)
-      else
-        client_added = client_arr - base_arr
-        client_removed = base_arr - client_arr
-        ((server_arr - client_removed) | client_added)
-      end
-    end
-
-    def merge_hash_union(base_hash, server_hash, client_hash, incoming_wins:)
-      merged = server_hash.dup
-      if base_hash.nil?
-        client_hash.each do |k, v|
-          merged[k] = v if !merged.key?(k) || incoming_wins
-        end
-      else
-        (base_hash.keys | client_hash.keys).each do |k|
-          c_present = client_hash.key?(k)
-          b_present = base_hash.key?(k)
-          next if c_present == b_present && client_hash[k] == base_hash[k]
-
-          s_changed = server_hash.key?(k) != b_present || server_hash[k] != base_hash[k]
-          if !s_changed || incoming_wins
-            c_present ? merged[k] = client_hash[k] : merged.delete(k)
-          end
-        end
-      end
-      merged
-    end
-
-    def json_array_string?(value)
-      value.is_a?(String) && value.lstrip.start_with?("[") && JSON.parse(value).is_a?(Array)
-    rescue JSON::ParserError
-      false
-    end
-
-    def parse_json_array(value, fallback: [])
-      return fallback if value.nil? || value == ""
-      return value if value.is_a?(Array)
-
-      parsed = JSON.parse(value.to_s)
-      parsed.is_a?(Array) ? parsed : fallback
-    rescue JSON::ParserError
-      fallback
-    end
-
-    def json_object_string?(value)
-      value.is_a?(String) && value.lstrip.start_with?("{") && JSON.parse(value).is_a?(Hash)
-    rescue JSON::ParserError
-      false
-    end
-
-    def parse_json_object(value, fallback: {})
-      return fallback if value.nil? || value == ""
-      return value if value.is_a?(Hash)
-
-      parsed = JSON.parse(value.to_s)
-      parsed.is_a?(Hash) ? parsed : fallback
-    rescue JSON::ParserError
-      fallback
-    end
-
-    def split_csv(value)
-      value.to_s.split(",").map(&:strip).reject(&:empty?)
     end
 
     def skipped_result(record, record_hlc)
@@ -672,6 +357,23 @@ module InstantRecord
       HLC.delete_record_hlc(model.name, @mutation[:record_id])
     end
 
+    # The other synced records that destroying `target` took with it
+    # (`dependent: :destroy`), in the order they went. They are logged once all
+    # are gone, not as each one goes: the log takes the server clock's row, and
+    # an edit of a later child would hold that child while it waits for it.
+    def cascaded_destroys(target)
+      previous = ActiveSupport::IsolatedExecutionState[:instant_record_cascaded_destroys]
+      events = []
+      ActiveSupport::IsolatedExecutionState[:instant_record_cascaded_destroys] = events
+      yield
+      # A callback may destroy a row in a savepoint it undoes, or create it
+      # again: the last event that stands says whether the row is gone.
+      last = events.reject { |event| event[:undone] }.reverse.uniq { |event| [event[:row].class, event[:row].id] }.reverse
+      last.filter_map { |event| event[:row] if event[:gone] && event[:row] != target }
+    ensure
+      ActiveSupport::IsolatedExecutionState[:instant_record_cascaded_destroys] = previous
+    end
+
     # The server's row as the sender may see it, for a client to roll back to.
     # Every rejection reads through here, so none carries a hidden record.
     def server_attributes_for(model)
@@ -703,14 +405,8 @@ module InstantRecord
       raise NotPermitted unless SyncScope.writable(model, @identity, partition: @partition).exists?(id: @mutation[:record_id])
     end
 
-    # create_or_find_by leans on the unique index: a concurrent duplicate
-    # returns the already-recorded result instead of applying twice.
     def record_result(**result)
-      payload = result.merge(mutation_id: @mutation_id)
-      record = AppliedMutation.create_or_find_by(mutation_id: @mutation_id) do |applied|
-        applied.result_payload = payload
-      end
-      record.result_payload.symbolize_keys
+      AppliedMutation.record(@mutation_id, **result)
     end
   end
 end

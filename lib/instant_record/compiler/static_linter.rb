@@ -65,6 +65,11 @@ module InstantRecord
         Rakefile
       ]).freeze
 
+      # Where compiled code lives in a Rails app.
+      RAILS_FOLDERS = %w[app/models app/controllers app/helpers app/screens config/routes].freeze
+      RAILS_FILES = %w[config/application.rb config/routes.rb config/importmap.rb].freeze
+      private_constant :RAILS_FOLDERS, :RAILS_FILES
+
       Diagnostic = Struct.new(:rule, :file, :line, :column, :message, keyword_init: true) do
         def to_s
           "#{file}:#{line}:#{column} [#{rule}] #{message}"
@@ -111,86 +116,70 @@ module InstantRecord
       end
 
       def run
-        files = discover_files
-        parsed_files = files.map { |path| [path, relative_path(path), Prism.parse_file(path)] }
+        parsed_files = parse(discover_files)
 
-        server_only_defs, client_defs =
-          if @precollected_server_only
-            [@precollected_server_only, collect_defs_from_parsed(parsed_files).last]
-          else
-            collect_defs_from_parsed(parsed_files)
-          end
+        server_only_defs, client_defs = collect_defs(parsed_files)
+        server_only_defs = @precollected_server_only if @precollected_server_only
 
-        effective_server_only = {}
+        # Constant name => where it is defined, nil for a gem constant.
+        @server_only = {}
         server_only_defs.each do |name, loc|
-          effective_server_only[name] = loc unless client_defs.include?(name)
+          @server_only[name] = loc unless client_defs.include?(name)
         end
         SERVER_ONLY_GEM_CONSTANTS.each do |name|
-          effective_server_only[name] ||= nil unless client_defs.include?(name)
+          @server_only[name] ||= nil unless client_defs.include?(name)
         end
 
-        diagnostics = []
-        parsed_files.each do |_abs, rel, parsed|
-          next unless parsed.success?
-
-          lint_file(rel, parsed.value, effective_server_only, diagnostics)
+        @diagnostics = []
+        parsed_files.each do |rel, parsed|
+          lint_file(rel, parsed.value) if parsed.success?
         end
 
-        diagnostics.sort_by! { |d| [d.file, d.line, d.column, d.rule.to_s] }
-        Result.new(files_checked: parsed_files.size, diagnostics: diagnostics)
+        @diagnostics.sort_by! { |d| [d.file, d.line, d.column, d.rule.to_s] }
+        Result.new(files_checked: parsed_files.size, diagnostics: @diagnostics)
       end
 
       def discover_files
-        root_path = Pathname(@root)
-        return [] unless root_path.directory?
+        return [] unless File.directory?(@root)
 
-        if @only_files
-          return @only_files.to_a.sort
-            .reject { |rel| excluded_custom?(rel) }
-            .map { |rel| File.join(@root, rel) }
-            .select { |path| File.file?(path) }
-        end
-
-        if @staged
-          candidates = Dir.glob("**/*.rb", base: @root).sort
-          return candidates.reject { |rel| excluded_staged?(rel) || excluded_custom?(rel) }.map { |rel| File.join(@root, rel) }
-        end
-
-        # Raw Rails app root (used by `instant_record:doctor`): scan the folders
-        # that actually enter compilation, or fall back to flat `**/*.rb` for
-        # standalone fixture directories.
-        app_subfolders = %w[app/models app/controllers app/helpers app/screens config/routes]
-        app_files = %w[config/application.rb config/routes.rb config/importmap.rb]
-        has_rails_layout = app_subfolders.any? { |dir| File.directory?(File.join(@root, dir)) } ||
-                           app_files.any? { |file| File.file?(File.join(@root, file)) }
-
-        if has_rails_layout
-          found = []
-          app_subfolders.each do |folder|
-            dir = File.join(@root, folder)
-            next unless File.directory?(dir)
-
-            Dir.glob("**/*.rb", base: dir).sort.each { |rel| found << File.join(dir, rel) }
+        candidates =
+          if @only_files
+            @only_files
+          elsif !@staged && rails_layout?
+            # Raw Rails app root (used by `instant_record:doctor`): scan only
+            # what enters compilation.
+            rails_files
+          else
+            # Staged tree or standalone fixture directory.
+            Dir.glob("**/*.rb", base: @root).reject { |rel| excluded_staged?(rel) }
           end
-          app_files.each do |file|
-            full = File.join(@root, file)
-            found << full if File.file?(full)
-          end
-          found.uniq.reject { |path| excluded_custom?(relative_path(path)) }.sort
-        else
-          Dir.glob("**/*.rb", base: @root).sort
-            .reject { |rel| excluded_staged?(rel) || excluded_custom?(rel) }
-            .map { |rel| File.join(@root, rel) }
-        end
+
+        paths = candidates.reject { |rel| excluded_custom?(rel) }.sort.map { |rel| File.join(@root, rel) }
+        @only_files ? paths.select { |path| File.file?(path) } : paths
       end
 
       def scan_constant_definitions(files)
-        parsed_files = files.map { |path| [path, relative_path(path), Prism.parse_file(path)] }
-        server_only_defs, client_defs = collect_defs_from_parsed(parsed_files)
+        server_only_defs, client_defs = collect_defs(parse(files))
         server_only_defs.reject { |name, _| client_defs.include?(name) }
       end
 
       private
+
+      def rails_layout?
+        RAILS_FOLDERS.any? { |dir| File.directory?(File.join(@root, dir)) } ||
+          RAILS_FILES.any? { |file| File.file?(File.join(@root, file)) }
+      end
+
+      def rails_files
+        in_folders = RAILS_FOLDERS.flat_map do |folder|
+          Dir.glob("**/*.rb", base: File.join(@root, folder)).map { |rel| File.join(folder, rel) }
+        end
+        in_folders + RAILS_FILES.select { |file| File.file?(File.join(@root, file)) }
+      end
+
+      def parse(files)
+        files.map { |path| [relative_path(path), Prism.parse_file(path)] }
+      end
 
       def relative_path(path)
         Pathname(path).relative_path_from(Pathname(@root)).to_s
@@ -206,70 +195,75 @@ module InstantRecord
         @exclude.any? { |entry| rel == entry || rel.start_with?("#{entry}/") }
       end
 
-      def collect_defs_from_parsed(parsed_files)
+      # --- Constant names ---
+
+      # The first definition of each server_only constant, and the set of
+      # constants the client defines.
+      def collect_defs(parsed_files)
         server_only_defs = {}
         client_defs = Set.new
 
-        parsed_files.each do |_abs, rel, parsed|
+        parsed_files.each do |rel, parsed|
           next unless parsed.success?
 
-          walk_defs(parsed.value, rel, [], in_server_only: false, server_only_defs: server_only_defs, client_defs: client_defs)
+          each_definition(parsed.value) do |name, line, in_server_only|
+            if in_server_only
+              server_only_defs[name] ||= "#{rel}:#{line}"
+            else
+              client_defs.add(name)
+            end
+          end
         end
 
         [server_only_defs, client_defs]
       end
 
-      def walk_defs(node, rel, namespace, in_server_only:, server_only_defs:, client_defs:)
+      def each_definition(node, namespace = [], in_server_only = false, &block)
         return if node.nil?
 
-        case node
-        when Prism::CallNode
-          if server_only_call?(node)
-            walk_defs(node.block&.body, rel, namespace, in_server_only: true, server_only_defs: server_only_defs, client_defs: client_defs)
-            return
-          end
-        when Prism::ClassNode, Prism::ModuleNode
-          full_path = qualify_definition(node.constant_path, namespace)
-          if full_path
-            record_const_def(full_path, rel, node.location.start_line, in_server_only, server_only_defs, client_defs)
-            next_ns = full_path.split("::")
-          else
-            next_ns = namespace
-          end
-          walk_defs(node.body, rel, next_ns, in_server_only: in_server_only, server_only_defs: server_only_defs, client_defs: client_defs)
+        if server_only_call?(node)
+          each_definition(node.block.body, namespace, true, &block)
           return
+        end
+
+        name = defined_name(node, namespace)
+        yield name, node.location.start_line, in_server_only if name
+
+        case node
+        when Prism::ClassNode, Prism::ModuleNode
+          each_definition(node.body, name ? name.split("::") : namespace, in_server_only, &block)
+        else
+          node.compact_child_nodes.each { |child| each_definition(child, namespace, in_server_only, &block) }
+        end
+      end
+
+      # The full name of the constant `node` defines, nil when it defines none
+      # or the name is dynamic.
+      def defined_name(node, namespace)
+        case node
+        when Prism::ClassNode, Prism::ModuleNode
+          name = AstLowerer.constant_name(node.constant_path)
         when Prism::ConstantWriteNode, Prism::ConstantOrWriteNode, Prism::ConstantAndWriteNode, Prism::ConstantOperatorWriteNode
-          full_path = (namespace + [node.name.to_s]).join("::")
-          record_const_def(full_path, rel, node.location.start_line, in_server_only, server_only_defs, client_defs)
+          name = node.name.to_s
         when Prism::ConstantPathWriteNode, Prism::ConstantPathOrWriteNode, Prism::ConstantPathAndWriteNode, Prism::ConstantPathOperatorWriteNode
-          full_path = qualify_definition(node.target, namespace)
-          record_const_def(full_path, rel, node.location.start_line, in_server_only, server_only_defs, client_defs) if full_path
+          name = AstLowerer.constant_name(node.target)
         end
-
-        node.compact_child_nodes.each do |child|
-          walk_defs(child, rel, namespace, in_server_only: in_server_only, server_only_defs: server_only_defs, client_defs: client_defs)
-        end
+        # A definition takes the innermost name.
+        lookup_names(name, namespace).first if name
       end
 
-      def record_const_def(full_path, rel, line, in_server_only, server_only_defs, client_defs)
-        if in_server_only
-          server_only_defs[full_path] ||= "#{rel}:#{line}"
-        else
-          client_defs.add(full_path)
-        end
+      # Every full name `name` may stand for, innermost namespace first.
+      def lookup_names(name, namespace)
+        return [name.delete_prefix("::")] if name.start_with?("::")
+        return [name] if namespace.empty?
+
+        namespace.length.downto(0).map { |depth| [*namespace.first(depth), name].join("::") }
       end
 
-      def qualify_definition(path_node, namespace)
-        name = AstLowerer.constant_name(path_node)
-        return nil unless name
-
-        if name.start_with?("::")
-          name.delete_prefix("::")
-        elsif namespace.empty?
-          name
-        else
-          (namespace + [name]).join("::")
-        end
+      # Every full name a constant reference may stand for; none when dynamic.
+      def referenced_names(node)
+        name = AstLowerer.constant_name(node)
+        name ? lookup_names(name, @namespace) : []
       end
 
       def server_only_call?(node)
@@ -280,25 +274,23 @@ module InstantRecord
           node.block.is_a?(Prism::BlockNode)
       end
 
-      def lint_file(rel, root, effective_server_only, diagnostics)
-        in_screen_file = rel.start_with?("app/screens/") ||
-                         rel == "lib/instant_record/native/screen.rb" ||
-                         rel == "lib/instant_record/native/node.rb"
-        state = {
-          rel: rel,
-          namespace: [],
-          in_screen: in_screen_file,
-          const_ints: {},
-          empty_hash_helpers: Set.new,
-          empty_hash_locals: Set.new,
-          reported_int_nodes: Set.new,
-          server_only: effective_server_only,
-          diagnostics: diagnostics
-        }
-        walk_lint(root, state)
+      # --- Walk ---
+
+      def lint_file(rel, root)
+        @rel = rel
+        @namespace = []
+        @in_screen = rel.start_with?("app/screens/") ||
+                     rel == "lib/instant_record/native/screen.rb" ||
+                     rel == "lib/instant_record/native/node.rb"
+        @const_ints = {}
+        @empty_hash_helpers = Set.new
+        @empty_hash_locals = Set.new
+        @reported_int_nodes = Set.new.compare_by_identity
+        walk(root)
       end
 
-      def walk_lint(node, state)
+      # A branch that returns decides itself which children are walked.
+      def walk(node)
         return if node.nil?
 
         case node
@@ -308,329 +300,270 @@ module InstantRecord
         when Prism::CallNode
           return if server_only_call?(node)
 
-          # Check constant arithmetic expression overflow first (before recursing)
-          if constant_int_expr?(node)
-            check_int_expression(node, state)
-          end
-
-          check_screen_call(node, state) if state[:in_screen]
-
-          # Recurse into receiver, arguments, block
-          walk_lint(node.receiver, state)
-          walk_lint(node.arguments, state)
-          walk_lint(node.block, state)
-          return
+          check_int(node) if integer_operation?(node.name)
+          check_screen_call(node) if @in_screen
         when Prism::IntegerNode
-          check_int_expression(node, state)
-          return
+          check_int(node)
         when Prism::IfNode
-          pred = browser_predicate(node.predicate)
-          if pred == :true
-            walk_lint(node.statements, state)
-            return
-          elsif pred == :false
-            walk_lint(node.subsequent, state)
-            return
+          case browser_predicate(node.predicate)
+          when true then return walk(node.statements)
+          when false then return walk(node.subsequent)
           end
         when Prism::UnlessNode
-          pred = browser_predicate(node.predicate)
-          if pred == :true
-            walk_lint(node.else_clause, state)
-            return
-          elsif pred == :false
-            walk_lint(node.statements, state)
-            return
+          case browser_predicate(node.predicate)
+          when true then return walk(node.else_clause)
+          when false then return walk(node.statements)
           end
         when Prism::ClassNode
-          walk_lint(node.superclass, state)
-          full_path = qualify_definition(node.constant_path, state[:namespace])
-          prev_ns = state[:namespace]
-          prev_screen = state[:in_screen]
-          prev_helpers = state[:empty_hash_helpers]
-
-          state[:namespace] = full_path ? full_path.split("::") : prev_ns
-          state[:in_screen] = prev_screen || screen_superclass?(node.superclass)
-          state[:empty_hash_helpers] = state[:in_screen] ? collect_empty_hash_helpers(node.body) : Set.new
-
-          walk_lint(node.body, state)
-          state[:namespace] = prev_ns
-          state[:in_screen] = prev_screen
-          state[:empty_hash_helpers] = prev_helpers
-          return
+          return walk_class(node)
         when Prism::ModuleNode
-          full_path = qualify_definition(node.constant_path, state[:namespace])
-          prev_ns = state[:namespace]
-          state[:namespace] = full_path ? full_path.split("::") : prev_ns
-          walk_lint(node.body, state)
-          state[:namespace] = prev_ns
-          return
+          return walk_namespace(node)
         when Prism::DefNode
-          prev_locals = state[:empty_hash_locals]
-          state[:empty_hash_locals] = Set.new
-          check_screen_def_params(node, state) if state[:in_screen]
-          walk_lint(node.parameters, state)
-          walk_lint(node.body, state)
-          state[:empty_hash_locals] = prev_locals
-          return
+          return walk_def(node)
         when Prism::LocalVariableWriteNode
-          if state[:in_screen]
-            if empty_hash_literal?(node.value)
-              state[:empty_hash_locals].add(node.name)
-            else
-              state[:empty_hash_locals].delete(node.name)
-            end
-          end
+          track_empty_hash_local(node) if @in_screen
         when Prism::InstanceVariableWriteNode
-          if state[:in_screen] && SCREEN_HASH_IVARS.include?(node.name) && empty_hash_literal?(node.value)
-            report_untyped_hash(node, "#{node.name} = {}", state)
+          if @in_screen && SCREEN_HASH_IVARS.include?(node.name) && empty_hash_literal?(node.value)
+            report_untyped_hash(node, "#{node.name} = {}")
           end
         when Prism::ConstantWriteNode
-          val = eval_const_int(node.value, state[:const_ints], state[:namespace])
-          if val.is_a?(Integer) && INT32_RANGE.cover?(val)
-            full_path = (state[:namespace] + [node.name.to_s]).join("::")
-            state[:const_ints][full_path] = val
-          end
-          walk_lint(node.value, state)
-          return
-        when Prism::ConstantOrWriteNode, Prism::ConstantAndWriteNode, Prism::ConstantOperatorWriteNode
-          walk_lint(node.value, state)
-          return
+          value = eval_const_int(node.value)
+          @const_ints[defined_name(node, @namespace)] = value if value.is_a?(Integer) && !overflow?(value)
         when Prism::ConstantPathWriteNode, Prism::ConstantPathOrWriteNode, Prism::ConstantPathAndWriteNode, Prism::ConstantPathOperatorWriteNode
           # Check the parent namespace of `Foo::BAR = 1` in case `Foo` is server_only,
           # without flagging `BAR` itself as a read.
-          walk_lint(node.target.parent, state) if node.target.is_a?(Prism::ConstantPathNode) && node.target.parent
-          walk_lint(node.value, state)
-          return
+          walk(node.target.parent)
+          return walk(node.value)
         when Prism::ConstantPathNode
-          check_server_only_const_ref(node, state)
+          check_server_only_const_ref(node)
           # If the path is dynamic (e.g. `obj::FOO`), still lint the receiver expression.
-          if AstLowerer.constant_name(node).nil?
-            walk_lint(node.parent, state)
-          end
+          walk(node.parent) unless AstLowerer.constant_name(node)
           return
         when Prism::ConstantReadNode
-          check_server_only_const_ref(node, state)
-          return
+          check_server_only_const_ref(node)
         end
 
-        node.compact_child_nodes.each { |child| walk_lint(child, state) }
+        node.compact_child_nodes.each { |child| walk(child) }
+      end
+
+      def walk_namespace(node)
+        outer = @namespace
+        @namespace = defined_name(node, outer)&.split("::") || outer
+        walk(node.body)
+        @namespace = outer
+      end
+
+      def walk_class(node)
+        walk(node.superclass)
+        outer_screen = @in_screen
+        outer_helpers = @empty_hash_helpers
+
+        @in_screen ||= screen_superclass?(node.superclass)
+        @empty_hash_helpers = @in_screen ? collect_empty_hash_helpers(node) : Set.new
+        walk_namespace(node)
+
+        @in_screen = outer_screen
+        @empty_hash_helpers = outer_helpers
+      end
+
+      def walk_def(node)
+        outer_locals = @empty_hash_locals
+        @empty_hash_locals = Set.new
+        check_screen_def_params(node.parameters) if @in_screen && node.parameters
+        walk(node.parameters)
+        walk(node.body)
+        @empty_hash_locals = outer_locals
+      end
+
+      # true or false when the condition is `InstantRecord.browser?` or its
+      # negation, nil for any other condition.
+      def browser_predicate(node)
+        case node
+        when Prism::ParenthesesNode
+          browser_predicate(only_statement(node))
+        when Prism::CallNode
+          return unless node.arguments.nil? && node.block.nil?
+
+          case node.name
+          when :browser?
+            true if %w[InstantRecord ::InstantRecord].include?(AstLowerer.constant_name(node.receiver))
+          when :!
+            inner = browser_predicate(node.receiver)
+            inner.nil? ? nil : !inner
+          end
+        end
+      end
+
+      # The single statement in a method body or a pair of parentheses, else nil.
+      def only_statement(node)
+        statements = body_statements(node)
+        statements.first if statements.length == 1
+      end
+
+      # The statements in a class body, a method body or a pair of parentheses. A
+      # body with a rescue or ensure keeps its own statements one level deeper.
+      def body_statements(node)
+        body = node.body
+        body = body.statements if body.is_a?(Prism::BeginNode)
+        body.is_a?(Prism::StatementsNode) ? body.body : []
       end
 
       # --- Rule 1: >31-bit integer literals & constant expressions ---
 
-      def constant_int_expr?(node)
-        case node
-        when Prism::IntegerNode
-          true
-        when Prism::ParenthesesNode
-          body = node.body&.body
-          body&.length == 1 && constant_int_expr?(body.first)
-        when Prism::CallNode
-          if %i[-@ +@ ~].include?(node.name) && node.arguments.nil? && node.block.nil?
-            constant_int_expr?(node.receiver)
-          elsif BYTE_MULTIPLIERS.key?(node.name) && node.arguments.nil? && node.block.nil?
-            constant_int_expr?(node.receiver)
-          elsif %i[+ - * / % ** << >> & | ^].include?(node.name) && node.block.nil?
-            args = node.arguments&.arguments
-            args&.length == 1 && constant_int_expr?(node.receiver) && constant_int_expr?(args.first)
-          else
-            false
-          end
-        when Prism::ConstantReadNode, Prism::ConstantPathNode
-          true
-        else
-          false
+      # Operators and byte multipliers. Any other call is never reported, so this
+      # only saves evaluating it.
+      def integer_operation?(name)
+        BYTE_MULTIPLIERS.key?(name) || name.match?(/\A[^[:word:]]/)
+      end
+
+      def check_int(node)
+        return if @reported_int_nodes.include?(node)
+
+        value = eval_const_int(node)
+        return unless overflow?(value)
+
+        # When an operand already overflows, the walk reports that one instead.
+        if node.is_a?(Prism::CallNode)
+          operands = [node.receiver, *node.arguments&.arguments]
+          return if operands.any? { |operand| overflow?(eval_const_int(operand)) }
         end
+
+        mark_subtree_reported(node)
+        detail = value == :overflow ? "exceeds 32-bit signed integer range" : "evaluates to #{value}, outside 32-bit signed integer range (#{INT32_MIN}..#{INT32_MAX})"
+        add_diagnostic(
+          rule: :integer_overflow,
+          node: node,
+          message: "Integer #{node.slice.inspect} #{detail}; compiled wasm32/Spinel builds raise RangeError on >31-bit values."
+        )
       end
 
-      def check_int_expression(node, state)
-        return if state[:reported_int_nodes].include?(node.object_id)
-
-        val = eval_const_int(node, state[:const_ints], state[:namespace])
-        return if val.nil?
-
-        if val == :overflow || (val.is_a?(Integer) && !INT32_RANGE.cover?(val))
-          # If an inner child already overflows, let recursion report the tightest offending node
-          # unless the current node itself is an IntegerNode or the overflow happens at this op.
-          if !node.is_a?(Prism::IntegerNode) && any_child_overflows?(node, state[:const_ints], state[:namespace])
-            return
-          end
-
-          mark_subtree_reported(node, state[:reported_int_nodes])
-          detail = val == :overflow ? "exceeds 32-bit signed integer range" : "evaluates to #{val}, outside 32-bit signed integer range (#{INT32_MIN}..#{INT32_MAX})"
-          add_diagnostic(
-            state,
-            rule: :integer_overflow,
-            node: node,
-            message: "Integer #{node.slice.inspect} #{detail}; compiled wasm32/Spinel builds raise RangeError on >31-bit values."
-          )
-        end
+      def mark_subtree_reported(node)
+        @reported_int_nodes.add(node)
+        node.compact_child_nodes.each { |child| mark_subtree_reported(child) }
       end
 
-      def any_child_overflows?(node, const_ints, namespace)
-        children =
-          case node
-          when Prism::CallNode
-            [node.receiver, *Array(node.arguments&.arguments)].compact
-          when Prism::ParenthesesNode
-            Array(node.body&.body)
-          else
-            []
-          end
-        children.any? do |child|
-          val = eval_const_int(child, const_ints, namespace)
-          val == :overflow || (val.is_a?(Integer) && !INT32_RANGE.cover?(val))
-        end
+      def overflow?(value)
+        value == :overflow || (value.is_a?(Integer) && !INT32_RANGE.cover?(value))
       end
 
-      def mark_subtree_reported(node, set)
-        return if node.nil?
-
-        set.add(node.object_id)
-        node.compact_child_nodes.each { |child| mark_subtree_reported(child, set) }
-      end
-
-      def eval_const_int(node, const_ints, namespace)
+      # The Integer a constant expression evaluates to, :overflow when it is too
+      # large to compute, nil when it is not a constant integer. Before Ruby 3.4
+      # a huge power can also give Float::INFINITY, which is never reported.
+      def eval_const_int(node)
         case node
         when Prism::IntegerNode
           node.value
         when Prism::ParenthesesNode
-          body = node.body&.body
-          body&.length == 1 ? eval_const_int(body.first, const_ints, namespace) : nil
+          eval_const_int(only_statement(node))
         when Prism::ConstantReadNode, Prism::ConstantPathNode
-          resolve_const_int(node, const_ints, namespace)
+          name = referenced_names(node).find { |full| @const_ints.key?(full) }
+          @const_ints[name]
         when Prism::CallNode
-          return nil if node.block
+          return if node.block
 
-          if node.arguments.nil?
-            lhs = eval_const_int(node.receiver, const_ints, namespace)
-            return :overflow if lhs == :overflow
-            return nil unless lhs.is_a?(Integer)
+          args = node.arguments&.arguments || []
+          return if args.length > 1
 
-            case node.name
-            when :-@ then -lhs
-            when :+@ then +lhs
-            when :~ then ~lhs
-            else
-              mult = BYTE_MULTIPLIERS[node.name]
-              mult ? lhs * mult : nil
-            end
-          elsif node.arguments.arguments.length == 1
-            lhs = eval_const_int(node.receiver, const_ints, namespace)
-            rhs = eval_const_int(node.arguments.arguments.first, const_ints, namespace)
-            return :overflow if lhs == :overflow || rhs == :overflow
-            return nil unless lhs.is_a?(Integer) && rhs.is_a?(Integer)
+          operands = [node.receiver, *args].map { |operand| eval_const_int(operand) }
+          return :overflow if operands.include?(:overflow)
+          return unless operands.all?(Integer)
 
-            case node.name
-            when :+ then lhs + rhs
-            when :- then lhs - rhs
-            when :* then lhs * rhs
-            when :/ then rhs == 0 ? nil : lhs / rhs
-            when :% then rhs == 0 ? nil : lhs % rhs
-            when :& then lhs & rhs
-            when :| then lhs | rhs
-            when :^ then lhs ^ rhs
-            when :**
-              return nil if rhs < 0
-              return :overflow if lhs.abs >= 2 && rhs >= 32
-
-              lhs**rhs
-            when :<<
-              return nil if rhs < 0
-              return :overflow if lhs != 0 && rhs >= 32
-
-              lhs << rhs
-            when :>>
-              return nil if rhs < 0
-
-              lhs >> rhs
-            end
-          end
+          args.empty? ? eval_unary(node.name, *operands) : eval_binary(node.name, *operands)
         end
       end
 
-      def resolve_const_int(node, const_ints, namespace)
-        raw = AstLowerer.constant_name(node)
-        return nil unless raw
-
-        candidates_for(raw, namespace).each do |full|
-          return const_ints[full] if const_ints.key?(full)
+      def eval_unary(name, value)
+        case name
+        when :-@ then -value
+        when :+@ then value
+        when :~ then ~value
+        else
+          multiplier = BYTE_MULTIPLIERS[name]
+          value * multiplier if multiplier
         end
-        nil
+      end
+
+      def eval_binary(name, lhs, rhs)
+        case name
+        when :+ then lhs + rhs
+        when :- then lhs - rhs
+        when :* then lhs * rhs
+        when :/ then lhs / rhs unless rhs == 0
+        when :% then lhs % rhs unless rhs == 0
+        when :& then lhs & rhs
+        when :| then lhs | rhs
+        when :^ then lhs ^ rhs
+        when :**
+          return if rhs < 0
+
+          lhs.abs >= 2 && rhs >= 32 ? :overflow : lhs**rhs
+        when :<<
+          return if rhs < 0
+
+          lhs != 0 && rhs >= 32 ? :overflow : lhs << rhs
+        when :>> then lhs >> rhs unless rhs < 0
+        end
       end
 
       # --- Rule 2: Untyped `{}` hashes in Native::Screen params:/args:/props: ---
 
       def screen_superclass?(superclass)
-        name = AstLowerer.constant_name(superclass)
-        return false unless name
-
-        clean = name.delete_prefix("::")
-        clean == "InstantRecord::Native::Screen" || clean == "Native::Screen" || clean == "Screen"
+        name = AstLowerer.constant_name(superclass)&.delete_prefix("::")
+        %w[InstantRecord::Native::Screen Native::Screen Screen].include?(name)
       end
 
-      def collect_empty_hash_helpers(body)
+      def collect_empty_hash_helpers(class_node)
         helpers = Set.new
-        return helpers unless body
+        body_statements(class_node).each do |stmt|
+          next unless stmt.is_a?(Prism::DefNode) && stmt.receiver.nil? && stmt.parameters.nil?
 
-        Array(body.body).each do |stmt|
-          next unless stmt.is_a?(Prism::DefNode) && stmt.receiver.nil?
-          next if stmt.parameters
-
-          def_stmts = stmt.body&.body
-          if def_stmts&.length == 1 && empty_hash_literal?(def_stmts.first)
-            helpers.add(stmt.name)
-          end
+          helpers.add(stmt.name) if empty_hash_literal?(only_statement(stmt))
         end
         helpers
       end
 
-      def check_screen_def_params(def_node, state)
-        params = def_node.parameters
-        return unless params
-
-        Array(params.optionals).each do |opt|
-          if SCREEN_HASH_KEYS.include?(opt.name) && empty_hash_literal?(opt.value)
-            report_untyped_hash(opt, "#{opt.name} = {}", state)
-          end
-        end
-        Array(params.keywords).each do |kw|
-          next unless kw.is_a?(Prism::OptionalKeywordParameterNode)
-
-          if SCREEN_HASH_KEYS.include?(kw.name) && empty_hash_literal?(kw.value)
-            report_untyped_hash(kw, "#{kw.name}: {}", state)
-          end
+      def track_empty_hash_local(write_node)
+        if empty_hash_literal?(write_node.value)
+          @empty_hash_locals.add(write_node.name)
+        else
+          @empty_hash_locals.delete(write_node.name)
         end
       end
 
-      def check_screen_call(call_node, state)
+      def check_screen_def_params(params)
+        params.optionals.each { |param| check_screen_default(param, "#{param.name} = {}") }
+        params.keywords.grep(Prism::OptionalKeywordParameterNode) do |param|
+          check_screen_default(param, "#{param.name}: {}")
+        end
+      end
+
+      def check_screen_default(param, snippet)
+        return unless SCREEN_HASH_KEYS.include?(param.name) && empty_hash_literal?(param.value)
+
+        report_untyped_hash(param, snippet)
+      end
+
+      def check_screen_call(call_node)
+        args = call_node.arguments&.arguments || []
+
         # Track mutations on local hash variables (e.g. `h["k"] = "v"` makes it typed)
         if %i[[]= store merge! update].include?(call_node.name) && call_node.receiver.is_a?(Prism::LocalVariableReadNode)
-          state[:empty_hash_locals].delete(call_node.receiver.name)
+          @empty_hash_locals.delete(call_node.receiver.name)
         end
 
         # `node.link_params = {}` / `node.args = {}` / `node.props = {}`
         if SCREEN_HASH_SETTERS.include?(call_node.name)
-          val = call_node.arguments&.arguments&.first
-          if val && untyped_hash_expr?(val, state)
-            report_untyped_hash(val, "#{call_node.name} {}", state)
-          end
+          report_untyped_hash(args.first, "#{call_node.name} {}") if untyped_hash_expr?(args.first)
           return
         end
 
         # Keyword arguments `params: {}`, `args: {}`, `props: {}`
-        Array(call_node.arguments&.arguments).each do |arg|
-          next unless arg.is_a?(Prism::KeywordHashNode)
+        args.grep(Prism::KeywordHashNode).flat_map(&:elements).each do |assoc|
+          next unless assoc.is_a?(Prism::AssocNode) && assoc.key.is_a?(Prism::SymbolNode)
 
-          arg.elements.each do |assoc|
-            next unless assoc.is_a?(Prism::AssocNode) && assoc.key.is_a?(Prism::SymbolNode)
-
-            key = assoc.key.unescaped.to_sym
-            next unless SCREEN_HASH_KEYS.include?(key)
-
-            if untyped_hash_expr?(assoc.value, state)
-              report_untyped_hash(assoc.value, "#{key}: #{assoc.value.slice}", state)
-            end
+          key = assoc.key.unescaped.to_sym
+          if SCREEN_HASH_KEYS.include?(key) && untyped_hash_expr?(assoc.value)
+            report_untyped_hash(assoc.value, "#{key}: #{assoc.value.slice}")
           end
         end
       end
@@ -645,46 +578,39 @@ module InstantRecord
             node.arguments.nil? &&
             node.block.nil?
         when Prism::ParenthesesNode
-          body = node.body&.body
-          body&.length == 1 && empty_hash_literal?(body.first)
+          empty_hash_literal?(only_statement(node))
         else
           false
         end
       end
 
-      def untyped_hash_expr?(node, state)
+      # Whether the expression is, or may return, an empty hash.
+      def untyped_hash_expr?(node)
         return true if empty_hash_literal?(node)
 
         case node
         when Prism::LocalVariableReadNode
-          state[:empty_hash_locals].include?(node.name)
+          @empty_hash_locals.include?(node.name)
         when Prism::CallNode
           node.receiver.nil? && node.arguments.nil? && node.block.nil? &&
-            state[:empty_hash_helpers].include?(node.name)
+            @empty_hash_helpers.include?(node.name)
         when Prism::IfNode
-          branch_has_empty_hash?(node.statements, state) ||
-            (node.subsequent.is_a?(Prism::ElseNode) && branch_has_empty_hash?(node.subsequent.statements, state)) ||
-            (node.subsequent.is_a?(Prism::IfNode) && untyped_hash_expr?(node.subsequent, state))
+          untyped_hash_expr?(node.statements) || untyped_hash_expr?(node.subsequent)
         when Prism::UnlessNode
-          branch_has_empty_hash?(node.statements, state) ||
-            (node.else_clause && branch_has_empty_hash?(node.else_clause.statements, state))
+          untyped_hash_expr?(node.statements) || untyped_hash_expr?(node.else_clause)
+        when Prism::ElseNode
+          untyped_hash_expr?(node.statements)
+        when Prism::StatementsNode
+          untyped_hash_expr?(node.body.last)
         when Prism::ParenthesesNode
-          body = node.body&.body
-          body&.length == 1 && untyped_hash_expr?(body.first, state)
+          untyped_hash_expr?(only_statement(node))
         else
           false
         end
       end
 
-      def branch_has_empty_hash?(stmts, state)
-        return false unless stmts && stmts.body.any?
-
-        untyped_hash_expr?(stmts.body.last, state)
-      end
-
-      def report_untyped_hash(node, snippet, state)
+      def report_untyped_hash(node, snippet)
         add_diagnostic(
-          state,
           rule: :untyped_screen_hash,
           node: node,
           message: "Untyped empty hash in Native::Screen (#{snippet}); use InstantRecord::Native::Node.strings so Spinel types it as Hash[String, String]."
@@ -693,73 +619,35 @@ module InstantRecord
 
       # --- Rule 3: server_only constant references from shared code ---
 
-      def check_server_only_const_ref(node, state)
-        raw = AstLowerer.constant_name(node)
-        return unless raw
+      def check_server_only_const_ref(node)
+        matched = nil
+        referenced_names(node).find { |full| matched = matching_server_only_constant(full) }
+        return unless matched
 
-        candidates_for(raw, state[:namespace]).each do |full|
-          matched = matching_server_only_constant(full, state[:server_only])
-          next unless matched
-
-          defined_at = state[:server_only][matched]
-          origin = defined_at ? " (defined inside server_only at #{defined_at})" : " (server-only gem constant)"
-          add_diagnostic(
-            state,
-            rule: :server_only_constant,
-            node: node,
-            message: "Shared/client code references server_only constant `#{matched}`#{origin}; wrap in `server_only` or define a client counterpart."
-          )
-          return
-        end
+        defined_at = @server_only[matched]
+        origin = defined_at ? " (defined inside server_only at #{defined_at})" : " (server-only gem constant)"
+        add_diagnostic(
+          rule: :server_only_constant,
+          node: node,
+          message: "Shared/client code references server_only constant `#{matched}`#{origin}; wrap in `server_only` or define a client counterpart."
+        )
       end
 
-      def matching_server_only_constant(full_name, server_only)
-        return full_name if server_only.key?(full_name)
-
-        # Also catch `ServerOnlyClass::SUB` when `ServerOnlyClass` itself is server_only.
-        parts = full_name.split("::")
-        (parts.length - 1).downto(1) do |len|
-          prefix = parts[0, len].join("::")
-          return prefix if server_only.key?(prefix)
+      # The name itself or the closest namespace around it that is server_only:
+      # `ServerOnlyClass::SUB` matches `ServerOnlyClass`.
+      def matching_server_only_constant(full_name)
+        until @server_only.key?(full_name)
+          full_name, separator, = full_name.rpartition("::")
+          return if separator.empty?
         end
-        nil
+        full_name
       end
 
-      def candidates_for(raw, namespace)
-        if raw.start_with?("::")
-          [raw.delete_prefix("::")]
-        else
-          list = []
-          namespace.length.downto(0) do |depth|
-            prefix = namespace[0, depth]
-            list << (prefix.empty? ? raw : (prefix + [raw]).join("::"))
-          end
-          list
-        end
-      end
-
-      def browser_predicate(node)
-        case node
-        when Prism::ParenthesesNode
-          body = node.body&.body
-          body&.length == 1 ? browser_predicate(body.first) : nil
-        when Prism::CallNode
-          if node.name == :browser? && node.arguments.nil? && node.block.nil?
-            recv = AstLowerer.constant_name(node.receiver)
-            return :true if recv == "InstantRecord" || recv == "::InstantRecord"
-          elsif node.name == :! && node.arguments.nil? && node.block.nil?
-            inner = browser_predicate(node.receiver)
-            return inner == :true ? :false : :true if inner
-          end
-          nil
-        end
-      end
-
-      def add_diagnostic(state, rule:, node:, message:)
+      def add_diagnostic(rule:, node:, message:)
         loc = node.location
-        state[:diagnostics] << Diagnostic.new(
+        @diagnostics << Diagnostic.new(
           rule: rule,
-          file: state[:rel],
+          file: @rel,
           line: loc.start_line,
           column: loc.start_column + 1,
           message: message

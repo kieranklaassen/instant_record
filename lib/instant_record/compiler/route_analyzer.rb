@@ -1,6 +1,5 @@
 require "active_support/inflector"
 require "prism"
-require "set"
 require_relative "manifest"
 require_relative "runner"
 
@@ -12,8 +11,19 @@ module InstantRecord
     class RouteAnalyzer
       HTTP_VERBS = %i[get post put patch delete].freeze
       CONTAINER_CALLS = %i[namespace scope resources resource member collection constraints defaults].freeze
-      PLURAL_ACTIONS = %w[index new create show edit update destroy].freeze
-      SINGULAR_ACTIONS = %w[new create show edit update destroy].freeze
+
+      RESOURCE_ROUTES = [
+        ["index", "GET", :collection, ""],
+        ["new", "GET", :collection, "/new"],
+        ["create", "POST", :collection, ""],
+        ["show", "GET", :member, ""],
+        ["edit", "GET", :member, "/edit"],
+        ["update", "PATCH", :member, ""],
+        ["update", "PUT", :member, ""],
+        ["destroy", "DELETE", :member, ""]
+      ].freeze
+      PLURAL_ACTIONS = RESOURCE_ROUTES.map(&:first).uniq.freeze
+      SINGULAR_ACTIONS = (PLURAL_ACTIONS - ["index"]).freeze
 
       Result = Struct.new(
         :has_local_first,
@@ -35,8 +45,13 @@ module InstantRecord
         :resource_member_prefix,
         :resource_collection_prefix,
         :resource_controller,
+        :active_draws,
         keyword_init: true
-      )
+      ) do
+        def with(**changes)
+          self.class.new(**to_h, **changes)
+        end
+      end
 
       def self.analyze(source_root:, island: nil)
         new(source_root: source_root, island: island).analyze
@@ -50,62 +65,30 @@ module InstantRecord
         @local_routes = []
         @server_routes = []
         @overrides = Manifest.normalize_overrides(nil)
-        @drawn_asts = {}
+        @drawn_statements = {}
       end
 
       def analyze
-        routes_path = File.join(@source_root, "config/routes.rb")
-        unless File.file?(routes_path)
-          raise BuildError, "Missing config/routes.rb in #{@source_root}" if @island
-
-          return Result.new(
-            has_local_first: false,
-            declared_islands: [],
-            local_routes: [],
-            server_routes: [],
-            overrides: @overrides,
-            local_routes_source: nil
-          )
-        end
-
-        source = File.read(routes_path)
-        parsed = parse_ruby!(source, routes_path)
-        draw_call = find_routes_draw(parsed.value)
-        body = draw_call ? statements_of(draw_call.block&.body) : statements_of(parsed.value.statements)
-
-        root_ctx = Context.new(
-          path_prefix: "",
-          module_prefix: nil,
-          controller: nil,
-          in_local_first: false,
-          island_name: nil
-        )
-
-        walk_statements(body, root_ctx)
-
-        if @island && !@declared_islands.include?(@island)
-          available = @declared_islands.empty? ? "none declared" : @declared_islands.uniq.sort.join(", ")
-          raise BuildError, "Unknown local_first island #{@island.inspect} in config/routes.rb (declared islands: #{available})."
-        end
+        body = routes_body
+        walk_statements(body, Context.new(path_prefix: "", in_local_first: false, active_draws: []))
+        check_island_declared!
 
         if @has_local_first
-          emitted_lines = emit_statements(body, root_ctx)
-          local_source = "Rails.application.routes.draw do\n#{indent_lines(emitted_lines, 2)}end\n"
-          local = Manifest.deduplicate_routes(@local_routes)
-          server = Manifest.deduplicate_routes(@server_routes + @overrides[:server_routes])
+          local = @local_routes
+          server = @server_routes + @overrides[:server_routes]
+          local_source = "Rails.application.routes.draw do\n#{indent_lines(emit_statements(body, false, []), 2)}end\n"
         else
           # Whole-app fallback mode: all non-internal routes are local routes.
-          local = Manifest.deduplicate_routes(@server_routes)
-          server = Manifest.deduplicate_routes(@overrides[:server_routes])
-          local_source = nil
+          local = @server_routes
+          server = @overrides[:server_routes]
         end
 
         Result.new(
           has_local_first: @has_local_first,
           island: @island,
           declared_islands: @declared_islands.uniq.sort,
-          local_routes: local,
-          server_routes: server,
+          local_routes: Manifest.deduplicate_routes(local),
+          server_routes: Manifest.deduplicate_routes(server),
           overrides: @overrides,
           local_routes_source: local_source
         )
@@ -113,22 +96,33 @@ module InstantRecord
 
       private
 
+      def routes_body
+        routes_path = File.join(@source_root, "config/routes.rb")
+        unless File.file?(routes_path)
+          raise BuildError, "Missing config/routes.rb in #{@source_root}" if @island
+
+          return []
+        end
+
+        statements = parse_ruby!(File.read(routes_path), routes_path)
+        draw_call = statements.find { |stmt| stmt.is_a?(Prism::CallNode) && stmt.name == :draw && literal_block?(stmt) }
+        draw_call ? statements_of(draw_call.block.body) : statements
+      end
+
+      def check_island_declared!
+        return if @island.nil? || @declared_islands.include?(@island)
+
+        available = @declared_islands.empty? ? "none declared" : @declared_islands.uniq.sort.join(", ")
+        raise BuildError, "Unknown local_first island #{@island.inspect} in config/routes.rb (declared islands: #{available})."
+      end
+
       def parse_ruby!(source, path)
         parsed = Prism.parse(source)
         unless parsed.success?
           errors = parsed.errors.map { |e| "line #{e.location.start_line}: #{e.message}" }.join("; ")
           raise BuildError, "Syntax error parsing #{path}: #{errors}"
         end
-        parsed
-      end
-
-      def find_routes_draw(program)
-        statements_of(program.statements).each do |stmt|
-          next unless stmt.is_a?(Prism::CallNode) && stmt.name == :draw && stmt.block
-
-          return stmt
-        end
-        nil
+        statements_of(parsed.value.statements)
       end
 
       def statements_of(node)
@@ -137,75 +131,68 @@ module InstantRecord
         node.is_a?(Prism::StatementsNode) ? node.body : [node]
       end
 
-      def walk_statements(stmts, ctx, active_draws = Set.new)
-        stmts.each { |stmt| walk_node(stmt, ctx, active_draws) }
+      def walk_statements(stmts, ctx)
+        stmts.each { |stmt| walk_node(stmt, ctx) }
       end
 
-      def walk_node(node, ctx, active_draws = Set.new)
+      def walk_block(node, ctx)
+        walk_statements(statements_of(node.block.body), ctx) if literal_block?(node)
+      end
+
+      # A block passed as an argument (`&blk`) is only known at runtime.
+      def literal_block?(node)
+        node.block.is_a?(Prism::BlockNode)
+      end
+
+      def walk_node(node, ctx)
         return unless node.is_a?(Prism::CallNode) && node.receiver.nil?
 
+        # mount is left out: a server-side engine (e.g. InstantRecord::Engine) is not a local controller.
         case node.name
-        when :local_first
-          walk_local_first(node, ctx, active_draws)
-        when :draw
-          walk_draw(node, ctx, active_draws)
-        when :namespace
-          walk_namespace(node, ctx, active_draws)
-        when :scope
-          walk_scope(node, ctx, active_draws)
-        when :resources
-          walk_resources(node, ctx, singular: false, active_draws: active_draws)
-        when :resource
-          walk_resources(node, ctx, singular: true, active_draws: active_draws)
-        when :member
-          walk_member_or_collection(node, ctx, member: true, active_draws: active_draws)
-        when :collection
-          walk_member_or_collection(node, ctx, member: false, active_draws: active_draws)
-        when :constraints, :defaults
-          walk_statements(statements_of(node.block&.body), ctx, active_draws) if node.block
-        when :root
-          record_root(node, ctx)
-        when *HTTP_VERBS
-          record_http_verb(node, ctx, [node.name.to_s.upcase])
-        when :match
-          record_match(node, ctx)
-        when :mount
-          # Server-side engine mount (e.g. InstantRecord::Engine); not a local controller.
-          nil
+        when :local_first then walk_local_first(node, ctx)
+        when :draw then walk_draw(node, ctx)
+        when :namespace then walk_namespace(node, ctx)
+        when :scope then walk_scope(node, ctx)
+        when :resources then walk_resources(node, ctx, singular: false)
+        when :resource then walk_resources(node, ctx, singular: true)
+        when :member, :collection then walk_block(node, resource_context(ctx, node.name))
+        when :constraints, :defaults then walk_block(node, ctx)
+        when :root then record_root(node, ctx)
+        when *HTTP_VERBS then record_http_verb(node, ctx, [node.name.to_s.upcase])
+        when :match then record_match(node, ctx)
         end
       end
 
-      def walk_local_first(node, ctx, active_draws = Set.new)
+      def walk_local_first(node, ctx)
         @has_local_first = true
-        pos, opts = extract_args(node)
-        declared_name = pos.first ? pos.first.to_s : nil
+        _, opts = extract_args(node)
+        declared_name = declared_island(node)
         @declared_islands << declared_name if declared_name
 
-        active = @island.nil? || declared_name == @island
-        if active
-          inline_overrides = Manifest.normalize_overrides(opts)
-          @overrides = Manifest.merge_overrides(@overrides, inline_overrides)
-        end
+        active = active_island?(declared_name)
+        @overrides = Manifest.merge_overrides(@overrides, Manifest.normalize_overrides(opts)) if active
 
-        child_ctx = ctx.dup
-        child_ctx.in_local_first = active
-        child_ctx.island_name = declared_name || ctx.island_name
-        walk_statements(statements_of(node.block&.body), child_ctx, active_draws) if node.block
+        walk_block(node, ctx.with(in_local_first: active, island_name: declared_name || ctx.island_name))
       end
 
-      def walk_draw(node, ctx, active_draws = Set.new)
+      def declared_island(node)
         pos, = extract_args(node)
-        name = pos.first&.to_s
+        pos.first.to_s if pos.first
+      end
+
+      def active_island?(declared_name)
+        @island.nil? || declared_name == @island
+      end
+
+      def walk_draw(node, ctx)
+        name = first_name(node)
         return unless name
 
-        sub_path = resolve_draw_path!(name)
-        raise BuildError, "Cyclic route draw detected for config/routes/#{name}.rb" if active_draws.include?(sub_path)
-
-        parsed = load_drawn_ast!(sub_path)
-        walk_statements(statements_of(parsed.value.statements), ctx, active_draws + [sub_path])
+        sub_path = resolve_draw_path!(name, ctx.active_draws)
+        walk_statements(drawn_statements(sub_path), ctx.with(active_draws: ctx.active_draws + [sub_path]))
       end
 
-      def resolve_draw_path!(name)
+      def resolve_draw_path!(name, active_draws)
         routes_dir = File.expand_path(File.join(@source_root, "config/routes"))
         sub_path = File.expand_path("#{name}.rb", routes_dir)
         unless sub_path.start_with?("#{routes_dir}#{File::SEPARATOR}")
@@ -214,112 +201,81 @@ module InstantRecord
         unless File.file?(sub_path)
           raise BuildError, "Route file config/routes/#{name}.rb referenced by draw(:#{name}) does not exist"
         end
+        raise BuildError, "Cyclic route draw detected for config/routes/#{name}.rb" if active_draws.include?(sub_path)
+
         sub_path
       end
 
-      def load_drawn_ast!(sub_path)
-        @drawn_asts[sub_path] ||= parse_ruby!(File.read(sub_path), sub_path)
+      def drawn_statements(sub_path)
+        @drawn_statements[sub_path] ||= parse_ruby!(File.read(sub_path), sub_path)
       end
 
-      def walk_namespace(node, ctx, active_draws = Set.new)
-        pos, opts = extract_args(node)
-        name = pos.first&.to_s
+      def walk_namespace(node, ctx)
+        name = first_name(node)
         return unless name && node.block
 
-        path_seg = opts.key?(:path) ? opts[:path]&.to_s : name
-        mod_seg = opts.key?(:module) ? opts[:module]&.to_s : name
-
-        child_ctx = ctx.dup
-        child_ctx.path_prefix = join_path(ctx.path_prefix, path_seg) if path_seg && !path_seg.empty?
-        child_ctx.module_prefix = join_module(ctx.module_prefix, mod_seg) if mod_seg && !mod_seg.empty?
-        child_ctx.controller = qualify_controller(opts[:controller].to_s, child_ctx.module_prefix) if opts[:controller]
-        walk_statements(statements_of(node.block.body), child_ctx, active_draws)
+        _, opts = extract_args(node)
+        walk_block(node, scoped_context(ctx, opts, path: opts.fetch(:path, name), mod: opts.fetch(:module, name)))
       end
 
-      def walk_scope(node, ctx, active_draws = Set.new)
+      def walk_scope(node, ctx)
         return unless node.block
 
         pos, opts = extract_args(node)
-        path_seg = opts.key?(:path) ? opts[:path]&.to_s : pos.first&.to_s
-        mod_seg = opts[:module]&.to_s
-
-        child_ctx = ctx.dup
-        child_ctx.path_prefix = join_path(ctx.path_prefix, path_seg) if path_seg && !path_seg.empty?
-        child_ctx.module_prefix = join_module(ctx.module_prefix, mod_seg) if mod_seg && !mod_seg.empty?
-        child_ctx.controller = qualify_controller(opts[:controller].to_s, child_ctx.module_prefix) if opts[:controller]
-        walk_statements(statements_of(node.block.body), child_ctx, active_draws)
+        walk_block(node, scoped_context(ctx, opts, path: opts.fetch(:path, pos.first), mod: opts[:module]))
       end
 
-      def walk_resources(node, ctx, singular:, active_draws: Set.new)
+      def scoped_context(ctx, opts, path:, mod:)
+        module_prefix = join_module(ctx.module_prefix, mod)
+        controller = opts[:controller] ? qualify_controller(opts[:controller].to_s, module_prefix) : ctx.controller
+        ctx.with(path_prefix: join_path(ctx.path_prefix, path), module_prefix: module_prefix, controller: controller)
+      end
+
+      def walk_resources(node, ctx, singular:)
         pos, opts = extract_args(node)
-        names = pos.map(&:to_s)
-        return if names.empty?
+        return if pos.empty?
 
-        default_actions = singular ? SINGULAR_ACTIONS : PLURAL_ACTIONS
-        actions = filter_actions(default_actions, only: opts[:only], except: opts[:except])
+        actions = filter_actions(singular ? SINGULAR_ACTIONS : PLURAL_ACTIONS, only: opts[:only], except: opts[:except])
+        module_prefix = opts[:module] ? join_module(ctx.module_prefix, opts[:module]) : ctx.module_prefix
 
-        names.each do |name|
-          path_seg = opts.key?(:path) ? opts[:path]&.to_s : name
-          base_path = join_path(ctx.path_prefix, path_seg)
-          controller = resolve_resource_controller(name, opts, ctx, singular: singular)
-          param = (opts[:param] || "id").to_s
+        pos.map(&:to_s).each do |name|
+          base = join_path(ctx.path_prefix, opts.fetch(:path, name))
+          controller = opts[:controller] || (singular ? ActiveSupport::Inflector.pluralize(name) : name)
+          controller = qualify_controller(controller.to_s, module_prefix)
 
-          if singular
-            emit_singular_resource_routes(base_path, controller, actions, ctx)
-            member_prefix = base_path
-            nested_prefix = base_path
-          else
-            emit_plural_resource_routes(base_path, param, controller, actions, ctx)
-            member_prefix = "#{base_path}/:#{param}"
-            nested_prefix = "#{base_path}/:#{ActiveSupport::Inflector.singularize(name)}_#{param}"
+          param = opts[:param] || "id"
+          member = singular ? base : "#{base}/:#{param}"
+          record_resource_routes(base, member, controller, actions, ctx)
+
+          nested = singular ? base : "#{base}/:#{ActiveSupport::Inflector.singularize(name)}_#{param}"
+          walk_block(node, ctx.with(
+            path_prefix: nested,
+            module_prefix: module_prefix,
+            controller: controller,
+            resource_member_prefix: member,
+            resource_collection_prefix: base,
+            resource_controller: controller
+          ))
+        end
+      end
+
+      def record_resource_routes(base, member, controller, actions, ctx)
+        RESOURCE_ROUTES.each do |action, verb, on, suffix|
+          next unless actions.include?(action)
+
+          record_route(verb, "#{on == :member ? member : base}#{suffix}", controller, action, ctx)
+        end
+      end
+
+      def resource_context(ctx, on)
+        prefix =
+          case on
+          when :member, "member" then ctx.resource_member_prefix
+          when :collection, "collection" then ctx.resource_collection_prefix
+          else return ctx
           end
 
-          next unless node.block
-
-          child_ctx = ctx.dup
-          child_ctx.path_prefix = nested_prefix
-          child_ctx.module_prefix = join_module(ctx.module_prefix, opts[:module].to_s) if opts[:module]
-          child_ctx.controller = controller
-          child_ctx.resource_member_prefix = member_prefix
-          child_ctx.resource_collection_prefix = base_path
-          child_ctx.resource_controller = controller
-          walk_statements(statements_of(node.block.body), child_ctx, active_draws)
-        end
-      end
-
-      def walk_member_or_collection(node, ctx, member:, active_draws: Set.new)
-        return unless node.block
-
-        child_ctx = ctx.dup
-        child_ctx.path_prefix = member ? (ctx.resource_member_prefix || ctx.path_prefix) : (ctx.resource_collection_prefix || ctx.path_prefix)
-        child_ctx.controller = ctx.resource_controller || ctx.controller
-        walk_statements(statements_of(node.block.body), child_ctx, active_draws)
-      end
-
-      def emit_plural_resource_routes(base, param, controller, actions, ctx)
-        member = "#{base}/:#{param}"
-        record_route("GET", base, controller, "index", ctx) if actions.include?("index")
-        record_route("GET", "#{base}/new", controller, "new", ctx) if actions.include?("new")
-        record_route("POST", base, controller, "create", ctx) if actions.include?("create")
-        record_route("GET", member, controller, "show", ctx) if actions.include?("show")
-        record_route("GET", "#{member}/edit", controller, "edit", ctx) if actions.include?("edit")
-        if actions.include?("update")
-          record_route("PATCH", member, controller, "update", ctx)
-          record_route("PUT", member, controller, "update", ctx)
-        end
-        record_route("DELETE", member, controller, "destroy", ctx) if actions.include?("destroy")
-      end
-
-      def emit_singular_resource_routes(base, controller, actions, ctx)
-        record_route("GET", "#{base}/new", controller, "new", ctx) if actions.include?("new")
-        record_route("POST", base, controller, "create", ctx) if actions.include?("create")
-        record_route("GET", base, controller, "show", ctx) if actions.include?("show")
-        record_route("GET", "#{base}/edit", controller, "edit", ctx) if actions.include?("edit")
-        if actions.include?("update")
-          record_route("PATCH", base, controller, "update", ctx)
-          record_route("PUT", base, controller, "update", ctx)
-        end
-        record_route("DELETE", base, controller, "destroy", ctx) if actions.include?("destroy")
+        ctx.with(path_prefix: prefix || ctx.path_prefix, controller: ctx.resource_controller || ctx.controller)
       end
 
       def record_root(node, ctx)
@@ -333,47 +289,32 @@ module InstantRecord
       end
 
       def record_http_verb(node, ctx, verbs)
-        pos, opts, string_mapping = extract_args(node, include_string_mapping: true)
-        if string_mapping
-          raw_path, raw_target = string_mapping
-        else
-          raw_path = pos.first&.to_s
-          raw_target = opts[:to]&.to_s
-        end
+        pos, opts, string_mapping = extract_args_and_mapping(node)
+        raw_path, raw_target = string_mapping || [pos.first&.to_s, opts[:to]&.to_s]
         return unless raw_path
 
-        effective_prefix =
-          case opts[:on]&.to_sym
-          when :member then ctx.resource_member_prefix || ctx.path_prefix
-          when :collection then ctx.resource_collection_prefix || ctx.path_prefix
-          else ctx.path_prefix
-          end
-        effective_controller =
-          %i[member collection].include?(opts[:on]&.to_sym) ? (ctx.resource_controller || ctx.controller) : ctx.controller
-
-        path = join_path(effective_prefix, raw_path)
+        on_ctx = resource_context(ctx, opts[:on])
+        path = join_path(on_ctx.path_prefix, raw_path)
         controller, action =
-          if raw_target
-            split_target(raw_target, ctx)
-          elsif opts.key?(:to)
-            # Dynamic `to:` (e.g. redirect("/new") or Rack app): keep the route path without guessing a controller.
-            [nil, nil]
-          elsif opts[:controller] || opts[:action]
-            ctrl = opts[:controller] ? qualify_controller(opts[:controller].to_s, ctx.module_prefix) : effective_controller
-            act = (opts[:action] || raw_path.split("/").last).to_s
-            [ctrl, act]
-          elsif effective_controller
-            [effective_controller, raw_path.delete_prefix("/").tr("-", "_")]
-          elsif raw_path.include?("/")
-            parts = raw_path.delete_prefix("/").split("/")
-            act = parts.pop
-            [qualify_controller(parts.join("/"), ctx.module_prefix), act]
-          else
-            [nil, nil]
-          end
+          raw_target ? split_target(raw_target, ctx) : infer_endpoint(raw_path, opts, on_ctx)
 
-        verbs.each do |verb|
-          record_route(verb, path, controller, action, ctx)
+        verbs.each { |verb| record_route(verb, path, controller, action, ctx) }
+      end
+
+      def infer_endpoint(raw_path, opts, ctx)
+        # Dynamic `to:` (e.g. redirect("/new") or Rack app): keep the route path without guessing a controller.
+        return [nil, nil] if opts.key?(:to)
+
+        if opts[:controller] || opts[:action]
+          controller = opts[:controller] ? qualify_controller(opts[:controller].to_s, ctx.module_prefix) : ctx.controller
+          [controller, (opts[:action] || raw_path.split("/").last).to_s]
+        elsif ctx.controller
+          [ctx.controller, raw_path.delete_prefix("/").tr("-", "_")]
+        elsif raw_path.include?("/")
+          *parts, action = raw_path.delete_prefix("/").split("/")
+          [qualify_controller(parts.join("/"), ctx.module_prefix), action]
+        else
+          [nil, nil]
         end
       end
 
@@ -403,90 +344,63 @@ module InstantRecord
         }
         entry["island"] = ctx.island_name if ctx.in_local_first && ctx.island_name
 
-        if ctx.in_local_first
-          @local_routes << entry
-        else
-          @server_routes << entry
-        end
+        (ctx.in_local_first ? @local_routes : @server_routes) << entry
       end
 
       # --- AST-preserving local config/routes.rb emitter ---
 
-      def emit_statements(stmts, ctx)
-        lines = []
-        stmts.each do |stmt|
-          lines.concat(emit_node(stmt, ctx))
-        end
-        lines
+      def emit_statements(stmts, local, active_draws)
+        stmts.flat_map { |stmt| emit_node(stmt, local, active_draws) }
       end
 
-      def emit_node(node, ctx)
+      def emit_node(node, local, active_draws)
         return [] unless node.is_a?(Prism::CallNode) && node.receiver.nil?
 
         case node.name
         when :local_first
-          pos, = extract_args(node)
-          declared_name = pos.first ? pos.first.to_s : nil
-          active = @island.nil? || declared_name == @island
-          return [] unless active && node.block
+          return [] unless active_island?(declared_island(node)) && literal_block?(node)
 
-          child_ctx = ctx.dup
-          child_ctx.in_local_first = true
-          child_ctx.island_name = declared_name || ctx.island_name
-          emit_statements(statements_of(node.block.body), child_ctx)
+          emit_statements(statements_of(node.block.body), true, active_draws)
         when :draw
-          pos, = extract_args(node)
-          name = pos.first&.to_s
+          name = first_name(node)
           return [] unless name
 
-          sub_path = resolve_draw_path!(name)
-          parsed = load_drawn_ast!(sub_path)
-          emit_statements(statements_of(parsed.value.statements), ctx)
+          sub_path = resolve_draw_path!(name, active_draws)
+          emit_statements(drawn_statements(sub_path), local, active_draws + [sub_path])
         when *CONTAINER_CALLS
-          if node.block
-            inner = emit_statements(statements_of(node.block.body), ctx)
-            return [] if inner.empty? && !ctx.in_local_first
-
-            if ctx.in_local_first && !subtree_has_special_calls?(node.block.body)
-              reindent_slice(node.location.slice)
-            else
-              header = container_header(node)
-              closing = node.block.closing_loc.slice
-              [header, *inner.map { |line| "  #{line}" }, closing]
-            end
-          else
-            ctx.in_local_first ? reindent_slice(node.location.slice) : []
-          end
+          literal_block?(node) ? emit_container(node, local, active_draws) : emit_call(node, local)
         when :root, *HTTP_VERBS, :match
-          ctx.in_local_first ? reindent_slice(node.location.slice) : []
+          emit_call(node, local)
         else
           []
         end
       end
 
+      def emit_call(node, local)
+        local ? reindent_slice(node.location.slice) : []
+      end
+
+      def emit_container(node, local, active_draws)
+        inner = emit_statements(statements_of(node.block.body), local, active_draws)
+        return [] if inner.empty? && !local
+        return emit_call(node, local) if local && !subtree_has_special_calls?(node.block.body)
+
+        [container_header(node), *inner.map { |line| "  #{line}" }, node.block.closing_loc.slice]
+      end
+
       def subtree_has_special_calls?(node)
         return false unless node
 
-        found = false
-        queue = [node]
-        while (current = queue.shift)
-          if current.is_a?(Prism::CallNode) && current.receiver.nil? && %i[local_first draw].include?(current.name)
-            found = true
-            break
-          end
-          queue.concat(current.compact_child_nodes)
-        end
-        found
+        !node.breadth_first_search { |child|
+          child.is_a?(Prism::CallNode) && child.receiver.nil? && %i[local_first draw].include?(child.name)
+        }.nil?
       end
 
       def container_header(node)
-        block = node.block
-        source_slice = node.location.slice
-        open_offset = block.opening_loc.end_offset - node.location.start_offset
-        if block.parameters
-          open_offset = block.parameters.location.end_offset - node.location.start_offset
-        end
-        source_slice[0...open_offset].strip
+        # The parameters of a block that uses _1 or it span the whole block.
+        parameters = node.block.parameters
+        header = parameters.is_a?(Prism::BlockParametersNode) ? parameters.location : node.block.opening_loc
+        node.location.slice.byteslice(0, header.end_offset - node.location.start_offset).strip
       end
 
       def reindent_slice(slice)
@@ -509,19 +423,6 @@ module InstantRecord
       end
 
       # --- Helpers ---
-
-      def resolve_resource_controller(name, opts, ctx, singular:)
-        raw =
-          if opts[:controller]
-            opts[:controller].to_s
-          elsif singular
-            ActiveSupport::Inflector.pluralize(name)
-          else
-            name
-          end
-        mod = opts[:module] ? join_module(ctx.module_prefix, opts[:module].to_s) : ctx.module_prefix
-        qualify_controller(raw, mod)
-      end
 
       def split_target(target, ctx)
         if target.include?("#")
@@ -569,33 +470,45 @@ module InstantRecord
 
       ROUTE_OPTION_KEYS = %i[to controller action via as on only except path module param constraints defaults format].freeze
 
-      def extract_args(call, include_string_mapping: false)
-        pos = []
-        opts = {}
-        string_mapping = nil
+      def first_name(call)
+        pos, = extract_args(call)
+        pos.first&.to_s
+      end
 
-        Array(call.arguments&.arguments).each do |arg|
-          if arg.is_a?(Prism::KeywordHashNode) || arg.is_a?(Prism::HashNode)
-            arg.elements.each do |assoc|
-              next unless assoc.is_a?(Prism::AssocNode)
+      def extract_args(call)
+        pos, pairs = split_args(call)
+        [pos, options_from(pairs)]
+      end
 
-              key = literal_value(assoc.key)
-              val = literal_value(assoc.value)
-              if include_string_mapping && val.is_a?(String) && val.include?("#") && string_mapping.nil? &&
-                  (key.is_a?(String) || (key.is_a?(Symbol) && !ROUTE_OPTION_KEYS.include?(key)))
-                string_mapping = [key.to_s, val]
-              elsif key.is_a?(Symbol)
-                opts[key] = val
-              elsif key.is_a?(String)
-                opts[key.to_sym] = val
-              end
-            end
-          else
-            pos << literal_value(arg)
-          end
+      def extract_args_and_mapping(call)
+        pos, pairs = split_args(call)
+        mapping = pairs.find { |key, value| string_mapping?(key, value) }
+        [pos, options_from(pairs.reject { |pair| pair.equal?(mapping) }), mapping && [mapping[0].to_s, mapping[1]]]
+      end
+
+      def string_mapping?(key, value)
+        return false unless value.is_a?(String) && value.include?("#")
+
+        key.is_a?(String) || (key.is_a?(Symbol) && !ROUTE_OPTION_KEYS.include?(key))
+      end
+
+      def split_args(call)
+        hashes, positional = Array(call.arguments&.arguments).partition { |arg| hash_node?(arg) }
+        [positional.map { |arg| literal_value(arg) }, hashes.flat_map { |hash| literal_pairs(hash) }]
+      end
+
+      def hash_node?(node)
+        node.is_a?(Prism::KeywordHashNode) || node.is_a?(Prism::HashNode)
+      end
+
+      def literal_pairs(hash_node)
+        hash_node.elements.grep(Prism::AssocNode).map { |assoc| [literal_value(assoc.key), literal_value(assoc.value)] }
+      end
+
+      def options_from(pairs)
+        pairs.each_with_object({}) do |(key, value), opts|
+          opts[key.to_sym] = value if key.is_a?(Symbol) || key.is_a?(String)
         end
-
-        include_string_mapping ? [pos, opts, string_mapping] : [pos, opts]
       end
 
       def literal_value(node)
@@ -608,14 +521,11 @@ module InstantRecord
         when Prism::NilNode then nil
         when Prism::ArrayNode then node.elements.map { |el| literal_value(el) }
         when Prism::HashNode, Prism::KeywordHashNode
-          node.elements.each_with_object({}) do |assoc, hash|
-            next unless assoc.is_a?(Prism::AssocNode)
-
-            k = literal_value(assoc.key)
-            hash[k] = literal_value(assoc.value) unless k.nil?
+          # A value is read only under a literal key.
+          node.elements.grep(Prism::AssocNode).each_with_object({}) do |assoc, hash|
+            key = literal_value(assoc.key)
+            hash[key] = literal_value(assoc.value) unless key.nil?
           end
-        else
-          nil
         end
       end
     end

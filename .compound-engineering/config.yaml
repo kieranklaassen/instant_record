@@ -1,0 +1,17 @@
+autonomous_profile: hands-off
+autonomous_motions: [main-red, backlog, stack, climb, create]
+autonomous_overrides:
+  - { motion: create, max: pr }
+autonomous_landing: direct
+autonomous_ci: ignored
+autonomous_merge_method: merge
+autonomous_checks:
+  - run: "bundle install --quiet && bundle exec rake test"
+  - run: "cd demo && bundle install --quiet && npm ci --no-audit --no-fund && d=$(mktemp -d /tmp/pg.XXXXXX) && initdb -D $d/data -U postgres -A trust >/dev/null && { postgres -D $d/data -k $d -c listen_addresses= >$d/log 2>&1 & p=$!; trap 'kill -INT $p; wait $p; rm -rf $d' EXIT; export PGHOST=$d PGUSER=postgres; for i in $(seq 60); do pg_isready -q && break; sleep 1; done; createdb demo_test && bin/rails test; }"
+    paths: "demo/**"
+autonomous_landing_steps:
+  - "Branch from `main` (`feat/…`, `fix/…`, `chore/…`) and commit there. Never commit on `main` itself."
+  - "Merge `origin/main` into the branch and run the tests on that result: `bundle exec rake test` for the gem, and `cd demo && bin/rails test` when the demo changed."
+  - "When they pass, merge the branch into `main` with a merge commit (`git merge --no-ff`) and push `main`."
+  - "Delete the branch, locally and on the remote."
+  - "If tests fail, a merge conflicts in a way you can't resolve cleanly, or the push is refused, stop and say so. A pull request is no way around it."

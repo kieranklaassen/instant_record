@@ -52,7 +52,7 @@ module InstantRecord
       page = rows.first(limit)
       last = page.last
       payload = {
-        records: page.map { |record| InstantRecord.record_payload(record) },
+        records: InstantRecord.record_payloads(page),
         has_more: rows.size > limit,
         server_time: InstantRecord::HLC.iso_now
       }
@@ -80,7 +80,7 @@ module InstantRecord
       if lookup_id
         rows = shape.lookup(base, lookup_id)
         return render json: {
-          records: rows.map { |record| InstantRecord.record_payload(record) },
+          records: InstantRecord.record_payloads(rows),
           has_more: false,
           server_time: InstantRecord::HLC.iso_now
         }
@@ -104,7 +104,7 @@ module InstantRecord
         search: params[:search].presence
       )
       payload = {
-        records: result[:records].map { |record| InstantRecord.record_payload(record) },
+        records: InstantRecord.record_payloads(result[:records]),
         has_more: result[:has_more],
         server_time: InstantRecord::HLC.iso_now
       }

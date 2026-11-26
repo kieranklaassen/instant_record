@@ -2,6 +2,8 @@ require "digest"
 require "instant_record/syncable"
 require "instant_record/sync_partition"
 require "instant_record/sync_shape"
+require "instant_record/payload_batch"
+require "instant_record/read_tracker_scan"
 
 module InstantRecord
   module Syncable
@@ -227,17 +229,25 @@ module InstantRecord
       # record's state as it stands, never the logged payload, which may
       # predate the record being shared. A record the asker may not see is sent
       # as an empty destroy: nothing to a client that never held it, a
-      # revocation to one that did.
+      # revocation to one that did. Each event is a hash of its own, the
+      # caller's to add to.
       def events_for(changes, identity, partition: nil)
         current = visible_records(changes, identity, partition: partition)
+        payloads = current.keys.zip(InstantRecord.record_payloads(current.values)).to_h
+        # Each logged type is looked up once per batch, and never kept past it:
+        # a reload, a new rule or InstantRecord.sync shows in the next one.
+        models = Hash.new { |known, type| known[type] = ruled_model(type) }
+        logged = changes.select { |change| change.operation == "destroy" || models[change.record_type].nil? }
+        stamps = PayloadBatch.change_stamps(logged)
         changes.map do |change|
-          model = ruled_model(change.record_type)
-          next [change.id, change.as_event] if change.operation == "destroy" || model.nil?
+          if change.operation == "destroy" || models[change.record_type].nil?
+            next [change.id, PayloadBatch.event(change, stamps[change.id])]
+          end
 
-          record = current[[change.record_type, change.record_id]]
+          payload = payloads[[change.record_type, change.record_id]]
           event =
-            if record
-              InstantRecord.record_payload(record).merge(operation: change.operation)
+            if payload
+              payload.merge(operation: change.operation)
             else
               { type: change.record_type, id: change.record_id, operation: "destroy", version: 0, attributes: {} }
             end

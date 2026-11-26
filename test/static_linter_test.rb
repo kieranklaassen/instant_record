@@ -61,6 +61,31 @@ class StaticLinterTest < ActiveSupport::TestCase
     end
   end
 
+  test "discovers the files that enter compilation" do
+    Dir.mktmpdir do |dir|
+      files = %w[
+        Rakefile.rb app/controllers/c.rb app/helpers/h.rb app/jobs/j.rb app/models/a/b.rb app/models/m.rb app/screens/s.rb
+        config/application.rb config/importmap.rb config/initializers/i.rb config/routes.rb config/routes/r.rb
+        db/schema.rb lib/l.rb lib/tasks/t.rb test/t.rb
+      ]
+      files.each do |file|
+        FileUtils.mkdir_p(File.dirname(File.join(dir, file)))
+        File.write(File.join(dir, file), "")
+      end
+      discover = ->(**options) { StaticLinter.new(root: dir, **options).discover_files.map { |path| path.delete_prefix("#{dir}/") } }
+
+      compiled = files - %w[Rakefile.rb app/jobs/j.rb config/initializers/i.rb db/schema.rb lib/l.rb lib/tasks/t.rb test/t.rb]
+      assert_equal compiled.sort, discover.call(staged: false)
+      assert_equal (files - %w[db/schema.rb lib/tasks/t.rb test/t.rb]).sort, discover.call(staged: true)
+      assert_equal (compiled - %w[app/models/a/b.rb app/models/m.rb config/routes.rb]).sort, discover.call(exclude: ["/app/models/", "config/routes.rb"])
+      assert_equal %w[app/models/m.rb lib/l.rb], discover.call(only_files: ["lib/l.rb", "/app/models/m.rb", "gone.rb", "db/schema.rb"], exclude: "db")
+      assert_empty StaticLinter.new(root: File.join(dir, "missing")).discover_files
+
+      FileUtils.rm_rf([File.join(dir, "app"), File.join(dir, "config")])
+      assert_equal %w[Rakefile.rb lib/l.rb], discover.call(staged: false)
+    end
+  end
+
   test "flags untyped {} hashes in Native::Screen params:, args:, props:, defaults, locals, helpers, and setters" do
     Dir.mktmpdir do |dir|
       FileUtils.mkdir_p(File.join(dir, "app/screens"))
@@ -180,6 +205,200 @@ class StaticLinterTest < ActiveSupport::TestCase
         ["app/controllers/docs_controller.rb", 4],
         ["app/models/secret_doc.rb", 29]
       ], found, const_issues.map(&:to_s).join("\n")
+    end
+  end
+
+  test "reports the tightest overflowing expression once" do
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "sizes.rb"), <<~RUBY)
+        module Sizes
+          GB = 1.gigabyte
+          INNER = (2**31) / 2
+          OUTER = ((2**31) / 2) * 1000
+          HUGE = 1 << 64
+          OTHER_CALL = (1 << 64).foo(1)
+          PATH = Sizes::GB * 2
+          NEGATED = ~4_294_967_295
+          FINE = [1 / 0, 1 % 0, 0 << 99, (2**-1) * 2_147_483_647 * 4, (1 << -1) - 2_147_483_647 - 2, 2_147_483_647 >> -1]
+          BITS = [
+            (6 & 3) * 2_147_483_647,
+            (6 | 3) * 2_147_483_647,
+            (6 ^ 3) * 2_147_483_647,
+            (4 >> 1) * 2_147_483_647,
+            ~2_147_483_647 * 2
+          ]
+        end
+      RUBY
+
+      diagnostics = StaticLinter.lint(dir, staged: true).diagnostics
+      assert_equal [
+        [3, 12], [4, 11], [5, 10], [6, 17], [7, 10], [8, 14], [11, 5], [12, 5], [13, 5], [14, 5], [15, 5]
+      ], diagnostics.map { |d| [d.line, d.column] }, diagnostics.map(&:to_s).join("\n")
+      assert_equal %w[4294967294 15032385529 10737418235 4294967294 -4294967296], diagnostics.last(5).map { |d| d.message[/evaluates to (-?\d+)/, 1] }
+      assert_includes diagnostics[1].message, "Integer \"((2**31) / 2) * 1000\" evaluates to 1073741824000, outside"
+      assert_includes diagnostics[2].message, "Integer \"1 << 64\" exceeds 32-bit signed integer range;"
+    end
+  end
+
+  test "flags untyped hashes in ivars, branches, and parentheses, and not in typed or nested forms" do
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "forms.rb"), <<~RUBY)
+        class Forms < Screen
+          def blank = {}
+          def optional(a = 1) = {}
+          def body
+            @props = ({})
+            @other = {}
+            row params: (if a then b elsif c then {} end)
+            row params: (unless a then b else {} end)
+            row params: (if a then {}; b end)
+            row params: optional, args: self.blank, props: { a: 1 }
+            local = {}
+            local = param
+            row params: local
+            merged = {}
+            merged.merge!(param)
+            row params: merged
+            row args: ((blank))
+          end
+        end
+      RUBY
+
+      diagnostics = StaticLinter.lint(dir, staged: true).diagnostics
+      assert_equal [5, 7, 8, 17], diagnostics.map(&:line), diagnostics.map(&:to_s).join("\n")
+    end
+  end
+
+  test "a rescue or ensure on a Screen class or method changes no finding" do
+    template = <<~RUBY
+      class Guarded < Screen
+        def blank
+          {}
+          METHOD_GUARD
+        end
+
+        def two
+          b
+          {}
+          METHOD_GUARD
+        end
+
+        def empty
+          METHOD_GUARD
+        end
+
+        def body
+          row params: blank
+          row params: two
+          row params: empty
+          row params: {}
+          METHOD_GUARD
+        end
+        CLASS_GUARD
+      end
+      class Bare < Screen
+        CLASS_GUARD
+      end
+    RUBY
+    guards = ["", "rescue then nil", "ensure nil", "rescue then nil; else nil; ensure nil"]
+
+    Dir.mktmpdir do |dir|
+      guards.product(guards).each do |method_guard, class_guard|
+        File.write(File.join(dir, "guarded.rb"), template.gsub("METHOD_GUARD", method_guard).gsub("CLASS_GUARD", class_guard))
+
+        diagnostics = StaticLinter.lint(dir, staged: true).diagnostics
+        assert_equal [[18, 17], [21, 17]], diagnostics.map { |d| [d.line, d.column] }, "method: #{method_guard.inspect}, class: #{class_guard.inspect}"
+      end
+    end
+  end
+
+  test "lints code inside rescue and ensure clauses" do
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "clauses.rb"), <<~RUBY)
+        class Clauses < Screen
+          def body
+            row id: "1"
+          rescue
+            row params: {}
+          ensure
+            2**31
+          end
+        rescue
+          def late = {}
+          row params: late
+        ensure
+          InstantRecord::Engine
+        end
+      RUBY
+
+      diagnostics = StaticLinter.lint(dir, staged: true).diagnostics
+      assert_equal [[5, :untyped_screen_hash], [7, :integer_overflow], [13, :server_only_constant]], diagnostics.map { |d| [d.line, d.rule] }
+    end
+  end
+
+  test "one linter instance carries nothing from file to file or from run to run" do
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "app/screens"))
+      first = File.join(dir, "app/screens/first.rb")
+      second = File.join(dir, "second.rb")
+      File.write(first, <<~RUBY)
+        BIG = 1.gigabyte
+        empty = {}
+        row params: empty
+        server_only { SECRET = 1 }
+      RUBY
+      File.write(second, <<~RUBY)
+        BIG * 2
+        row params: {}
+        class Second < Screen
+          empty ||= param
+          row params: empty
+          SECRET
+        end
+      RUBY
+      linter = StaticLinter.new(root: dir, staged: true)
+      found = -> { linter.run.diagnostics.map { |d| [d.file, d.line, d.rule] } }
+
+      expected = [["app/screens/first.rb", 3, :untyped_screen_hash], ["second.rb", 6, :server_only_constant]]
+      assert_equal expected, found.call
+      assert_equal expected, found.call
+
+      File.write(first, "")
+      assert_empty found.call
+    end
+  end
+
+  test "server_only references follow browser? branches, constant paths, and lookup order" do
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "doc.rb"), <<~RUBY)
+        class Doc
+          server_only do
+            KEY = 1
+            Policy = 2
+          end
+          if !InstantRecord.browser? then KEY else Policy end
+          if InstantRecord.browser? then KEY else Policy end
+          unless (InstantRecord.browser?) then KEY else Policy end
+          [::KEY, ::Doc::KEY]
+          KEY::LIMIT = 1
+          Policy.call::DYNAMIC
+          Policy::LIMIT ||= KEY
+          Policy::SUB
+        end
+      RUBY
+      File.write(File.join(dir, "order.rb"), <<~RUBY)
+        server_only { RANK = 1 }
+        class Order
+          server_only { RANK = 2 }
+          RANK
+        end
+      RUBY
+
+      order, diagnostics = StaticLinter.lint(dir, staged: true).diagnostics.partition { |d| d.file == "order.rb" }
+      assert_equal ["Order::RANK"], order.map { |d| d.message[/`(.+?)`/, 1] }
+      assert_equal [
+        [6, "Policy"], [7, "KEY"], [8, "Policy"], [9, "KEY"], [10, "KEY"], [11, "Policy"], [12, "Policy"], [12, "KEY"], [13, "Policy"]
+      ], diagnostics.map { |d| [d.line, d.message[/`Doc::(\w+)` \(defined inside server_only at doc\.rb:/, 1]] }
     end
   end
 

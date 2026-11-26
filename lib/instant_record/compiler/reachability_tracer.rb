@@ -258,57 +258,54 @@ module InstantRecord
         end
 
         def extract_render(node)
-          args = Array(node.arguments&.arguments)
-          return if args.empty?
+          first = node.arguments&.arguments&.first
+          return unless first
 
+          # Read every option before anything is recorded: this raises on a key that is not valid text.
           opts = extract_keyword_hash(node)
           return if (opts.keys & NON_TEMPLATE_RENDER_KEYS).any?
 
+          line = node.location.start_line
+          in_template = @is_view || @is_helper
+
           if opts.key?(:partial)
-            val = opts[:partial]
-            if val.is_a?(String) || val.is_a?(Symbol)
-              @renders << { kind: :partial, target: val.to_s, line: node.location.start_line }
-            else
-              record_dynamic_warning("render", node.location.start_line,
-                "Dynamic partial render; declare targets in include: { partials: [...] }.")
-            end
+            record_render(:partial, opts[:partial], line) ||
+              record_dynamic_warning("render", line, "Dynamic partial render; declare targets in include: { partials: [...] }.")
           elsif opts.key?(:template)
-            val = opts[:template]
-            if val.is_a?(String) || val.is_a?(Symbol)
-              @renders << { kind: :template, target: val.to_s, line: node.location.start_line }
-            else
-              record_dynamic_warning("render", node.location.start_line,
-                "Dynamic template render; declare targets in include: { views: [...] }.")
-            end
+            record_render(:template, opts[:template], line) ||
+              record_dynamic_warning("render", line, "Dynamic template render; declare targets in include: { views: [...] }.")
           elsif opts.key?(:action)
-            val = opts[:action]
-            if val.is_a?(String) || val.is_a?(Symbol)
-              @renders << { kind: :template, target: val.to_s, line: node.location.start_line }
-            end
-          else
-            first = args.first
-            unless first.is_a?(Prism::KeywordHashNode) || first.is_a?(Prism::HashNode)
-              if first.is_a?(Prism::StringNode) || first.is_a?(Prism::SymbolNode)
-                kind = (@is_view || @is_helper) ? :partial : :template
-                @renders << { kind: kind, target: first.unescaped, line: node.location.start_line }
-              else
-                record_dynamic_warning("render", node.location.start_line,
-                  "Dynamic render expression; declare targets in include: { partials: [...] } or include: { views: [...] }.")
-              end
-            end
+            record_render(:template, opts[:action], line)
+          elsif !hash_node?(first)
+            record_render(in_template ? :partial : :template, literal_name(first), line) ||
+              record_dynamic_warning("render", line,
+                "Dynamic render expression; declare targets in include: { partials: [...] } or include: { views: [...] }.")
           end
 
           # Independently handle `layout:` option (e.g. `render partial: "row", layout: "card"`).
-          if opts.key?(:layout)
-            layout_val = opts[:layout]
-            if layout_val.is_a?(String) || layout_val.is_a?(Symbol)
-              if @is_view || @is_helper || opts.key?(:partial)
-                @renders << { kind: :partial, target: layout_val.to_s, line: node.location.start_line }
-              else
-                @layouts << { target: layout_val.to_s, line: node.location.start_line }
-              end
-            end
+          layout = opts[:layout]
+          if in_template || opts.key?(:partial)
+            record_render(:partial, layout, line)
+          elsif layout.is_a?(String) || layout.is_a?(Symbol)
+            @layouts << { target: layout.to_s, line: line }
           end
+        end
+
+        def record_render(kind, target, line)
+          return false unless target.is_a?(String) || target.is_a?(Symbol)
+
+          @renders << { kind: kind, target: target.to_s, line: line }
+          true
+        end
+
+        # The text of a string or symbol node. Unlike +literal+, keeps the source's
+        # encoding: an ASCII Symbol drops it, and messages quote the name by it.
+        def literal_name(node)
+          node.unescaped if node.is_a?(Prism::StringNode) || node.is_a?(Prism::SymbolNode)
+        end
+
+        def hash_node?(node)
+          node.is_a?(Prism::KeywordHashNode) || node.is_a?(Prism::HashNode)
         end
 
         def extract_layout(node)
@@ -365,7 +362,7 @@ module InstantRecord
         def extract_keyword_hash(call)
           opts = {}
           Array(call.arguments&.arguments).each do |arg|
-            next unless arg.is_a?(Prism::KeywordHashNode) || arg.is_a?(Prism::HashNode)
+            next unless hash_node?(arg)
 
             arg.elements.each do |assoc|
               next unless assoc.is_a?(Prism::AssocNode)
@@ -429,6 +426,7 @@ module InstantRecord
         @concern_syncable = Set.new
         @diagnostics = []
         @errors = []
+        @safe_source_files = {}
       end
 
       def trace
@@ -469,6 +467,7 @@ module InstantRecord
         @helper_files = glob_rel("app/helpers/**/*.rb")
         @view_files = glob_rel("app/views/**/*").select { |rel| File.file?(File.join(@source_root, rel)) }
         @screen_files = glob_rel("app/screens/**/*.rb")
+        index_view_files!
 
         # Map constant names -> relative file paths for stageable categories.
         @stageable_constants = {}
@@ -513,6 +512,20 @@ module InstantRecord
 
           extract_public_helper_defs(parsed.value).each do |method_name|
             (@helper_methods[method_name] ||= []) << rel
+          end
+        end
+      end
+
+      # Files each view under its path and under that path cut at each dot, so
+      # both "index" and "index.html" find index.html.erb.
+      def index_view_files!
+        @views_by_stem = {}
+        @non_ascii_view = @view_files.find { |rel| !rel.ascii_only? }
+        @view_files.each do |rel|
+          stem = rel
+          until stem.empty?
+            (@views_by_stem[stem] ||= []) << rel
+            stem = stem.rpartition(".").first
           end
         end
       end
@@ -1005,11 +1018,13 @@ module InstantRecord
 
       def find_view_files(dir, name, partial:)
         prefix = dir.to_s.empty? ? "app/views" : "app/views/#{dir}"
-        stem = partial ? "_#{name.delete_prefix('_')}" : name
-        exact_prefix = "#{prefix}/#{stem}."
-        exact_path = "#{prefix}/#{stem}"
+        leaf = partial ? "_#{name.delete_prefix('_')}" : name
+        # The dot makes a US-ASCII name UTF-8, as the file names are.
+        dotted = "#{prefix}/#{leaf}."
 
-        @view_files.select { |rel| rel == exact_path || rel.start_with?(exact_prefix) }
+        # Raises when the name's encoding can't be compared with the file names'.
+        @non_ascii_view&.start_with?(dotted)
+        @views_by_stem.fetch(dotted.chop, [])
       end
 
       def view_dir_for(rel, is_view:)
@@ -1086,6 +1101,10 @@ module InstantRecord
       end
 
       def safe_source_file?(rel)
+        @safe_source_files.fetch(rel) { @safe_source_files[rel] = inside_source_root?(rel) }
+      end
+
+      def inside_source_root?(rel)
         expanded = File.expand_path(rel, @source_root)
         return false unless expanded.start_with?("#{@source_root}#{File::SEPARATOR}")
         return false unless File.file?(expanded)

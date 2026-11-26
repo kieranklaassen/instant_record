@@ -1,3 +1,4 @@
+require "bigdecimal"
 require "digest"
 require "fileutils"
 require "json"
@@ -42,6 +43,15 @@ module InstantRecord
     # no zone ("2026-11-19 06:10:30.814075"). Queries order by this text, so a
     # row written any other way sorts apart from rows that sync in later.
     DB_TIME = "%Y-%m-%d %H:%M:%S.%6N"
+
+    # A datetime as the wire carries it, on a day and at a time every month has,
+    # so its text is already DB_TIME's but for the "T" and the "Z". Any other is
+    # parsed: "2026-02-30" names the second of March.
+    WIRE_TIME = /\A\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|1\d|2[0-8])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d\.\d{6}Z\z/
+
+    # Time#iso8601 returns the one, parsed JSON the other. SQLite would keep a
+    # binary string as a blob.
+    WIRE_ENCODINGS = [Encoding::US_ASCII, Encoding::UTF_8].freeze
 
     SQLITE_TYPES = {
       string: "varchar",
@@ -214,7 +224,7 @@ module InstantRecord
             visible = SyncScope.visible(model, identity)
             window = model.instant_record_sync_window
             rows = window ? window.in_window(visible) : visible
-            rows.map { |record| InstantRecord.record_payload(record) }
+            InstantRecord.record_payloads(rows)
           end
           { cursor: cursor, records: records }
         end
@@ -349,7 +359,7 @@ module InstantRecord
         database.execute("PRAGMA page_size = 1024")
         database.transaction do
           ddl.fetch(:statements).each { |sql| database.execute(sql) }
-          records.each { |record| insert(database, record) }
+          insert_records(database, records)
 
           metadata = {
             "compiled_models" => models.join(","),
@@ -382,50 +392,143 @@ module InstantRecord
         FileUtils.rm_f(draft) if draft
       end
 
+      # What every row of one type shares, with a statement per list of columns.
+      # Lives for one build: a model may be reloaded before the next.
+      InsertPlan = Struct.new(:table, :names, :datetimes, :dates, :statements)
+      private_constant :InsertPlan
+
+      # The statements are closed whatever happens: SQLite refuses to close a
+      # database that has one open.
+      def insert_records(database, records)
+        plans = {}
+        records.each { |record| insert(database, record, plans) }
+      ensure
+        plans.each_value { |plan| plan.statements.each_value(&:close) }
+      end
+
+      def insert_plan(type)
+        model = InstantRecord.synced_model(type) || type.to_s.constantize
+        of_type = ->(kind) { model.columns.filter_map { |column| column.name if column.type == kind } }
+        InsertPlan.new(model.table_name, model.column_names, of_type.(:datetime), of_type.(:date), {})
+      end
+
       # A row as the client's upsert would leave it: wire values with datetimes
       # in the compiled runtime's format, server_version set, sync_state synced.
-      def insert(database, record)
+      def insert(database, record, plans)
         type = record[:type] || record["type"]
-        model = InstantRecord.synced_model(type) || type.to_s.constantize
+        plan = plans[type] ||= insert_plan(type)
         raw = record[:attributes] || record["attributes"] || {}
-        attributes = raw.transform_keys(&:to_s).slice(*model.column_names)
-        if model.column_names.include?("server_version")
+        attributes = raw.transform_keys(&:to_s).slice(*plan.names)
+        if plan.names.include?("server_version")
           attributes["server_version"] = record[:version] || record["version"] || attributes["server_version"] || 0
         end
-        attributes["sync_state"] = "synced" if model.column_names.include?("sync_state")
+        attributes["sync_state"] = "synced" if plan.names.include?("sync_state")
 
-        model.columns.each do |column|
-          val = attributes[column.name]
-          next if val.nil?
-
-          if column.type == :datetime
-            attributes[column.name] = format_datetime(val)
-          elsif column.type == :date && val.is_a?(Date)
-            attributes[column.name] = val.iso8601
-          end
+        plan.datetimes.each do |name|
+          value = attributes[name]
+          attributes[name] = format_datetime(value) unless value.nil?
+        end
+        plan.dates.each do |name|
+          value = attributes[name]
+          attributes[name] = value.iso8601 if value.is_a?(Date)
         end
 
-        columns = attributes.keys.map { |name| %("#{name}") }.join(", ")
-        values = attributes.values.map { |value| sqlite_value(value) }
-        placeholders = (["?"] * values.size).join(", ")
-        database.execute(%(INSERT INTO "#{model.table_name}" (#{columns}) VALUES (#{placeholders})), values)
+        statement = plan.statements[attributes.keys] ||= database.prepare(insert_sql(plan.table, attributes.keys))
+        statement.execute(attributes.values.map { |value| sqlite_value(value) })
+      end
+
+      def insert_sql(table, names)
+        columns = names.map { |name| %("#{name}") }.join(", ")
+        %(INSERT INTO "#{table}" (#{columns}) VALUES (#{(["?"] * names.size).join(", ")}))
       end
 
       def format_datetime(value)
+        if value.is_a?(String) && WIRE_ENCODINGS.include?(value.encoding) && WIRE_TIME.match?(value)
+          return "#{value.byteslice(0, 10)} #{value.byteslice(11, 15)}"
+        end
+
         time = value.is_a?(String) ? Time.iso8601(value) : value.to_time
         time.utc.strftime(DB_TIME)
       rescue ArgumentError
         Time.parse(value.to_s).utc.strftime(DB_TIME)
       end
 
+      # A client's adapter writes a decimal as a double, and the wire sends it
+      # null for one that is not finite.
       def sqlite_value(value)
         case value
+        when String then value # most values are one
         when true then 1
         when false then 0
         when Hash, Array then JSON.generate(value)
+        when BigDecimal then (value.to_f if value.finite?)
         else value
         end
       end
+
+      # A column's default as a SQLite literal, or nil when the SQLite column
+      # would read it back as another value. Rails hands over the database's
+      # string or, from 8.1.0 to 8.1.3.1, sometimes the value; the type reads both.
+      def sqlite_default(connection, column)
+        return if column.default.nil? || column.default_function
+
+        type = column.respond_to?(:fetch_cast_type) ? column.fetch_cast_type(connection) : connection.lookup_cast_type_from_column(column)
+        value = type.deserialize(column.default)
+
+        case column.type
+        when :json, :jsonb
+          return if value.nil? && column.default.to_s.strip != "null" # it could not be decoded
+
+          # A json column has numeric affinity: a longer bare integer turns double.
+          sqlite_quote(JSON.generate(value)) unless value.is_a?(Integer) && !sqlite_integer?(value)
+        when :boolean
+          sqlite_value(value).to_s if value == true || value == false
+        when :integer, :bigint, :oid
+          value.to_s if sqlite_integer?(value)
+        when :float
+          sqlite_float(value)
+        when :decimal
+          sqlite_decimal(value)
+        when :date
+          sqlite_quote(connection.quoted_date(value)) if value.is_a?(Date)
+        when :datetime
+          sqlite_quote(value.getutc.strftime(DB_TIME)) if value.acts_like?(:time)
+        else
+          readable = value.is_a?(String) && !value.include?("\0") && (column.type != :binary || value.ascii_only?)
+          sqlite_quote(value) if readable
+        end
+      rescue JSON::GeneratorError, JSON::NestingError
+        nil # a number JSON has no form for, or more levels than it takes
+      rescue ArgumentError
+        raise if %i[json jsonb].include?(column.type)
+
+        nil # a range without its start
+      end
+
+      # Plain digits, as the SQLite adapter reads no default with an exponent.
+      def sqlite_float(value)
+        return unless value.is_a?(Numeric)
+
+        number = BigDecimal(value.to_s)
+        return if number.nan?
+
+        number.infinite? ? sqlite_quote(value.to_s) : number.to_s("F")
+      end
+
+      # SQLite keeps a decimal as an integer or a double.
+      def sqlite_decimal(value)
+        return unless value.is_a?(Numeric)
+
+        number = BigDecimal(value.to_s)
+        return unless number.finite?
+        return number.to_i.to_s if number.frac.zero? && sqlite_integer?(number.to_i)
+
+        number.to_s("F") if ActiveRecord::Type::Decimal.new.deserialize(number.to_f) == number
+      end
+
+      def sqlite_integer?(value) = value.is_a?(Integer) && value.bit_length < 64
+
+      def sqlite_quote(text) = "'#{SQLite3::Database.quote(text)}'"
 
       def extract_schema_version(schema_path)
         match = File.read(schema_path).match(/\.define\s*\(\s*version:\s*([\d_]+)/)
@@ -439,7 +542,10 @@ module InstantRecord
           columns = connection.columns(table).map do |column|
             sql = %("#{column.name}" #{SQLITE_TYPES.fetch(column.type, "text")})
             sql << " NOT NULL" unless column.null
-            sql << " DEFAULT #{connection.quote(column.default)}" if column.default && !column.default_function
+            default = sqlite_default(connection, column)
+            # Left out, it would refuse every row that does not set the column.
+            default ||= connection.quote(column.default) if !column.null && column.default && !column.default_function
+            sql << " DEFAULT #{default}" if default
             sql << " PRIMARY KEY AUTOINCREMENT" if keys == [column.name] && %i[integer bigint].include?(column.type)
             sql
           end

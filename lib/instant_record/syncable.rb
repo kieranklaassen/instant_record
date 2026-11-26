@@ -108,6 +108,37 @@ module InstantRecord
         after_find do
           InstantRecord::SyncActions.server_note_read(self) if instant_record_server_mutator_write?
         end
+        # MutationApplier logs what its destroy takes along: these note each
+        # destroy and create there in order, and which of them were undone.
+        before_destroy do
+          # Loaded without the columns that say who hears of it: read them while
+          # the row is there. Without them it would be addressed to no one or everyone.
+          if ActiveSupport::IsolatedExecutionState[:instant_record_cascaded_destroys] && !new_record?
+            columns = [self.class.instant_record_sync_scope, self.class.instant_record_sync_partition&.column].compact
+            whole = columns.all? { |column| has_attribute?(column) }
+            @cascaded_row = whole ? self : self.class.unscoped.find_by(self.class.primary_key => id)
+          end
+        end
+        after_destroy { note_cascaded(@cascaded_row, true) unless new_record? || instant_record_server_mutator_write? }
+        after_create { note_cascaded(self, false) }
+
+        define_method(:note_cascaded) do |row, gone|
+          events = ActiveSupport::IsolatedExecutionState[:instant_record_cascaded_destroys]
+          next unless events && row
+
+          event = { row: row, gone: gone, undone: false }
+          events << event
+          self.class.current_transaction.after_rollback { event[:undone] = true }
+        end
+        private :note_cascaded
+
+        # Active Record runs after_update even when the UPDATE matched no row, as
+        # when a concurrent destroy removed it. Logging that would bring it back.
+        # The flag is the one Active Record decides its commit callbacks by.
+        define_method(:record_server_change) do |operation|
+          super(operation) unless operation == "update" && !_trigger_update_callback
+        end
+        private :record_server_change
       end
     end
 
