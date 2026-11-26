@@ -36,6 +36,7 @@ class GemspecTest < ActiveSupport::TestCase
       frontend/files.js
       frontend/package.json
       sig/instant_record/native.rbs
+      sig/instant_record/native_host.rbs
       native/ios/InstantRecordNative/Package.swift
     ].each do |expected|
       assert_includes spec.files, expected, "expected #{expected} to be packaged in the gem"

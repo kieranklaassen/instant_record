@@ -32,14 +32,21 @@ module InstantRecord
       BRIDGE = <<~'RUBY'
 
         module <<bridge>>
+          # On its own: Spinel inlines the blocks of handle_request into one C function,
+          # where the return values of nested ensure frames no longer fit each other.
+          def self.dispatch_capturing_changes(req, res)
+            InstantRecord::Client.capture_local_changes do
+              Tep::APP.dispatch(req, res)
+            end
+            nil
+          end
+
           def self.handle_request
             InstantRecord::Client.clear_events
             req = Tep::Parser.parse(<<read:in>>)
             res = Tep::Response.new
             reads = InstantRecord::ReadTracker.track do
-              InstantRecord::Client.capture_local_changes do
-                Tep::APP.dispatch(req, res)
-              end
+              <<bridge>>.dispatch_capturing_changes(req, res)
             end
             out = +""
             out << res.status.to_s << "\n"

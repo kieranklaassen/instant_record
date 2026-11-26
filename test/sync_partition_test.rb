@@ -63,6 +63,14 @@ class SyncPartitionTest < Minitest::Test
     assert_equal "owner:acme", part.change_key("acme")
   end
 
+  # A compiled model's `[]` compares Symbols.
+  def test_a_partition_reads_its_column_by_symbol
+    record = Object.new
+    def record.[](name) = { owner: "acme" }[name]
+
+    assert_equal "owner:acme", @partitioned.instant_record_sync_partition.change_partition_for(record)
+  end
+
   def test_models_for_isolates_partitioned_and_unpartitioned_sessions
     assert_equal [@global], InstantRecord::SyncScope.models_for(nil)
     assert_equal [@partitioned], InstantRecord::SyncScope.models_for("acme")

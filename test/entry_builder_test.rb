@@ -31,8 +31,26 @@ class EntryBuilderTest < ActiveSupport::TestCase
         [kind, %w[wasm native].map { |target| Digest::SHA256.hexdigest(read(emit, "main_#{target}.rb"))[0, 16] }]
       end
 
-      assert_equal({ "full" => %w[ae2c5d0c80998933 3971549a1f5cc560], "demo" => %w[e8d4136ee4600eea ea2468610e3c2a85] }, rendered)
+      assert_equal({ "full" => %w[a8e2f7f24094fa92 4b956abc005bdb7f], "demo" => %w[7cc53a35594a0fe4 e7fa9a120e836acc] }, rendered)
       assert_equal "class Release; end\n", read(emit, "app/models/release.rb")
+    end
+  end
+
+  # Spinel inlines a method's blocks into one C function. Two ensure frames in it copy
+  # return values to each other unboxed, which clang refuses.
+  test "a request is tracked and captured in two methods" do
+    in_app do |emit, app|
+      wasm(emit)
+      native(emit, app)
+      { "wasm" => "WasmBridge", "native" => "NativeBridge" }.each do |target, bridge|
+        methods = read(emit, "main_#{target}.rb").split(/^  def self\./)
+        request = methods.find { |text| text.start_with?("handle_request") }
+        dispatch = methods.find { |text| text.start_with?("dispatch_capturing_changes") }
+
+        assert_includes request, "InstantRecord::ReadTracker.track do\n      #{bridge}.dispatch_capturing_changes(req, res)\n    end"
+        refute_includes request, "capture_local_changes do"
+        assert_includes dispatch, "InstantRecord::Client.capture_local_changes do\n      Tep::APP.dispatch(req, res)\n    end\n    nil\n"
+      end
     end
   end
 

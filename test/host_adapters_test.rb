@@ -213,6 +213,35 @@ class HostAdaptersTest < ActiveSupport::TestCase
     end
   end
 
+  test "only the native host's calls are declared for Roundhouse, each with its arguments" do
+    Dir.mktmpdir do |dir|
+      staged = %i[Wasm Native].to_h do |name|
+        app = File.join(dir, name.to_s)
+        FileUtils.mkdir_p(File.join(app, "lib/instant_record"))
+        HostAdapters.const_get(name).install(gem_src: GEM_ROOT, app_dir: app)
+        [name, File.join(app, "sig/instant_record/native_host.rbs")]
+      end
+
+      refute File.exist?(staged[:Wasm])
+      declared = File.read(staged[:Native]).scan(/def self\.(\w+): \(([^)]*)\)/).to_h { |name, args| [name, args.split(", ").size] }
+      bound = InstantRecord::Compiler::EntryBuilder::NATIVE_HOST.scan(/ffi_func :(\w+), \[([^\]]*)\]/).to_h { |name, args| [name, args.split(", ").size] }
+      called = HostAdapters::Native.host_source.scan(/NativeHost\.(\w+)/).flatten.uniq
+
+      assert_equal bound, declared
+      assert_equal bound.keys.sort, called.sort
+    end
+  end
+
+  # The native entry gets this source as it is, past Roundhouse, which lowers blank?.
+  test "the native host knows an unset id without blank?" do
+    host = Module.new.tap { |mod| mod.module_eval(HostAdapters::Native.host_source) }.const_get(:InstantRecord)::Host
+    plain = Class.new(String) { undef_method :blank? }
+
+    assert host.blank_id?(nil)
+    assert host.blank_id?(plain.new(""))
+    refute host.blank_id?(plain.new("0193"))
+  end
+
   test "thread replies become an array in every matching ternary" do
     assert_equal "r = @thread_parent ? a.b(1).to_a : []\ns = @thread_parent   ?\n  'é☕'.c.to_a\n  : [ ]\n",
       coerce("r = @thread_parent ? a.b(1) : []\ns = @thread_parent   ?\n  'é☕'.c\n  : [ ]\n")
