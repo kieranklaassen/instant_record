@@ -11,7 +11,7 @@ Inertia page in React (`app/frontend`), built on the gem's own package in
 `app/assets/builds/inbox.js`:
 
 ```sh
-npm install
+npm ci
 npm run build   # once, or `npm run dev` to rebuild on change
 npm test        # the keyboard hook's unit tests
 ```

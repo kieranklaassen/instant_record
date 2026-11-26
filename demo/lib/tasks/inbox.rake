@@ -4,7 +4,7 @@ namespace :inbox do
   desc "Build the Inbox demo's React bundle"
   task :build do
     Dir.chdir(Rails.root) do
-      system("npm", "install", "--no-audit", "--no-fund", exception: true) unless Dir.exist?("node_modules")
+      system("npm", "ci", "--no-audit", "--no-fund", exception: true) unless Dir.exist?("node_modules")
       system("npm", "run", "build", exception: true)
     end
   end
