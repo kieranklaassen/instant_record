@@ -231,6 +231,73 @@ class ShellTest < ActiveSupport::TestCase
     end
   end
 
+  test "decimals are stored as a client's write of the wire value stores them" do
+    with_shell_rows_table do |rows|
+      InstantRecord.sync(rows)
+      forms = {
+        "12.50" => [12.5, "real"],
+        "-0.005" => [-0.005, "real"],
+        "10.00" => [10, "integer"],
+        "-7" => [-7, "integer"],
+        "-0" => [0, "integer"],
+        "1E+2" => [100, "integer"],
+        "1e-30" => [1e-30, "real"],
+        "1e30" => [1e30, "real"],
+        "0.1234567890123456789" => [0.12345678901234568, "real"],
+        "12345678901234567890.123456789" => [1.2345678901234567e19, "real"],
+        "9007199254740993" => [2**53, "integer"],
+        "9223372036854775807" => [2.0**63, "real"],
+        "NaN" => [nil, "null"],
+        "Infinity" => [nil, "null"],
+        "-Infinity" => [nil, "null"]
+      }
+      values = forms.keys.map { |text| BigDecimal(text) }
+      records = values.each_with_index.map { |value, i| { type: "ShellRow", attributes: { "id" => format("%02d", i), "amount" => value } } }
+      query = "SELECT amount, typeof(amount) FROM shell_rows ORDER BY id"
+      stored = read_shell(records) { |db| db.execute(query) }
+
+      values.each_with_index do |value, i|
+        rows.create!(id: format("%02d", i), amount: ActiveSupport::JSON.decode(ActiveSupport::JSON.encode(value)))
+      end
+      client = ActiveRecord::Base.connection.select_rows(query)
+
+      assert_equal forms.values, stored
+      assert_equal client, stored
+      read = stored.map { |amount, _| rows.type_for_attribute("amount").deserialize(amount) }
+      assert_equal rows.order(:id).map(&:amount), read
+    end
+  end
+
+  test "a decimal sent as a string, and one inside a json value, are kept as the wire has them" do
+    with_shell_rows_table do |rows|
+      InstantRecord.sync(rows)
+      records = [
+        { type: "ShellRow", attributes: { "id" => "a", "amount" => "12.50", "data" => { "n" => BigDecimal("1.50") } } },
+        { type: "ShellRow", attributes: { "id" => "b", "amount" => "-7.0", "data" => [BigDecimal("-2")] } }
+      ]
+
+      stored = read_shell(records) { |db| db.execute("SELECT amount, typeof(amount), data FROM shell_rows ORDER BY id") }
+      assert_equal [[12.5, "real", '{"n":"1.5"}'], [-7, "integer", '["-2.0"]']], stored
+    end
+  end
+
+  test "a snapshot of a model with a decimal column builds" do
+    with_shell_rows_table do |rows|
+      InstantRecord.sync(rows)
+      rows.connection.add_column :shell_rows, :server_version, :integer, default: 0
+      rows.reset_column_information
+      rows.create!(id: "a", amount: "12.5")
+
+      shell = InstantRecord::Shell.build(partition: "rows", revision: 1, models: [rows], identity_key: nil) do
+        { cursor: 1, records: InstantRecord.record_payloads(rows.all) }
+      end
+      database = SQLite3::Database.new(shell.path)
+      assert_equal 12.5, database.get_first_value("SELECT amount FROM shell_rows")
+    ensure
+      database&.close
+    end
+  end
+
   test "a record that cannot be written raises and leaves no file behind" do
     InstantRecord.sync(syncable_model("BrokenItem"))
     good = { type: "BrokenItem", attributes: { "id" => "a", "created_at" => "2026-01-01T00:00:00Z", "updated_at" => "2026-01-01T00:00:00Z" } }
@@ -432,6 +499,7 @@ class ShellTest < ActiveSupport::TestCase
         t.json :data
         t.date :day
         t.float :ratio
+        t.decimal :amount
         t.bigint :big
         t.binary :bytes
         t.datetime :at

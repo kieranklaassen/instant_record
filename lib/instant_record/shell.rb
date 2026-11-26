@@ -453,11 +453,15 @@ module InstantRecord
         Time.parse(value.to_s).utc.strftime(DB_TIME)
       end
 
+      # A client's adapter writes a decimal as a double, and the wire sends it
+      # null for one that is not finite.
       def sqlite_value(value)
         case value
+        when String then value # most values are one
         when true then 1
         when false then 0
         when Hash, Array then JSON.generate(value)
+        when BigDecimal then (value.to_f if value.finite?)
         else value
         end
       end
