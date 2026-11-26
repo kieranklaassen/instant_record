@@ -1,0 +1,6 @@
+# The native host's two calls (native_shim.c). EntryBuilder declares the module in
+# main_native.rb, after Roundhouse has compiled the host adapter that calls it.
+module NativeHost
+  def self.ir_host_take: (String name) -> String
+  def self.ir_host_give: (String name, String body) -> nil
+end

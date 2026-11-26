@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- **A partitioned island compiles for iOS with current Roundhouse and Spinel.** The native host's two calls are declared for Roundhouse (`sig/instant_record/native_host.rbs`), a compiled `sync_partition` reads its column by Symbol, a request's dispatch is captured in a method of its own, and the native host tests an unset id without `blank?`.
+- **A synced table's foreign key to a table that does not sync is left out of the compiled app's schema.** SQLite on the device enforces foreign keys, and refused a synced row whose parent it never receives. The server keeps every constraint.
+
 ## 0.3.0 (2026-11-23)
 
 ### Sync Engine, Conflict Resolution, and Local Data

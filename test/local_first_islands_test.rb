@@ -102,6 +102,27 @@ class LocalFirstIslandsTest < ActiveSupport::TestCase
     end
   end
 
+  test "a synced table keeps its foreign keys to synced tables only, and the app's own schema keeps them all" do
+    Dir.mktmpdir do |dir|
+      app_root = File.join(dir, "monolith")
+      build_monolith_fixture(app_root)
+      schema = File.join(app_root, "db/schema.rb")
+      synced = %(  add_foreign_key "comments", "tasks", on_delete: :cascade\n)
+      outside = %(  add_foreign_key "invoices", "stripe_customers"\n  add_foreign_key "invoices", "tasks"\n)
+      unfilled = %(  add_foreign_key "tasks", "stripe_customers", column: "payer_id"\n  add_foreign_key "comments", "invoices"\n)
+      bare = File.read(schema)
+      whole = bare.sub(/^end\s*\z/, "#{synced}#{unfilled}#{outside}end\n")
+      refute_equal bare, whole
+      File.write(schema, whole)
+
+      staged = File.join(dir, "staged")
+      InstantRecord::Compiler::AppStage.stage(source: app_root, target: staged)
+
+      assert_equal bare.sub(/^end\s*\z/, "#{synced}#{outside}end\n"), File.read(File.join(staged, "db/schema.rb"))
+      assert_equal whole, File.read(schema)
+    end
+  end
+
   test "supports named islands, STI and computed-partial include overrides via routes DSL and config/instant_record.yml" do
     Dir.mktmpdir do |dir|
       app_root = File.join(dir, "monolith")

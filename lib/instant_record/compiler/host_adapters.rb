@@ -76,7 +76,7 @@ module InstantRecord
           File.write(File.join(app_dir, "lib/instant_record/native.rb"), NATIVE_SEAM)
 
           FileUtils.mkdir_p(File.join(app_dir, "sig/instant_record"))
-          %w[native.rbs inertia.rbs].each do |rbs|
+          signatures.each do |rbs|
             FileUtils.cp(
               File.join(gem_src, "sig/instant_record", rbs),
               File.join(app_dir, "sig/instant_record", rbs)
@@ -86,6 +86,8 @@ module InstantRecord
           adapt_compiled_mutate_signatures(app_dir)
           adapt_sync_actions(app_dir)
         end
+
+        def signatures = %w[native.rbs inertia.rbs]
 
         private
 
@@ -321,9 +323,11 @@ module InstantRecord
 
               def discover_syncable_models = []
 
-              # Compiled models initialize a new record's id to "", not nil.
+              # Compiled models initialize a new record's id to "", not nil. EntryBuilder
+              # puts this source where Roundhouse's output was, and Spinel's String has
+              # no `blank?` of its own.
               def blank_id?(id)
-                id.blank?
+                id.to_s.empty?
               end
 
               def read_channel(name)
@@ -341,6 +345,7 @@ module InstantRecord
 
         def target = :native
         def host_source = HOST_SOURCE
+        def signatures = %w[native.rbs inertia.rbs native_host.rbs]
       end
 
       # Demo-specific seams isolated from GemVendor core vendoring. Ruby edits use

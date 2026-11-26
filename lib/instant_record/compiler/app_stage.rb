@@ -44,6 +44,8 @@ module InstantRecord
         Gemfile config/application.rb config/routes.rb config/importmap.rb db/schema.rb
       ].freeze
 
+      FOREIGN_KEY = /^[ \t]*add_foreign_key\s+["'](\w+)["'],\s*["'](\w+)["'].*\n?/
+
       StageResult = Struct.new(:manifest, :route_analysis, :trace, :overrides, keyword_init: true)
 
       module_function
@@ -146,6 +148,7 @@ module InstantRecord
         unless target_path.join("db/schema.rb").file?
           raise BuildError, "The compiled app needs db/schema.rb. Run bin/rails db:migrate and db:schema:dump first."
         end
+        drop_foreign_keys_to_unsynced_tables(target_path.join("db/schema.rb"), analysis.manifest)
 
         if manifest_path
           FileUtils.mkdir_p(File.dirname(manifest_path))
@@ -154,6 +157,20 @@ module InstantRecord
 
         analysis
       end
+
+      # SQLite on the device enforces foreign keys, but only synced tables are filled
+      # there: a synced row that names a row of another table would be refused. The
+      # server keeps every constraint.
+      def drop_foreign_keys_to_unsynced_tables(schema, manifest)
+        synced = manifest.models.map { |entry| entry["table"] }
+        source = schema.read
+        kept = source.gsub(FOREIGN_KEY) do |line|
+          from, to = Regexp.last_match.captures
+          synced.include?(from) && !synced.include?(to) ? "" : line
+        end
+        schema.write(kept) unless kept == source
+      end
+      private_class_method :drop_foreign_keys_to_unsynced_tables
 
       def copy_file_if_present(source_path, target_path, rel)
         src_root = source_path.realpath.to_s

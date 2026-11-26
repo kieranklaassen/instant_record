@@ -52,8 +52,9 @@ module InstantRecord
       text.empty? ? nil : "#{@name}:#{text}"
     end
 
+    # A compiled model's `[]` takes a Symbol only.
     def change_partition_for(record)
-      change_key(record[@column])
+      change_key(record[@column.to_sym])
     end
 
     def scope_relation(relation, value)

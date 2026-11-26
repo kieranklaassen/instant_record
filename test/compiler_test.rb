@@ -776,6 +776,14 @@ class CompilerTest < ActiveSupport::TestCase
       assert File.file?(output.join("service-worker.js"))
       assert File.file?(output.join("assets/turbo.min.js"))
       assert_equal 1, Dir.glob(output.join("app-*.wasm").to_s).size
+
+      # The staged schema loses a foreign key to a table that does not sync. A server's shells are
+      # named by its own schema, so the fingerprint is that one's.
+      staged_schema = Dir.glob(File.join(app_root, "tmp/instant_record/compiled/**/app-src/db/schema.rb"), File::FNM_DOTMATCH).first
+      refute_includes File.read(staged_schema), "add_foreign_key"
+      entry = Dir.glob(File.join(app_root, "tmp/instant_record/compiled/**/emit/main_wasm.rb"), File::FNM_DOTMATCH).first
+      fingerprint = InstantRecord::Shell.fingerprint(models: ["Task"], schema_path: File.join(app_root, "db/schema.rb"))
+      assert_includes File.read(entry), "fingerprint: \"#{fingerprint}\""
       refute File.exist?(Pathname(app_root).join("tmp/instant_record/compiled/pipeline")), "pipeline scripts should not be copied into tmp/"
 
       index_html = output.join("index.html").read
@@ -941,6 +949,7 @@ class CompilerTest < ActiveSupport::TestCase
     File.write(File.join(app_root, "app/javascript/controllers/tasks_controller.js"), "export default {}\n")
     File.write(File.join(app_root, "db/schema.rb"), <<~RUBY)
       ActiveRecord::Schema[8.1].define(version: 2026_11_20_000001) do
+        add_foreign_key "tasks", "users"
       end
     RUBY
     File.write(File.join(app_root, "db/migrate/20261120000001_create_tasks.rb"), <<~RUBY)

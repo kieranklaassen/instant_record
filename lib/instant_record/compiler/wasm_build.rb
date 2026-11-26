@@ -251,7 +251,7 @@ module InstantRecord
 
         shell_fingerprint = InstantRecord::Shell.fingerprint(
           models: EntryBuilder.app_models(manifest: manifest, models: @models),
-          schema_path: File.join(app, "db/schema.rb")
+          schema_path: File.join(@source_root, "db/schema.rb")
         )
 
         tree = File.join(@build_dir, "wasm-tree")
@@ -284,6 +284,7 @@ module InstantRecord
           File.join(@workspace, "web/package-lock.json"),
           File.join(@gem_root, "lib/instant_record.rb"),
           File.join(@gem_root, "sig/instant_record/native.rbs"),
+          File.join(@gem_root, "sig/instant_record/native_host.rbs"),
           File.join(@gem_root, "sig/instant_record/inertia.rbs")
         ].select { |p| File.file?(p) }
 
