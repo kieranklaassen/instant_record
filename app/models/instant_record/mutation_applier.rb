@@ -298,7 +298,8 @@ module InstantRecord
 
         permit!(model) if record
         applied_hlc = resolve_incoming_hlc(server_now)
-        record&.destroy!
+        cascaded = record ? cascaded_destroys(record) { record.destroy! } : []
+        cascaded.each { |other| other.send(:record_server_change, "destroy") }
         HLC.receive(applied_hlc, now: server_now, node: HLC::SERVER_NODE)
         log_destroy(model, record, hlc: applied_hlc)
         { status: "applied" }
@@ -670,6 +671,23 @@ module InstantRecord
       )
       HLC.set_change_hlc(change.id, hlc)
       HLC.delete_record_hlc(model.name, @mutation[:record_id])
+    end
+
+    # The other synced records that destroying `target` took with it
+    # (`dependent: :destroy`), in the order they went. They are logged once all
+    # are gone, not as each one goes: the log takes the server clock's row, and
+    # an edit of a later child would hold that child while it waits for it.
+    def cascaded_destroys(target)
+      previous = ActiveSupport::IsolatedExecutionState[:instant_record_cascaded_destroys]
+      events = []
+      ActiveSupport::IsolatedExecutionState[:instant_record_cascaded_destroys] = events
+      yield
+      # A callback may destroy a row in a savepoint it undoes, or create it
+      # again: the last event that stands says whether the row is gone.
+      last = events.reject { |event| event[:undone] }.reverse.uniq { |event| [event[:row].class, event[:row].id] }.reverse
+      last.filter_map { |event| event[:row] if event[:gone] && event[:row] != target }
+    ensure
+      ActiveSupport::IsolatedExecutionState[:instant_record_cascaded_destroys] = previous
     end
 
     # The server's row as the sender may see it, for a client to roll back to.
