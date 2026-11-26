@@ -141,67 +141,18 @@ module InstantRecord
 
       private
 
-      def validate_fields!(node, expected_fields, path)
-        by_name = expected_fields.each_with_object({}) { |field, map| map[field.name] = field }
+      def validate_fields!(node, expected_fields, path, by_name = index_fields(expected_fields))
         seen = {}
 
         node.children.each do |child|
-          case child.kind
-          when "prop"
-            name = child.props["name"].to_s
-            field = by_name[name]
-            unless field
-              raise ContractError, "#{path}: undeclared prop #{name.inspect}"
+          field =
+            case child.kind
+            when "prop" then validate_prop!(child, by_name, path)
+            when "record" then validate_record!(child, by_name, path)
+            when "props" then validate_list!(child, by_name, path)
+            else raise ContractError, "#{path}: unexpected child node kind #{child.kind.inspect}"
             end
-            unless field.scalar?
-              raise ContractError, "#{path}.#{name}: expected #{field.kind} but emitted scalar prop"
-            end
-            actual_type = child.props["type"].to_s
-            unless actual_type == field.type
-              raise ContractError, "#{path}.#{name}: expected type #{field.type.inspect}, got #{actual_type.inspect}"
-            end
-            seen[name] = true
-          when "record"
-            name = child.props["name"].to_s
-            field = by_name[name]
-            unless field
-              raise ContractError, "#{path}: undeclared nested record #{name.inspect}"
-            end
-            unless field.one?
-              raise ContractError, "#{path}.#{name}: expected #{field.kind} but emitted nested record"
-            end
-            validate_fields!(child, field.fields, "#{path}.#{name}")
-            seen[name] = true
-          when "props"
-            name = child.props["name"].to_s
-            field = by_name[name]
-            unless field
-              raise ContractError, "#{path}: undeclared list prop #{name.inspect}"
-            end
-            if field.many?
-              child.children.each_with_index do |item, index|
-                unless item.kind == "record"
-                  raise ContractError, "#{path}.#{name}[#{index}]: expected record item, got #{item.kind.inspect}"
-                end
-                validate_fields!(item, field.fields, "#{path}.#{name}[#{index}]")
-              end
-            elsif field.many_scalar?
-              child.children.each_with_index do |item, index|
-                unless item.kind == "prop"
-                  raise ContractError, "#{path}.#{name}[#{index}]: expected scalar prop item, got #{item.kind.inspect}"
-                end
-                actual_type = item.props["type"].to_s
-                unless actual_type == field.type
-                  raise ContractError, "#{path}.#{name}[#{index}]: expected type #{field.type.inspect}, got #{actual_type.inspect}"
-                end
-              end
-            else
-              raise ContractError, "#{path}.#{name}: expected #{field.kind} but emitted list"
-            end
-            seen[name] = true
-          else
-            raise ContractError, "#{path}: unexpected child node kind #{child.kind.inspect}"
-          end
+          seen[field.name] = true
         end
 
         expected_fields.each do |field|
@@ -209,6 +160,60 @@ module InstantRecord
 
           raise ContractError, "#{path}: missing required prop #{field.name.inspect} (#{field.kind == :scalar ? field.type : field.kind})"
         end
+      end
+
+      def validate_prop!(node, by_name, path)
+        field = declared_field!(node, by_name, path, "prop".freeze)
+        raise ContractError, "#{path}.#{field.name}: expected #{field.kind} but emitted scalar prop" unless field.scalar?
+
+        validate_type!(node, field) { "#{path}.#{field.name}" }
+        field
+      end
+
+      def validate_record!(node, by_name, path)
+        field = declared_field!(node, by_name, path, "nested record".freeze)
+        field_path = "#{path}.#{field.name}"
+        raise ContractError, "#{field_path}: expected #{field.kind} but emitted nested record" unless field.one?
+
+        validate_fields!(node, field.fields, field_path)
+        field
+      end
+
+      def validate_list!(node, by_name, path)
+        field = declared_field!(node, by_name, path, "list prop".freeze)
+        field_path = "#{path}.#{field.name}"
+        raise ContractError, "#{field_path}: expected #{field.kind} but emitted list" unless field.many? || field.many_scalar?
+
+        by_item_name = nil
+        node.children.each_with_index do |item, index|
+          if field.many?
+            raise ContractError, "#{field_path}[#{index}]: expected record item, got #{item.kind.inspect}" unless item.kind == "record"
+
+            by_item_name ||= index_fields(field.fields)
+            validate_fields!(item, field.fields, "#{field_path}[#{index}]", by_item_name)
+          else
+            raise ContractError, "#{field_path}[#{index}]: expected scalar prop item, got #{item.kind.inspect}" unless item.kind == "prop"
+
+            validate_type!(item, field) { "#{field_path}[#{index}]" }
+          end
+        end
+        field
+      end
+
+      def index_fields(fields)
+        fields.each_with_object({}) { |field, map| map[field.name] = field }
+      end
+
+      def declared_field!(node, by_name, path, label)
+        name = node.props["name"].to_s
+        by_name[name] || raise(ContractError, "#{path}: undeclared #{label} #{name.inspect}")
+      end
+
+      def validate_type!(node, field)
+        actual_type = node.props["type"].to_s
+        return if actual_type == field.type
+
+        raise ContractError, "#{yield}: expected type #{field.type.inspect}, got #{actual_type.inspect}"
       end
     end
 
