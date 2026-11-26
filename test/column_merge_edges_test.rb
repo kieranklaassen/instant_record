@@ -457,7 +457,10 @@ class ColumnMergeEdgesTest < Minitest::Test
 
     lose_history("r-1")
     assert_equal 1, merge_reads { update(model, { "state" => "x" }, hlc: client_hlc(3)) }.size
-    assert_empty merge_reads { update(model, { "state" => "x" }, hlc: client_hlc(3), base_version: 0) }
+    # Without a base version, the log says only whether the client created the record.
+    created = merge_reads { update(model, { "state" => "x" }, hlc: client_hlc(3), base_version: 0) }
+    assert_match(/"operation" = .* ORDER BY .*"id" DESC LIMIT/, created.first)
+    assert_equal 1, created.size
   end
 
   # --- Union: comma-separated strings ----------------------------------------
