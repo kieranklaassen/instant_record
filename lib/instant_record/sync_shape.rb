@@ -6,6 +6,13 @@ module InstantRecord
   class SyncShape
     attr_reader :model, :limit, :min_limit, :max_limit, :fill_page_size, :fill_budget_bytes
 
+    # Whether a keyset page must also say `created_at <= before`, which its own
+    # condition already means. SQLite takes that range from the condition's OR.
+    # PostgreSQL does not, and reads every newer row before the page's first.
+    def self.needs_range?(model)
+      model.connection_pool.with_connection { |connection| connection.adapter_name != "SQLite" }
+    end
+
     def initialize(model, limit: 50, min_limit: 1, max_limit: 200, roots: nil, include: nil,
                    search: nil, lookup: nil, background_fill: false, fill_page_size: nil, fill_budget_bytes: nil)
       unless limit.is_a?(Integer) && limit.positive?
@@ -59,6 +66,7 @@ module InstantRecord
       end
       if before_at && before_id.present?
         relation = relation.where("created_at < :at OR (created_at = :at AND #{pk} < :id)", at: before_at, id: before_id)
+        relation = relation.where("created_at <= ?", before_at) if self.class.needs_range?(@model)
       end
 
       fetched = relation.order(created_at: :desc, pk => :desc).limit(size + 1).to_a

@@ -59,7 +59,99 @@ class RecordsControllerTest < Minitest::Test
     assert_empty forbidden_page.fetch("records")
   end
 
+  def test_window_pages_walk_every_row_once_through_rows_of_one_instant
+    model = syncable_model("TiedMessage") { sync_window limit: 2, partition_by: :state }
+    InstantRecord.sync(model)
+    create_tied_rows(model)
+
+    assert_equal TIED_IDS, walk("TiedMessage", partition: "open", limit: 2)
+    assert_equal TIED_IDS, on_postgresql(model) { walk("TiedMessage", partition: "open", limit: 2) }
+  end
+
+  def test_shape_pages_walk_every_row_once_through_rows_of_one_instant
+    model = syncable_model("TiedShape") { sync_shape limit: 2, roots: -> { where(state: "open") } }
+    InstantRecord.sync(model)
+    create_tied_rows(model)
+
+    assert_equal TIED_IDS, walk("TiedShape", partition: nil, limit: 2)
+    assert_equal TIED_IDS, on_postgresql(model) { walk("TiedShape", partition: nil, limit: 2) }
+  end
+
+  def test_pages_bound_created_at_where_the_database_takes_no_range_from_an_or
+    window = syncable_model("BoundWindow") { sync_window limit: 2, partition_by: :state }
+    shape = syncable_model("BoundShape") { sync_shape limit: 2 }
+    InstantRecord.sync(window, shape)
+    create_tied_rows(window)
+
+    [window, shape].each do |model|
+      on_sqlite = page_sql { walk(model.name, partition: "open", limit: 2) }
+      bounded = on_postgresql(model) { page_sql { walk(model.name, partition: "open", limit: 2) } }
+
+      assert_operator on_sqlite.size, :>, 1
+      assert_equal on_sqlite.size, bounded.size
+      on_sqlite.each { |sql| refute_match(/created_at"? <= /, sql) }
+      bounded.each { |sql| assert_match(/created_at"? <= /, sql) }
+    end
+  end
+
+  def test_a_page_asks_for_the_database_without_keeping_a_connection
+    model = syncable_model("LeasedShape") { sync_shape limit: 2 }
+    pool = model.connection_pool
+    pool.release_connection
+
+    refute InstantRecord::SyncShape.needs_range?(model)
+    refute pool.active_connection?
+  end
+
+  TIED_AT = Time.utc(2026, 11, 20, 12)
+  TIED_IDS = %w[n-2 n-1 t-5 t-4 t-3 t-2 t-1 o-2 o-1].freeze
+
   private
+
+  def create_tied_rows(model)
+    on_server do
+      2.times { |i| create_row(model, "n-#{i + 1}", state: "open", at: TIED_AT + 1 + i) }
+      5.times { |i| create_row(model, "t-#{i + 1}", state: "open", at: TIED_AT) }
+      2.times { |i| create_row(model, "o-#{i + 1}", state: "open", at: TIED_AT - 2 + i) }
+      create_row(model, "elsewhere", state: "closed", at: TIED_AT)
+    end
+  end
+
+  # Every id the pages give, newest first, following each page's cursor.
+  def walk(type, partition:, limit:)
+    at = TIED_AT + 60
+    id = "zzz"
+    ids = []
+    loop do
+      page = fetch_records(type: type, partition: partition, before_at: at, before_id: id, scope: nil, limit: limit)
+      ids.concat(page.fetch("records").map { |record| record.fetch("id") })
+      return ids unless page.fetch("has_more")
+
+      at = Time.zone.parse(page.dig("next_before", "created_at"))
+      id = page.dig("next_before", "id")
+    end
+  end
+
+  # The connection says it is PostgreSQL's for the block; the SQL asked of it
+  # is SQL both databases take.
+  def on_postgresql(model)
+    connection = model.connection
+    connection.define_singleton_method(:adapter_name) { "PostgreSQL" }
+    yield
+  ensure
+    connection.singleton_class.send(:remove_method, :adapter_name)
+  end
+
+  def page_sql
+    seen = []
+    subscriber = ActiveSupport::Notifications.subscribe("sql.active_record") do |*, payload|
+      seen << payload[:sql] if payload[:sql].match?(/FROM "items".*ORDER BY/)
+    end
+    yield
+    seen
+  ensure
+    ActiveSupport::Notifications.unsubscribe(subscriber)
+  end
 
   def create_row(model, id, state:, at:, owner: nil)
     model.create!(id: id, title: id, state: state, owner: owner, created_at: at, updated_at: at)
