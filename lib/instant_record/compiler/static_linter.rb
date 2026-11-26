@@ -359,7 +359,7 @@ module InstantRecord
         outer_helpers = @empty_hash_helpers
 
         @in_screen ||= screen_superclass?(node.superclass)
-        @empty_hash_helpers = @in_screen ? collect_empty_hash_helpers(node.body) : Set.new
+        @empty_hash_helpers = @in_screen ? collect_empty_hash_helpers(node) : Set.new
         walk_namespace(node)
 
         @in_screen = outer_screen
@@ -396,8 +396,16 @@ module InstantRecord
 
       # The single statement in a method body or a pair of parentheses, else nil.
       def only_statement(node)
-        statements = node.body&.body
-        statements.first if statements&.length == 1
+        statements = body_statements(node)
+        statements.first if statements.length == 1
+      end
+
+      # The statements in a class body, a method body or a pair of parentheses. A
+      # body with a rescue or ensure keeps its own statements one level deeper.
+      def body_statements(node)
+        body = node.body
+        body = body.statements if body.is_a?(Prism::BeginNode)
+        body.is_a?(Prism::StatementsNode) ? body.body : []
       end
 
       # --- Rule 1: >31-bit integer literals & constant expressions ---
@@ -504,11 +512,9 @@ module InstantRecord
         %w[InstantRecord::Native::Screen Native::Screen Screen].include?(name)
       end
 
-      def collect_empty_hash_helpers(body)
+      def collect_empty_hash_helpers(class_node)
         helpers = Set.new
-        return helpers unless body
-
-        body.body.each do |stmt|
+        body_statements(class_node).each do |stmt|
           next unless stmt.is_a?(Prism::DefNode) && stmt.receiver.nil? && stmt.parameters.nil?
 
           helpers.add(stmt.name) if empty_hash_literal?(only_statement(stmt))
