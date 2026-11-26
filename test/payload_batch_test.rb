@@ -37,6 +37,14 @@ class PayloadBatchTest < Minitest::Test
     statements
   end
 
+  # How many rows of @open were asked for their `attributes`.
+  def columns_asked(&block)
+    calls = 0
+    method = ActiveRecord::AttributeMethods.instance_method(:attributes)
+    TracePoint.new(:call) { |trace| calls += 1 if trace.self.instance_of?(@open) }.enable(target: method, &block)
+    calls
+  end
+
   # What events_for did before it read clocks together.
   def one_by_one(changes, identity)
     changes.map do |change|
@@ -66,6 +74,84 @@ class PayloadBatchTest < Minitest::Test
     assert_equal "not a clock", batched[2][:hlc]
     assert HLC.valid?(batched[3][:hlc])
     assert_equal batched.to_json, InstantRecord.record_payloads(@open.order(:id)).to_json
+  end
+
+  # Rows of one query are read together. Each of these has a row that differs.
+  def test_a_relation_of_unlike_rows_is_the_single_payloads
+    extension = Module.new { def attributes = super.slice("id", "title").merge("extra" => 1) }
+    # A saved change leaves a row's attributes in another order.
+    reorder = lambda do |record|
+      next unless record.id.to_s.end_with?("-2")
+
+      record.state = "closed"
+      record.send(:clear_changes_information)
+    end
+    models = {
+      "answers for its attributes" => syncable_model { def attributes = super.except("owner").merge("extra" => 1) },
+      "answers for one attribute" => syncable_model { def _read_attribute(name, &block) = name == "title" ? "other" : super },
+      "has other readers" => syncable_model { def title = "reader" },
+      "has a virtual attribute" => syncable_model { attribute :virtual, :integer, default: 7 },
+      "extends one row" => syncable_model { after_find { extend(extension) if id.end_with?("-0") } },
+      "extends another row" => syncable_model { after_find { extend(extension) if id.end_with?("-2") } },
+      "reorders one row as it is found" => syncable_model { after_find { reorder.call(self) } },
+      "reorders one row as it is made" => syncable_model { after_initialize { reorder.call(self) } }
+    }
+    seed(@open, 4)
+
+    models.each do |how, model|
+      singles = model.order(:id).map { |record| InstantRecord.record_payload(record) }
+      assert_equal singles.to_json, InstantRecord.record_payloads(model.order(:id)).to_json, how
+      assert_equal singles.to_json, InstantRecord.record_payloads(model.order(:id).load).to_json, how
+    end
+
+    loaded = @open.order(:id).load
+    reorder.call(loaded.to_a[2])
+    assert_equal loaded.map { |record| InstantRecord.record_payload(record) }.to_json, InstantRecord.record_payloads(loaded).to_json
+  end
+
+  def test_an_extended_relation_is_the_single_payloads
+    hiding = Module.new { def attributes = super.except("owner") }
+    extension = Module.new do
+      define_method(:records) { super().each { |record| record.extend(hiding) if record.id.end_with?("-2") } }
+    end
+    seed(@open, 4)
+
+    rows = @open.order(:id).extending(extension)
+    singles = rows.spawn.map { |record| InstantRecord.record_payload(record) }
+
+    refute singles[2][:attributes].key?("owner")
+    assert_equal singles.to_json, InstantRecord.record_payloads(rows.spawn).to_json
+  end
+
+  # The output is the same either way, so this is what says the rows of a
+  # bootstrap are read by name.
+  def test_a_relation_asks_one_row_of_a_class_for_its_columns
+    seed(@open, 4)
+
+    assert_equal 1, columns_asked { InstantRecord.record_payloads(@open.order(:id)) }
+    assert_equal 4, columns_asked { InstantRecord.record_payloads(@open.order(:id).to_a) }
+    assert_equal 4, columns_asked { InstantRecord.record_payloads(@open.order(:id).load) }
+    assert_equal 1, columns_asked { get(InstantRecord::BootstrapsController, :show) }
+  end
+
+  def test_rows_of_several_classes_and_selections_are_the_single_payloads
+    base = syncable_model("Base") { self.inheritance_column = "state" }
+    wide = Class.new(base) { attribute :virtual, :integer, default: 3 }
+    narrow = Class.new(base) { def attributes = super.except("owner") }
+    classes = { "wide" => wide, "narrow" => narrow }
+    base.define_singleton_method(:find_sti_class) { |name| classes.fetch(name, base) }
+    seed(@open, 6)
+    @open.where(id: %w[open-1 open-4]).update_all(state: "wide")
+    @open.where(id: %w[open-2 open-5]).update_all(state: "narrow")
+
+    [
+      base.order(:id),
+      @open.order(:id).select(:id, :title, :server_version),
+      @open.order(:id).select("items.*", "1 + 1 AS two")
+    ].each do |rows|
+      singles = rows.spawn.map { |record| InstantRecord.record_payload(record) }
+      assert_equal singles.to_json, InstantRecord.record_payloads(rows.spawn).to_json
+    end
   end
 
   def test_events_are_the_single_events
