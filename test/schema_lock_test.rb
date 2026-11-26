@@ -6,6 +6,9 @@ require "tmpdir"
 
 class SchemaLockTest < ActiveSupport::TestCase
   GEM_ROOT = File.expand_path("..", __dir__)
+  V1 = 20261120000001
+  V2 = 20261120000002
+  V3 = 20261120000003
 
   teardown do
     InstantRecord.clear_outbox_upcasters!
@@ -211,7 +214,253 @@ class SchemaLockTest < ActiveSupport::TestCase
     end
   end
 
+  test "verify stops at a missing lockfile" do
+    in_app do |dir|
+      lock_path = File.join(dir, "db/instant_record_lock.json")
+      report = InstantRecord::Compiler.verify_schema(root: dir)
+
+      assert_equal lock_path, report.lock_path
+      assert_checks report, ["lockfile", :error, "missing #{lock_path} (run `bin/rails instant_record:schema:lock`)"]
+      assert_empty report.replayed_versions
+    end
+  end
+
+  test "verify stops at a lockfile it cannot use" do
+    in_app do |dir|
+      ["{", "[]", "null", '{"lockfile_version":2,"versions":[]}', '{"lockfile_version":1,"versions":{}}'].each do |content|
+        File.write(File.join(dir, "db/instant_record_lock.json"), content)
+        report = InstantRecord::Compiler.verify_schema(root: dir)
+
+        assert_checks report, ["lockfile", :error, "invalid or unsupported lockfile format"]
+        assert_empty report.replayed_versions
+      end
+    end
+  end
+
+  test "verify stops when the migrations cannot be planned" do
+    in_app do |dir|
+      InstantRecord::Compiler.lock_schema(root: dir)
+      schema_path = File.join(dir, "db/schema.rb")
+      File.delete(schema_path)
+      report = InstantRecord::Compiler.verify_schema(root: dir)
+
+      assert_checks report,
+        ["lockfile", :ok, "v1 (1 versions)"],
+        ["migrations plan", :error, "Missing #{schema_path}"]
+      assert_empty report.replayed_versions
+    end
+  end
+
+  test "verify reports a stale schema version and unrecorded migration, then stops before replay" do
+    in_app do |dir|
+      InstantRecord::Compiler.lock_schema(root: dir)
+      add_migration_v2(dir)
+      report = InstantRecord::Compiler.verify_schema(root: dir)
+
+      assert_checks report,
+        ["lockfile", :ok, "v1 (1 versions)"],
+        ["schema version", :error, "lockfile is at #{V1}, db/schema.rb is at #{V2} (run `bin/rails instant_record:schema:lock`)"],
+        ["migration history", :error, "migration #{V2} is not recorded in db/instant_record_lock.json (run `bin/rails instant_record:schema:lock`)"]
+      assert_empty report.replayed_versions
+    end
+  end
+
+  test "a wrong schema version or baseline alone does not stop the replay" do
+    in_app do |dir|
+      InstantRecord::Compiler.lock_schema(root: dir)
+
+      edit_lock(dir) { |lock| lock["baseline"] = 5 }
+      report = InstantRecord::Compiler.verify_schema(root: dir)
+      assert_includes report.checks.map(&:to_a), ["schema baseline", :error, "lockfile baseline 5 differs from configured nil"]
+      assert_equal [V1], report.replayed_versions
+
+      edit_lock(dir) { |lock| lock["schema_version"] = 7 }
+      report = InstantRecord::Compiler.verify_schema(root: dir)
+      assert_equal ["lockfile", "schema version", "migration history", "fresh HEAD schema", "replay #{V1}"], report.checks.map(&:name)
+      assert_equal "0 step(s) -> 7, 1 pending outbox row(s) preserved & compatible", report.checks.last.detail
+    end
+  end
+
+  test "verify lists every drifted migration and stops before replay" do
+    in_app do |dir|
+      add_migration_v2(dir)
+      add_migration_v3(dir)
+      InstantRecord::Compiler.lock_schema(root: dir)
+      File.delete(File.join(dir, "db/migrate/#{V1}_create_notes.rb"))
+      FileUtils.mkdir_p(File.join(dir, "db/browser_migrate"))
+      File.write(File.join(dir, "db/browser_migrate/#{V2}_add_word_count_to_notes.sql"), "SELECT 1;")
+      edit_lock(dir) { |lock| lock["versions"].last["digest"] = "wrong" }
+      report = InstantRecord::Compiler.verify_schema(root: dir)
+
+      assert_checks report,
+        ["lockfile", :ok, "v1 (3 versions)"],
+        ["schema version", :ok, V3.to_s],
+        ["migration history", :error, "published migration #{V1} was deleted"],
+        ["migration history", :error, "published migration #{V2} changed; add a new migration instead"],
+        ["migration history", :error, "lockfile digest mismatch for migration #{V3}"]
+      assert_empty report.replayed_versions
+    end
+  end
+
+  test "a clean ladder reports every check in order" do
+    in_app do |dir|
+      add_migration_v2(dir)
+      InstantRecord::Compiler.lock_schema(root: dir)
+      report = InstantRecord::Compiler.verify_schema(root: dir)
+
+      assert_checks report,
+        ["lockfile", :ok, "v1 (2 versions)"],
+        ["schema version", :ok, V2.to_s],
+        ["migration history", :ok, "all 2 locked versions immutable and current"],
+        ["fresh HEAD schema", :ok, "1 table(s), PRAGMA integrity_check ok"],
+        ["replay #{V1}", :ok, "1 step(s) -> #{V2}, 1 pending outbox row(s) preserved & compatible"],
+        ["replay #{V2}", :ok, "0 step(s) -> #{V2}, 1 pending outbox row(s) preserved & compatible"]
+    end
+  end
+
+  test "a HEAD schema that cannot be built stops before any replay" do
+    in_app do |dir|
+      InstantRecord::Compiler.lock_schema(root: dir)
+      edit_lock(dir) { |lock| lock["baseline_schema_sql"] = ["CREATE TABLE notes (id varchar)"] }
+      report = InstantRecord::Compiler.verify_schema(root: dir)
+
+      assert_equal ["fresh HEAD schema", :error], report.checks.last.to_a.first(2)
+      assert_match(/\Amigration #{V1} failed inside transaction: table "notes" already exists/, report.checks.last.detail)
+      assert_empty report.replayed_versions
+    end
+  end
+
+  test "a failed replay does not stop the later ones" do
+    in_app do |dir|
+      add_sql_migration(dir, V2, 'ALTER TABLE "notes" ADD COLUMN "author" varchar NOT NULL;')
+      InstantRecord::Compiler.lock_schema(root: dir)
+      report = InstantRecord::Compiler.verify_schema(root: dir)
+
+      assert_match(/\Amigration #{V2} failed inside transaction: Cannot add a NOT NULL column/, replay(report, V1).detail)
+      assert_equal :ok, replay(report, V2).status
+      assert_equal [V1, V2], report.replayed_versions
+    end
+  end
+
+  test "replay reports lost and corrupted outbox rows" do
+    {
+      "DELETE FROM instant_record_outbox;" =>
+        /\Aupgrade from #{V2} lost 1 pending OutboxMutation row\(s\): replay-#{V2}-notes-create\z/,
+      "UPDATE instant_record_outbox SET changes_payload = '{';" =>
+        /\Aupgrade from #{V2} corrupted OutboxMutation replay-#{V2}-notes-create JSON: /,
+      "DROP TABLE instant_record_outbox;" =>
+        /\Aupgrade from #{V2} lost 1 pending OutboxMutation row\(s\)/
+    }.each do |sql, message|
+      in_app do |dir|
+        add_sql_migration(dir, V2, InstantRecord::Compiler::SchemaLock::OUTBOX_TABLE_DDL)
+        add_sql_migration(dir, V3, sql)
+        InstantRecord::Compiler.lock_schema(root: dir)
+        report = InstantRecord::Compiler.verify_schema(root: dir)
+
+        assert_equal :error, replay(report, V2).status
+        assert_match message, replay(report, V2).detail
+        assert_equal :ok, replay(report, V1).status
+      end
+    end
+  end
+
+  test "replay reports a schema that differs from HEAD" do
+    in_app do |dir|
+      InstantRecord::Compiler.lock_schema(root: dir)
+      {
+        [] => "upgrade from #{V1} is missing table \"notes\" present at HEAD",
+        ["CREATE TABLE notes (id varchar, title varchar, body text, server_version integer, sync_state varchar, created_at datetime, b_extra text, a_extra text)"] =>
+          "upgrade from #{V1} drifted on table \"notes\" (missing columns: updated_at; extra columns: a_extra, b_extra)"
+      }.each do |schema_sql, message|
+        edit_lock(dir) { |lock| lock["versions"].first["schema_sql"] = schema_sql }
+        report = InstantRecord::Compiler.verify_schema(root: dir)
+        assert_equal ["replay #{V1}", :error, message], report.checks.last.to_a
+      end
+    end
+  end
+
+  test "replay reports a failed integrity check" do
+    in_app do |dir|
+      add_sql_migration(dir, V2, "CREATE TABLE counts (id varchar, n integer CHECK (n >= 0));")
+      add_sql_migration(dir, V3, "PRAGMA ignore_check_constraints = ON; UPDATE counts SET n = -1; PRAGMA ignore_check_constraints = OFF;")
+      InstantRecord::Compiler.lock_schema(root: dir)
+      report = InstantRecord::Compiler.verify_schema(root: dir)
+
+      assert_equal "SQLite PRAGMA integrity_check failed: CHECK constraint failed in counts", replay(report, V2).detail
+      assert_equal :ok, replay(report, V1).status
+    end
+  end
+
+  test "a baseline with schema SQL is replayed before the locked versions" do
+    in_app do |dir|
+      add_migration_v2(dir)
+      lock = InstantRecord::Compiler.lock_schema(root: dir, baseline: V1)
+      assert_equal 1, lock["baseline_schema_sql"].size
+      report = InstantRecord::Compiler.verify_schema(root: dir, baseline: V1)
+
+      assert report.ok?, report.to_s
+      assert_equal [V1, V2], report.replayed_versions
+      assert_equal "1 step(s) -> #{V2}, 1 pending outbox row(s) preserved & compatible", replay(report, V1).detail
+    end
+  end
+
+  test "a baseline without schema SQL replays only the locked versions" do
+    in_app do |dir|
+      add_sql_migration(dir, V2, "CREATE TABLE tags (id varchar PRIMARY KEY);")
+      File.delete(File.join(dir, "db/migrate/#{V1}_create_notes.rb"))
+      lock = InstantRecord::Compiler.lock_schema(root: dir, baseline: V1)
+      refute lock.key?("baseline_schema_sql")
+      report = InstantRecord::Compiler.verify_schema(root: dir, baseline: V1)
+
+      assert report.ok?, report.to_s
+      assert_equal [V2], report.replayed_versions
+    end
+  end
+
+  test "a lockfile without versions builds HEAD and replays nothing" do
+    in_app do |dir|
+      InstantRecord::Compiler.lock_schema(root: dir, baseline: V1)
+      report = InstantRecord::Compiler.verify_schema(root: dir, baseline: V1)
+
+      assert_checks report,
+        ["lockfile", :ok, "v1 (0 versions)"],
+        ["schema version", :ok, V1.to_s],
+        ["migration history", :ok, "all 0 locked versions immutable and current"],
+        ["fresh HEAD schema", :ok, "1 table(s), PRAGMA integrity_check ok"]
+      assert_empty report.replayed_versions
+    end
+  end
+
   private
+
+  def in_app
+    Dir.mktmpdir do |dir|
+      setup_app_v1(dir)
+      yield dir
+    end
+  end
+
+  def assert_checks(report, *expected)
+    assert_equal expected, report.checks.map(&:to_a)
+  end
+
+  def replay(report, version)
+    report.checks.find { |check| check.name == "replay #{version}" }
+  end
+
+  def edit_lock(dir)
+    path = File.join(dir, "db/instant_record_lock.json")
+    lock = JSON.parse(File.read(path))
+    yield lock
+    File.write(path, JSON.generate(lock))
+  end
+
+  def add_sql_migration(dir, version, sql)
+    File.write(File.join(dir, "db/schema.rb"), "ActiveRecord::Schema[8.1].define(version: #{version}) do\nend\n")
+    File.write(File.join(dir, "db/migrate/#{version}_step.rb"), "class Step < ActiveRecord::Migration[8.1]\nend\n")
+    FileUtils.mkdir_p(File.join(dir, "db/browser_migrate"))
+    File.write(File.join(dir, "db/browser_migrate/#{version}_step.sql"), sql)
+  end
 
   def setup_app_v1(dir)
     FileUtils.mkdir_p(File.join(dir, "db/migrate"))
