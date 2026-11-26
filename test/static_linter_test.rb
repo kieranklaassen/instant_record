@@ -269,6 +269,105 @@ class StaticLinterTest < ActiveSupport::TestCase
     end
   end
 
+  test "a rescue or ensure on a Screen class or method changes no finding" do
+    template = <<~RUBY
+      class Guarded < Screen
+        def blank
+          {}
+          METHOD_GUARD
+        end
+
+        def two
+          b
+          {}
+          METHOD_GUARD
+        end
+
+        def empty
+          METHOD_GUARD
+        end
+
+        def body
+          row params: blank
+          row params: two
+          row params: empty
+          row params: {}
+          METHOD_GUARD
+        end
+        CLASS_GUARD
+      end
+      class Bare < Screen
+        CLASS_GUARD
+      end
+    RUBY
+    guards = ["", "rescue then nil", "ensure nil", "rescue then nil; else nil; ensure nil"]
+
+    Dir.mktmpdir do |dir|
+      guards.product(guards).each do |method_guard, class_guard|
+        File.write(File.join(dir, "guarded.rb"), template.gsub("METHOD_GUARD", method_guard).gsub("CLASS_GUARD", class_guard))
+
+        diagnostics = StaticLinter.lint(dir, staged: true).diagnostics
+        assert_equal [[18, 17], [21, 17]], diagnostics.map { |d| [d.line, d.column] }, "method: #{method_guard.inspect}, class: #{class_guard.inspect}"
+      end
+    end
+  end
+
+  test "lints code inside rescue and ensure clauses" do
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "clauses.rb"), <<~RUBY)
+        class Clauses < Screen
+          def body
+            row id: "1"
+          rescue
+            row params: {}
+          ensure
+            2**31
+          end
+        rescue
+          def late = {}
+          row params: late
+        ensure
+          InstantRecord::Engine
+        end
+      RUBY
+
+      diagnostics = StaticLinter.lint(dir, staged: true).diagnostics
+      assert_equal [[5, :untyped_screen_hash], [7, :integer_overflow], [13, :server_only_constant]], diagnostics.map { |d| [d.line, d.rule] }
+    end
+  end
+
+  test "one linter instance carries nothing from file to file or from run to run" do
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "app/screens"))
+      first = File.join(dir, "app/screens/first.rb")
+      second = File.join(dir, "second.rb")
+      File.write(first, <<~RUBY)
+        BIG = 1.gigabyte
+        empty = {}
+        row params: empty
+        server_only { SECRET = 1 }
+      RUBY
+      File.write(second, <<~RUBY)
+        BIG * 2
+        row params: {}
+        class Second < Screen
+          empty ||= param
+          row params: empty
+          SECRET
+        end
+      RUBY
+      linter = StaticLinter.new(root: dir, staged: true)
+      found = -> { linter.run.diagnostics.map { |d| [d.file, d.line, d.rule] } }
+
+      expected = [["app/screens/first.rb", 3, :untyped_screen_hash], ["second.rb", 6, :server_only_constant]]
+      assert_equal expected, found.call
+      assert_equal expected, found.call
+
+      File.write(first, "")
+      assert_empty found.call
+    end
+  end
+
   test "server_only references follow browser? branches, constant paths, and lookup order" do
     Dir.mktmpdir do |dir|
       File.write(File.join(dir, "doc.rb"), <<~RUBY)
