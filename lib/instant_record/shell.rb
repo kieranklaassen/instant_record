@@ -265,21 +265,11 @@ module InstantRecord
       # falling back to ActiveRecord connection introspection when no
       # db/schema.rb or portable migrations are present.
       def resolve_schema_ddl(app_root: default_app_root, migration_paths: nil)
-        if app_root && File.file?(File.join(app_root.to_s, "db/schema.rb"))
-          paths = migration_paths || default_migration_paths(app_root)
-          if paths.any? { |dir| File.directory?(dir) && Dir.glob("[0-9]*_*.rb", base: dir).any? }
-            begin
-              return Compiler::BrowserMigrations.schema_ddl(root: app_root.to_s, migration_paths: paths)
-            rescue Compiler::BuildError
-              # Fall back to live connection introspection if an app has a
-              # pre-baseline non-portable migration without a .sql companion.
-            end
-          end
-          version = extract_schema_version(File.join(app_root.to_s, "db/schema.rb"))
-          return { version: version, statements: connection_schema_statements }
-        end
+        schema_file = File.join(app_root.to_s, "db/schema.rb") if app_root
+        return { version: nil, statements: connection_schema_statements } unless schema_file && File.file?(schema_file)
 
-        { version: nil, statements: connection_schema_statements }
+        portable_schema_ddl(app_root, migration_paths || default_migration_paths(app_root)) ||
+          { version: extract_schema_version(schema_file), statements: connection_schema_statements }
       end
 
       private
@@ -412,11 +402,17 @@ module InstantRecord
         InsertPlan.new(model.table_name, model.column_names, of_type.(:datetime), of_type.(:date), {})
       end
 
-      # A row as the client's upsert would leave it: wire values with datetimes
-      # in the compiled runtime's format, server_version set, sync_state synced.
       def insert(database, record, plans)
         type = record[:type] || record["type"]
         plan = plans[type] ||= insert_plan(type)
+        attributes = row_attributes(record, plan)
+        statement = plan.statements[attributes.keys] ||= database.prepare(insert_sql(plan.table, attributes.keys))
+        statement.execute(attributes.values.map { |value| sqlite_value(value) })
+      end
+
+      # A row as the client's upsert would leave it: wire values with datetimes
+      # in the compiled runtime's format, server_version set, sync_state synced.
+      def row_attributes(record, plan)
         raw = record[:attributes] || record["attributes"] || {}
         attributes = raw.transform_keys(&:to_s).slice(*plan.names)
         if plan.names.include?("server_version")
@@ -433,13 +429,11 @@ module InstantRecord
           attributes[name] = value.iso8601 if value.is_a?(Date)
         end
 
-        statement = plan.statements[attributes.keys] ||= database.prepare(insert_sql(plan.table, attributes.keys))
-        statement.execute(attributes.values.map { |value| sqlite_value(value) })
+        attributes
       end
 
       def insert_sql(table, names)
-        columns = names.map { |name| %("#{name}") }.join(", ")
-        %(INSERT INTO "#{table}" (#{columns}) VALUES (#{(["?"] * names.size).join(", ")}))
+        %(INSERT INTO "#{table}" (#{quote_names(names)}) VALUES (#{(["?"] * names.size).join(", ")}))
       end
 
       def format_datetime(value)
@@ -530,6 +524,16 @@ module InstantRecord
 
       def sqlite_quote(text) = "'#{SQLite3::Database.quote(text)}'"
 
+      # Nil without migrations, or when an app has a pre-baseline non-portable
+      # migration without a .sql companion.
+      def portable_schema_ddl(app_root, paths)
+        return if paths.none? { |dir| File.directory?(dir) && Dir.glob("[0-9]*_*.rb", base: dir).any? }
+
+        Compiler::BrowserMigrations.schema_ddl(root: app_root.to_s, migration_paths: paths)
+      rescue Compiler::BuildError
+        nil
+      end
+
       def extract_schema_version(schema_path)
         match = File.read(schema_path).match(/\.define\s*\(\s*version:\s*([\d_]+)/)
         match ? Integer(match[1], 10) : nil
@@ -539,25 +543,29 @@ module InstantRecord
         connection = ActiveRecord::Base.connection
         (connection.tables - SERVER_TABLES).sort.flat_map do |table|
           keys = Array(connection.primary_key(table))
-          columns = connection.columns(table).map do |column|
-            sql = %("#{column.name}" #{SQLITE_TYPES.fetch(column.type, "text")})
-            sql << " NOT NULL" unless column.null
-            default = sqlite_default(connection, column)
-            # Left out, it would refuse every row that does not set the column.
-            default ||= connection.quote(column.default) if !column.null && column.default && !column.default_function
-            sql << " DEFAULT #{default}" if default
-            sql << " PRIMARY KEY AUTOINCREMENT" if keys == [column.name] && %i[integer bigint].include?(column.type)
-            sql
-          end
+          columns = connection.columns(table).map { |column| column_sql(connection, column, keys) }
           if keys.any? && columns.none? { |sql| sql.include?("AUTOINCREMENT") }
-            columns << "PRIMARY KEY (#{keys.map { |key| %("#{key}") }.join(", ")})"
+            columns << "PRIMARY KEY (#{quote_names(keys)})"
           end
           indexes = connection.indexes(table).select { |index| index.columns.is_a?(Array) && index.where.nil? }.map do |index|
-            %(CREATE #{"UNIQUE " if index.unique}INDEX "#{index.name}" ON "#{table}" (#{index.columns.map { |name| %("#{name}") }.join(", ")}))
+            %(CREATE #{"UNIQUE " if index.unique}INDEX "#{index.name}" ON "#{table}" (#{quote_names(index.columns)}))
           end
           [%(CREATE TABLE "#{table}" (#{columns.join(", ")})), *indexes]
         end
       end
+
+      def column_sql(connection, column, keys)
+        sql = %("#{column.name}" #{SQLITE_TYPES.fetch(column.type, "text")})
+        sql << " NOT NULL" unless column.null
+        default = sqlite_default(connection, column)
+        # Left out, it would refuse every row that does not set the column.
+        default ||= connection.quote(column.default) if !column.null && column.default && !column.default_function
+        sql << " DEFAULT #{default}" if default
+        sql << " PRIMARY KEY AUTOINCREMENT" if keys == [column.name] && %i[integer bigint].include?(column.type)
+        sql
+      end
+
+      def quote_names(names) = names.map { |name| %("#{name}") }.join(", ")
     end
 
     def initialize(path)
