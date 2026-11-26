@@ -355,6 +355,69 @@ class ShellTest < ActiveSupport::TestCase
     assert_equal 2, prepared.size
   end
 
+  test "the schema comes from portable migrations, or else from the connection" do
+    from_connection = InstantRecord::Shell.send(:connection_schema_statements)
+    resolve = ->(root, **options) { InstantRecord::Shell.resolve_schema_ddl(app_root: root, **options) }
+
+    Dir.mktmpdir do |dir|
+      assert_equal({ version: nil, statements: from_connection }, resolve.(nil))
+      assert_equal({ version: nil, statements: from_connection }, resolve.(dir))
+
+      migrations = File.join(dir, "db/migrate")
+      elsewhere = File.join(dir, "elsewhere")
+      FileUtils.mkdir_p([migrations, elsewhere])
+      schema = File.join(dir, "db/schema.rb")
+      File.write(schema, "ActiveRecord::Schema[8.1].define(version: 2026_11_21_000002) do\nend\n")
+      assert_equal({ version: 20261121000002, statements: from_connection }, resolve.(Pathname(dir)))
+
+      migration = File.join(migrations, "20261121000001_create_widgets.rb")
+      File.write(migration, "class CreateWidgets < ActiveRecord::Migration[8.1]\n  def change\n    create_table(:widgets, id: :string) { |t| t.string :name }\n  end\nend\n")
+      ported = resolve.(dir)
+      assert_equal 20261121000002, ported[:version]
+      assert_match(/\ACREATE TABLE "widgets"/, ported[:statements].sole)
+      assert_equal from_connection, resolve.(dir, migration_paths: [elsewhere])[:statements]
+
+      File.write(migration, "class CreateWidgets < ActiveRecord::Migration[8.1]\n  def change\n    raise 'not portable'\n  end\nend\n")
+      assert_raises(InstantRecord::Compiler::BuildError) { InstantRecord::Compiler::BrowserMigrations.schema_ddl(root: dir, migration_paths: [migrations]) }
+      assert_equal({ version: 20261121000002, statements: from_connection }, resolve.(dir))
+
+      File.write(schema, "# no version\n")
+      assert_equal({ version: nil, statements: from_connection }, resolve.(dir, migration_paths: [elsewhere]))
+    end
+  end
+
+  test "connection DDL carries keys and plain indexes" do
+    ActiveRecord::Base.transaction do
+      connection = ActiveRecord::Base.connection
+      connection.create_table(:shell_counted) do |t|
+        t.string :name, null: false
+        t.string :code
+        t.index [:name, :code], unique: true, name: "by_name_and_code"
+        t.index :code, name: "by_code"
+        t.index :name, name: "by_some", where: "code IS NOT NULL"
+        t.index "lower(name)", name: "by_lower"
+      end
+      connection.create_table(:shell_paired, primary_key: [:left, :right]) do |t|
+        t.string :left
+        t.integer :right
+      end
+      connection.create_table(:shell_keyless, id: false) { |t| t.integer :n }
+
+      statements = InstantRecord::Shell.send(:connection_schema_statements).grep(/shell_(counted|paired|keyless)/)
+      tables, indexes = statements.partition { |sql| sql.start_with?("CREATE TABLE") }
+      assert_equal [
+        'CREATE TABLE "shell_counted" ("id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "name" varchar NOT NULL, "code" varchar)',
+        'CREATE TABLE "shell_keyless" ("n" integer)',
+        'CREATE TABLE "shell_paired" ("left" varchar, "right" integer, PRIMARY KEY ("left", "right"))'
+      ], tables
+      assert_equal [
+        'CREATE INDEX "by_code" ON "shell_counted" ("code")',
+        'CREATE UNIQUE INDEX "by_name_and_code" ON "shell_counted" ("name", "code")'
+      ], indexes.sort
+      raise ActiveRecord::Rollback
+    end
+  end
+
   test "connection DDL keeps the defaults a SQLite table can hold" do
     ActiveRecord::Base.transaction do
       ActiveRecord::Base.connection.create_table :shell_defaults, id: :string do |t|
