@@ -78,6 +78,21 @@ class McpHttpExchangeTest < ActiveSupport::TestCase
     assert failing.any_offline?
   end
 
+  test "an answer that is not HTTP, does not unpack, or a refusing proxy is offline" do
+    errors = [
+      Net::HTTPBadResponse.new("wrong status line"),
+      Net::HTTPHeaderSyntaxError.new("wrong header"),
+      Net::HTTPClientException.new("403 Forbidden", nil),
+      Net::HTTPFatalError.new("502 Bad Gateway", nil),
+      Zlib::DataError.new("incorrect header check")
+    ]
+    errors.each do |error|
+      exchange = InstantRecord::Mcp::HttpExchange.new(adapter: ->(*) { raise error })
+      assert_equal "0\n", exchange.call("GET http://example.test/bootstrap\n"), error.class.name
+      assert_equal error.message, exchange.trace.last[:error]
+    end
+  end
+
   test "performs real loopback Net::HTTP GET and POST requests with auth headers" do
     received = []
     server = TCPServer.new("127.0.0.1", 0)

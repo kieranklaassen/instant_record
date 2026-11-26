@@ -1,6 +1,7 @@
 require "test_helper"
 require "instant_record/mcp"
 require "json"
+require "open3"
 require "stringio"
 
 # Pins what the MCP server writes, and what it asks of the runtime, message by
@@ -239,7 +240,59 @@ class McpServerProtocolTest < ActiveSupport::TestCase
     assert_equal result({}), pong
   end
 
+  test "each line is read as UTF-8 and answered in UTF-8, whatever the locale" do
+    message = JSON.generate(jsonrpc: "2.0", id: "é✓", method: "nopé")
+    answer = JSON.generate(jsonrpc: "2.0", id: "é✓", error: { code: -32601, message: "Method not found: nopé" })
+
+    [[{ "LC_ALL" => "C" }, []], [{}, %w[-E ISO-8859-1:UTF-8]], [{}, %w[-E UTF-8:ISO-8859-1]]].each do |env, flags|
+      script = <<~'RUBY'
+        require "instant_record/mcp"
+        runtime = Object.new
+        def runtime.status = raise("bad \u2713")
+        InstantRecord::Mcp::Server.new(runtime).run
+      RUBY
+      out, err, status = Open3.capture3(env, RbConfig.ruby, "-I", File.expand_path("../lib", __dir__), *flags, "-e", script,
+        stdin_data: "\xFF\n#{message}\n#{JSON.generate(tool_request('status', {}))}\n", binmode: true)
+
+      assert status.success?, "#{env} #{flags}: #{err}"
+      lines = out.force_encoding(Encoding::UTF_8).lines(chomp: true)
+      assert_equal [parse_error("invalid UTF-8"), answer, error(-32603, "bad ✓")], lines, "#{env} #{flags}"
+      assert_equal "[instant_record:mcp] RuntimeError: bad ✓\n".b, err
+    end
+  end
+
+  test "the streams keep their encodings once the server is done" do
+    input, client = IO.pipe
+    reader, output = IO.pipe
+    client.close
+    input.set_encoding("ISO-8859-1", "UTF-8")
+    output.set_encoding(nil)
+    before = [input, output].map { |io| [io.external_encoding, io.internal_encoding] }
+    InstantRecord::Mcp::Server.new(@runtime, input: input, output: output, err: nil).run
+    assert_equal before, [input, output].map { |io| [io.external_encoding, io.internal_encoding] }
+  ensure
+    [input, client, reader, output].each { |io| io&.close }
+  end
+
+  test "a line that is not valid UTF-8 is a parse error, and the next line is still read" do
+    ping = JSON.generate(request("ping"))
+    ["\xFF\n", "  \xC3\n", %({"jsonrpc":"2.0","id":1,"method":"\xE9"}\n)].each do |line|
+      assert_equal [parse_error("invalid UTF-8"), result({})], exchange_lines("#{line}#{ping}\n")
+    end
+  end
+
+  test "an error that is not valid UTF-8, or an id JSON cannot write, does not stop the server" do
+    @runtime = RecordingRuntime.new(RuntimeError.new("bad \xFF".b))
+    assert_equal [error(-32603, "bad \u{FFFD}"), result({})], exchange(tool_request("status", {}), request("ping"))
+
+    failed, pong = exchange_lines(%({"jsonrpc":"2.0","id":1e999,"method":"ping"}\n#{JSON.generate(request('ping'))}\n))
+    assert_equal [nil, -32603], [JSON.parse(failed)["id"], JSON.parse(failed).dig("error", "code")]
+    assert_equal result({}), pong
+  end
+
   private
+
+  def parse_error(reason) = error(-32700, "Parse error: #{reason}").sub('"id":1', '"id":null')
 
   def request(method, params: nil)
     { jsonrpc: "2.0", id: 1, method: method, params: params }.compact

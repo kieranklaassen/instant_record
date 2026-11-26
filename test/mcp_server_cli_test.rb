@@ -13,6 +13,7 @@ class McpServerCliTest < ActiveSupport::TestCase
   end
 
   teardown do
+    @runtimes&.each(&:close)
     FileUtils.remove_entry(@dir) if @dir && Dir.exist?(@dir)
   end
 
@@ -194,7 +195,68 @@ class McpServerCliTest < ActiveSupport::TestCase
     assert_equal 2, InstantRecord::Mcp::Cli.run(["bogus"], stdout: StringIO.new, stderr: StringIO.new)
   end
 
+  test "a sync that fails after a write leaves the write's result, its exit status and one queued write" do
+    commands = {
+      %w[action issues close --arg id=i-1 --sync] => ["instant_record_action", { screen: "issues", action: "close", args: { id: "i-1" }, sync: true }],
+      ["request", "POST", "/todo/issues", "--data", "issue[title]=Once", "--sync"] =>
+        ["instant_record_request", { method: "POST", path: "/todo/issues", body: "issue[title]=Once", sync: true }]
+    }
+    no_endpoint = "No sync endpoint configured. Pass endpoint or set INSTANT_RECORD_ENDPOINT."
+    failures = [
+      [nil, nil, no_endpoint],
+      ["http://sync.test", InstantRecord::Mcp::HostError.new("host failed"), "host failed"],
+      ["http://sync.test", InstantRecord::Mcp::HostCrashedError.new("host died"), "host died"],
+      ["http://sync.test", Errno::EPIPE.new, "Broken pipe"]
+    ]
+
+    failures.product(commands.to_a).each_with_index do |((endpoint, failure, message), (argv, (tool, arguments))), index|
+      runtime = failing_sync_runtime("cli#{index}", endpoint, failure)
+      out = StringIO.new
+      err = StringIO.new
+      code = InstantRecord::Mcp::Cli.run(argv, env: {}, stdout: out, stderr: err, runtime_factory: ->(_) { runtime })
+      assert_equal [0, ""], [code, err.string], "#{argv} #{message}"
+      assert_write_kept message, JSON.parse(out.string)
+
+      runtime = failing_sync_runtime("tool#{index}", endpoint, failure)
+      call = { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: tool, arguments: arguments } }
+      output = StringIO.new
+      InstantRecord::Mcp::Server.new(runtime, input: StringIO.new("#{JSON.generate(call)}\n"), output: output).run
+      response = JSON.parse(output.string)
+      assert_equal false, response.dig("result", "isError"), output.string
+      assert_write_kept message, parse_tool_json(response)
+      runtime.close
+    end
+  end
+
+  test "a sync on its own still raises, and a bug in a sync after a write is not hidden" do
+    assert_raises(ArgumentError) { failing_sync_runtime("alone", nil, nil).sync }
+
+    [NoMethodError, ArgumentError, TypeError].each do |bug|
+      runtime = failing_sync_runtime(bug.name, "http://sync.test", bug.new("bug"))
+      assert_raises(bug) { runtime.perform_action(screen: "issues", action: "close", sync: true) }
+      assert_raises(bug) { runtime.app_request(method: "POST", path: "/todo/issues", body: "issue[title]=Once", sync: true) }
+    end
+  end
+
   private
+
+  # A runtime on the real test host, whose "sync" entry raises `failure`.
+  def failing_sync_runtime(name, endpoint, failure)
+    host = InstantRecord::Mcp::HostProcess.new(binary: @host_bin, database: File.join(@dir, "#{name}.sqlite3"))
+    host.define_singleton_method(:call) do |entry, input = ""|
+      raise failure if failure && entry == "sync"
+
+      super(entry, input)
+    end
+    runtime = InstantRecord::Mcp::Runtime.new(database_path: host.database_path, endpoint: endpoint, host_process: host)
+    (@runtimes ||= []) << runtime
+    runtime
+  end
+
+  def assert_write_kept(message, data)
+    assert_equal [true, 1], data.values_at("ok", "pending"), data.inspect
+    assert_equal({ "ok" => false, "error" => message }, data["sync"])
+  end
 
   def parse_tool_json(response)
     JSON.parse(response.dig("result", "content", 0, "text"))
