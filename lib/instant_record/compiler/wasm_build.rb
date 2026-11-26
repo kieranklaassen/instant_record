@@ -46,6 +46,20 @@ module InstantRecord
         "WasmBridge.branch_replay"
       ].join(",").freeze
 
+      PRECOMPRESS_JS = <<~'JS'
+        const fs = require("fs"), path = require("path"), zlib = require("zlib");
+        const params = { [zlib.constants.BROTLI_PARAM_QUALITY]: 11, [zlib.constants.BROTLI_PARAM_LGWIN]: 24 };
+        for (const name of fs.readdirSync(process.argv[1], { recursive: true })) {
+          const file = path.join(process.argv[1], String(name));
+          if (!/\.(wasm|js|css|html|json|svg)$/.test(file) || !fs.statSync(file).isFile()) continue;
+          const body = fs.readFileSync(file);
+          if (body.length < 1024) continue;
+          const size = { [zlib.constants.BROTLI_PARAM_SIZE_HINT]: body.length };
+          fs.writeFileSync(file + ".br", zlib.brotliCompressSync(body, { params: { ...params, ...size } }));
+          fs.writeFileSync(file + ".gz", zlib.gzipSync(body, { level: 9 }));
+        }
+      JS
+
       SQLITE_CFLAGS = %w[
         -Oz -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_OMIT_WAL
         -DSQLITE_MAX_MMAP_SIZE=0 -DSQLITE_DEFAULT_SYNCHRONOUS=0 -DSQLITE_OMIT_DEPRECATED
@@ -657,7 +671,13 @@ module InstantRecord
         FileUtils.cp(shell_worker, File.join(dist, "service-worker.js")) if File.file?(shell_worker)
 
         inject_preloads(dist, app)
+        precompress(dist)
         [dist, digest]
+      end
+
+      # Copies for CompiledSite to serve. Node is already needed by the web build.
+      def precompress(dist)
+        @runner.run(["node", "-e", PRECOMPRESS_JS, dist], log: "precompress.log")
       end
 
       def copy_hotwire_assets(assets)
