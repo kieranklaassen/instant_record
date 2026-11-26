@@ -52,6 +52,13 @@ class ReachabilityTracerTest < ActiveSupport::TestCase
     ["false", "nil", "pick"].each { |value| assert_render "render layout: #{value}" }
   end
 
+  test "a render call spread over several lines is recorded at its first line" do
+    assert_render "render(\n  \"row\",\n  layout: \"card\"\n)", renders: [[:template, "row"]], layouts: ["card"]
+    assert_render "render(\n  partial: pick\n)", warnings: [PARTIAL_WARNING]
+    assert_render "render(\n  template: pick\n)", warnings: [TEMPLATE_WARNING]
+    assert_render "render(\n  row\n)", warnings: [EXPRESSION_WARNING]
+  end
+
   test "a name that is not valid text is taken as it is, and an option key that is not raises" do
     assert_render 'render "\xff", layout: "\xfe"', renders: [[:template, "\xff"]], layouts: ["\xfe"]
     assert_equal '"\u0000"', visit('render :"\0"').renders.first[:target].inspect

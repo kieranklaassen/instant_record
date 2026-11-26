@@ -76,7 +76,7 @@ module InstantRecord
         if @has_local_first
           local = @local_routes
           server = @server_routes + @overrides[:server_routes]
-          local_source = "Rails.application.routes.draw do\n#{indent_lines(emit_statements(body, false), 2)}end\n"
+          local_source = "Rails.application.routes.draw do\n#{indent_lines(emit_statements(body, false, []), 2)}end\n"
         else
           # Whole-app fallback mode: all non-internal routes are local routes.
           local = @server_routes
@@ -105,7 +105,7 @@ module InstantRecord
         end
 
         statements = parse_ruby!(File.read(routes_path), routes_path)
-        draw_call = statements.find { |stmt| stmt.is_a?(Prism::CallNode) && stmt.name == :draw && stmt.block }
+        draw_call = statements.find { |stmt| stmt.is_a?(Prism::CallNode) && stmt.name == :draw && literal_block?(stmt) }
         draw_call ? statements_of(draw_call.block.body) : statements
       end
 
@@ -136,7 +136,12 @@ module InstantRecord
       end
 
       def walk_block(node, ctx)
-        walk_statements(statements_of(node.block.body), ctx) if node.block
+        walk_statements(statements_of(node.block.body), ctx) if literal_block?(node)
+      end
+
+      # A block passed as an argument (`&blk`) is only known at runtime.
+      def literal_block?(node)
+        node.block.is_a?(Prism::BlockNode)
       end
 
       def walk_node(node, ctx)
@@ -183,13 +188,11 @@ module InstantRecord
         name = first_name(node)
         return unless name
 
-        sub_path = resolve_draw_path!(name)
-        raise BuildError, "Cyclic route draw detected for config/routes/#{name}.rb" if ctx.active_draws.include?(sub_path)
-
+        sub_path = resolve_draw_path!(name, ctx.active_draws)
         walk_statements(drawn_statements(sub_path), ctx.with(active_draws: ctx.active_draws + [sub_path]))
       end
 
-      def resolve_draw_path!(name)
+      def resolve_draw_path!(name, active_draws)
         routes_dir = File.expand_path(File.join(@source_root, "config/routes"))
         sub_path = File.expand_path("#{name}.rb", routes_dir)
         unless sub_path.start_with?("#{routes_dir}#{File::SEPARATOR}")
@@ -198,6 +201,8 @@ module InstantRecord
         unless File.file?(sub_path)
           raise BuildError, "Route file config/routes/#{name}.rb referenced by draw(:#{name}) does not exist"
         end
+        raise BuildError, "Cyclic route draw detected for config/routes/#{name}.rb" if active_draws.include?(sub_path)
+
         sub_path
       end
 
@@ -265,8 +270,8 @@ module InstantRecord
       def resource_context(ctx, on)
         prefix =
           case on
-          when :member then ctx.resource_member_prefix
-          when :collection then ctx.resource_collection_prefix
+          when :member, "member" then ctx.resource_member_prefix
+          when :collection, "collection" then ctx.resource_collection_prefix
           else return ctx
           end
 
@@ -288,7 +293,7 @@ module InstantRecord
         raw_path, raw_target = string_mapping || [pos.first&.to_s, opts[:to]&.to_s]
         return unless raw_path
 
-        on_ctx = resource_context(ctx, opts[:on]&.to_sym)
+        on_ctx = resource_context(ctx, opts[:on])
         path = join_path(on_ctx.path_prefix, raw_path)
         controller, action =
           raw_target ? split_target(raw_target, ctx) : infer_endpoint(raw_path, opts, on_ctx)
@@ -344,23 +349,26 @@ module InstantRecord
 
       # --- AST-preserving local config/routes.rb emitter ---
 
-      def emit_statements(stmts, local)
-        stmts.flat_map { |stmt| emit_node(stmt, local) }
+      def emit_statements(stmts, local, active_draws)
+        stmts.flat_map { |stmt| emit_node(stmt, local, active_draws) }
       end
 
-      def emit_node(node, local)
+      def emit_node(node, local, active_draws)
         return [] unless node.is_a?(Prism::CallNode) && node.receiver.nil?
 
         case node.name
         when :local_first
-          return [] unless active_island?(declared_island(node)) && node.block
+          return [] unless active_island?(declared_island(node)) && literal_block?(node)
 
-          emit_statements(statements_of(node.block.body), true)
+          emit_statements(statements_of(node.block.body), true, active_draws)
         when :draw
           name = first_name(node)
-          name ? emit_statements(drawn_statements(resolve_draw_path!(name)), local) : []
+          return [] unless name
+
+          sub_path = resolve_draw_path!(name, active_draws)
+          emit_statements(drawn_statements(sub_path), local, active_draws + [sub_path])
         when *CONTAINER_CALLS
-          node.block ? emit_container(node, local) : emit_call(node, local)
+          literal_block?(node) ? emit_container(node, local, active_draws) : emit_call(node, local)
         when :root, *HTTP_VERBS, :match
           emit_call(node, local)
         else
@@ -372,8 +380,8 @@ module InstantRecord
         local ? reindent_slice(node.location.slice) : []
       end
 
-      def emit_container(node, local)
-        inner = emit_statements(statements_of(node.block.body), local)
+      def emit_container(node, local, active_draws)
+        inner = emit_statements(statements_of(node.block.body), local, active_draws)
         return [] if inner.empty? && !local
         return emit_call(node, local) if local && !subtree_has_special_calls?(node.block.body)
 
@@ -390,7 +398,7 @@ module InstantRecord
 
       def container_header(node)
         header_end = (node.block.parameters&.location || node.block.opening_loc).end_offset
-        node.location.slice[0...(header_end - node.location.start_offset)].strip
+        node.location.slice.byteslice(0, header_end - node.location.start_offset).strip
       end
 
       def reindent_slice(slice)
