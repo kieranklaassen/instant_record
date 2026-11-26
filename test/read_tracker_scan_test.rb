@@ -37,6 +37,14 @@ class ReadTrackerScanTest < Minitest::Test
     "SELECT * FROM items WHERE owner = 'x' UNION SELECT * FROM items WHERE owner = 'y'"
   ].freeze
 
+  # Binds that are the same text, or only look it, as another.
+  LIST_BINDS = [
+    1, "1", 1.0, -3, 10**20, true, :a, "a", "a".b, "a".encode("UTF-16LE"), "é", "é".b, "é".encode("ISO-8859-1"),
+    "é", "", "".encode("UTF-16LE"), "\xFF", "x'y"
+  ].freeze
+  LIST_LITERALS = ["1", "01", "'x'", "'a''b'", "'é,'", "'日本'", "''", "'('", "-3", "1.0"].freeze
+  LISTS = ["id IN (%s)", "items.id IN (%s)", "(id IN (%s))", "((\"items\".\"id\" IN (%s)))", "owner IN (%s)", "id = 1 AND id IN (%s)"].freeze
+
   def setup
     @model = syncable_model("ScannedMemo") { sync_window limit: 20, partition_by: :owner }
     InstantRecord.sync(@model)
@@ -65,6 +73,20 @@ class ReadTrackerScanTest < Minitest::Test
     assert_operator narrowed, :>, 20, "too few generated queries reach partition narrowing"
   end
 
+  def test_long_lists_read_the_same
+    @random = Random.new(20_261_126)
+    narrowed = 0
+    150.times do
+      queries = Array.new(1 + @random.rand(3)) { list_query }
+      reference = outcome { track(REFERENCE, queries) }
+      assert_equal reference, outcome { track(SCAN, queries) }, queries.inspect
+      narrowed += 1 if reference.first == :ok && reference[1].first["partitions"].any?
+
+      queries.each { |sql, binds| assert_same_values(sql, binds) }
+    end
+    assert_operator narrowed, :>, 20, "too few generated lists narrow"
+  end
+
   private
 
   def pick(list) = list[@random.rand(list.size)]
@@ -83,6 +105,39 @@ class ReadTrackerScanTest < Minitest::Test
   def select = "SELECT #{pick(["*", "'q''s'", "(SELECT ?)"])} FROM #{pick(SOURCES)} WHERE #{condition}#{pick(ENDINGS)}"
 
   def broken(sql) = sql.dup.insert(@random.rand(sql.length + 1), pick(ATOMS))
+
+  # One or two predicates, each a list of bind marks or literals, with repeats.
+  def list_query
+    binds = []
+    predicates = Array.new(1 + @random.rand(2)) do
+      size = 1 + @random.rand(80)
+      items = Array.new(size) { @random.rand(2).zero? ? "?" : pick(LIST_LITERALS) }
+      items = Array.new(size, "?") if @random.rand(2).zero?
+      pool = pick([LIST_BINDS, ["a", "b", 1], (1..60).to_a])
+      items.count("?").times { binds << (@random.rand(300).zero? ? nil : pick(pool)) }
+      format(pick(LISTS), items.join(pick([", ", ","])))
+    end
+    ["SELECT * FROM items WHERE #{predicates.join(" AND ")}", binds]
+  end
+
+  def track(tracker, queries)
+    reads = tracker.track { queries.each { |sql, binds| tracker.record_sql(sql, binds) } }
+    [reads, details(reads["partitions"])]
+  end
+
+  # Order, encoding and frozenness of the values as they leave the query.
+  def assert_same_values(sql, binds)
+    assert_equal(*[REFERENCE, SCAN].map do |tracker|
+      result = tracker.send(:extract_outer_partitions, sql, ["items"], binds)
+      [result, details(result)]
+    end)
+  end
+
+  def details(partitions)
+    partitions.map do |name, columns|
+      [name, columns.frozen?, columns.map { |column, values| [column, values.map { |v| [v.b, v.encoding, v.frozen?] }] }]
+    end
+  end
 
   # UTF-8 first, and forms the scan hands to the original.
   def encodings(text)

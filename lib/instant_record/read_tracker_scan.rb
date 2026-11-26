@@ -95,6 +95,37 @@ module InstantRecord
       stop = semi if semi && semi < stop
       [rest[0...stop].strip, start]
     end
+
+    # A place in the mask is used as a place in the text, as in the original, even
+    # where the mask is shorter. Text that is not ASCII is cut in UTF-32, where a
+    # place is found without reading what comes before it.
+    def split_top_level_commas(text)
+      return super unless scannable?(text)
+      return [text[0..]] unless text.include?(",")
+      return text.split(",", -1) unless text.match?(/['()]/)
+
+      wide = text.ascii_only? ? text : text.encode(Encoding::UTF_32LE)
+      lengths = top_level_text(text).split(",", -1).map(&:length)
+      lengths.pop
+      cursor = 0
+      parts = lengths.map do |length|
+        part = wide[cursor, length]
+        cursor += length + 1
+        part
+      end
+      parts << wide[cursor..]
+      wide.equal?(text) ? parts : parts.map { |part| part.encode(Encoding::UTF_8) }
+    end
+
+    # add_partition_value keeps every value here, and the repeats go in one pass at
+    # the end. The first of each stays in its place, as in the original.
+    def extract_outer_partitions(sql, tables, binds)
+      super.each_value { |columns| columns.each_value(&:uniq!) }
+    end
+
+    def add_partition_value(result, table, col, val)
+      ((result[table] ||= {})[col] ||= []) << val.to_s
+    end
   end
 
   ReadTracker.singleton_class.prepend(ReadTrackerScan)
