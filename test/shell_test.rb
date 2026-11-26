@@ -172,6 +172,122 @@ class ShellTest < ActiveSupport::TestCase
     InstantRecord::Shell.sources.delete("custom_feed")
   end
 
+  test "rows of several types and column lists each land as their own record says" do
+    with_shell_rows_table do |rows|
+      InstantRecord.sync(syncable_model("MixedItem"), rows)
+      stamps = { "created_at" => "2026-01-01T00:00:00.000001Z", "updated_at" => "2026-01-01T00:00:00.000001Z" }
+
+      built = read_shell([
+        { type: "MixedItem", version: 3, attributes: stamps.merge("id" => "a", "title" => "first", "owner" => "o", "gone" => 1) },
+        { type: "ShellRow", attributes: { id: "r1", flag: true, data: { "k" => [1, nil] }, day: Date.new(2026, 1, 2), ratio: 1.5 } },
+        { "type" => "MixedItem", "version" => 4, "attributes" => stamps.merge("id" => "b", "title" => nil) },
+        { type: "ShellRow", attributes: { "id" => "r2", "flag" => false, "data" => nil, "big" => 2**62, "bytes" => "\xFF\0".b } },
+        { type: "MixedItem", attributes: stamps.merge("id" => "c", "title" => "é\0\u{1F600}", "owner" => "") },
+        { type: "ShellRow", attributes: { "id" => "r3" } }
+      ]) do |db|
+        [
+          db.execute("SELECT id, title, owner, server_version, sync_state FROM items ORDER BY id"),
+          db.execute("SELECT id, flag, data, day, ratio, big, typeof(bytes) FROM shell_rows ORDER BY id")
+        ]
+      end
+
+      assert_equal [
+        ["a", "first", "o", 3, "synced"],
+        ["b", nil, nil, 4, "synced"],
+        ["c", "é\0\u{1F600}", "", 0, "synced"]
+      ], built[0]
+      assert_equal [
+        ["r1", 1, '{"k":[1,null]}', "2026-01-02", 1.5, nil, "null"],
+        ["r2", 0, nil, nil, nil, 2**62, "blob"],
+        ["r3", nil, nil, nil, nil, nil, "null"]
+      ], built[1]
+    end
+  end
+
+  test "datetimes are stored in the runtime's format, whatever form they came in" do
+    with_shell_rows_table do |rows|
+      InstantRecord.sync(rows)
+      forms = {
+        "2026-01-28T23:59:59.999999Z" => "2026-01-28 23:59:59.999999",
+        "2026-01-31T23:59:59.999999Z" => "2026-01-31 23:59:59.999999",
+        "2024-02-29T00:00:00.000000Z" => "2024-02-29 00:00:00.000000",
+        "2026-02-30T01:02:03.000004Z" => "2026-03-02 01:02:03.000004",
+        "2026-12-31T24:00:00.000000Z" => "2027-01-01 00:00:00.000000",
+        "2026-12-31T23:59:60.000000Z" => "2027-01-01 00:00:00.000000",
+        "2026-01-01T00:00:00Z" => "2026-01-01 00:00:00.000000",
+        "2026-01-01T00:00:00.1234567Z" => "2026-01-01 00:00:00.123456",
+        "2026-01-01T01:00:00.123456+02:00" => "2025-12-31 23:00:00.123456",
+        "2026-01-01 00:00:00.5 UTC" => "2026-01-01 00:00:00.500000",
+        "2026-01-01T00:00:00.123456Z\n" => "2026-01-01 00:00:00.123456",
+        "2026-01-01T00:00:00.123456Z".encode("US-ASCII") => "2026-01-01 00:00:00.123456",
+        "2026-01-01T00:00:00.123456Z".b => "2026-01-01 00:00:00.123456",
+        Time.new(2026, 1, 1, 2, 3, 4.5r, "+02:00") => "2026-01-01 00:03:04.500000",
+        nil => nil
+      }
+      records = forms.keys.each_with_index.map { |form, i| { type: "ShellRow", attributes: { "id" => format("%02d", i), "at" => form } } }
+
+      stored = read_shell(records) { |db| db.execute("SELECT at, typeof(at) FROM shell_rows ORDER BY id") }
+      assert_equal forms.values.map { |text| [text, text ? "text" : "null"] }, stored
+    end
+  end
+
+  test "a record that cannot be written raises and leaves no file behind" do
+    InstantRecord.sync(syncable_model("BrokenItem"))
+    good = { type: "BrokenItem", attributes: { "id" => "a", "created_at" => "2026-01-01T00:00:00Z", "updated_at" => "2026-01-01T00:00:00Z" } }
+    with = ->(changes) { good.merge(attributes: good[:attributes].merge("id" => "b", **changes)) }
+
+    {
+      SQLite3::ConstraintException => good,
+      ArgumentError => with.("created_at" => "not a time"),
+      RuntimeError => with.("title" => Object.new),
+      NameError => { type: "NoSuchShellModel", attributes: {} },
+      IOError => nil
+    }.each do |error, bad|
+      records = Enumerator.new do |rows|
+        rows << good
+        bad ? rows << bad : raise(IOError, "the feed broke")
+      end
+      raised = assert_raises(error) { read_shell(records) }
+      refute_kind_of SQLite3::BusyException, raised
+      assert_empty Dir.glob(@shells.join("*.{sqlite3,tmp}*").to_s), error.name
+    end
+  end
+
+  test "a model reloaded between builds is looked up again" do
+    with_shell_rows_table do |rows|
+      record = { type: "ReloadedItem", attributes: { "id" => "a", "title" => "t", "flag" => true, "created_at" => "2026-01-01T00:00:00Z", "updated_at" => "2026-01-01T00:00:00Z" } }
+      counts = ->(db) { %w[items shell_rows].map { |table| db.get_first_value("SELECT COUNT(*) FROM #{table}") } }
+
+      InstantRecord.sync(syncable_model("ReloadedItem"))
+      assert_equal [1, 0], read_shell([record], &counts)
+
+      rows.define_singleton_method(:name) { "ReloadedItem" }
+      InstantRecord.instance_variable_set(:@synced_models, [rows])
+      assert_equal [0, 1], read_shell([record], &counts)
+    end
+  end
+
+  test "a build prepares one statement for each column list of a type" do
+    InstantRecord.sync(syncable_model("PreparedItem"))
+    record = ->(id, extra = {}) { { type: "PreparedItem", attributes: { "id" => id, "created_at" => "2026-01-01T00:00:00Z", "updated_at" => "2026-01-01T00:00:00Z" }.merge(extra) } }
+    prepared = []
+    count = Module.new do
+      define_method(:prepare) do |sql, &block|
+        prepared << sql if sql.start_with?('INSERT INTO "items"')
+        super(sql, &block)
+      end
+    end
+    opened = SQLite3::Database.method(:new)
+    SQLite3::Database.define_singleton_method(:new) { |*args, **options| opened.call(*args, **options).extend(count) }
+    begin
+      read_shell([record.("a"), record.("b", "title" => "t"), record.("c"), record.("d", "title" => "u")])
+    ensure
+      SQLite3::Database.singleton_class.remove_method(:new)
+    end
+
+    assert_equal 2, prepared.size
+  end
+
   test "connection DDL keeps the defaults a SQLite table can hold" do
     ActiveRecord::Base.transaction do
       ActiveRecord::Base.connection.create_table :shell_defaults, id: :string do |t|
@@ -306,6 +422,39 @@ class ShellTest < ActiveSupport::TestCase
   end
 
   private
+
+  # A second table whose columns differ from the items table's, for a model
+  # named ShellRow.
+  def with_shell_rows_table
+    ActiveRecord::Base.transaction do
+      ActiveRecord::Base.connection.create_table :shell_rows, id: :string do |t|
+        t.boolean :flag
+        t.json :data
+        t.date :day
+        t.float :ratio
+        t.bigint :big
+        t.binary :bytes
+        t.datetime :at
+      end
+      yield(Class.new(ActiveRecord::Base) do
+        self.table_name = "shell_rows"
+        define_singleton_method(:name) { "ShellRow" }
+      end)
+      raise ActiveRecord::Rollback
+    end
+  end
+
+  # Builds a shell holding the records and hands its database to the block.
+  def read_shell(records)
+    FileUtils.rm_f(Dir.glob(@shells.join("*.sqlite3").to_s))
+    shell = InstantRecord::Shell.build(partition: "rows", revision: 1, models: [], identity_key: nil) { { cursor: 1, records: records } }
+    return unless block_given?
+
+    database = SQLite3::Database.new(shell.path)
+    yield database
+  ensure
+    database&.close
+  end
 
   def stored_defaults(table, names)
     database = SQLite3::Database.new(":memory:")
