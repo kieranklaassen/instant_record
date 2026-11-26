@@ -126,9 +126,9 @@ module InstantRecord
       end
       private_class_method :declared_action_name
 
-      # A method that names its keywords, with or without a `*rest` before them, gets each
-      # one from `args`, and one without parameters gets nothing. Any other, and one not
-      # defined in the class, gets `args` whole.
+      # A class method with named keywords and neither leading positionals nor `**rest` gets
+      # each keyword from `args`; a `*rest` is ignored. One with no parameters, or only a
+      # block, gets nothing. Any other, or one not defined in the class, gets `args` whole.
       def format_sync_action_call(class_name, action_name, def_node, path)
         target = "#{class_name}.#{action_name}"
         return "#{target}(args)" unless def_node
