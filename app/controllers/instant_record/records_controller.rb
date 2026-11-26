@@ -44,10 +44,9 @@ module InstantRecord
       return head :bad_request if before_at.nil? || params[:before_id].blank?
 
       limit = (params[:limit].presence || window.limit).to_i.clamp(1, HARD_LIMIT)
-      rows = window
-        .keyset_below(at: before_at, id: params[:before_id], partition: params[:partition], scope: base)
-        .limit(limit + 1)
-        .to_a
+      below = window.keyset_below(at: before_at, id: params[:before_id], partition: params[:partition], scope: base)
+      below = below.where("#{model.quoted_table_name}.created_at <= ?", before_at) if SyncShape.needs_range?(model)
+      rows = below.limit(limit + 1).to_a
 
       page = rows.first(limit)
       last = page.last
