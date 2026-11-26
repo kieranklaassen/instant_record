@@ -426,6 +426,7 @@ module InstantRecord
         @concern_syncable = Set.new
         @diagnostics = []
         @errors = []
+        @safe_source_files = {}
       end
 
       def trace
@@ -466,6 +467,7 @@ module InstantRecord
         @helper_files = glob_rel("app/helpers/**/*.rb")
         @view_files = glob_rel("app/views/**/*").select { |rel| File.file?(File.join(@source_root, rel)) }
         @screen_files = glob_rel("app/screens/**/*.rb")
+        index_view_files!
 
         # Map constant names -> relative file paths for stageable categories.
         @stageable_constants = {}
@@ -510,6 +512,20 @@ module InstantRecord
 
           extract_public_helper_defs(parsed.value).each do |method_name|
             (@helper_methods[method_name] ||= []) << rel
+          end
+        end
+      end
+
+      # Files each view under its path and under that path cut at each dot, so
+      # both "index" and "index.html" find index.html.erb.
+      def index_view_files!
+        @views_by_stem = {}
+        @non_ascii_view = @view_files.find { |rel| !rel.ascii_only? }
+        @view_files.each do |rel|
+          stem = rel
+          until stem.empty?
+            (@views_by_stem[stem] ||= []) << rel
+            stem = stem.rpartition(".").first
           end
         end
       end
@@ -1002,11 +1018,13 @@ module InstantRecord
 
       def find_view_files(dir, name, partial:)
         prefix = dir.to_s.empty? ? "app/views" : "app/views/#{dir}"
-        stem = partial ? "_#{name.delete_prefix('_')}" : name
-        exact_prefix = "#{prefix}/#{stem}."
-        exact_path = "#{prefix}/#{stem}"
+        leaf = partial ? "_#{name.delete_prefix('_')}" : name
+        # The dot makes a US-ASCII name UTF-8, as the file names are.
+        dotted = "#{prefix}/#{leaf}."
 
-        @view_files.select { |rel| rel == exact_path || rel.start_with?(exact_prefix) }
+        # Raises when the name's encoding can't be compared with the file names'.
+        @non_ascii_view&.start_with?(dotted)
+        @views_by_stem.fetch(dotted.chop, [])
       end
 
       def view_dir_for(rel, is_view:)
@@ -1083,6 +1101,10 @@ module InstantRecord
       end
 
       def safe_source_file?(rel)
+        @safe_source_files.fetch(rel) { @safe_source_files[rel] = inside_source_root?(rel) }
+      end
+
+      def inside_source_root?(rel)
         expanded = File.expand_path(rel, @source_root)
         return false unless expanded.start_with?("#{@source_root}#{File::SEPARATOR}")
         return false unless File.file?(expanded)
