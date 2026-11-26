@@ -60,6 +60,73 @@ class McpReplicaTest < ActiveSupport::TestCase
     assert_raises(ArgumentError) { @replica.query(model: "Issue", columns: ["id", "1; --"]) }
   end
 
+  test "each filter becomes its SQL with every value bound" do
+    {
+      nil => ["", []],
+      {} => ["", []],
+      { "title" => {} } => ["", []],
+      { "title" => {}, state: "open" } => [' WHERE "state" = ?', ["open"]],
+      { "title" => nil } => [' WHERE "title" IS NULL', []],
+      { "title" => "x' OR 1=1 --" } => [' WHERE "title" = ?', ["x' OR 1=1 --"]],
+      { "title" => true, "state" => false } => [' WHERE "title" = ? AND "state" = ?', [1, 0]],
+      { "title" => 1.5 } => [' WHERE "title" = ?', [1.5]],
+      { "title" => [] } => [" WHERE 1 = 0", []],
+      { "title" => [nil] } => [' WHERE "title" IN (?)', [nil]],
+      { "title" => ["a", nil, true, 2] } => [' WHERE "title" IN (?, ?, ?, ?)', ["a", nil, 1, 2]],
+      { "title" => { eq: "a" } } => [' WHERE "title" = ?', ["a"]],
+      { "title" => { "eq" => nil } } => [' WHERE "title" IS NULL', []],
+      { "title" => { "eq" => false } } => [' WHERE "title" = ?', [0]],
+      { "title" => { "eq" => "a", "ne" => "b" } } => [' WHERE "title" = ? AND "title" != ?', %w[a b]],
+      { "title" => { "ne" => nil } } => [' WHERE "title" IS NOT NULL', []],
+      { "title" => { "ne" => false } } => [' WHERE "title" != ?', [0]],
+      { "title" => { "gt" => 1, "gte" => "2", "lt" => 3.0, "lte" => true } } =>
+        [' WHERE "title" > ? AND "title" >= ? AND "title" < ? AND "title" <= ?', [1, "2", 3.0, 1]],
+      { "title" => { "gt" => nil, "gte" => nil, "lt" => nil, "lte" => nil } } =>
+        [' WHERE "title" > ? AND "title" >= ? AND "title" < ? AND "title" <= ?', [nil, nil, nil, nil]],
+      { "title" => { "gt" => false, "gte" => true, "lt" => false, "lte" => false } } =>
+        [' WHERE "title" > ? AND "title" >= ? AND "title" < ? AND "title" <= ?', [0, 1, 0, 0]],
+      { "title" => { "like" => "A%_\\É" } } => [%q( WHERE CAST("title" AS TEXT) LIKE ? ESCAPE '\\'), ["%a\\%\\_\\\\é%"]],
+      { "title" => { "like" => nil } } => [%q( WHERE CAST("title" AS TEXT) LIKE ? ESCAPE '\\'), ["%%"]],
+      { "title" => { "like" => true } } => [%q( WHERE CAST("title" AS TEXT) LIKE ? ESCAPE '\\'), ["%true%"]],
+      { "title" => { "in" => [] } } => [" WHERE 1 = 0", []],
+      { "title" => { "in" => nil } } => [" WHERE 1 = 0", []],
+      { "title" => { "in" => "a" } } => [' WHERE "title" IN (?)', ["a"]],
+      { "title" => { "in" => false } } => [' WHERE "title" IN (?)', [0]],
+      { "title" => { "in" => [true, nil, 3] } } => [' WHERE "title" IN (?, ?, ?)', [1, nil, 3]],
+      { "title" => { "in" => { "a" => 1 } } } => [' WHERE "title" IN (?)', [["a", 1]]],
+      { "title" => { "is_null" => true, "not_null" => true } } => [' WHERE "title" IS NULL AND "title" IS NOT NULL', []],
+      { "title" => { "is_null" => false, "not_null" => nil } } => [' WHERE "title" IS NOT NULL AND "title" IS NULL', []],
+      { "title" => { "is_null" => 0, "not_null" => "" } } => [' WHERE "title" IS NULL AND "title" IS NOT NULL', []],
+      { "title" => { "in" => [1, 2], "eq" => 3 }, "state" => [4], %(a"b) => 5 } =>
+        [' WHERE "title" IN (?, ?) AND "title" = ? AND "state" IN (?) AND "a""b" = ?', [1, 2, 3, 4, 5]],
+      Class.new(Hash)["title", Class.new(Hash)["eq", 1]] => [' WHERE "title" = ?', [1]]
+    }.each do |where, expected|
+      sql, binds = build_where(where)
+      assert_equal expected, [sql, binds], where.inspect
+      assert_equal expected.last.map(&:class), binds.map(&:class), where.inspect
+    end
+  end
+
+  test "a filter that cannot be built names the first problem" do
+    operators = "Allowed: eq, ne, gt, gte, lt, lte, like, in, is_null, not_null"
+    columns = %(Available columns: title, state, a"b)
+    {
+      [] => "where must be an object/hash",
+      "" => "where must be an object/hash",
+      false => "where must be an object/hash",
+      { "nope" => { "regex" => 1 } } => %(Unknown column "nope". #{columns}),
+      { "nope" => {} } => %(Unknown column "nope". #{columns}),
+      { "nope" => [] } => %(Unknown column "nope". #{columns}),
+      { "nope" => nil } => %(Unknown column "nope". #{columns}),
+      { "title" => { "regex" => 1 }, "nope" => 1 } => %(Unsupported filter operator "regex" for column title. #{operators}),
+      { title: { "eq" => 1, "EQ" => 2, "regex" => 3 } } => %(Unsupported filter operator "EQ" for column title. #{operators}),
+      { "title" => { nil => 1 } } => %(Unsupported filter operator "" for column title. #{operators})
+    }.each do |where, message|
+      error = assert_raises(ArgumentError, where.inspect) { build_where(where) }
+      assert_equal message, error.message
+    end
+  end
+
   test "finds single record by primary key" do
     found = @replica.find(model: "Note", id: "n-1")
     assert_equal "Release checklist", found["record"]["title"]
@@ -200,6 +267,10 @@ class McpReplicaTest < ActiveSupport::TestCase
     yield db
   ensure
     db&.close
+  end
+
+  def build_where(where)
+    @replica.send(:build_where, where, ["title", "state", %(a"b)])
   end
 
   def search_ids(text, **options)
