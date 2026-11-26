@@ -427,6 +427,108 @@ class RouteAnalyzerTest < ActiveSupport::TestCase
     assert_equal ["GET /a/x xs#show", "GET /b/x xs#show"], routes(result.local_routes)
   end
 
+  test "a draw cycle inside a container the route walk skips is still a build error" do
+    ["resources { draw(:x) }", "namespace(name) { draw(:x) }"].each do |code|
+      error = assert_raises(Compiler::BuildError, code) do
+        analyze_draw("local_first { get 'a', to: 'pages#a' }\n#{code}", drawn: { "x" => code })
+      end
+      assert_equal "Cyclic route draw detected for config/routes/x.rb", error.message
+    end
+  end
+
+  test "the emitter may draw the same file twice when neither draw is inside the other" do
+    result = analyze_draw("local_first { draw(:x)\ndraw(:x) }", drawn: { "x" => "get 'x', to: 'xs#show'" })
+
+    assert_equal <<~RUBY, result.local_routes_source
+      Rails.application.routes.draw do
+        get 'x', to: 'xs#show'
+        get 'x', to: 'xs#show'
+      end
+    RUBY
+  end
+
+  test "a block passed as an argument is only known at runtime" do
+    calls = [
+      "resources :posts, only: [:index], &blk",
+      "resource :profile, only: [:show], &blk",
+      "namespace :admin, &blk",
+      "scope(\"s\", &blk)",
+      "constraints(id: /x/, &blk)"
+    ]
+    result = analyze_draw(<<~RUBY)
+      scope("server", &blk)
+      local_first(&blk)
+      local_first do
+        #{calls.join("\n  ")}
+        resources(:tags, only: []) { member(&blk) }
+      end
+    RUBY
+
+    assert_equal ["GET /posts posts#index", "GET /profile profiles#show"], routes(result.local_routes)
+    assert_empty result.server_routes
+    assert_equal <<~RUBY, result.local_routes_source
+      Rails.application.routes.draw do
+        #{calls.join("\n  ")}
+        resources(:tags, only: []) { member(&blk) }
+      end
+    RUBY
+
+    assert_empty analyze("Rails.application.routes.draw(&blk)").local_routes
+  end
+
+  test "a container's header may hold characters of several bytes" do
+    result = analyze_draw(<<~RUBY, drawn: { "x" => "get 'x', to: 'xs#show'" })
+      local_first do
+        scope("größe/行/行行行") do |mapper|
+          draw(:x)
+        end
+      end
+    RUBY
+
+    assert_equal <<~RUBY, result.local_routes_source
+      Rails.application.routes.draw do
+        scope("größe/行/行行行") do |mapper|
+          get 'x', to: 'xs#show'
+        end
+      end
+    RUBY
+  end
+
+  test "an on: that is not member or collection changes nothing" do
+    ["true", "false", "1", "[:member]", "{ a: 1 }", ":other", "pick"].each do |on|
+      assert_local_routes "resources(:posts, only: []) { get :a, on: #{on} }", "GET /posts/:post_id/a posts#a\n"
+    end
+    assert_local_routes 'resources(:posts, only: []) { get :a, on: "member" }', "GET /posts/:id/a posts#a\n"
+    assert_local_routes 'resources(:posts, only: []) { get :a, on: "collection" }', "GET /posts/a posts#a\n"
+  end
+
+  test "a match route is emitted when local and dropped when not" do
+    result = analyze_draw(<<~RUBY)
+      match "s", to: "pages#s", via: :get
+      local_first { match "m", to: "pages#m", via: :get }
+    RUBY
+
+    assert_equal <<~RUBY, result.local_routes_source
+      Rails.application.routes.draw do
+        match "m", to: "pages#m", via: :get
+      end
+    RUBY
+  end
+
+  test "server routes are deduplicated, the first one kept" do
+    result = analyze_draw(<<~RUBY)
+      get "s", to: "pages#s"
+      get "s", to: "pages#again"
+      local_first(server_routes: ["GET /s"]) { get "l", to: "pages#l" }
+    RUBY
+
+    assert_equal ["GET /s pages#s"], routes(result.server_routes)
+  end
+
+  test "a string option without a # is not the route's target" do
+    assert_local_routes 'get "kept", note: "plain", "other" => "words"', "GET /kept #\n"
+  end
+
   private
 
   def assert_local_routes(source, expected)
