@@ -17,6 +17,7 @@ module InstantRecord
     Error = Class.new(StandardError)
     HostError = Class.new(Error)
     HostCrashedError = Class.new(HostError)
+    ExchangeError = Class.new(Error)
 
     module_function
 

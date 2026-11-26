@@ -7,6 +7,8 @@ module InstantRecord
     # configurable token/cookie/header/scope auth), and the <1ms read-only
     # SQLite replica reader under a single serial mutex.
     class Runtime
+      MissingEndpoint = Class.new(ArgumentError)
+
       attr_reader :database_path, :endpoint, :screens, :exchange
 
       def initialize(
@@ -80,7 +82,7 @@ module InstantRecord
         @mutex.synchronize do
           started = monotonic_now
           target = normalize_endpoint(endpoint) || @endpoint
-          raise ArgumentError, "No sync endpoint configured. Pass endpoint or set INSTANT_RECORD_ENDPOINT." if target.nil?
+          raise MissingEndpoint, "No sync endpoint configured. Pass endpoint or set INSTANT_RECORD_ENDPOINT." if target.nil?
 
           if offline?
             pos = parse_cursor(@host.call("cursor", "").out)
@@ -198,7 +200,7 @@ module InstantRecord
           }
         end
 
-        payload["sync"] = self.sync if sync
+        payload["sync"] = sync_after_write if sync
         payload
       end
 
@@ -239,7 +241,7 @@ module InstantRecord
           }
         end
 
-        payload["sync"] = self.sync if sync && payload["ok"]
+        payload["sync"] = sync_after_write if sync && payload["ok"]
         payload
       end
 
@@ -306,6 +308,16 @@ module InstantRecord
       end
 
       private
+
+      # The write is queued by now, so a failed sync must not hide its result:
+      # the caller would write again. Rescued is what a sync may raise: no
+      # endpoint, or a host or exchange that fails. Anything else is a bug and
+      # escapes.
+      def sync_after_write
+        sync
+      rescue MissingEndpoint, Error, SystemCallError, IOError => e
+        { "ok" => false, "error" => e.message }
+      end
 
       def parse_cursor(raw)
         raw.to_s.split.each_with_object({}) do |pair, acc|

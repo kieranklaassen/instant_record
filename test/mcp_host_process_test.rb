@@ -47,6 +47,31 @@ class McpHostProcessTest < ActiveSupport::TestCase
     end
   end
 
+  test "an error message cut inside a character is still valid UTF-8" do
+    Dir.mktmpdir do |dir|
+      host = InstantRecord::Mcp::HostProcess.new(binary: write_fake_host(dir), database: File.join(dir, "replica.sqlite3"))
+      error = assert_raises(InstantRecord::Mcp::HostError) { host.call("fail", "caf\xC3") }
+      assert_equal "Validation failed: caf\u{FFFD}", error.message
+    ensure
+      host&.close
+    end
+  end
+
+  test "an exchange that raises is reported once the host has its answer, and the host is ready again" do
+    Dir.mktmpdir do |dir|
+      raised = nil
+      host = InstantRecord::Mcp::HostProcess.new(binary: write_fake_host(dir), database: File.join(dir, "replica.sqlite3"), exchange: ->(*) { raise raised })
+      [ArgumentError.new("bad"), EncodingError.new("bad"), TypeError.new("bad"), IOError.new("bad"), URI::InvalidComponentError.new("bad")].each do |error|
+        raised = error
+        shown = assert_raises(InstantRecord::Mcp::ExchangeError) { host.call("sync", "http://example.test") }
+        assert_equal "Sync request failed: #{error.class}: bad", shown.message
+        assert_equal "echo:ready", host.call("echo", "ready").out
+      end
+    ensure
+      host&.close
+    end
+  end
+
   test "supports deferred boot with database '-'" do
     Dir.mktmpdir do |dir|
       fake_host = write_fake_host(dir)

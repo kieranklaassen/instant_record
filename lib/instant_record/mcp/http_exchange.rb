@@ -1,6 +1,7 @@
 require "net/http"
 require "openssl"
 require "uri"
+require "zlib"
 
 module InstantRecord
   module Mcp
@@ -81,7 +82,8 @@ module InstantRecord
         @trace << { method: verb, url: uri.to_s, status: status.to_i, error: nil }
         "#{status.to_i}\n#{response_body}"
       rescue URI::InvalidURIError, SocketError, SystemCallError, Timeout::Error,
-             IOError, EOFError, OpenSSL::SSL::SSLError, Net::HTTPError => e
+             IOError, EOFError, OpenSSL::SSL::SSLError, Net::HTTPError,
+             Net::ProtocolError, Net::HTTPBadResponse, Net::HTTPHeaderSyntaxError, Zlib::Error => e
         record_offline(verb, raw_url, e.message)
       end
 

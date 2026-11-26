@@ -29,16 +29,12 @@ module InstantRecord
       end
 
       def run
-        while (line = @input.gets)
-          line = line.strip
-          next if line.empty?
-
-          response = handle_line(line)
-          write_response(response) if response
-        end
+        with_utf8_streams { serve }
       end
 
       def handle_line(line)
+        return error_response(nil, PARSE_ERROR, "Parse error: invalid UTF-8") unless line.valid_encoding?
+
         message = JSON.parse(line)
         handle_message(message)
       rescue JSON::ParserError => e
@@ -76,7 +72,7 @@ module InstantRecord
       rescue ArgumentError => e
         error_response(id, INVALID_PARAMS, e.message) unless notification
       rescue StandardError => e
-        @err&.puts("[instant_record:mcp] #{e.class}: #{e.message}")
+        @err&.puts("[instant_record:mcp] #{e.class}: #{utf8(e.message)}")
         error_response(id, INTERNAL_ERROR, e.message) unless notification
       end
 
@@ -208,6 +204,39 @@ module InstantRecord
       end
 
       private
+
+      # MCP is UTF-8 both ways, so no stream may convert to or from the locale's
+      # encoding. The server reads and writes copies: the caller's streams keep
+      # their own encodings.
+      def with_utf8_streams
+        originals = [@input, @output, @err]
+        copies = []
+        @input, @output, @err = originals.map do |io|
+          next io unless io.is_a?(IO)
+
+          copies << (copy = io.dup)
+          copy.set_encoding(io.equal?(originals.first) ? Encoding::BINARY : Encoding::UTF_8, nil)
+          copy.sync = true
+          copy
+        end
+        yield
+      ensure
+        @input, @output, @err = originals
+        copies.each(&:close)
+      end
+
+      def serve
+        while (line = @input.gets)
+          line.force_encoding(Encoding::UTF_8)
+          if line.valid_encoding?
+            line = line.strip
+            next if line.empty?
+          end
+
+          response = handle_line(line)
+          write_response(response) if response
+        end
+      end
 
       def tool(name, description, properties: {}, required: nil)
         schema = { "type" => "object", "properties" => properties }
@@ -374,12 +403,21 @@ module InstantRecord
       end
 
       def error_response(id, code, message)
-        { "jsonrpc" => JSONRPC_VERSION, "id" => id, "error" => { "code" => code, "message" => message } }
+        { "jsonrpc" => JSONRPC_VERSION, "id" => id, "error" => { "code" => code, "message" => utf8(message) } }
       end
 
+      def utf8(text) = String.new(text, encoding: Encoding::UTF_8).scrub
+
       def write_response(payload)
-        @output.write("#{JSON.generate(payload)}\n")
+        @output.write("#{generate(payload)}\n")
         @output.flush
+      end
+
+      # An id such as 1e999 parses to a number JSON cannot write.
+      def generate(payload)
+        JSON.generate(payload)
+      rescue JSON::GeneratorError => e
+        JSON.generate(error_response(nil, INTERNAL_ERROR, e.message))
       end
     end
   end
