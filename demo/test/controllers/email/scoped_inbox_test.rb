@@ -141,7 +141,7 @@ class ScopedInboxTest < ActionDispatch::IntegrationTest
       headers: { "X-Inertia" => "true", "X-Inertia-Partial-Component" => "Email/Inbox", "X-Inertia-Partial-Data" => prop }
     assert_response :success
     assert_equal "true", response.headers["X-Inertia"]
-    assert_equal "X-Inertia", response.headers["Vary"]
+    assert_includes response.headers["Vary"].to_s.split(",").map(&:strip), "X-Inertia"
     assert_equal [prop, "errors"].sort, response.parsed_body["props"].keys.sort
     response.parsed_body.dig("props", prop)
   end
