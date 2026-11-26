@@ -298,6 +298,106 @@ class QueuedEditsTest < Minitest::Test
     assert_equal ["by hand", "mine too"], [@record.reload.title, @record.state]
   end
 
+  # --- Columns whose values are not JSON of themselves --------------------------
+
+  # A base value, five edits as a client sends them, and what somebody sets by hand.
+  TYPED = {
+    string: ["base", %w[v1 v2 v3 v4 v5], "by hand"],
+    date: [Date.new(2026, 1, 1), (1..5).map { |n| "2026-02-0#{n}" }, Date.new(2026, 3, 1)],
+    decimal: [BigDecimal("0.5"), (1..5).map { |n| "#{n}.25" }, BigDecimal("4.26")],
+    float: [0.5, (1..5).map { |n| n + 0.1 }, 4.2],
+    integer: [0, [1, 2, 3, 4, 5], 6],
+    boolean: [false, [true, false, true, false, true], nil],
+    datetime: [Time.utc(2026, 1, 1), (1..5).map { |n| "2026-02-01T00:00:00.12345#{n}Z" }, Time.utc(2026, 2, 1, 0, 0, 0, 123_456)],
+    json: [{ "a" => [0] }, (1..5).map { |n| { "a" => [n, nil, 1.5], "b" => { "c" => true } } }, { "a" => [1, nil, 1.5], "b" => { "c" => false } }]
+  }.freeze
+
+  def test_every_queued_edit_of_a_typed_column_is_kept
+    each_typed_column do |policy, type, base, edits, _by_hand|
+      synced_record(policy, type: type, base: base)
+      results = edits.each.with_index(1).map { |value, n| edit({ "title" => value }, at: n) }
+
+      assert_title edits.last, [policy, type]
+      assert_empty results.select { |result| result[:skipped] }, [policy, type]
+      assert_rising
+    end
+  end
+
+  def test_every_queued_edit_of_a_typed_column_created_offline_is_kept
+    each_typed_column do |policy, type, base, edits, _by_hand|
+      define_model(policy, type: type)
+      apply("create", { "title" => base.as_json }, at: 1, base_version: 0)
+      edits.each.with_index(2) { |value, at| edit({ "title" => value }, at: at, base_version: 0) }
+
+      @record = @model.find(@id)
+      assert_title edits.last, [policy, type]
+      assert_rising
+    end
+  end
+
+  def test_an_edit_of_another_column_leaves_a_typed_column_untouched
+    each_typed_column do |policy, type, base, edits, _by_hand|
+      synced_record(policy, type: type, base: base)
+      edit({ "state" => "theirs" }, at: 15, node: "clientbb")
+      results = edits.each.with_index(1).map { |value, n| edit({ "title" => value }, at: n) }
+
+      assert_title edits.last, [policy, type]
+      assert_empty results.select { |result| result[:skipped] }, [policy, type]
+    end
+  end
+
+  def test_a_typed_value_changed_by_hand_stays_the_servers
+    TYPED.each do |type, (base, edits, by_hand)|
+      [by_hand, nil].uniq.each do |value|
+        synced_record(:server_wins, type: type, base: base)
+        edit({ "title" => edits[0] }, at: 1)
+        edit({ "state" => "mine" }, at: 2)
+        @record.reload.update_columns(title: value)
+
+        assert edit({ "title" => edits[1] }, at: 3)[:skipped], "#{type}: #{value.inspect}"
+        assert_title value, [type, value]
+      end
+    end
+  end
+
+  def test_a_typed_value_set_by_hand_where_there_was_none_stays_the_servers
+    TYPED.each do |type, (_base, edits, by_hand)|
+      value = by_hand.nil? ? false : by_hand
+      synced_record(:server_wins, type: type, base: nil)
+      edit({ "state" => "mine" }, at: 1)
+      @record.reload.update_columns(title: value)
+
+      assert edit({ "title" => edits[0] }, at: 2)[:skipped], type
+      assert_title value, type
+    end
+  end
+
+  # The log holds null for a number JSON cannot spell.
+  def test_an_infinite_number_set_by_hand_where_there_was_none_stays_the_servers
+    { float: Float::INFINITY, decimal: BigDecimal("Infinity") }.each do |type, infinite|
+      synced_record(:server_wins, type: type, base: nil)
+      edit({ "state" => "mine" }, at: 1)
+      @model.where(id: @id).update_all("title = 'Infinity'")
+
+      assert edit({ "title" => 1.5 }, at: 2)[:skipped], type
+      assert_title infinite, type
+    end
+  end
+
+  # An app's setting under which the log reads a date back as a date.
+  def test_every_queued_edit_of_a_date_is_kept_where_json_times_are_parsed
+    previous, ActiveSupport.parse_json_times = ActiveSupport.parse_json_times, true
+    POLICIES.each do |policy|
+      base, edits = TYPED[:date]
+      synced_record(policy, type: :date, base: base)
+      edits.each.with_index(1) { |value, n| edit({ "title" => value }, at: n) }
+
+      assert_title edits.last, policy
+    end
+  ensure
+    ActiveSupport.parse_json_times = previous
+  end
+
   # --- Merges that keep the server's clock -------------------------------------
 
   def test_a_contested_edit_is_logged_under_the_servers_clock
@@ -382,17 +482,31 @@ class QueuedEditsTest < Minitest::Test
 
   private
 
-  def define_model(policy)
+  def define_model(policy, type: nil)
     reset_instant_record_tables!
     @id = "r-#{@sequence += 1}"
-    @model = syncable_model("Task") { sync_merge :title, policy }
+    @model = syncable_model("Task") do
+      attribute :title, type if type
+      sync_merge :title, policy
+    end
     InstantRecord.sync(@model)
   end
 
-  def synced_record(policy)
-    define_model(policy)
+  def each_typed_column
+    POLICIES.product(TYPED.to_a) { |policy, (type, values)| yield policy, type, *values }
+  end
+
+  # As the column's type reads it, in whichever form it was sent.
+  def assert_title(expected, message)
+    expected = @model.type_for_attribute("title").cast(expected)
+    actual = @record.reload.title
+    expected.nil? ? assert_nil(actual, message) : assert_equal(expected, actual, message)
+  end
+
+  def synced_record(policy, type: nil, base: "base")
+    define_model(policy, type: type)
     @record = HLC.with_clock(-> { @t0 }) do
-      on_server { @model.create!(id: @id, title: "base", created_at: @t0, updated_at: @t0) }
+      on_server { @model.create!(id: @id, title: base, created_at: @t0, updated_at: @t0) }
     end
   end
 
