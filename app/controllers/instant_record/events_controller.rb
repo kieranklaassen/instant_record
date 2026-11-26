@@ -38,9 +38,11 @@ module InstantRecord
           changes = Change.poll(@cursor, scope: SyncScope.token(@identity), partition: @partition)
           SyncScope.events_for(changes, @identity, partition: @partition_spec).each do |id, event|
             @cursor = id
-            @last_write = Time.current
-            stamped = event.merge(server_time: InstantRecord::HLC.iso_now)
-            yield "id: #{id}\nevent: change\ndata: #{stamped.to_json}\n\n"
+            # Time.now, not Time.current: an elapsed time needs no zone, and
+            # this runs once per event.
+            @last_write = Time.now
+            event[:server_time] = InstantRecord::HLC.iso_now
+            yield "id: #{id}\nevent: change\ndata: #{event.to_json}\n\n"
           end
 
           # An SSE comment, written only when the stream has been quiet for a
