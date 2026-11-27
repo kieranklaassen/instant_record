@@ -87,6 +87,124 @@ class GgpoRebaseTest < Minitest::Test
     assert_equal 0, InstantRecord::Client::Rebaser.confirmed_snapshot_count
   end
 
+  def test_ack_with_a_clamped_hlc_lets_a_later_server_change_through
+    note = seed_synced_row(id: "fast-1")
+    now = Time.utc(2026, 11, 21, 12, 5, 0)
+
+    in_browser do
+      InstantRecord::HLC.with_clock(-> { now + 120 }) { note.update!(state: "closed") }
+      mutation = InstantRecord::OutboxMutation.sole
+      clamped = InstantRecord::HLC.clamp(mutation.hlc, now: now)
+      assert_operator clamped, :<, mutation.hlc
+
+      InstantRecord::Client.apply_results([
+        { "mutation_id" => mutation.id, "status" => "applied", "version" => 2, "hlc" => clamped }
+      ])
+      assert_equal clamped, InstantRecord::HLC.row_hlc("Note", "fast-1")
+
+      InstantRecord::Client.apply_change(
+        "type" => "Note", "id" => "fast-1", "operation" => "update", "version" => 3,
+        "hlc" => InstantRecord::HLC.from_time(now + 1, node: InstantRecord::HLC::SERVER_NODE),
+        "attributes" => note.attributes.merge("state" => "open", "updated_at" => (now + 1).iso8601(6))
+      )
+    end
+
+    assert_equal "open", note.reload.state
+    assert_equal 3, note.server_version
+  end
+
+  # The clamp must not undo a newer server change that arrived before the ack.
+  def test_ack_keeps_the_row_hlc_of_a_newer_server_change
+    note = seed_synced_row(id: "late-ack-1")
+    now = Time.utc(2026, 11, 21, 12, 5, 0)
+
+    in_browser do
+      InstantRecord::HLC.with_clock(-> { now }) { note.update!(state: "closed") }
+      mutation = InstantRecord::OutboxMutation.sole
+      newer = InstantRecord::HLC.from_time(now + 1, node: InstantRecord::HLC::SERVER_NODE)
+      InstantRecord::Client.apply_change(
+        "type" => "Note", "id" => "late-ack-1", "operation" => "update", "version" => 3, "hlc" => newer,
+        "attributes" => note.attributes.merge("state" => "open", "updated_at" => (now + 1).iso8601(6))
+      )
+      InstantRecord::Client.apply_results([
+        { "mutation_id" => mutation.id, "status" => "applied", "version" => 2, "hlc" => mutation.hlc }
+      ])
+
+      assert_equal newer, InstantRecord::HLC.row_hlc("Note", "late-ack-1")
+    end
+  end
+
+  def test_clamped_ack_keeps_the_hlc_of_a_newer_server_change_against_an_older_page
+    note = seed_synced_row(id: "fast-2")
+    now = Time.utc(2026, 11, 21, 12, 5, 0)
+
+    in_browser do
+      InstantRecord::HLC.with_clock(-> { now + 120 }) { note.update!(state: "closed") }
+      mutation = InstantRecord::OutboxMutation.sole
+      newer = InstantRecord::HLC.from_time(now + 2, node: InstantRecord::HLC::SERVER_NODE)
+      InstantRecord::Client.apply_change(
+        "type" => "Note", "id" => "fast-2", "operation" => "update", "version" => 4, "hlc" => newer,
+        "attributes" => note.attributes.merge("state" => "open", "title" => "new", "updated_at" => (now + 2).iso8601(6))
+      )
+      InstantRecord::Client.apply_results([
+        { "mutation_id" => mutation.id, "status" => "applied", "version" => 2,
+          "hlc" => InstantRecord::HLC.clamp(mutation.hlc, now: now) }
+      ])
+      assert_equal newer, InstantRecord::HLC.row_hlc("Note", "fast-2")
+
+      InstantRecord::Client.apply_change(
+        "type" => "Note", "id" => "fast-2", "operation" => "update", "version" => 3,
+        "hlc" => InstantRecord::HLC.from_time(now + 1, node: InstantRecord::HLC::SERVER_NODE),
+        "attributes" => note.attributes.merge("title" => "middle", "updated_at" => (now + 1).iso8601(6))
+      )
+    end
+
+    assert_equal "new", note.reload.title
+    assert_equal "closed", note.state
+  end
+
+  # A row an earlier ack left with this client's future clock hands it to the
+  # snapshot of the next write. That clock never came from the server.
+  def test_clamped_ack_ignores_this_clients_own_future_hlc_in_the_snapshot
+    note = seed_synced_row(id: "fast-3")
+    now = Time.utc(2026, 11, 21, 12, 5, 0)
+
+    in_browser do
+      future = InstantRecord::HLC.from_time(now + 120, node: InstantRecord::HLC.node_id)
+      InstantRecord::HLC.set_row_hlc("Note", "fast-3", future)
+      InstantRecord::HLC.with_clock(-> { now + 60 }) { note.update!(state: "closed") }
+      assert_equal future, InstantRecord::Client::Rebaser.confirmed_snapshot("Note", "fast-3")["hlc"]
+      mutation = InstantRecord::OutboxMutation.sole
+      clamped = InstantRecord::HLC.clamp(mutation.hlc, now: now)
+      InstantRecord::Client.apply_results([
+        { "mutation_id" => mutation.id, "status" => "applied", "version" => 2, "hlc" => clamped }
+      ])
+
+      assert_equal clamped, InstantRecord::HLC.row_hlc("Note", "fast-3")
+    end
+  end
+
+  def test_clamped_acks_of_queued_writes_leave_the_last_clamped_hlc
+    note = seed_synced_row(id: "fast-4")
+    now = Time.utc(2026, 11, 21, 12, 5, 0)
+
+    in_browser do
+      InstantRecord::HLC.with_clock(-> { now + 120 }) do
+        note.update!(state: "closed")
+        note.update!(title: "second")
+      end
+      clamps = InstantRecord::OutboxMutation.ordered.to_a.map do |mutation|
+        clamped = InstantRecord::HLC.clamp(mutation.hlc, now: now)
+        InstantRecord::Client.apply_results([
+          { "mutation_id" => mutation.id, "status" => "applied", "version" => 2, "hlc" => clamped }
+        ])
+        clamped
+      end
+
+      assert_equal clamps.last, InstantRecord::HLC.row_hlc("Note", "fast-4")
+    end
+  end
+
   def test_skipped_ack_rebases_remaining_unacked_local_edit_instead_of_clobbering
     t0 = Time.utc(2026, 11, 21, 12, 0, 0)
     note = seed_synced_row(id: "rebase-1", title: "v0", state: "open", version: 1, updated_at: t0)
