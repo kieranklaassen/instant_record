@@ -131,6 +131,8 @@ module InstantRecord
             else
               fail_at!(stmt, "Unknown contract declaration #{stmt.name.inspect}")
             end
+          rescue ArgumentError => e
+            fail_at!(stmt, e.message)
           end
         end
 
@@ -142,8 +144,6 @@ module InstantRecord
           name = literal_name(positional.first, call, "field name")
           optional = extract_optional!(kwargs, call, allowed: %i[optional])
           builder.prop(name, type, optional: optional)
-        rescue ArgumentError => e
-          fail_at!(call, e.message)
         end
 
         def parse_prop_field(call, builder)
@@ -157,8 +157,6 @@ module InstantRecord
           type = positional[1] ? literal_name(positional[1], call, "field type") : "string"
           optional = extract_optional!(kwargs, call, allowed: %i[optional])
           builder.prop(name, type, optional: optional)
-        rescue ArgumentError => e
-          fail_at!(call, e.message)
         end
 
         def parse_one_field(call, builder)
@@ -172,8 +170,6 @@ module InstantRecord
           builder.one(name, as: as, optional: optional) do |nested|
             parse_contract_block(call.block, nested, allow_actions: false)
           end
-        rescue ArgumentError => e
-          fail_at!(call, e.message)
         end
 
         def parse_many_field(call, builder)
@@ -195,8 +191,6 @@ module InstantRecord
               parse_contract_block(call.block, nested, allow_actions: false)
             end
           end
-        rescue ArgumentError => e
-          fail_at!(call, e.message)
         end
 
         def parse_action(call, builder)
@@ -209,8 +203,6 @@ module InstantRecord
           else
             builder.action(name)
           end
-        rescue ArgumentError => e
-          fail_at!(call, e.message)
         end
 
         def parse_action_block(block, action_builder)
