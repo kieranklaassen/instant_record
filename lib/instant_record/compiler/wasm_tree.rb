@@ -142,6 +142,8 @@ module InstantRecord
 
       RUBY
 
+      SYMBOLIZE_ATTRS = "attrs = attrs.to_h { |k, v| [k.to_s.to_sym, v] } if attrs.is_a?(Hash) && attrs.any? { |k, _| k.is_a?(String) }"
+
       QUOTING_METHODS = <<~'RUBY'
             def quote_column_name(name)
               "\"" + name.to_s.gsub("\"", "\"\"") + "\""
@@ -353,6 +355,7 @@ module InstantRecord
         patch_read_tracking
         patch_model_datetime_casts
         patch_model_remote_timestamps
+        patch_model_update_keys
         patch_active_record_changed
         patch_connection_quoting
         patch_emitted_views
@@ -446,6 +449,16 @@ module InstantRecord
               "if !(creating) || @updated_at_raw.nil? || @updated_at_raw.empty?",
               "if (!(creating) && !InstantRecord::Client.applying_remote?) || @updated_at_raw.nil? || @updated_at_raw.empty?"
             )
+          end
+        end
+      end
+
+      # A generated update and initialize turn String keys into Symbols; the
+      # generated update! does not, so it saves without the fields and succeeds.
+      def patch_model_update_keys
+        ruby_files("app/models").each do |path|
+          rewrite(path) do |text|
+            text.gsub(/^( *)def update!\(attrs\)\n(?! *attrs = attrs\.to_h )/) { "#{$&}#{$1}  #{SYMBOLIZE_ATTRS}\n" }
           end
         end
       end
