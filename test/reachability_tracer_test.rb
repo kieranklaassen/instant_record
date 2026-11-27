@@ -91,6 +91,44 @@ class ReachabilityTracerTest < ActiveSupport::TestCase
     end
   end
 
+  test "an include list stages what its entries name and reports each one that names nothing" do
+    with_views("a/show.html.erb", "a/_row.html.erb", "a/_row.json") do
+      %w[models/extra models/concerns/tagged controllers/b_controller helpers/money_helper jobs/mail_job].each do |file|
+        write_app("app/#{file}.rb", "")
+      end
+      result = trace(
+        models: %w[Extra Tagged], controllers: %w[B], helpers: %w[money], views: %w[a/show], partials: %w[a/row],
+        files: %w[app/jobs/mail_job.rb]
+      )
+      assert_equal %w[app/models/concerns/tagged.rb app/models/extra.rb], result.models
+      assert_equal %w[app/controllers/a_controller.rb app/controllers/b_controller.rb], result.controllers
+      assert_equal %w[app/helpers/money_helper.rb], result.helpers
+      assert_equal %w[app/views/a/_row.html.erb app/views/a/_row.json app/views/a/show.html.erb], result.views
+      assert_equal %w[app/jobs/mail_job.rb], result.extra_files
+
+      kinds = { models: "models", controllers: "controllers", helpers: "helpers", views: "views", partials: "views" }
+      missing = kinds.map { |kind, dir| "  - Explicit include.#{kind} entry \"nope\" was not found under app/#{dir}/." }
+      missing << "  - Explicit include.files entry \"nope\" does not exist inside #{@app}."
+      error = assert_raises(InstantRecord::Compiler::BuildError) { trace(**kinds.transform_values { "nope" }, files: "nope") }
+      assert_equal missing, error.message.lines(chomp: true).drop(1)
+    end
+  end
+
+  test "the first file to take a constant's name keeps it" do
+    with_views do
+      {
+        "models/apple" => %w[models/apple models/concerns/apple], # models in path order, concerns among them
+        "models/concerns/zebra" => %w[models/concerns/zebra models/zebra],
+        "helpers/money" => %w[controllers/concerns/money helpers/money]
+      }.each do |first, files|
+        files.each { |file| write_app("app/#{file}.rb", "") }
+        write_app("app/controllers/application_controller.rb", File.basename(first).capitalize)
+        result = trace
+        assert_equal ["app/#{first}.rb"], (result.models + result.helpers), first
+      end
+    end
+  end
+
   private
 
   def with_views(*views)
@@ -105,6 +143,13 @@ class ReachabilityTracerTest < ActiveSupport::TestCase
     path = File.join(@app, rel)
     FileUtils.mkdir_p(File.dirname(path))
     File.binwrite(path, content)
+  end
+
+  def trace(**include)
+    write_app("config/routes.rb", "Rails.application.routes.draw { local_first { post 'a', to: 'a#create' } }")
+    write_app("app/controllers/a_controller.rb", "")
+    routes = InstantRecord::Compiler::RouteAnalyzer.analyze(source_root: @app)
+    InstantRecord::Compiler::ReachabilityTracer.trace(source_root: @app, route_analysis: routes, overrides: { include: include })
   end
 
   # The views staged when a controller without views of its own renders +name+.

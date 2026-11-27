@@ -468,43 +468,48 @@ module InstantRecord
         @view_files = glob_rel("app/views/**/*").select { |rel| File.file?(File.join(@source_root, rel)) }
         @screen_files = glob_rel("app/screens/**/*.rb")
         index_view_files!
+        index_stageable_constants!
+        index_unstaged_constants!
+        index_helper_methods!
+      end
 
-        # Map constant names -> relative file paths for stageable categories.
+      # Map constant names -> relative file paths for stageable categories.
+      def index_stageable_constants!
         @stageable_constants = {}
-        @controller_files.each { |rel| register_const_path(@stageable_constants, const_from_rel(rel, "app/controllers/"), rel) }
-        @model_files.each do |rel|
-          register_const_path(@stageable_constants, const_from_rel(rel, "app/models/"), rel)
-          if rel.start_with?("app/models/concerns/")
-            register_const_path(@stageable_constants, const_from_rel(rel, "app/models/concerns/"), rel)
-          end
-        end
-        @helper_files.each { |rel| register_const_path(@stageable_constants, const_from_rel(rel, "app/helpers/"), rel) }
-        @controller_files.each do |rel|
-          if rel.start_with?("app/controllers/concerns/")
-            register_const_path(@stageable_constants, const_from_rel(rel, "app/controllers/concerns/"), rel)
-          end
-        end
-        @screen_files.each { |rel| register_const_path(@stageable_constants, const_from_rel(rel, "app/screens/"), rel) } if @native
+        register_constants(@controller_files, "app/controllers/")
+        register_constants(@model_files, "app/models/", "app/models/concerns/")
+        register_constants(@helper_files, "app/helpers/")
+        register_constants(@controller_files, "app/controllers/concerns/")
+        register_constants(@screen_files, "app/screens/") if @native
+      end
 
-        # Index unstaged app directories (jobs, services, mailers, channels, non-native screens, lib)
-        # for crisp missing-symbol diagnostics.
+      # Names each file after every one of +prefixes+ it lies under. The first file to take a name keeps it.
+      def register_constants(files, *prefixes)
+        files.each do |rel|
+          prefixes.each do |prefix|
+            @stageable_constants[const_from_rel(rel, prefix)] ||= rel if rel.start_with?(prefix)
+          end
+        end
+      end
+
+      # Index unstaged app directories (jobs, services, mailers, channels, non-native screens, lib)
+      # for crisp missing-symbol diagnostics.
+      def index_unstaged_constants!
         @unstaged_constants = {}
-        Dir.glob("app/**/*.rb", base: @source_root).sort.each do |rel|
+        glob_rel("app/**/*.rb").each do |rel|
           next if rel.start_with?("app/controllers/", "app/models/", "app/helpers/")
           next if @native && rel.start_with?("app/screens/")
 
           top_dir = rel.split("/")[1]
-          const_name = const_from_rel(rel, "app/#{top_dir}/")
-          @unstaged_constants[const_name] ||= rel
+          @unstaged_constants[const_from_rel(rel, "app/#{top_dir}/")] ||= rel
         end
-        Dir.glob("lib/**/*.rb", base: @source_root).sort.each do |rel|
-          next if rel.start_with?("lib/tasks/")
-
-          const_name = const_from_rel(rel, "lib/")
-          @unstaged_constants[const_name] ||= rel
+        glob_rel("lib/**/*.rb").each do |rel|
+          @unstaged_constants[const_from_rel(rel, "lib/")] ||= rel unless rel.start_with?("lib/tasks/")
         end
+      end
 
-        # Index public helper methods -> helper rel path so views/helpers calling one automatically stage it.
+      # Index public helper methods -> helper rel path so views/helpers calling one automatically stage it.
+      def index_helper_methods!
         @helper_methods = {}
         @helper_files.each do |rel|
           parsed = Prism.parse_file(File.join(@source_root, rel))
@@ -574,54 +579,13 @@ module InstantRecord
       end
 
       def apply_explicit_includes!
-        inc = @overrides[:include]
+        include_each("models", "app/models/") { |entry| resolve_model_override(entry) }
+        include_each("controllers", "app/controllers/") { |entry| resolve_controller_override(entry) }
+        include_each("helpers", "app/helpers/") { |entry| resolve_helper_override(entry) }
+        include_each("views", "app/views/") { |entry| resolve_view_override(entry, partial: false) }
+        include_each("partials", "app/views/") { |entry| resolve_view_override(entry, partial: true) }
 
-        inc["models"].each do |entry|
-          rel = resolve_model_override(entry)
-          if rel
-            enqueue(rel)
-          else
-            @errors << "Explicit include.models entry #{entry.inspect} was not found under app/models/."
-          end
-        end
-
-        inc["controllers"].each do |entry|
-          rel = resolve_controller_override(entry)
-          if rel
-            enqueue(rel)
-          else
-            @errors << "Explicit include.controllers entry #{entry.inspect} was not found under app/controllers/."
-          end
-        end
-
-        inc["helpers"].each do |entry|
-          rel = resolve_helper_override(entry)
-          if rel
-            enqueue(rel)
-          else
-            @errors << "Explicit include.helpers entry #{entry.inspect} was not found under app/helpers/."
-          end
-        end
-
-        inc["views"].each do |entry|
-          matches = resolve_view_override(entry, partial: false)
-          if matches.any?
-            matches.each { |rel| enqueue(rel) }
-          else
-            @errors << "Explicit include.views entry #{entry.inspect} was not found under app/views/."
-          end
-        end
-
-        inc["partials"].each do |entry|
-          matches = resolve_view_override(entry, partial: true)
-          if matches.any?
-            matches.each { |rel| enqueue(rel) }
-          else
-            @errors << "Explicit include.partials entry #{entry.inspect} was not found under app/views/."
-          end
-        end
-
-        inc["files"].each do |entry|
+        @overrides[:include]["files"].each do |entry|
           rel = sanitize_relative_path(entry)
           if rel && safe_source_file?(rel)
             @staged_extra_files << rel
@@ -629,6 +593,15 @@ module InstantRecord
           else
             @errors << "Explicit include.files entry #{entry.inspect} does not exist inside #{@source_root}."
           end
+        end
+      end
+
+      # Enqueues the file or files the block finds for each entry of an include list.
+      def include_each(kind, dir)
+        @overrides[:include][kind].each do |entry|
+          found = Array(yield(entry))
+          @errors << "Explicit include.#{kind} entry #{entry.inspect} was not found under #{dir}." if found.empty?
+          found.each { |rel| enqueue(rel) }
         end
       end
 
@@ -1140,10 +1113,6 @@ module InstantRecord
 
       def const_from_rel(rel, prefix)
         rel.delete_prefix(prefix).delete_suffix(".rb").split("/").map { |part| ActiveSupport::Inflector.camelize(part) }.join("::")
-      end
-
-      def register_const_path(map, const_name, rel)
-        map[const_name] ||= rel
       end
 
       # Extract top-level public helper method definitions, skipping server_only
