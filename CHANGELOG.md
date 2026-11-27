@@ -5,6 +5,7 @@
 - **A partitioned island compiles for iOS with current Roundhouse and Spinel.** The native host's two calls are declared for Roundhouse (`sig/instant_record/native_host.rbs`), a compiled `sync_partition` reads its column by Symbol, a request's dispatch is captured in a method of its own, and the native host tests an unset id without `blank?`.
 - **A synced table's foreign key to a table that does not sync is left out of the compiled app's schema.** SQLite on the device enforces foreign keys, and refused a synced row whose parent it never receives. The server keeps every constraint.
 - **`bin/rails instant_record:mcp -- --build` compiles the native host.** The task passed `shell_snapshot`, an option of the browser build only, to the native build, and stopped with `unknown keyword: :shell_snapshot`.
+- **The documented arguments of the `mcp` and `replay` tasks work.** `bin/rails` takes every word after a task for another task, so the README and the usage texts now give the forms that work: `bundle exec rake instant_record:mcp -- models`, `bundle exec rake instant_record:replay -- a.irtrace --json`, and the standalone `instant_record_mcp` with its options before the command. `bin/rails "instant_record:replay[a.irtrace]" -- --json` reads `--json`, `--stop-on-fault` and `--allow-digest-mismatch`, which it ignored.
 
 ## 0.3.0 (2026-11-23)
 

@@ -105,7 +105,7 @@ namespace :instant_record do
     end
   end
 
-  desc "Run the local MCP stdio server or offline CLI around the compiled native host (pass CLI args after `--`)"
+  desc "Run the local MCP stdio server or offline CLI around the compiled native host (CLI args after `--`, with bundle exec rake: bin/rails takes words for tasks)"
   task mcp: :environment do
     require "instant_record/compiler"
     require "instant_record/mcp"
@@ -180,13 +180,15 @@ namespace :instant_record do
     end
   end
 
+  value_flags = %w[--wasm --db --max-steps]
+
   # A flag with a value takes the argument after it, even one that looks like a flag.
   replay_arguments = lambda do |arguments|
     flags = {}
     positional = []
     rest = arguments.dup
     while (arg = rest.shift)
-      if %w[--wasm --db --max-steps].include?(arg)
+      if value_flags.include?(arg)
         flags[arg] = rest.shift unless rest.empty?
       elsif arg.start_with?("-")
         flags[arg] = true
@@ -201,15 +203,23 @@ namespace :instant_record do
   task :replay, [:file, :wasm] => :environment do |_task, args|
     require "instant_record/trace"
 
-    # Support `rails instant_record:replay path/to/file.irtrace`,
-    # `rails "instant_record:replay[path/to/file.irtrace]"`, and `TRACE=...`.
-    extra = ARGV.drop_while { |arg| !arg.start_with?("instant_record:replay") }.drop(1)
+    replay = ->(arg) { arg.start_with?("instant_record:replay") }
+    if ARGV.none?(&replay) && Rake.application.top_level_tasks.any?(&replay)
+      # bin/rails took the task's name out of ARGV, and takes words for tasks: only flags without a value arrive.
+      extra = ARGV.drop_while { |arg| arg != "--" }.grep(/\A-/) - value_flags
+    else
+      extra = ARGV.drop_while { |arg| !replay.call(arg) }.drop(1)
+    end
     flags, positional = replay_arguments.call(extra)
     extra.each { |arg| Rake::Task.define_task(arg.to_sym) {} unless Rake::Task.task_defined?(arg) }
 
     trace_file = args[:file].to_s.empty? ? (positional[0] || ENV["TRACE"]) : args[:file]
     if trace_file.nil? || trace_file.empty?
-      abort "Usage: bin/rails instant_record:replay <file.irtrace> [--wasm <app.wasm>] [--db <file.sqlite3>] [--json]"
+      abort <<~USAGE
+        Usage: bundle exec rake instant_record:replay -- <file.irtrace> [--wasm <app.wasm>] [--db <file.sqlite3>] [--json]
+               bin/rails "instant_record:replay[<file.irtrace>,<app.wasm>]" [-- --json]
+               TRACE=<file.irtrace> [WASM=<app.wasm>] [DB=<file.sqlite3>] [JSON=1] bin/rails instant_record:replay
+      USAGE
     end
 
     in_rails = defined?(Rails) && Rails.respond_to?(:root)
