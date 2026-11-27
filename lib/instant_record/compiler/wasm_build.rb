@@ -417,31 +417,11 @@ module InstantRecord
 
       def inject_preloads(dist, app_root)
         links = app_root ? outside_stylesheets(app_root) : []
-        harness_dir = File.join(dist, "harness")
-        if File.directory?(harness_dir)
-          Dir.children(harness_dir).sort.each do |name|
-            if name.start_with?("worker-") && name.end_with?(".js")
-              # Started here, not preloaded: a modulepreload is a module load in the page, after
-              # which Firefox refuses the import map of the app's own page (compiled/web/vite.config.js).
-              links << %(    <script>try { window.__worker = new Worker("/harness/#{name}", { type: "module" }); } catch (error) {}</script>)
-            end
-          end
-        end
+        links.concat(worker_starts(File.join(dist, "harness")))
 
         assets_dir = File.join(dist, "assets")
-        deferred_css = []
-        if File.directory?(assets_dir)
-          css_files = Dir.children(assets_dir).sort.select { |name| name.end_with?(".css") }
-          css_files.each do |name|
-            stem = File.basename(name, ".css").sub(/-[0-9a-f]{8,}\z/, "")
-            if css_files.length <= 3 || CORE_PRELOAD_STYLES.include?(stem)
-              links << %(    <link rel="preload" as="style" fetchpriority="low" href="/assets/#{name}">)
-            else
-              deferred_css << name
-            end
-          end
-        end
-
+        preloaded_css, deferred_css = split_stylesheets(assets_dir)
+        links.concat(preloaded_css.map { |name| %(    <link rel="preload" as="style" fetchpriority="low" href="/assets/#{name}">) })
         links.concat(warm_scripts(assets_dir, deferred_css: deferred_css))
         return if links.empty?
 
@@ -451,6 +431,27 @@ module InstantRecord
       end
 
       private
+
+      # Started here, not preloaded: a modulepreload is a module load in the page, after
+      # which Firefox refuses the import map of the app's own page (compiled/web/vite.config.js).
+      def worker_starts(harness_dir)
+        return [] unless File.directory?(harness_dir)
+
+        workers = Dir.children(harness_dir).sort.select { |name| name.start_with?("worker-") && name.end_with?(".js") }
+        workers.map do |name|
+          %(    <script>try { window.__worker = new Worker("/harness/#{name}", { type: "module" }); } catch (error) {}</script>)
+        end
+      end
+
+      def split_stylesheets(assets_dir)
+        return [[], []] unless File.directory?(assets_dir)
+
+        css_files = Dir.children(assets_dir).sort.select { |name| name.end_with?(".css") }
+        css_files.partition do |name|
+          stem = File.basename(name, ".css").sub(/-[0-9a-f]{8,}\z/, "")
+          css_files.length <= 3 || CORE_PRELOAD_STYLES.include?(stem)
+        end
+      end
 
       def clean(path)
         expanded = File.expand_path(path)
