@@ -153,41 +153,38 @@ module InstantRecord
         parsed = Prism.parse(source)
         return source unless parsed.success?
 
-        ranges = []
-        collect_contract_ranges(parsed.value, ranges)
-        return source if ranges.empty?
-
-        output = source.b
-        ranges.sort_by { |start_off, _| -start_off }.each do |start_off, end_off|
-          slice = output.byteslice(start_off...end_off)
-          output[start_off...end_off] = "\n" * slice.count("\n")
+        edits = contract_calls(parsed.value).map do |call|
+          location = call.location
+          AstLowerer::Edit.new(
+            start_offset: location.start_offset,
+            end_offset: location.end_offset,
+            replacement: "\n" * location.slice.b.count("\n")
+          )
         end
-        output.force_encoding(source.encoding)
+        AstLowerer.apply_edits(source, edits)
       end
 
-      def collect_contract_ranges(node, ranges)
-        return unless node
-
+      # The `contract` calls standing directly in a class body, in source order.
+      # A call anywhere else (top level, module body, method) is not one.
+      def contract_calls(node)
         case node
         when Prism::ProgramNode
-          collect_contract_ranges(node.statements, ranges)
+          contract_calls(node.statements)
         when Prism::StatementsNode
-          node.body.each { |stmt| collect_contract_ranges(stmt, ranges) }
+          node.body.flat_map { |stmt| contract_calls(stmt) }
         when Prism::ModuleNode
-          collect_contract_ranges(node.body, ranges)
+          contract_calls(node.body)
         when Prism::ClassNode
-          if node.body.is_a?(Prism::StatementsNode)
-            node.body.body.each do |stmt|
-              if stmt.is_a?(Prism::CallNode) && stmt.receiver.nil? && stmt.name == :contract
-                ranges << [stmt.location.start_offset, stmt.location.end_offset]
-              else
-                collect_contract_ranges(stmt, ranges)
-              end
-            end
-          else
-            collect_contract_ranges(node.body, ranges)
-          end
+          return [] unless node.body.is_a?(Prism::StatementsNode)
+
+          node.body.body.flat_map { |stmt| contract_call?(stmt) ? [stmt] : contract_calls(stmt) }
+        else
+          []
         end
+      end
+
+      def contract_call?(node)
+        node.is_a?(Prism::CallNode) && node.receiver.nil? && node.name == :contract
       end
     end
   end
