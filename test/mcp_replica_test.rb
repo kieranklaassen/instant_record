@@ -52,6 +52,24 @@ class McpReplicaTest < ActiveSupport::TestCase
     assert_operator times.min, :<, 5.0, "expected local replica query to be sub-millisecond (got #{times.inspect})"
   end
 
+  test "the total counts every match, on a full page, the last one and past the end" do
+    page = lambda do |where, limit, offset|
+      result = @replica.query(model: "Issue", where: where, order: "id", limit: limit, offset: offset)
+      [result["count"], result["total"]]
+    end
+
+    assert_equal [2, 3], page.({}, 2, 0)
+    assert_equal [3, 3], page.({}, 3, 0)
+    assert_equal [1, 3], page.({}, 2, 2)
+    assert_equal [0, 3], page.({}, 2, 3)
+    assert_equal [0, 3], page.({}, 2, 900)
+    assert_equal [2, 2], page.({ "state" => "open" }, 50, 0)
+    assert_equal [1, 2], page.({ "state" => "open" }, 50, 1)
+    assert_equal [0, 0], page.({ "state" => "none" }, 50, 0)
+    # A value nested in a list takes no place of its own, so no row is read.
+    assert_equal [0, 2], page.({ "state" => [{}, "open"] }, 50, 0)
+  end
+
   test "rejects unknown models, columns, operators, and sort directions against SQL injection" do
     assert_raises(ArgumentError) { @replica.query(model: "issues; DROP TABLE issues;--") }
     assert_raises(ArgumentError) { @replica.query(model: "Issue", where: { "title OR 1=1" => "x" }) }
