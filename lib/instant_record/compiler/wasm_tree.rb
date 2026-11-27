@@ -142,6 +142,17 @@ module InstantRecord
 
       RUBY
 
+      QUOTING_METHODS = <<~'RUBY'
+            def quote_column_name(name)
+              "\"" + name.to_s.gsub("\"", "\"\"") + "\""
+            end
+
+            def quote_table_name(name)
+              quote_column_name(name).gsub(".", "\".\"")
+            end
+
+      RUBY
+
       PRUNED_STUBS = {
         "runtime/action_text.rb" => "module ActionText\nend\n",
         "runtime/action_text_json.rb" => "",
@@ -343,6 +354,7 @@ module InstantRecord
         patch_model_datetime_casts
         patch_model_remote_timestamps
         patch_active_record_changed
+        patch_connection_quoting
         patch_emitted_views
         patch_slack_sidebar if @demo
         prepend_wasm_threads_require
@@ -445,6 +457,22 @@ module InstantRecord
         raise BuildError, "Expected #{anchor.strip} in #{path}" unless text.include?(anchor)
 
         File.write(path, text.sub(anchor) { CHANGED_METHOD + anchor })
+      end
+
+      # The emitted Connection has no identifier quoting, which SyncWindow's SQL
+      # is built with. These quote as Rails does for SQLite.
+      def patch_connection_quoting
+        path = File.join(@target, "runtime/active_record/connection.rb")
+        raise BuildError, "Expected #{path}" unless File.file?(path)
+
+        anchor = "    def quote_string(str)\n"
+        rewrite(path) do |text|
+          given = %w[quote_column_name quote_table_name].count { |name| text.include?("def #{name}(") }
+          next text if given == 2
+          raise BuildError, "Expected #{anchor.strip} and both or neither quoting method in #{path}" unless given.zero? && text.include?(anchor)
+
+          text.sub(anchor) { QUOTING_METHODS + anchor }
+        end
       end
 
       def patch_emitted_views

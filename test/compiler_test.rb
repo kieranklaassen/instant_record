@@ -710,6 +710,7 @@ class CompilerTest < ActiveSupport::TestCase
       File.write(File.join(emit, "runtime/db.rb"), "sqlite3_bind_int64\nsqlite3_last_insert_rowid\n")
       File.write(File.join(emit, "runtime/sqlite_adapter.rb"), "module SqliteAdapter\n  def self.each_row(sql)\n  end\nend\n")
       File.write(File.join(emit, "runtime/active_record/base.rb"), "module ActiveRecord\n  class Base\n    def has_changes_to_save?\n    end\n  end\nend\n")
+      File.write(File.join(emit, "runtime/active_record/connection.rb"), "module ActiveRecord\n  class Connection\n    def quote_string(str)\n    end\n  end\nend\n")
       File.write(File.join(emit, "runtime/action_text.rb"), "line1\nline2\n")
       File.write(File.join(emit, "app/models/note.rb"), <<~RUBY)
         if name == "created_at"
@@ -809,6 +810,31 @@ class CompilerTest < ActiveSupport::TestCase
     assert_equal tracked, tree["runtime/sqlite_adapter.rb"]
     refute_includes build_wasm_tree({}).last, "runtime/sqlite_adapter.rb"
     assert_raises(Errno::ENOENT) { build_wasm_tree("main_wasm.rb" => nil) }
+  end
+
+  # SyncWindow builds its SQL with these, and an emitted Connection has neither.
+  test "WasmTree gives the emitted Connection the identifier quoting Rails has for SQLite" do
+    emitted = "class Connection\n    def quote_string(str)\n      str\n    end\nend\n"
+    _stats, tree = build_wasm_tree("runtime/active_record/connection.rb" => emitted)
+
+    sandbox = Module.new
+    sandbox.module_eval(tree["runtime/active_record/connection.rb"])
+    compiled = sandbox.const_get(:Connection).new
+    rails = ActiveRecord::Base.connection
+    ["messages", "main.messages", 'odd"name', :created_at].each do |name|
+      assert_equal rails.quote_table_name(name), compiled.quote_table_name(name)
+      assert_equal rails.quote_column_name(name), compiled.quote_column_name(name)
+    end
+    assert_equal "kept", compiled.quote_string("kept")
+  end
+
+  test "WasmTree refuses an emitted Connection it cannot give the quoting to, and leaves one that has it" do
+    path = "runtime/active_record/connection.rb"
+    [nil, "def other\nend\n", "def quote_table_name(name)\nend\n    def quote_string(str)\n"].each do |emitted|
+      assert_raises(InstantRecord::Compiler::BuildError) { build_wasm_tree(path => emitted) }
+    end
+    quoting = "def quote_column_name(name)\nend\ndef quote_table_name(name)\nend\n"
+    assert_equal quoting, build_wasm_tree(path => quoting).last[path]
   end
 
   test "Compiler.build and Compiler.build_native run end-to-end with a stub toolchain and cache unchanged builds" do
@@ -968,7 +994,8 @@ class CompilerTest < ActiveSupport::TestCase
         "main_wasm.rb" => "Mutex.new\n",
         "runtime/message_digest.rb" => "  def self.aes_256_gcm_encrypt\n",
         "runtime/db.rb" => "",
-        "runtime/active_record/base.rb" => "    def has_changes_to_save?\n"
+        "runtime/active_record/base.rb" => "    def has_changes_to_save?\n",
+        "runtime/active_record/connection.rb" => "    def quote_string(str)\n"
       }.merge(files).compact.each do |rel, text|
         path = File.join(emit, rel)
         FileUtils.mkdir_p(File.dirname(path))
@@ -1101,6 +1128,7 @@ class CompilerTest < ActiveSupport::TestCase
       printf 'require "openssl"\\n  def self.aes_256_gcm_encrypt; end\\nend\\n' > "$out/runtime/message_digest.rb"
       printf 'sqlite3_bind_int64\\n' > "$out/runtime/db.rb"
       printf '    def has_changes_to_save?\\n    end\\n' > "$out/runtime/active_record/base.rb"
+      printf '    def quote_string(str)\\n    end\\n' > "$out/runtime/active_record/connection.rb"
       printf 'module InstantRecord; module Host; end; end\\n' > "$out/app/models/instant_record/host.rb"
     SH
 
