@@ -248,7 +248,7 @@ module InstantRecord
       def parse_timestamp(value)
         return nil if value.nil? || value.to_s.empty?
 
-        Time.parse(value.to_s)
+        Client.parse_time(value.to_s)
       rescue ArgumentError
         nil
       end

@@ -605,7 +605,7 @@ module InstantRecord
           return nil if raw.nil? || raw.to_s.empty?
           return raw.to_time.utc if raw.respond_to?(:to_time) && !raw.is_a?(String)
 
-          Time.parse(raw.to_s).utc
+          Client.parse_time(raw.to_s)
         rescue ArgumentError
           nil
         end

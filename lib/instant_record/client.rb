@@ -873,6 +873,24 @@ module InstantRecord
         apply_remote_event(event, record_delta: false)
       end
 
+      # Normalize Ruby Time, ActiveSupport::TimeWithZone, ISO 8601 strings, and
+      # bare SQLite UTC datetime strings ("YYYY-MM-DD HH:MM:SS.ffffff") to UTC
+      # so comparisons never drift on non-UTC host machines. Public for the rebaser
+      # and branches, which read such times too. :nodoc:
+      def parse_time(value)
+        return value.utc if value.is_a?(Time)
+        return value.to_time.utc if !value.is_a?(String) && value.respond_to?(:to_time)
+
+        text = value.to_s.strip
+        raise ArgumentError, "blank timestamp" if text.empty?
+
+        if text.match?(/(?:Z|[+-]\d{2}:?\d{2}|UTC)\z/i)
+          Time.parse(text).utc
+        else
+          Time.parse("#{text} UTC").utc
+        end
+      end
+
       private
 
       def apply_remote_event(event, record_delta:)
@@ -1447,23 +1465,6 @@ module InstantRecord
         0
       end
 
-      # Normalize Ruby Time, ActiveSupport::TimeWithZone, ISO 8601 strings, and
-      # bare SQLite UTC datetime strings ("YYYY-MM-DD HH:MM:SS.ffffff") to UTC
-      # so boundary comparisons never drift on non-UTC host machines.
-      def parse_time(value)
-        return value.utc if value.is_a?(Time)
-        return value.to_time.utc if !value.is_a?(String) && value.respond_to?(:to_time)
-
-        text = value.to_s.strip
-        raise ArgumentError, "blank timestamp" if text.empty?
-
-        if text.match?(/(?:Z|[+-]\d{2}:?\d{2}|UTC)\z/i)
-          Time.parse(text).utc
-        else
-          Time.parse("#{text} UTC").utc
-        end
-      end
-
       # Keyset page below (before_at, before_id), newest first, as
       # [created_at, id] tuples.
       def local_page(window, partition, before_at, before_id, limit)
@@ -1697,7 +1698,7 @@ module InstantRecord
         changed_cols = record.changed.map(&:to_s)
         record.save!(validate: false)
         if sliced["updated_at"]
-          record.update_columns(updated_at: Time.parse(sliced["updated_at"].to_s))
+          record.update_columns(updated_at: parse_time(sliced["updated_at"].to_s))
           changed_cols << "updated_at" unless changed_cols.include?("updated_at")
         end
         note_record_change(record, was_new ? "create" : "update", changed_columns: changed_cols)
@@ -1731,7 +1732,7 @@ module InstantRecord
 
         incoming_hlc = HLC.valid?(hlc) ? hlc : nil
         local_hlc = record.persisted? ? HLC.row_hlc(model.name, record.id) : nil
-        incoming_at = attributes["updated_at"] && Time.parse(attributes["updated_at"].to_s)
+        incoming_at = attributes["updated_at"] && parse_time(attributes["updated_at"].to_s)
         local_at = record.persisted? ? record.updated_at : nil
         prior_pending = !authoritative && record.persisted? && record.sync_state == "pending"
         prior_attributes = prior_pending ? InstantRecord.wire_attributes(record.attributes) : nil
