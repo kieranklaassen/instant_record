@@ -49,6 +49,9 @@ module InstantRecord
         InstantRecord::Compiler
       ]).freeze
 
+      SERVER_ONLY = "server_only".b.freeze
+      private_constant :SERVER_ONLY
+
       NON_COMPILED_PREFIXES = %w[
         db/
         test/
@@ -118,8 +121,9 @@ module InstantRecord
       def run
         parsed_files = parse(discover_files)
 
-        server_only_defs, client_defs = collect_defs(parsed_files)
-        server_only_defs = @precollected_server_only if @precollected_server_only
+        server_only_defs = @precollected_server_only || collect_server_only_defs(parsed_mentioning(parsed_files, [SERVER_ONLY]))
+        names = server_only_defs.map(&:first) + SERVER_ONLY_GEM_CONSTANTS.to_a
+        client_defs = collect_client_defs(parsed_mentioning(parsed_files, last_segments(names)))
 
         # Constant name => where it is defined, nil for a gem constant.
         @server_only = {}
@@ -159,7 +163,11 @@ module InstantRecord
       end
 
       def scan_constant_definitions(files)
-        server_only_defs, client_defs = collect_defs(parse(files))
+        server_only_defs = collect_server_only_defs(parse(files.select { |path| file_mentions?(path, [SERVER_ONLY]) }))
+        return server_only_defs if server_only_defs.empty?
+
+        words = last_segments(server_only_defs.keys)
+        client_defs = collect_client_defs(parse(files.select { |path| file_mentions?(path, words) }))
         server_only_defs.reject { |name, _| client_defs.include?(name) }
       end
 
@@ -197,25 +205,51 @@ module InstantRecord
 
       # --- Constant names ---
 
-      # The first definition of each server_only constant, and the set of
-      # constants the client defines.
-      def collect_defs(parsed_files)
-        server_only_defs = {}
-        client_defs = Set.new
+      # The first definition of each server_only constant.
+      def collect_server_only_defs(parsed_files)
+        defs = {}
+        each_file_definition(parsed_files) do |rel, name, line, in_server_only|
+          defs[name] ||= "#{rel}:#{line}" if in_server_only
+        end
+        defs
+      end
 
+      # The constants the client defines in these files.
+      def collect_client_defs(parsed_files)
+        defs = Set.new
+        each_file_definition(parsed_files) do |_rel, name, _line, in_server_only|
+          defs.add(name) unless in_server_only
+        end
+        defs
+      end
+
+      def each_file_definition(parsed_files)
         parsed_files.each do |rel, parsed|
           next unless parsed.success?
 
-          each_definition(parsed.value) do |name, line, in_server_only|
-            if in_server_only
-              server_only_defs[name] ||= "#{rel}:#{line}"
-            else
-              client_defs.add(name)
-            end
-          end
+          each_definition(parsed.value) { |name, line, in_server_only| yield rel, name, line, in_server_only }
         end
+      end
 
-        [server_only_defs, client_defs]
+      # A definition spells the last segment of its name, and a block its
+      # method's, so a file without the word holds none.
+      def last_segments(names)
+        names.map { |name| name.rpartition("::").last.b }.uniq
+      end
+
+      def parsed_mentioning(parsed_files, words)
+        parsed_files.select { |_rel, parsed| mentions?(parsed.source.source, words) }
+      end
+
+      def file_mentions?(path, words)
+        mentions?(File.binread(path), words)
+      rescue SystemCallError
+        true # Parsing it raises.
+      end
+
+      def mentions?(source, words)
+        bytes = source.b
+        words.any? { |word| bytes.include?(word) }
       end
 
       def each_definition(node, namespace = [], in_server_only = false, &block)

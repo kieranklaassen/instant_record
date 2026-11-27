@@ -86,6 +86,22 @@ class StaticLinterTest < ActiveSupport::TestCase
     end
   end
 
+  test "a client definition in a file that never says server_only makes the constant shared" do
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "a.rb"), "class Job\n  server_only do\n    LIMIT = 1\n    RETRIES = 2\n  end\nend\n")
+      File.write(File.join(dir, "b.rb"), "class Job\n  LIMIT = 3\nend\n")
+      File.write(File.join(dir, "c.rb"), "Job::LIMIT\nJob::RETRIES\n")
+
+      assert_equal({ "Job::RETRIES" => "a.rb:4" }, StaticLinter.collect_server_only_constants(dir))
+
+      given = { "Job::LIMIT" => "a.rb:3", "Job::RETRIES" => "a.rb:4" }
+      [nil, given].each do |server_only_constants|
+        result = StaticLinter.lint(dir, staged: true, server_only_constants: server_only_constants)
+        assert_equal ["c.rb:2"], result.diagnostics.map { |d| "#{d.file}:#{d.line}" }
+      end
+    end
+  end
+
   test "flags untyped {} hashes in Native::Screen params:, args:, props:, defaults, locals, helpers, and setters" do
     Dir.mktmpdir do |dir|
       FileUtils.mkdir_p(File.join(dir, "app/screens"))
