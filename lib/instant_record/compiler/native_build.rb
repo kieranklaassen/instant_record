@@ -410,7 +410,7 @@ module InstantRecord
         end
       end
 
-      def object_cache_key(name:, source:, cflags:, toolchain_identity:, extra_inputs: [])
+      def object_cache_key(name:, source:, cflags:, toolchain_identity:, extra_inputs:)
         payload = {
           "schema" => CACHE_SCHEMA_VERSION,
           "kind" => "object",
@@ -435,15 +435,23 @@ module InstantRecord
         Digest::SHA256.hexdigest(JSON.generate(payload))
       end
 
-      def cached_object(name:, source:, cflags:, includes:, cc:, toolchain_identity: nil, extra_inputs: [], key: nil)
-        digest = key || object_cache_key(
+      def cached_object(cc:, **inputs)
+        compile_keyed_object(cc: cc, **keyed_object(**inputs))
+      end
+
+      def keyed_object(name:, source:, cflags:, includes:, toolchain_identity:, extra_inputs:)
+        key = object_cache_key(
           name: name,
           source: source,
           cflags: cflags,
           toolchain_identity: toolchain_identity,
           extra_inputs: extra_inputs
         )
-        cached_path = File.join(object_cache_dir, "#{name}-#{digest}.o")
+        { name: name, source: source, cflags: cflags, includes: includes, key: key }
+      end
+
+      def compile_keyed_object(name:, source:, cflags:, includes:, key:, cc:)
+        cached_path = File.join(object_cache_dir, "#{name}-#{key}.o")
         fetch_cached_file(cached_path) do |tmp_path|
           @runner.run([*cc, *cflags, *includes, "-c", source, "-o", tmp_path], log: "cc.log")
         end
@@ -484,23 +492,6 @@ module InstantRecord
         value.to_s.gsub(/[^A-Za-z0-9_.-]+/, "_")
       end
 
-      def runtime_member(name:, source:, cflags:, includes:, extra_inputs:, toolchain_identity:)
-        {
-          name: name,
-          source: source,
-          cflags: cflags,
-          includes: includes,
-          extra_inputs: extra_inputs,
-          key: object_cache_key(
-            name: name,
-            source: source,
-            cflags: cflags,
-            toolchain_identity: toolchain_identity,
-            extra_inputs: extra_inputs
-          )
-        }
-      end
-
       def cross_runtime(cc, spinel_home, runtime, toolchain_identity)
         lib = File.join(spinel_home, "lib")
         regexp_dir = File.join(lib, "regexp")
@@ -516,7 +507,7 @@ module InstantRecord
         lib_headers = [["spinel_lib_headers", directory_headers_digest(lib)]]
 
         members = re_src_paths.map do |path|
-          runtime_member(
+          keyed_object(
             name: "re_#{sanitize_cache_name(path.delete_suffix('.c'))}",
             source: File.join(spinel_home, path),
             cflags: runtime_cflags,
@@ -528,7 +519,7 @@ module InstantRecord
 
         members.concat(
           self.class.makefile_list(spinel_home, "RT_MEMBERS").map do |member|
-            runtime_member(
+            keyed_object(
               name: "rt_#{sanitize_cache_name(member)}",
               source: File.join(lib, "#{member}.c"),
               cflags: runtime_cflags,
@@ -548,16 +539,7 @@ module InstantRecord
         cached_archive = File.join(object_cache_dir, "libspinel_rt-#{archive_key}.a")
 
         fetch_cached_file(cached_archive) do |tmp_archive|
-          objects = members.map do |member|
-            cached_object(
-              name: member[:name],
-              source: member[:source],
-              cflags: member[:cflags],
-              includes: member[:includes],
-              cc: cc,
-              key: member[:key]
-            )
-          end
+          objects = members.map { |member| compile_keyed_object(cc: cc, **member) }
           @runner.run(["ar", "rcs", tmp_archive, *objects])
         end
 
