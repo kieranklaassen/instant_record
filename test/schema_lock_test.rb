@@ -501,7 +501,258 @@ class SchemaLockTest < ActiveSupport::TestCase
     end
   end
 
+  test "replay pruning still catches a NOT NULL failure on a table created in a later step" do
+    v4 = 20261120000004
+    in_app do |dir|
+      add_sql_migration(dir, V2, "CREATE TABLE widgets (id varchar PRIMARY KEY, name varchar NOT NULL);")
+      add_sql_migration(dir, V3, "CREATE TABLE unrelated (id varchar PRIMARY KEY);")
+      add_sql_migration(dir, v4, 'ALTER TABLE "widgets" ADD COLUMN "required_code" varchar NOT NULL;')
+      InstantRecord::Compiler.lock_schema(root: dir)
+      report = InstantRecord::Compiler.verify_schema(root: dir)
+
+      assert_equal :ok, replay(report, V1).status
+      assert_equal :error, replay(report, V2).status
+      assert_match(/\Amigration #{v4} failed inside transaction: Cannot add a NOT NULL column/, replay(report, V2).detail)
+      assert_equal :error, replay(report, V3).status
+      assert_equal :ok, replay(report, v4).status
+    end
+  end
+
+  test "replay pruning handles case-insensitive table names, triggers, and tampered middle snapshots" do
+    v4 = 20261120000004
+
+    in_app do |dir|
+      add_sql_migration(dir, V2, 'ALTER TABLE "NOTES" ADD COLUMN "author" varchar NOT NULL;')
+      add_sql_migration(dir, V3, "CREATE TABLE unrelated (id varchar PRIMARY KEY);")
+      InstantRecord::Compiler.lock_schema(root: dir)
+      report = InstantRecord::Compiler.verify_schema(root: dir)
+
+      assert_equal :error, replay(report, V1).status
+      assert_match(/Cannot add a NOT NULL column/, replay(report, V1).detail)
+      assert_equal :ok, replay(report, V2).status
+    end
+
+    in_app do |dir|
+      add_sql_migration(dir, V2, <<~SQL)
+        CREATE TABLE audit_log (id integer PRIMARY KEY AUTOINCREMENT, note_id varchar NOT NULL);
+        CREATE TRIGGER log_note_update AFTER UPDATE ON notes BEGIN INSERT INTO audit_log (note_id) VALUES (NEW.id); END;
+      SQL
+      add_sql_migration(dir, V3, 'UPDATE notes SET title = title || "!";')
+      add_sql_migration(dir, v4, 'ALTER TABLE "audit_log" ADD COLUMN "actor" varchar NOT NULL;')
+      InstantRecord::Compiler.lock_schema(root: dir)
+      report = InstantRecord::Compiler.verify_schema(root: dir)
+
+      assert_equal :error, replay(report, V1).status
+      assert_match(/\Amigration #{v4} failed inside transaction: Cannot add a NOT NULL column/, replay(report, V1).detail)
+      assert_equal :error, replay(report, V2).status
+      assert_match(/no such table: main\.notes/, replay(report, V2).detail)
+    end
+
+    in_app do |dir|
+      add_sql_migration(dir, V2, 'ALTER TABLE "notes" ADD COLUMN "col_a" varchar;')
+      add_sql_migration(dir, V3, 'ALTER TABLE "notes" ADD COLUMN "col_b" varchar;')
+      InstantRecord::Compiler.lock_schema(root: dir)
+      edit_lock(dir) do |lock|
+        lock["versions"][1]["schema_sql"] = [
+          "CREATE TABLE notes (id varchar, title varchar, body text, server_version integer, sync_state varchar, created_at datetime, updated_at datetime, bogus_col text)"
+        ]
+      end
+      report = InstantRecord::Compiler.verify_schema(root: dir)
+
+      assert_equal :ok, replay(report, V1).status
+      assert_equal :error, replay(report, V2).status
+      assert_equal 'upgrade from 20261120000002 drifted on table "notes" (missing columns: col_a; extra columns: bogus_col)', replay(report, V2).detail
+      assert_equal :ok, replay(report, V3).status
+    end
+  end
+
+  test "replay pruning preserves transitive table dependencies across multi-table steps" do
+    v4 = 20261120000004
+
+    # V2 creates a new table, V3 alters both V1's notes and V2's folders, V4 alters folders again.
+    in_app do |dir|
+      add_ruby_migration(dir, V2, "create_folders", <<~RUBY)
+        class CreateFolders < ActiveRecord::Migration[8.1]
+          def change
+            create_table :folders, id: :string do |t|
+              t.string :name, null: false
+            end
+          end
+        end
+      RUBY
+      add_ruby_migration(dir, V3, "link_notes_and_folders", <<~RUBY)
+        class LinkNotesAndFolders < ActiveRecord::Migration[8.1]
+          def change
+            add_column :notes, :folder_id, :string
+            add_column :folders, :pinned_note_id, :string
+          end
+        end
+      RUBY
+      add_ruby_migration(dir, v4, "add_folder_position", <<~RUBY)
+        class AddFolderPosition < ActiveRecord::Migration[8.1]
+          def change
+            add_column :folders, :position, :integer, default: 0, null: false
+          end
+        end
+      RUBY
+
+      InstantRecord::Compiler.lock_schema(root: dir)
+      report = InstantRecord::Compiler.verify_schema(root: dir)
+      assert report.ok?, report.to_s
+      assert_equal [V1, V2, V3, v4], report.replayed_versions
+    end
+
+    # V2 creates instant_record_outbox, V3 alters both notes and instant_record_outbox.
+    in_app do |dir|
+      add_sql_migration(dir, V2, InstantRecord::Compiler::SchemaLock::OUTBOX_TABLE_DDL)
+      add_ruby_migration(dir, V3, "add_tag_and_release_at", <<~RUBY)
+        class AddTagAndReleaseAt < ActiveRecord::Migration[8.1]
+          def change
+            add_column :notes, :tag, :string
+            add_column :instant_record_outbox, :release_at, :datetime
+          end
+        end
+      RUBY
+
+      InstantRecord::Compiler.lock_schema(root: dir)
+      report = InstantRecord::Compiler.verify_schema(root: dir)
+      assert report.ok?, report.to_s
+    end
+
+    # Unpopulated internal table altered in V2 and updated alongside notes in V3.
+    in_app do |dir|
+      File.write(File.join(dir, "db/migrate/#{V1}_create_notes.rb"), <<~RUBY)
+        class CreateNotes < ActiveRecord::Migration[8.1]
+          def change
+            create_table :notes, id: :string do |t|
+              t.string :title, null: false
+            end
+            create_table :instant_record_changes, id: :string do |t|
+              t.string :record_id, null: false
+            end
+          end
+        end
+      RUBY
+      add_ruby_migration(dir, V2, "add_change_scope", <<~RUBY)
+        class AddChangeScope < ActiveRecord::Migration[8.1]
+          def change
+            add_column :instant_record_changes, :scope, :string
+          end
+        end
+      RUBY
+      add_ruby_migration(dir, V3, "update_notes_and_changes", <<~RUBY)
+        class UpdateNotesAndChanges < ActiveRecord::Migration[8.1]
+          def change
+            add_column :notes, :tag, :string
+            execute "UPDATE instant_record_changes SET scope = 'global'"
+          end
+        end
+      RUBY
+
+      InstantRecord::Compiler.lock_schema(root: dir)
+      report = InstantRecord::Compiler.verify_schema(root: dir)
+      assert report.ok?, report.to_s
+    end
+  end
+
+  test "snapshot reuse does not leak rows inserted by earlier migrations" do
+    in_app do |dir|
+      add_sql_migration(dir, V2, <<~SQL)
+        CREATE TABLE admins (id integer PRIMARY KEY, name varchar NOT NULL);
+        INSERT INTO admins (name) VALUES ('root');
+      SQL
+      add_ruby_migration(dir, V3, "add_admin_email", <<~RUBY)
+        class AddAdminEmail < ActiveRecord::Migration[8.1]
+          def change
+            add_column :admins, :email, :string
+          end
+        end
+      RUBY
+
+      InstantRecord::Compiler.lock_schema(root: dir)
+      report = InstantRecord::Compiler.verify_schema(root: dir)
+      assert report.ok?, report.to_s
+      assert_equal [V1, V2, V3], report.replayed_versions
+    end
+  end
+
+  test "verify falls back to schema_sql when sqlite3 serialize/deserialize are unavailable" do
+    in_app do |dir|
+      add_migration_v2(dir)
+      add_migration_v3(dir)
+      InstantRecord::Compiler.lock_schema(root: dir)
+
+      orig_with_sqlite = InstantRecord::Compiler::SchemaLock.method(:with_sqlite)
+      wrapper = lambda do |&block|
+        orig_with_sqlite.call do |db|
+          db.define_singleton_method(:respond_to?) do |name, include_all = false|
+            return false if name == :serialize || name == :deserialize
+
+            super(name, include_all)
+          end
+          db.define_singleton_method(:serialize) { raise NoMethodError, "serialize unavailable" }
+          db.define_singleton_method(:deserialize) { |_bytes| raise NoMethodError, "deserialize unavailable" }
+          block.call(db)
+        end
+      end
+
+      InstantRecord::Compiler::SchemaLock.singleton_class.alias_method(:__orig_with_sqlite_for_test, :with_sqlite)
+      InstantRecord::Compiler::SchemaLock.define_singleton_method(:with_sqlite, &wrapper)
+      begin
+        report = InstantRecord::Compiler.verify_schema(root: dir)
+        assert report.ok?, report.to_s
+        assert_equal [V1, V2, V3], report.replayed_versions
+      ensure
+        InstantRecord::Compiler::SchemaLock.singleton_class.alias_method(:with_sqlite, :__orig_with_sqlite_for_test)
+        InstantRecord::Compiler::SchemaLock.singleton_class.remove_method(:__orig_with_sqlite_for_test)
+        InstantRecord::Compiler::SchemaLock.singleton_class.send(:private, :with_sqlite)
+      end
+    end
+  end
+
+  test "pruned replay works from baseline_schema_sql across independent and dependent steps" do
+    v4 = 20261120000004
+    in_app do |dir|
+      add_ruby_migration(dir, V2, "create_tags", <<~RUBY)
+        class CreateTags < ActiveRecord::Migration[8.1]
+          def change
+            create_table :tags, id: :string do |t|
+              t.string :label, null: false
+            end
+          end
+        end
+      RUBY
+      add_ruby_migration(dir, V3, "add_notes_tag_id", <<~RUBY)
+        class AddNotesTagId < ActiveRecord::Migration[8.1]
+          def change
+            add_column :notes, :tag_id, :string
+            add_column :tags, :color, :string
+          end
+        end
+      RUBY
+      add_ruby_migration(dir, v4, "create_unrelated", <<~RUBY)
+        class CreateUnrelated < ActiveRecord::Migration[8.1]
+          def change
+            create_table :unrelated, id: :string do |t|
+              t.string :val
+            end
+          end
+        end
+      RUBY
+
+      InstantRecord::Compiler.lock_schema(root: dir, baseline: V1)
+      report = InstantRecord::Compiler.verify_schema(root: dir, baseline: V1)
+      assert report.ok?, report.to_s
+      assert_equal [V1, V2, V3, v4], report.replayed_versions
+    end
+  end
+
   private
+
+  def add_ruby_migration(dir, version, slug, source)
+    File.write(File.join(dir, "db/schema.rb"), "ActiveRecord::Schema[8.1].define(version: #{version}) do\nend\n")
+    File.write(File.join(dir, "db/migrate/#{version}_#{slug}.rb"), source)
+  end
 
   def in_app
     Dir.mktmpdir do |dir|
