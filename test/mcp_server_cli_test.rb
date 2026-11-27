@@ -281,6 +281,19 @@ class McpServerCliTest < ActiveSupport::TestCase
     assert_equal [true, nil], [data.key?("pending"), data["pending"]]
   end
 
+  test "status, sync and open report the whole cursor reply, and defaults for what it leaves out" do
+    {
+      "cursor=7 pending=2 bootstrap=ready identity=maya" => { "cursor" => 7, "pending" => 2, "bootstrap" => "ready", "identity" => "maya" },
+      "" => { "cursor" => 0, "pending" => 0, "bootstrap" => "needed", "identity" => "" }
+    }.each_with_index do |(reply, expected), index|
+      runtime = failing_runtime("position#{index}", endpoint: "http://sync.test", "cursor" => reply)
+      answers = [runtime.status, runtime.sync, runtime.open_database(path: File.join(@dir, "opened#{index}.sqlite3"))]
+      runtime.offline = true
+      answers << runtime.sync
+      answers.each { |answer| assert_equal expected, answer.slice(*expected.keys) }
+    end
+  end
+
   test "a bug in a cursor read or re-render after a write is not hidden" do
     [NoMethodError, ArgumentError, TypeError].each do |bug|
       %w[cursor render].each do |entry|

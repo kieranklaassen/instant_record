@@ -61,16 +61,13 @@ module InstantRecord
       def status
         @mutex.synchronize do
           started = monotonic_now
-          pos = parse_cursor(@host.call("cursor", "").out)
+          position = replica_position
           models_summary = @replica.models["models"]
           {
             "database" => @database_path,
             "endpoint" => @endpoint,
             "offline" => offline?,
-            "cursor" => pos["cursor"].to_i,
-            "pending" => pos["pending"].to_i,
-            "bootstrap" => pos["bootstrap"] || "needed",
-            "identity" => pos["identity"].to_s,
+            **position,
             "screens" => @screens,
             "models" => models_summary,
             "elapsed_ms" => elapsed_ms(started)
@@ -85,23 +82,19 @@ module InstantRecord
           raise MissingEndpoint, "No sync endpoint configured. Pass endpoint or set INSTANT_RECORD_ENDPOINT." if target.nil?
 
           if offline?
-            pos = parse_cursor(@host.call("cursor", "").out)
             return {
               "ok" => false,
               "offline" => true,
               "endpoint" => target,
               "error" => "Client is in offline mode",
-              "cursor" => pos["cursor"].to_i,
-              "pending" => pos["pending"].to_i,
-              "bootstrap" => pos["bootstrap"] || "needed",
-              "identity" => pos["identity"].to_s,
+              **replica_position,
               "elapsed_ms" => elapsed_ms(started)
             }
           end
 
           @exchange.reset_trace! if @exchange.respond_to?(:reset_trace!)
           result = @host.call("sync", target)
-          pos = parse_cursor(@host.call("cursor", "").out)
+          position = replica_position
           @replica.refresh_schema!
 
           went_offline = @exchange.respond_to?(:any_offline?) && @exchange.any_offline?
@@ -117,10 +110,7 @@ module InstantRecord
             "changed" => changed,
             "summary" => result.out,
             "notice" => result.notice,
-            "cursor" => pos["cursor"].to_i,
-            "pending" => pos["pending"].to_i,
-            "bootstrap" => pos["bootstrap"] || "needed",
-            "identity" => pos["identity"].to_s,
+            **position,
             "http_status" => last_http,
             "elapsed_ms" => elapsed_ms(started)
           }
@@ -300,15 +290,11 @@ module InstantRecord
           @database_path = expanded
           @endpoint = normalize_endpoint(endpoint) if endpoint
           @replica.reopen(expanded)
-          pos = parse_cursor(@host.call("cursor", "").out)
           {
             "ok" => true,
             "database" => @database_path,
             "endpoint" => @endpoint,
-            "cursor" => pos["cursor"].to_i,
-            "pending" => pos["pending"].to_i,
-            "bootstrap" => pos["bootstrap"] || "needed",
-            "identity" => pos["identity"].to_s,
+            **replica_position,
             "elapsed_ms" => elapsed_ms(started)
           }
         end
@@ -338,6 +324,16 @@ module InstantRecord
       rescue Error, SystemCallError, IOError, JSON::JSONError => e
         errors["#{name}_error"] = String.new(e.message, encoding: Encoding::UTF_8).scrub
         nil
+      end
+
+      def replica_position
+        pos = parse_cursor(@host.call("cursor", "").out)
+        {
+          "cursor" => pos["cursor"].to_i,
+          "pending" => pos["pending"].to_i,
+          "bootstrap" => pos["bootstrap"] || "needed",
+          "identity" => pos["identity"].to_s
+        }
       end
 
       def pending_count
