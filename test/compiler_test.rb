@@ -837,6 +837,37 @@ class CompilerTest < ActiveSupport::TestCase
     assert_equal quoting, build_wasm_tree(path => quoting).last[path]
   end
 
+  # A retried notice, like any JSON, holds its attributes under String keys.
+  test "WasmTree makes the emitted update! take String keys, as its update does" do
+    emitted = <<~RUBY
+      class Emitted
+        attr_reader :title, :saved
+
+        def update(attrs)
+          attrs = attrs.to_h { |k, v| [k.to_s.to_sym, v] } if attrs.is_a?(Hash) && attrs.any? { |k, _| k.is_a?(String) }
+          @title = attrs[:title] if attrs.key?(:title)
+        end
+
+        def update!(attrs)
+          @title = attrs[:title] if attrs.key?(:title)
+          @saved = true
+          self
+        end
+      end
+    RUBY
+    path = "app/models/emitted.rb"
+    _stats, tree = build_wasm_tree(path => emitted)
+
+    sandbox = Module.new
+    sandbox.module_eval(tree[path])
+    record = sandbox.const_get(:Emitted).new
+    assert_equal "by string", record.update!({ "title" => "by string" }).title
+    assert_equal "by symbol", record.update!({ title: "by symbol" }).title
+    assert_equal "by symbol", record.update!({}).title
+    assert record.saved
+    assert_equal tree[path], build_wasm_tree(path => tree[path]).last[path], "a tree that converts the keys is left alone"
+  end
+
   test "Compiler.build and Compiler.build_native run end-to-end with a stub toolchain and cache unchanged builds" do
     Dir.mktmpdir do |dir|
       fake = create_fake_toolchain(dir)
