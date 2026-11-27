@@ -112,6 +112,7 @@ module InstantRecord
               snapshot
             end
 
+          mutation_hlc = mutation.hlc
           mutation.destroy!
           remaining = pending_for(record_type, record_id)
 
@@ -125,7 +126,18 @@ module InstantRecord
               else
                 record = model.find_by(id: record_id)
                 record&.update_columns(sync_state: "synced", server_version: result["version"] || record.server_version)
-                HLC.set_row_hlc(record_type, record_id, result["hlc"]) if HLC.valid?(result["hlc"])
+                # The server may have clamped this write's clock. A row still carrying the
+                # clock the write was made with takes the server's, or later server changes
+                # would look stale. A server change that came in before this ack is in the
+                # row too, so its clock in the snapshot counts; one of this client's own,
+                # never clamped, does not. A newer clock the row got since is kept.
+                own_stamp = HLC.row_hlc(record_type, record_id) == mutation_hlc
+                server_hlc = result["hlc"]
+                if own_stamp && updated_snapshot
+                  confirmed_hlc = updated_snapshot["hlc"]
+                  server_hlc = confirmed_hlc if HLC.valid?(confirmed_hlc) && HLC.node(confirmed_hlc) != HLC.node(mutation_hlc)
+                end
+                HLC.set_row_hlc(record_type, record_id, server_hlc, force: own_stamp) if HLC.valid?(result["hlc"])
               end
               false
             else
