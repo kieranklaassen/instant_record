@@ -121,7 +121,7 @@ namespace :instant_record do
     builder = lambda do
       options = compiler_options.call
       require_toolchain.call(options[:toolchain])
-      InstantRecord::Compiler.build_native(**options, out: $stderr)
+      InstantRecord::Compiler.build_native(**options.except(:shell_snapshot), out: $stderr)
     end
 
     cli_args =
