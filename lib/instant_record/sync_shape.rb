@@ -7,10 +7,14 @@ module InstantRecord
     attr_reader :model, :limit, :min_limit, :max_limit, :fill_page_size, :fill_budget_bytes
 
     # Whether a keyset page must also say `created_at <= before`, which its own
-    # condition already means. SQLite takes that range from the condition's OR.
-    # PostgreSQL does not, and reads every newer row before the page's first.
+    # condition already means. SQLite takes that range from the condition's OR,
+    # but only when both its times are the same literal: as two binds of a
+    # prepared statement they may differ. PostgreSQL never takes it. Without
+    # it, every newer row is read before the page's first.
     def self.needs_range?(model)
-      model.connection_pool.with_connection { |connection| connection.adapter_name != "SQLite" }
+      model.connection_pool.with_connection do |connection|
+        connection.adapter_name != "SQLite" || connection.prepared_statements
+      end
     end
 
     def initialize(model, limit: 50, min_limit: 1, max_limit: 200, roots: nil, include: nil,
@@ -65,8 +69,9 @@ module InstantRecord
         relation = relation.instance_exec(search, &@search)
       end
       if before_at && before_id.present?
-        relation = relation.where("created_at < :at OR (created_at = :at AND #{pk} < :id)", at: before_at, id: before_id)
+        # Before the OR: without an index, a row above the page fails at once.
         relation = relation.where("created_at <= ?", before_at) if self.class.needs_range?(@model)
+        relation = relation.where("created_at < :at OR (created_at = :at AND #{pk} < :id)", at: before_at, id: before_id)
       end
 
       fetched = relation.order(created_at: :desc, pk => :desc).limit(size + 1).to_a

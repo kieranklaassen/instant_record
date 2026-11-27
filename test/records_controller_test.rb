@@ -84,14 +84,36 @@ class RecordsControllerTest < Minitest::Test
     create_tied_rows(window)
 
     [window, shape].each do |model|
-      on_sqlite = page_sql { walk(model.name, partition: "open", limit: 2) }
-      bounded = on_postgresql(model) { page_sql { walk(model.name, partition: "open", limit: 2) } }
+      pages = -> { page_sql { walk(model.name, partition: "open", limit: 2) } }
+      binds = pages.call
+      literals = model.connection.unprepared_statement(&pages)
+      postgresql = on_postgresql(model, &pages)
 
-      assert_operator on_sqlite.size, :>, 1
-      assert_equal on_sqlite.size, bounded.size
-      on_sqlite.each { |sql| refute_match(/created_at"? <= /, sql) }
-      bounded.each { |sql| assert_match(/created_at"? <= /, sql) }
+      assert_operator binds.size, :>, 1
+      assert_equal [binds.size] * 2, [literals.size, postgresql.size]
+      literals.each { |sql| refute_match(/created_at"? <= /, sql) }
+      (binds + postgresql).each { |sql| assert_match(/created_at"? <= /, sql) }
     end
+  end
+
+  def test_a_deep_page_enters_the_index_at_the_page
+    model = syncable_model("IndexedWindow") { sync_window limit: 2, partition_by: :state }
+    shape = syncable_model("IndexedShape") { sync_shape limit: 2, roots: -> { where(state: "open") } }
+    InstantRecord.sync(model, shape)
+    create_tied_rows(model)
+    connection = model.connection
+    connection.add_index :items, %i[state created_at id], name: "items_page"
+
+    [model, shape].each do |type|
+      [false, true].each do |unprepared|
+        pages = -> { page_plans(connection) { walk(type.name, partition: "open", limit: 2) } }
+        plans = unprepared ? connection.unprepared_statement(&pages) : pages.call
+
+        plans.each { |plan| assert_match(/items_page \(state=\? AND created_at<\?\)/, plan) }
+      end
+    end
+  ensure
+    connection&.remove_index :items, name: "items_page", if_exists: true
   end
 
   def test_a_page_asks_for_the_database_without_keeping_a_connection
@@ -99,7 +121,7 @@ class RecordsControllerTest < Minitest::Test
     pool = model.connection_pool
     pool.release_connection
 
-    refute InstantRecord::SyncShape.needs_range?(model)
+    assert InstantRecord::SyncShape.needs_range?(model)
     refute pool.active_connection?
   end
 
@@ -149,6 +171,22 @@ class RecordsControllerTest < Minitest::Test
     end
     yield
     seen
+  ensure
+    ActiveSupport::Notifications.unsubscribe(subscriber)
+  end
+
+  # SQLite's plan for each page query of the block.
+  def page_plans(connection)
+    seen = []
+    subscriber = ActiveSupport::Notifications.subscribe("sql.active_record") do |*, payload|
+      seen << [payload[:sql], payload[:type_casted_binds]] if payload[:sql].match?(/\ASELECT.*FROM "items".*ORDER BY/)
+    end
+    yield
+    refute_empty seen
+    seen.map do |sql, binds|
+      binds = binds.call if binds.respond_to?(:call)
+      connection.raw_connection.execute("EXPLAIN QUERY PLAN #{sql}", binds.to_a).map { |row| row["detail"] }.join("\n")
+    end
   ensure
     ActiveSupport::Notifications.unsubscribe(subscriber)
   end
