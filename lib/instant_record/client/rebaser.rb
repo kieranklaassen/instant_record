@@ -98,16 +98,23 @@ module InstantRecord
           HLC.receive(result["hlc"]) if HLC.valid?(result["hlc"])
           authoritative = result["skipped"] || result["merged"] || result["status"] == "rejected" || result["server_attributes"].present?
 
+          # A server change that came in before this result with a later version was
+          # made after it: the snapshot is the server's newer word on the row.
+          overtaken = overtaken?(snapshot, result)
+          plain = result["status"] == "applied" && !authoritative
+
           updated_snapshot =
             case result["status"]
             when "applied"
-              if authoritative
+              if overtaken
+                plain ? acknowledge_in_snapshot(snapshot, mutation, result["hlc"], model) : snapshot
+              elsif authoritative
                 authoritative_snapshot(snapshot, result)
               else
                 advance_confirmed_snapshot(snapshot, mutation, result["version"], model, hlc: result["hlc"])
               end
             when "rejected"
-              authoritative_snapshot(snapshot, result, fallback_missing: true)
+              overtaken ? snapshot : authoritative_snapshot(snapshot, result, fallback_missing: true)
             else
               snapshot
             end
@@ -120,7 +127,7 @@ module InstantRecord
             clear_confirmed_snapshot(record_type, record_id)
             return false unless model
 
-            if result["status"] == "applied" && !authoritative
+            if plain && !overtaken
               if mutation.operation == "destroy"
                 HLC.delete_row_hlc(record_type, record_id)
               else
@@ -224,7 +231,8 @@ module InstantRecord
             "version" => version || sliced["server_version"] || snapshot["version"] || 0,
             "hlc" => incoming_hlc || confirmed_hlc,
             "attributes" => sliced,
-            "initial_attributes" => snapshot["initial_attributes"]
+            "initial_attributes" => snapshot["initial_attributes"],
+            "delivered" => true
           }
           write_confirmed_snapshot(record_type, record_id, updated_snapshot)
 
@@ -255,6 +263,36 @@ module InstantRecord
         end
 
         private
+
+        def overtaken?(snapshot, result)
+          return false unless snapshot && snapshot["exists"] == true && snapshot["delivered"] == true
+
+          # A rejection gives its version in the attributes only.
+          version = result["version"]
+          version = result["server_attributes"]["server_version"] if version.nil? && result["server_attributes"].present?
+          return false if version.nil?
+
+          snapshot["version"].to_i > version.to_i
+        end
+
+        # The snapshot holds the acknowledged write already. Its columns count as known
+        # from here on, so the edits still queued on them replay as they did before. Its
+        # clock may be this client's own, never clamped: the acknowledgement's counts then.
+        def acknowledge_in_snapshot(snapshot, mutation, result_hlc, model)
+          changes = (mutation.changes_payload || {}).deep_stringify_keys.except("id", "server_version", "sync_state")
+          initial = (snapshot["initial_attributes"] || {}).deep_stringify_keys.merge(changes)
+          initial = initial.slice(*model.column_names) if model
+          hlc = max_valid_hlc(snapshot["hlc"], result_hlc)
+          hlc = result_hlc if HLC.valid?(result_hlc) && HLC.node(hlc) == HLC.node(mutation.hlc)
+          {
+            "exists" => true,
+            "version" => snapshot["version"],
+            "hlc" => hlc,
+            "attributes" => snapshot["attributes"],
+            "initial_attributes" => initial,
+            "delivered" => true
+          }
+        end
 
         def advance_confirmed_snapshot(snapshot, mutation, version, model, hlc: nil)
           next_hlc = max_valid_hlc(snapshot && snapshot["hlc"], hlc)

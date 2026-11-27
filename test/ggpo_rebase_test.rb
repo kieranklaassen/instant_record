@@ -160,7 +160,7 @@ class GgpoRebaseTest < Minitest::Test
     end
 
     assert_equal "new", note.reload.title
-    assert_equal "closed", note.state
+    assert_equal "open", note.state
   end
 
   # A row an earlier ack left with this client's future clock hands it to the
@@ -203,6 +203,123 @@ class GgpoRebaseTest < Minitest::Test
 
       assert_equal clamps.last, InstantRecord::HLC.row_hlc("Note", "fast-4")
     end
+  end
+
+  def test_late_ack_keeps_the_server_version_of_a_newer_server_change
+    note = seed_synced_row(id: "late-version")
+    mutation = write_then_newer_server_change(note, { "state" => "closed", "title" => "theirs" })
+
+    ack(mutation)
+
+    assert_equal 3, note.reload.server_version
+    assert_equal ["theirs", "closed", "synced"], [note.title, note.state, note.sync_state]
+  end
+
+  # A clock ahead of the server's shows the local value over the newer one until
+  # the acknowledgement: the version says the server's change came after it.
+  def test_late_ack_shows_the_newer_server_value_of_the_same_column_for_a_fast_clock
+    note = seed_synced_row(id: "late-fast")
+    mutation = write_then_newer_server_change(note, { "state" => "theirs" }, skew: 120)
+    assert_equal "closed", note.reload.state
+
+    assert ack(mutation), "the row changed, so the page must hear of it"
+
+    assert_equal ["theirs", 3, "synced"], [note.reload.state, note.server_version, note.sync_state]
+    assert_equal server_hlc(2), InstantRecord::HLC.row_hlc("Note", "late-fast")
+    assert_equal 0, InstantRecord::Client::Rebaser.confirmed_snapshot_count
+  end
+
+  def test_late_ack_of_the_first_queued_edit_keeps_the_newer_server_change_under_the_rest
+    note = seed_synced_row(id: "late-queue")
+    mutation = write_then_newer_server_change(note, { "state" => "theirs" })
+    in_browser { note.reload.update!(owner: "mine") }
+
+    ack(mutation)
+
+    assert_equal ["theirs", "mine", 3, "pending"], [note.reload.state, note.owner, note.server_version, note.sync_state]
+    assert_equal "theirs", InstantRecord::Client::Rebaser.confirmed_snapshot("Note", "late-queue")["attributes"]["state"]
+  end
+
+  # The change that came in holds the first edit, so it is no one else's and the
+  # second edit of its column still shows.
+  def test_late_ack_of_the_first_queued_edit_keeps_the_next_edit_of_its_column
+    note = seed_synced_row(id: "late-run")
+    in_browser do
+      InstantRecord::HLC.with_clock(-> { ACK_TIME }) do
+        note.update!(state: "first")
+        note.update!(state: "second")
+      end
+    end
+    first, second = InstantRecord::OutboxMutation.ordered.to_a
+    newer_server_change(note, { "state" => "first", "title" => "theirs" })
+
+    ack(first)
+    assert_equal ["theirs", "second", 3, "pending"], [note.reload.title, note.state, note.server_version, note.sync_state]
+
+    ack(second, version: 4)
+    assert_equal ["theirs", "second", 4, "synced"], [note.reload.title, note.state, note.server_version, note.sync_state]
+  end
+
+  def test_late_ack_of_a_create_keeps_a_newer_server_change
+    in_browser do
+      InstantRecord::HLC.with_clock(-> { ACK_TIME + 120 }) { @model.create!(id: "late-create", title: "mine", state: "open") }
+    end
+    note = @model.find("late-create")
+    mutation = InstantRecord::OutboxMutation.sole
+    newer_server_change(note, { "title" => "theirs" })
+
+    ack(mutation, version: 1)
+
+    assert_equal ["theirs", 3, "synced"], [note.reload.title, note.server_version, note.sync_state]
+  end
+
+  def test_late_merged_skipped_or_rejected_result_keeps_a_newer_server_change
+    { "merged" => "applied", "skipped" => "applied", "rejected" => "rejected" }.each do |kind, status|
+      reset_instant_record_tables!
+      note = seed_synced_row(id: "late-#{kind}")
+      before = note.attributes.merge("title" => "older", "state" => kind == "merged" ? "closed" : "open", "server_version" => 2)
+      mutation = write_then_newer_server_change(note, { "title" => "theirs", "state" => "theirs" })
+
+      ack(mutation, { "status" => status, kind => true, "server_attributes" => InstantRecord.wire_attributes(before) },
+        version: kind == "rejected" ? nil : 2) # a rejection says it in the attributes only
+
+      assert_equal ["theirs", "theirs", 3, "synced"], [note.reload.title, note.state, note.server_version, note.sync_state], kind
+      assert_equal server_hlc(2), InstantRecord::HLC.row_hlc("Note", note.id), kind
+    end
+  end
+
+  # A change the server logged without a clock says nothing about the row's, which
+  # may still be one of this client's own from before the server clamped it.
+  def test_late_ack_gives_the_row_the_clamped_hlc_after_a_change_without_one
+    [nil, 120].each do |own_ahead|
+      reset_instant_record_tables!
+      note = seed_synced_row(id: "late-unstamped")
+      if own_ahead
+        in_browser do
+          own = InstantRecord::HLC.from_time(ACK_TIME + own_ahead, node: InstantRecord::HLC.node_id)
+          InstantRecord::HLC.set_row_hlc("Note", note.id, own)
+        end
+      end
+      mutation = write_then_newer_server_change(note, { "state" => "theirs" }, skew: 130, hlc: nil)
+
+      clamped = InstantRecord::HLC.clamp(mutation.hlc, now: ACK_TIME)
+
+      ack(mutation)
+
+      assert_equal clamped, InstantRecord::HLC.row_hlc("Note", note.id)
+      assert_equal 3, note.reload.server_version
+    end
+  end
+
+  # The row was destroyed and created again at the server: the version the write was
+  # made on is higher, and no change came in to say so.
+  def test_ack_of_a_lower_version_than_the_write_was_made_on_keeps_the_edit
+    note = seed_synced_row(id: "late-base", version: 5)
+    in_browser { note.update!(state: "closed") }
+
+    ack(InstantRecord::OutboxMutation.sole)
+
+    assert_equal ["closed", 2, "synced"], [note.reload.state, note.server_version, note.sync_state]
   end
 
   def test_skipped_ack_rebases_remaining_unacked_local_edit_instead_of_clobbering
@@ -525,5 +642,41 @@ class GgpoRebaseTest < Minitest::Test
     assert_equal 1, InstantRecord::Client::Rebaser.confirmed_snapshot_count
     assert_nil InstantRecord::Client::Rebaser.confirmed_snapshot("Note", "secret-1")
     assert InstantRecord::Client::Rebaser.confirmed_snapshot("OtherNote", "public-1")
+  end
+
+  private
+
+  ACK_TIME = Time.utc(2026, 11, 21, 12, 5, 0)
+  private_constant :ACK_TIME
+
+  def server_hlc(seconds)
+    InstantRecord::HLC.from_time(ACK_TIME + seconds, node: InstantRecord::HLC::SERVER_NODE)
+  end
+
+  # The state is written locally, and version 3 of the row arrives before the
+  # acknowledgement of version 2.
+  def write_then_newer_server_change(note, changes, skew: 0, hlc: server_hlc(2))
+    in_browser { InstantRecord::HLC.with_clock(-> { ACK_TIME + skew }) { note.update!(state: "closed") } }
+    mutation = InstantRecord::OutboxMutation.sole
+    newer_server_change(note, changes, hlc: hlc)
+    mutation
+  end
+
+  def newer_server_change(note, changes, hlc: server_hlc(2))
+    in_browser do
+      InstantRecord::Client.apply_change(
+        "type" => "Note", "id" => note.id, "operation" => "update", "version" => 3, "hlc" => hlc,
+        "attributes" => InstantRecord.wire_attributes(note.attributes).merge("updated_at" => (ACK_TIME + 2).iso8601(6)).merge(changes)
+      )
+    end
+  end
+
+  def ack(mutation, result = {}, version: 2)
+    in_browser do
+      InstantRecord::Client.apply_results([
+        { "mutation_id" => mutation.id, "status" => "applied", "version" => version,
+          "hlc" => InstantRecord::HLC.clamp(mutation.hlc, now: ACK_TIME) }.merge(result)
+      ])
+    end
   end
 end
