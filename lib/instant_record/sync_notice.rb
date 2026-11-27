@@ -213,7 +213,7 @@ module InstantRecord
       return unless record.respond_to?(:updated_at=)
 
       now = Time.now.utc
-      floor = record.updated_at ? record.updated_at.to_time.utc + 0.000001 : now
+      floor = record.updated_at ? record.updated_at.utc + 0.000001 : now
       record.updated_at = now > floor ? now : floor
     end
 
