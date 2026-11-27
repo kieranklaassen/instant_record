@@ -189,23 +189,13 @@ module InstantRecord
 
       def build_manifest_models(trace, explicit_models:, island_mode:)
         discovered = trace.model_metadata.values.select { |meta| meta["syncable"] }
-        by_name = discovered.each_with_object({}) do |meta, hash|
-          hash[meta["name"]] = format_model_entry(meta)
-        end
+        by_name = discovered.to_h { |meta| [meta["name"], format_model_entry(meta)] }
 
         if !island_mode && explicit_models
           Array(explicit_models).each do |name|
-            next if by_name.key?(name)
-
-            meta = trace.model_metadata[name]
-            by_name[name] = meta ? format_model_entry(meta) : {
-              "name" => name,
-              "table" => ActiveSupport::Inflector.tableize(name),
-              "file" => nil,
-              "sync_window" => nil,
-              "sync_scope" => nil,
-              "sync_file" => false
-            }
+            by_name[name] ||= format_model_entry(
+              trace.model_metadata[name] || { "name" => name, "table" => ActiveSupport::Inflector.tableize(name) }
+            )
           end
         end
 
