@@ -1,8 +1,8 @@
 require "fileutils"
 require "json"
 require "tmpdir"
-require "uri"
 require_relative "base"
+require_relative "compiled_local_writes"
 
 module InstantRecord
   module Testing
@@ -16,6 +16,7 @@ module InstantRecord
       # seamlessly via ir_open(db_path).
       class NativeRuntime
         include Base
+        include CompiledLocalWrites
 
         # Process-wide booted handle per shared library path.
         class LibrarySession
@@ -213,10 +214,7 @@ module InstantRecord
 
         def execute_request(client, method, path, body:, content_type:)
           raw_req = build_http_request(method, path, body: body, content_type: content_type, cookies: client.cookies)
-          res = @session.call_entry(client.db_path, "request", raw_req)
-          assert_clean_stderr!(res[:errors], context: "native request(#{client.id}, #{method} #{path})")
-          raise InstantRecord::Testing::Error, "native request failed: #{res[:errors].join('; ')}" unless res[:ok]
-
+          res = call_entry(client, "request", raw_req, about: "#{client.id}, #{method} #{path}")
           parsed = parse_bridge_http_response(res[:out], cookies: client.cookies)
           parsed.merge(exit: 0, errors: res[:errors])
         end
@@ -232,8 +230,7 @@ module InstantRecord
           res, fault_fired = @network.track_faults do
             @session.call_entry(client.db_path, "sync", endpoint.to_s, exchange: exchange_cb)
           end
-          assert_clean_stderr!(res[:errors], context: "native sync(#{client.id})", allow_offline_warning: fault_fired)
-          raise InstantRecord::Testing::Error, "native sync failed: #{res[:errors].join('; ')}" unless res[:ok]
+          check_call!(res, "sync", client.id, allow_offline_warning: fault_fired)
 
           text = res[:out]
           pending = (text[/pending=(\d+)/, 1] || -1).to_i
@@ -253,18 +250,11 @@ module InstantRecord
         end
 
         def execute_sync_plan(client)
-          res = @session.call_entry(client.db_path, "sync_plan", "")
-          assert_clean_stderr!(res[:errors], context: "native sync_plan(#{client.id})")
-          raise InstantRecord::Testing::Error, "native sync_plan failed: #{res[:errors].join('; ')}" unless res[:ok]
-
-          JSON.parse(res[:out])
+          JSON.parse(call_entry(client, "sync_plan", "")[:out])
         end
 
         def execute_consume_stream(client, chunk)
-          res = @session.call_entry(client.db_path, "stream", chunk.to_s)
-          assert_clean_stderr!(res[:errors], context: "native stream(#{client.id})")
-          raise InstantRecord::Testing::Error, "native stream failed: #{res[:errors].join('; ')}" unless res[:ok]
-
+          res = call_entry(client, "stream", chunk.to_s)
           text = res[:out]
           {
             applied: (text[/applied=(\d+)/, 1] || 0).to_i,
@@ -277,11 +267,7 @@ module InstantRecord
         end
 
         def execute_sync_state(client)
-          res = @session.call_entry(client.db_path, "cursor", "")
-          assert_clean_stderr!(res[:errors], context: "native cursor(#{client.id})")
-          raise InstantRecord::Testing::Error, "native cursor failed: #{res[:errors].join('; ')}" unless res[:ok]
-
-          text = res[:out]
+          text = call_entry(client, "cursor", "")[:out]
           {
             bootstrapped: text.include?("bootstrap=ready"),
             cursor: (text[/cursor=(\d+)/, 1] || 0).to_i,
@@ -291,54 +277,22 @@ module InstantRecord
         end
 
         def execute_history(client, key, response)
-          res = @session.call_entry(client.db_path, "history", JSON.generate({ key: key.to_s, response: response.to_s }))
-          assert_clean_stderr!(res[:errors], context: "native history(#{client.id})")
-          raise InstantRecord::Testing::Error, "native history failed: #{res[:errors].join('; ')}" unless res[:ok]
-
-          JSON.parse(res[:out])
-        end
-
-        def execute_local_write(client, model:, operation:, id:, attributes:)
-          attrs = attributes.transform_keys(&:to_s)
-          case [model.to_s, operation.to_s]
-          when ["Issue", "create"]
-            res = execute_request(client, "POST", "/todo/issues", body: URI.encode_www_form("issue[title]" => attrs["title"]), content_type: "application/x-www-form-urlencoded")
-            raise Error, "Expected 200/302 on POST /todo/issues, got #{res[:status]}" unless [200, 302, 303].include?(res[:status])
-            newest_id_from_snapshot(client, "Issue", title: attrs["title"])
-          when ["Issue", "update"]
-            done = attrs["state"].to_s == "done" ? "1" : "0"
-            res = execute_request(client, "POST", "/todo/issues/#{id}", body: URI.encode_www_form("_method" => "patch", "done" => done), content_type: "application/x-www-form-urlencoded")
-            raise Error, "Expected 200/302 on PATCH /todo/issues/#{id}, got #{res[:status]}" unless [200, 302, 303].include?(res[:status])
-            id
-          when ["Issue", "destroy"]
-            res = execute_request(client, "POST", "/todo/issues/#{id}", body: URI.encode_www_form("_method" => "delete"), content_type: "application/x-www-form-urlencoded")
-            raise Error, "Expected 200/302 on DELETE /todo/issues/#{id}, got #{res[:status]}" unless [200, 302, 303].include?(res[:status])
-            id
-          when ["AuthNote", "create"]
-            form = {
-              "note[title]" => attrs["title"],
-              "note[body]" => attrs["body"].to_s,
-              "note[audience]" => attrs["audience"] || "owner",
-              "note[owner_id]" => attrs["owner_id"].to_s
-            }
-            res = execute_request(client, "POST", "/auth/notes", body: URI.encode_www_form(form), content_type: "application/x-www-form-urlencoded")
-            raise Error, "Expected 200/302 on POST /auth/notes, got #{res[:status]}" unless [200, 302, 303].include?(res[:status])
-            newest_id_from_snapshot(client, "AuthNote", title: attrs["title"])
-          when ["AuthNote", "destroy"]
-            res = execute_request(client, "POST", "/auth/notes/#{id}", body: URI.encode_www_form("_method" => "delete"), content_type: "application/x-www-form-urlencoded")
-            raise Error, "Expected 200/302 on DELETE /auth/notes/#{id}, got #{res[:status]}" unless [200, 302, 303].include?(res[:status])
-            id
-          else
-            raise ArgumentError, "Unsupported native local_write: #{model}##{operation}"
-          end
+          JSON.parse(call_entry(client, "history", JSON.generate({ key: key.to_s, response: response.to_s }))[:out])
         end
 
         private
 
-        def newest_id_from_snapshot(client, model_name, title:)
-          state = read_sqlite_file_state(client.db_path, model_names: [model_name])
-          rows = state[:tables][model_name].select { |r| r["title"] == title }
-          rows.max_by { |r| r["created_at"].to_s }&.fetch("id")
+        def local_write_kind = "native"
+
+        def call_entry(client, entry, input, about: client.id)
+          check_call!(@session.call_entry(client.db_path, entry, input), entry, about)
+        end
+
+        def check_call!(res, entry, about, allow_offline_warning: false)
+          assert_clean_stderr!(res[:errors], context: "native #{entry}(#{about})", allow_offline_warning: allow_offline_warning)
+          raise InstantRecord::Testing::Error, "native #{entry} failed: #{res[:errors].join('; ')}" unless res[:ok]
+
+          res
         end
       end
     end
