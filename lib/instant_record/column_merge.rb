@@ -33,7 +33,7 @@ module InstantRecord
       base_attrs, server_touched = inspect_changes_since_base
       own_touched = (touched_since_own_create if @base_version.zero?) || server_touched
       touched = server_touched.values_at(*@columns) + own_touched.values_at(*@columns)
-      @notes = Notes.read(@record, touched.compact.flat_map { |entry| entry[:clocks] })
+      @notes = Notes.read(@record, touched.compact.flat_map { |entry| entry[:clocks] }.uniq)
 
       @columns.each do |col|
         merge_column(col, base_attrs[col], server_touched[col], own_touched[col])
@@ -83,12 +83,11 @@ module InstantRecord
       base_change = record_changes.where(version: @base_version).order(:id).last if @base_version.positive?
       return [{}, every_column_touched] unless base_change
 
-      base_attrs = change_attributes(base_change)
+      base_attrs = change_attributes(base_change.attributes_payload)
       changes_since = record_changes
         .where("version > ?", @base_version)
         .where.not(operation: "destroy")
         .order(:version, :id)
-        .to_a
 
       [base_attrs, columns_touched(base_attrs, changes_since)]
     end
@@ -102,18 +101,21 @@ module InstantRecord
       create = logged.where(operation: "create").order(:id).last
       return unless create && HLC.node(create.hlc) == @incoming_node
 
-      changes = logged.after(create.id).where.not(operation: "destroy").to_a
-      columns_touched(change_attributes(create), changes)
+      changes = logged.after(create.id).where.not(operation: "destroy")
+      columns_touched(change_attributes(create.attributes_payload), changes)
     end
 
+    # Each edit a client queued offline reads every change logged for those before
+    # it, so the rows are read as values, without an object for each.
     def columns_touched(base_attrs, changes_since)
-      hlc_map = HLC.change_hlcs(changes_since.map(&:id))
+      rows = changes_since.pluck(:id, :attributes_payload, :created_at)
+      clocks = change_clocks(rows.map(&:first))
       server_touched = {}
       prev_attrs = base_attrs
 
-      changes_since.each do |change|
-        curr_attrs = change_attributes(change)
-        c_hlc = hlc_map[change.id] || HLC.from_time(curr_attrs["updated_at"] || change.created_at, node: HLC::SERVER_NODE)
+      rows.each do |id, payload, created_at|
+        curr_attrs = change_attributes(payload)
+        c_hlc = clocks["#{HLC::CHANGE_PREFIX}#{id}"] || HLC.from_time(curr_attrs["updated_at"] || created_at, node: HLC::SERVER_NODE)
         touch_changed_columns(server_touched, prev_attrs, curr_attrs, hlc: c_hlc)
         prev_attrs = curr_attrs
       end
@@ -135,8 +137,16 @@ module InstantRecord
       Hash.new({ hlc: @record_hlc, clocks: [@record_hlc].compact })
     end
 
-    def change_attributes(change)
-      change.attributes_payload.is_a?(Hash) ? change.attributes_payload : {}
+    # HLC.change_hlcs by metadata key, which the browser compiles.
+    def change_clocks(ids)
+      return {} if ids.empty?
+
+      SyncMetadata.where(key: ids.map { |id| "#{HLC::CHANGE_PREFIX}#{id}" }).pluck(:key, :value)
+        .to_h.select { |_key, value| HLC.valid?(value) }
+    end
+
+    def change_attributes(payload)
+      payload.is_a?(Hash) ? payload : {}
     end
 
     # The attributes with dates and decimals as they read back from the log,
@@ -151,7 +161,7 @@ module InstantRecord
     end
 
     def touch_changed_columns(server_touched, prev_attrs, curr_attrs, hlc:, unlogged: false)
-      ((curr_attrs.keys | prev_attrs.keys) - NON_DATA_COLUMNS).each do |col|
+      @columns.each do |col|
         next if curr_attrs[col] == prev_attrs[col]
 
         entry = (server_touched[col] ||= { clocks: [] })
