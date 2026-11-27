@@ -31,7 +31,7 @@ class EntryBuilderTest < ActiveSupport::TestCase
         [kind, %w[wasm native].map { |target| Digest::SHA256.hexdigest(read(emit, "main_#{target}.rb"))[0, 16] }]
       end
 
-      assert_equal({ "full" => %w[a8e2f7f24094fa92 4b956abc005bdb7f], "demo" => %w[7cc53a35594a0fe4 e7fa9a120e836acc] }, rendered)
+      assert_equal({ "full" => %w[6e5f919ff62ceecb ba58daf1575e38c6], "demo" => %w[adbd1c7f253ec073 7c950a58f10cabe4] }, rendered)
       assert_equal "class Release; end\n", read(emit, "app/models/release.rb")
     end
   end
@@ -50,6 +50,21 @@ class EntryBuilderTest < ActiveSupport::TestCase
         assert_includes request, "InstantRecord::ReadTracker.track do\n      #{bridge}.dispatch_capturing_changes(req, res)\n    end"
         refute_includes request, "capture_local_changes do"
         assert_includes dispatch, "InstantRecord::Client.capture_local_changes do\n      Tep::APP.dispatch(req, res)\n    end\n    nil\n"
+      end
+    end
+  end
+
+  # The compiled replay_mutations takes a Symbol there, and refuses a String before it
+  # reads a mutation.
+  test "a branch replay hands its conflict strategy over as a symbol" do
+    in_app do |emit, app|
+      wasm(emit)
+      native(emit, app)
+      %w[wasm native].each do |target|
+        replay = read(emit, "main_#{target}.rb")[/^  def self\.branch_replay\n.*?^  end\n/m]
+        { {} => :lww, { conflict: "lww" } => :lww, { conflict: "branch_wins" } => :branch_wins }.each do |asked, given|
+          assert_equal given, conflict_given_to_replay(replay, { mutations: [] }.merge(asked)), "#{target} #{asked}"
+        end
       end
     end
   end
@@ -301,6 +316,19 @@ class EntryBuilderTest < ActiveSupport::TestCase
 
   def native(emit, app, **given)
     EntryBuilder.write_native_entry(**{ tree_dir: emit, app_dir: app, migration_plan: PLAN, models: ["Note"] }, **given)
+  end
+
+  # What the bridge method `source` passes as `conflict:` for one request.
+  def conflict_given_to_replay(source, request)
+    received = nil
+    branch = Module.new { define_singleton_method(:replay_mutations) { |_mutations, conflict:| (received = conflict) && {} } }
+    client = Module.new { def self.clear_events = nil }
+    bridge = Module.new
+    bridge.const_set(:InstantRecord, Module.new { const_set(:Branch, branch) && const_set(:Client, client) })
+    bridge.module_eval(source.gsub(/NativeHost\.ir_host_take\("in"\)|File\.read\("\/host\/in"\)/) { JSON.generate(request).inspect }
+      .gsub(/NativeHost\.ir_host_give\("out", |File\.write\("\/host\/out", /, "String("))
+    bridge.branch_replay
+    received
   end
 
   def actions(source)

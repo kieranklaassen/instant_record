@@ -255,7 +255,7 @@ module InstantRecord
 
       def latest_outbox_time
         last = OutboxMutation.ordered.last
-        last&.created_at&.to_time
+        last&.created_at&.utc
       end
 
       def next_outbox_time(raw_created_at, previous)
