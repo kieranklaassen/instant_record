@@ -3,8 +3,8 @@ require "fileutils"
 require "json"
 require "open3"
 require "tmpdir"
-require "uri"
 require_relative "base"
+require_relative "compiled_local_writes"
 
 module InstantRecord
   module Testing
@@ -14,6 +14,7 @@ module InstantRecord
       # isolated AppHost instances inside one fast persistent Node process.
       class WasmRuntime
         include Base
+        include CompiledLocalWrites
 
         BRIDGE_SCRIPT = File.expand_path("../wasm_host_bridge.mjs", __dir__)
 
@@ -92,8 +93,7 @@ module InstantRecord
         def name = :wasm
 
         def create_client(client_id, env: {})
-          res = rpc({ op: "create_client", client: client_id.to_s, env: env })
-          assert_clean_stderr!(res["errors"], context: "wasm boot(#{client_id})")
+          clean_rpc("create_client", client_id.to_s, context: "boot(#{client_id})", env: env)
           ClientHandle.new(id: client_id, runtime: self)
         end
 
@@ -116,18 +116,9 @@ module InstantRecord
         end
 
         def execute_request(client, method, path, body:, content_type:)
-          res = rpc({
-            op: "request",
-            client: client.id,
-            method: method.to_s.upcase,
-            path: path.to_s,
-            body: body.to_s,
-            contentType: content_type
-          })
-          assert_clean_stderr!(res["errors"], context: "wasm request(#{client.id}, #{method} #{path})")
-          if res["exit"] != 0
-            raise InstantRecord::Testing::Error, "wasm_request exited with #{res['exit']} on #{method} #{path}"
-          end
+          res = clean_rpc("request", client.id, context: "request(#{client.id}, #{method} #{path})",
+            method: method.to_s.upcase, path: path.to_s, body: body.to_s, contentType: content_type)
+          assert_exit_zero!(res, "wasm_request", "on #{method} #{path}")
           {
             status: res["status"].to_i,
             headers: res["headers"] || [],
@@ -142,9 +133,7 @@ module InstantRecord
             rpc({ op: "sync", client: client.id, endpoint: endpoint.to_s })
           end
           assert_clean_stderr!(res["errors"], context: "wasm sync(#{client.id})", allow_offline_warning: fault_fired)
-          if res["exit"] != 0
-            raise InstantRecord::Testing::Error, "wasm_sync exited with #{res['exit']} (errors=#{res['errors'].inspect})"
-          end
+          assert_exit_zero!(res, "wasm_sync")
           if res["pending"].to_i < 0
             raise InstantRecord::Testing::Error, "wasm_sync reported pending=#{res['pending']} (expected >= 0)"
           end
@@ -191,17 +180,12 @@ module InstantRecord
         end
 
         def execute_sync_plan(client)
-          res = rpc({ op: "sync_plan", client: client.id })
-          assert_clean_stderr!(res["errors"], context: "wasm sync_plan(#{client.id})")
-          res["plan"]
+          clean_rpc("sync_plan", client.id)["plan"]
         end
 
         def execute_consume_stream(client, chunk)
-          res = rpc({ op: "consume_stream", client: client.id, chunk: chunk.to_s })
-          assert_clean_stderr!(res["errors"], context: "wasm consume_stream(#{client.id})")
-          if res["exit"] != 0
-            raise InstantRecord::Testing::Error, "wasm_stream exited with #{res['exit']} (errors=#{res['errors'].inspect})"
-          end
+          res = clean_rpc("consume_stream", client.id, chunk: chunk.to_s)
+          assert_exit_zero!(res, "wasm_stream")
           {
             applied: res["applied"].to_i,
             cursor: res["cursor"].to_i,
@@ -214,8 +198,7 @@ module InstantRecord
         end
 
         def execute_sync_state(client)
-          res = rpc({ op: "sync_state", client: client.id })
-          assert_clean_stderr!(res["errors"], context: "wasm sync_state(#{client.id})")
+          res = clean_rpc("sync_state", client.id)
           {
             bootstrapped: !!res["bootstrapped"],
             cursor: res["cursor"].to_i,
@@ -225,51 +208,12 @@ module InstantRecord
         end
 
         def execute_history(client, key, response)
-          res = rpc({ op: "history", client: client.id, key: key.to_s, response: response.to_s })
-          assert_clean_stderr!(res["errors"], context: "wasm history(#{client.id})")
-          res["history"]
-        end
-
-        def execute_local_write(client, model:, operation:, id:, attributes:)
-          attrs = attributes.transform_keys(&:to_s)
-          case [model.to_s, operation.to_s]
-          when ["Issue", "create"]
-            res = execute_request(client, "POST", "/todo/issues", body: URI.encode_www_form("issue[title]" => attrs["title"]), content_type: "application/x-www-form-urlencoded")
-            raise Error, "Expected 200/302 on POST /todo/issues, got #{res[:status]}" unless [200, 302, 303].include?(res[:status])
-            newest_id_from_snapshot(client, "Issue", title: attrs["title"])
-          when ["Issue", "update"]
-            done = attrs["state"].to_s == "done" ? "1" : "0"
-            res = execute_request(client, "POST", "/todo/issues/#{id}", body: URI.encode_www_form("_method" => "patch", "done" => done), content_type: "application/x-www-form-urlencoded")
-            raise Error, "Expected 200/302 on PATCH /todo/issues/#{id}, got #{res[:status]}" unless [200, 302, 303].include?(res[:status])
-            id
-          when ["Issue", "destroy"]
-            res = execute_request(client, "POST", "/todo/issues/#{id}", body: URI.encode_www_form("_method" => "delete"), content_type: "application/x-www-form-urlencoded")
-            raise Error, "Expected 200/302 on DELETE /todo/issues/#{id}, got #{res[:status]}" unless [200, 302, 303].include?(res[:status])
-            id
-          when ["AuthNote", "create"]
-            form = {
-              "note[title]" => attrs["title"],
-              "note[body]" => attrs["body"].to_s,
-              "note[audience]" => attrs["audience"] || "owner",
-              "note[owner_id]" => attrs["owner_id"].to_s
-            }
-            res = execute_request(client, "POST", "/auth/notes", body: URI.encode_www_form(form), content_type: "application/x-www-form-urlencoded")
-            raise Error, "Expected 200/302 on POST /auth/notes, got #{res[:status]}" unless [200, 302, 303].include?(res[:status])
-            newest_id_from_snapshot(client, "AuthNote", title: attrs["title"])
-          when ["AuthNote", "destroy"]
-            res = execute_request(client, "POST", "/auth/notes/#{id}", body: URI.encode_www_form("_method" => "delete"), content_type: "application/x-www-form-urlencoded")
-            raise Error, "Expected 200/302 on DELETE /auth/notes/#{id}, got #{res[:status]}" unless [200, 302, 303].include?(res[:status])
-            id
-          else
-            raise ArgumentError, "Unsupported compiled local_write: #{model}##{operation}"
-          end
+          clean_rpc("history", client.id, key: key.to_s, response: response.to_s)["history"]
         end
 
         def execute_verify_frontend_http(client)
           http_path = File.join(InstantRecord::Testing.gem_root.to_s, "frontend/http.js")
-          res = rpc({ op: "verify_frontend_http", client: client.id, httpPath: http_path })
-          assert_clean_stderr!(res["errors"], context: "wasm frontend/http.js(#{client.id})")
-          res
+          clean_rpc("verify_frontend_http", client.id, context: "frontend/http.js(#{client.id})", httpPath: http_path)
         end
 
         def database_bytes(client)
@@ -279,16 +223,24 @@ module InstantRecord
 
         private
 
+        def local_write_kind = "compiled"
+
+        def clean_rpc(op, client_id, context: "#{op}(#{client_id})", **params)
+          rpc({ op: op, client: client_id, **params }).tap do |res|
+            assert_clean_stderr!(res["errors"], context: "wasm #{context}")
+          end
+        end
+
+        def assert_exit_zero!(res, function, detail = "(errors=#{res['errors'].inspect})")
+          return if res["exit"] == 0
+
+          raise InstantRecord::Testing::Error, "#{function} exited with #{res['exit']} #{detail}"
+        end
+
         def normalize_changes(list)
           return nil if list.nil?
 
           Array(list).map { |c| { type: c["type"].to_s, id: c["id"].to_s } }
-        end
-
-        def newest_id_from_snapshot(client, model_name, title:)
-          state = read_sqlite_bytes_state(database_bytes(client), model_names: [model_name])
-          rows = state[:tables][model_name].select { |r| r["title"] == title }
-          rows.max_by { |r| r["created_at"].to_s }&.fetch("id")
         end
 
         def prepare_app_host_path
