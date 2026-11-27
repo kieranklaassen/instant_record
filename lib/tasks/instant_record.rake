@@ -7,12 +7,20 @@ namespace :instant_record do
     abort "No toolchain file at #{path}. Run bin/rails generate instant_record:install, or set INSTANT_RECORD_TOOLCHAIN." unless File.file?(path)
   end
 
+  settings = -> { Rails.application.config.instant_record }
+  mount_path = -> { settings.call.mount_path || InstantRecord::DEFAULT_MOUNT_PATH }
+  migration_paths = -> { Rails.application.config.paths["db/migrate"].existent }
+  app_island = -> { ENV["INSTANT_RECORD_ISLAND"].presence || settings.call.island }
+
+  schema_options = lambda do
+    { root: Rails.root, baseline: settings.call.compiled_migration_baseline, migration_paths: migration_paths.call }
+  end
+
   # What both builds are told about this app.
   compiler_options = lambda do
     require "instant_record/compiler"
     Rails.application.eager_load!
     models = InstantRecord.syncable_models
-    mount_path = Rails.application.config.instant_record.mount_path || InstantRecord::DEFAULT_MOUNT_PATH
     sync_windows = models.each_with_object({}) do |model, map|
       window = model.instant_record_sync_window
       next unless window
@@ -20,17 +28,15 @@ namespace :instant_record do
       map[model.name] = { limit: window.limit, partition_by: window.partition_by }
     end
     {
-      root: Rails.root,
+      **schema_options.call,
       models: models.map(&:name),
       sync_windows: sync_windows,
       toolchain: toolchain_path.call,
-      endpoint: ENV.fetch("SYNC_ENDPOINT") { mount_path },
-      mount_path: mount_path,
-      baseline: Rails.application.config.instant_record.compiled_migration_baseline,
-      migration_paths: Rails.application.config.paths["db/migrate"].existent,
-      island: ENV["INSTANT_RECORD_ISLAND"].presence || Rails.application.config.instant_record.island,
-      overrides: Rails.application.config.instant_record.include,
-      shell_snapshot: Rails.application.config.instant_record.shell_snapshot
+      endpoint: ENV.fetch("SYNC_ENDPOINT") { mount_path.call },
+      mount_path: mount_path.call,
+      island: app_island.call,
+      overrides: settings.call.include,
+      shell_snapshot: settings.call.shell_snapshot
     }
   end
 
@@ -39,9 +45,9 @@ namespace :instant_record do
     require "instant_record/compiler"
     manifest = InstantRecord::Compiler.manifest(
       root: Rails.root,
-      island: args[:island].presence || ENV["INSTANT_RECORD_ISLAND"].presence || Rails.application.config.instant_record.island,
-      overrides: Rails.application.config.instant_record.include,
-      migration_paths: Rails.application.config.paths["db/migrate"].existent
+      island: args[:island].presence || app_island.call,
+      overrides: settings.call.include,
+      migration_paths: migration_paths.call
     )
     puts manifest.to_json
   end
@@ -105,13 +111,10 @@ namespace :instant_record do
     require "instant_record/mcp"
 
     Rails.application.eager_load!
-    mount_path = Rails.application.config.instant_record.mount_path || InstantRecord::DEFAULT_MOUNT_PATH
-    default_endpoint =
-      if mount_path.to_s.start_with?("http://", "https://")
-        mount_path.to_s
-      else
-        "http://127.0.0.1:#{ENV.fetch('PORT', '3000')}#{mount_path}"
-      end
+    default_endpoint = mount_path.call.to_s
+    unless default_endpoint.start_with?("http://", "https://")
+      default_endpoint = "http://127.0.0.1:#{ENV.fetch('PORT', '3000')}#{default_endpoint}"
+    end
 
     screens = InstantRecord::Compiler::EntryBuilder.discover_screens(Rails.root.to_s).map(&:first)
     models = InstantRecord.syncable_models.map(&:name)
@@ -151,10 +154,8 @@ namespace :instant_record do
       toolchain: toolchain,
       target: args[:target] || :wasm,
       web_dir: Rails.root.join("tmp/instant_record/compiled/web"),
-      root: Rails.root,
+      **schema_options.call,
       app_root: Rails.root,
-      baseline: Rails.application.config.instant_record.compiled_migration_baseline,
-      migration_paths: Rails.application.config.paths["db/migrate"].existent,
       models: InstantRecord.syncable_models
     )
     puts report
@@ -165,11 +166,7 @@ namespace :instant_record do
     desc "Generate or update db/instant_record_lock.json from db/schema.rb and db/migrate"
     task lock: :environment do
       require "instant_record/compiler"
-      lock = InstantRecord::Compiler.lock_schema(
-        root: Rails.root,
-        baseline: Rails.application.config.instant_record.compiled_migration_baseline,
-        migration_paths: Rails.application.config.paths["db/migrate"].existent
-      )
+      lock = InstantRecord::Compiler.lock_schema(**schema_options.call)
       puts "Wrote #{InstantRecord::Compiler::SchemaLock.path(Rails.root)} (schema version #{lock['schema_version']}, #{lock['versions'].size} versions)"
     end
 
@@ -177,15 +174,27 @@ namespace :instant_record do
     task verify: :environment do
       require "instant_record/compiler"
       Rails.application.eager_load!
-      report = InstantRecord::Compiler.verify_schema(
-        root: Rails.root,
-        baseline: Rails.application.config.instant_record.compiled_migration_baseline,
-        migration_paths: Rails.application.config.paths["db/migrate"].existent,
-        models: InstantRecord.syncable_models
-      )
+      report = InstantRecord::Compiler.verify_schema(**schema_options.call, models: InstantRecord.syncable_models)
       puts report
       abort "Schema lockfile verification failed." unless report.ok?
     end
+  end
+
+  # A flag with a value takes the argument after it, even one that looks like a flag.
+  replay_arguments = lambda do |arguments|
+    flags = {}
+    positional = []
+    rest = arguments.dup
+    while (arg = rest.shift)
+      if %w[--wasm --db --max-steps].include?(arg)
+        flags[arg] = rest.shift unless rest.empty?
+      elsif arg.start_with?("-")
+        flags[arg] = true
+      else
+        positional << arg
+      end
+    end
+    [flags, positional]
   end
 
   desc "Replay a recorded .irtrace flight recorder file deterministically in Node AppHost"
@@ -195,43 +204,7 @@ namespace :instant_record do
     # Support `rails instant_record:replay path/to/file.irtrace`,
     # `rails "instant_record:replay[path/to/file.irtrace]"`, and `TRACE=...`.
     extra = ARGV.drop_while { |arg| !arg.start_with?("instant_record:replay") }.drop(1)
-    positional = []
-    wasm_opt = args[:wasm].to_s.empty? ? ENV["WASM"] : args[:wasm]
-    db_opt = ENV["DB"]
-    json_opt = ENV["JSON"] == "1"
-    allow_mismatch = ENV["ALLOW_DIGEST_MISMATCH"] == "1"
-    stop_on_fault = ENV["STOP_ON_FAULT"] == "1"
-    max_steps = ENV["MAX_STEPS"]
-
-    i = 0
-    while i < extra.length
-      arg = extra[i]
-      if arg == "--wasm" && extra[i + 1]
-        wasm_opt = extra[i + 1]
-        i += 2
-      elsif arg == "--db" && extra[i + 1]
-        db_opt = extra[i + 1]
-        i += 2
-      elsif arg == "--max-steps" && extra[i + 1]
-        max_steps = extra[i + 1]
-        i += 2
-      elsif arg == "--json"
-        json_opt = true
-        i += 1
-      elsif arg == "--allow-digest-mismatch"
-        allow_mismatch = true
-        i += 1
-      elsif arg == "--stop-on-fault"
-        stop_on_fault = true
-        i += 1
-      elsif !arg.start_with?("-")
-        positional << arg
-        i += 1
-      else
-        i += 1
-      end
-    end
-
+    flags, positional = replay_arguments.call(extra)
     extra.each { |arg| Rake::Task.define_task(arg.to_sym) {} unless Rake::Task.task_defined?(arg) }
 
     trace_file = args[:file].to_s.empty? ? (positional[0] || ENV["TRACE"]) : args[:file]
@@ -239,17 +212,17 @@ namespace :instant_record do
       abort "Usage: bin/rails instant_record:replay <file.irtrace> [--wasm <app.wasm>] [--db <file.sqlite3>] [--json]"
     end
 
-    wasm_opt ||= positional[1]
+    in_rails = defined?(Rails) && Rails.respond_to?(:root)
     result = InstantRecord::Trace.replay(
       trace_path: trace_file,
-      wasm_path: wasm_opt,
-      db_path: db_opt,
-      root: defined?(Rails) && Rails.respond_to?(:root) ? Rails.root : nil,
-      toolchain: defined?(Rails) && Rails.respond_to?(:root) ? toolchain_path.call : nil,
-      json: json_opt,
-      allow_digest_mismatch: allow_mismatch,
-      stop_on_fault: stop_on_fault,
-      max_steps: max_steps
+      wasm_path: flags["--wasm"] || (args[:wasm].to_s.empty? ? ENV["WASM"] : args[:wasm]) || positional[1],
+      db_path: flags["--db"] || ENV["DB"],
+      root: in_rails ? Rails.root : nil,
+      toolchain: in_rails ? toolchain_path.call : nil,
+      json: flags["--json"] || ENV["JSON"] == "1",
+      allow_digest_mismatch: flags["--allow-digest-mismatch"] || ENV["ALLOW_DIGEST_MISMATCH"] == "1",
+      stop_on_fault: flags["--stop-on-fault"] || ENV["STOP_ON_FAULT"] == "1",
+      max_steps: flags["--max-steps"] || ENV["MAX_STEPS"]
     )
     puts result.stdout unless result.stdout.empty?
     warn result.stderr unless result.stderr.empty?
