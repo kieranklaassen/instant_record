@@ -17,6 +17,16 @@ module InstantRecord
     KEYWORDS = %w[WHERE GROUP ORDER LIMIT HAVING UNION INTERSECT EXCEPT OR].to_h { |kw| [kw, /\b#{kw}\b/i] }.freeze
     STOPS = %w[GROUP ORDER LIMIT HAVING UNION INTERSECT EXCEPT].map { |kw| KEYWORDS.fetch(kw) }.freeze
 
+    # The partition columns of one query, read when the first is looked for.
+    class PartitionColumns
+      def initialize(&read)
+        @read = read
+      end
+
+      def key?(column) = (@columns ||= @read.call).key?(column)
+    end
+    private_constant :PartitionColumns
+
     private
 
     def scannable?(sql)
@@ -125,6 +135,12 @@ module InstantRecord
 
     def add_partition_value(result, table, col, val)
       ((result[table] ||= {})[col] ||= []) << val.to_s
+    end
+
+    # Naming the partition columns asks every model. The original does so for each
+    # query with a WHERE, yet looks only for a column that is not an id.
+    def known_partition_columns
+      PartitionColumns.new { super }
     end
   end
 

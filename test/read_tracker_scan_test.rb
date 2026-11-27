@@ -93,7 +93,40 @@ class ReadTrackerScanTest < Minitest::Test
     assert_operator narrowed, :>, 20, "too few generated lists narrow"
   end
 
+  def test_only_a_column_that_is_not_an_id_asks_the_models
+    asked = { "id = 'x'" => 0, "id IN ('x', 'y')" => 0, "list_id = 'x'" => 0, "title LIKE 'x'" => 0, "owner = 'x'" => 1,
+      "title = 'x' AND owner = 'y'" => 1 }
+    asked.each do |where, times|
+      sql = "SELECT * FROM items WHERE #{where}"
+      assert_equal times, models_asked { SCAN.send(:extract_outer_partitions, sql, ["items"], nil) }, where
+      assert_equal track(REFERENCE, [[sql, nil]]), track(SCAN, [[sql, nil]])
+    end
+  end
+
+  # A model that loads while a block is tracked counts for the queries after it.
+  def test_partition_columns_are_read_for_each_query
+    sql = "SELECT * FROM items WHERE owner = 'x'"
+    InstantRecord.sync(syncable_model("PlainMemo"))
+    assert_empty SCAN.send(:extract_outer_partitions, sql, ["items"], nil)
+
+    InstantRecord.sync(@model)
+    assert_equal({ "items" => { "owner" => ["x"] } }, SCAN.send(:extract_outer_partitions, sql, ["items"], nil))
+  end
+
   private
+
+  def models_asked
+    times = 0
+    models = InstantRecord.method(:syncable_models)
+    InstantRecord.define_singleton_method(:syncable_models) do
+      times += 1
+      models.call
+    end
+    yield
+    times
+  ensure
+    InstantRecord.define_singleton_method(:syncable_models, models)
+  end
 
   def pick(list) = list[@random.rand(list.size)]
 
