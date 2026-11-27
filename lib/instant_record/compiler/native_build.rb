@@ -28,6 +28,8 @@ module InstantRecord
       RUNTIME_CFLAGS = %w[-O2 -Wno-all -ffunction-sections -fdata-sections -ffp-contract=off].freeze
       PACKAGES = WasmBuild::SPINEL_PACKAGES
       IOS_MINIMUM = "17.0"
+      INCLUDED_SOURCE_GLOB = "**/*.{c,h,hh,hpp,inc,def}"
+      private_constant :INCLUDED_SOURCE_GLOB
 
       def self.shared_library_name
         darwin? ? "libinstant_record_app.dylib" : "libinstant_record_app.so"
@@ -103,12 +105,9 @@ module InstantRecord
         @source_root = @app_source || File.join(@gem_root, "demo")
         @models = models
         @sync_windows = sync_windows
-        @endpoint = (endpoint && !endpoint.to_s.empty?) ? endpoint.to_s.sub(%r{/+\z}, "") : nil
-        @mount_path = (mount_path && !mount_path.to_s.empty?) ? mount_path.to_s.sub(%r{/+\z}, "") : nil
-        @target = target.nil? || target.to_s.empty? ? nil : target.to_s
-        if @target && !TARGETS.include?(@target)
-          raise ArgumentError, "Unknown target #{@target}. Leave it out for this machine, or use #{TARGETS.join(' or ')}."
-        end
+        @endpoint = strip_trailing_slashes(endpoint)
+        @mount_path = strip_trailing_slashes(mount_path)
+        @target = normalize_target(target)
         @build_dir = File.join(@workspace, *[".build-native", @target].compact)
         @baseline = baseline
         @migration_paths = migration_paths
@@ -130,10 +129,81 @@ module InstantRecord
 
         generate_contracts
 
-        spinel_home = @toolchain.fetch("SPINEL_HOME")
-        path_env = { "PATH" => [File.join(spinel_home, "bin"), ENV.fetch("PATH", "")].join(File::PATH_SEPARATOR) }
+        spinel_home
         cc, toolchain_identity = resolve_compiler
 
+        tree = emit_native_tree
+        out_dir = File.join(tree, "build")
+
+        app_c = compile_to_c(tree, out_dir)
+        check_generated_c!(app_c)
+
+        includes = compiler_includes(out_dir)
+        objects = compile_objects(cc, toolchain_identity, includes, app_c, out_dir)
+
+        if @target
+          runtime = File.join(@build_dir, "libspinel_rt.a")
+          objects.concat(cross_runtime(cc, runtime, toolchain_identity))
+        else
+          objects.concat(host_package_objects)
+        end
+
+        library = archive_library(objects)
+
+        if @target
+          @out.puts "built #{library} and #{runtime} for #{@target}"
+          return Pathname(@build_dir)
+        end
+
+        host = link_host_binary(cc, includes, library)
+        shared = link_shared_library(cc, library)
+
+        @out.puts "built #{library}, #{shared} and #{host} (#{File.size(host)} bytes)"
+        Pathname(@build_dir)
+      end
+
+      def generate_contracts
+        screens_dir = File.join(@source_root, "app/screens")
+        contracts = NativeContracts.extract_dir(screens_dir)
+        return [] if contracts.empty?
+
+        generated_dir = File.join(@build_dir, "generated")
+        FileUtils.mkdir_p(generated_dir)
+
+        write_contract_output(
+          generated_dir: generated_dir,
+          filename: "InstantRecordContracts.swift",
+          source: SwiftCodegen.generate(contracts),
+          extra_out: @swift_out,
+          count: contracts.size
+        )
+
+        if @kotlin
+          write_contract_output(
+            generated_dir: generated_dir,
+            filename: "InstantRecordContracts.kt",
+            source: KotlinCodegen.generate(contracts, package: @kotlin_package),
+            extra_out: @kotlin_out,
+            count: contracts.size
+          )
+        end
+
+        contracts
+      end
+
+      private
+
+      def write_contract_output(generated_dir:, filename:, source:, extra_out:, count:)
+        path = File.join(generated_dir, filename)
+        File.write(path, source)
+        if extra_out && extra_out != path
+          FileUtils.mkdir_p(File.dirname(extra_out))
+          File.write(extra_out, source)
+        end
+        @out.puts "wrote #{path} (#{count} contracts)"
+      end
+
+      def emit_native_tree
         wasm_build = WasmBuild.new(
           workspace: @workspace,
           gem_root: @gem_root,
@@ -151,29 +221,28 @@ module InstantRecord
           out: @out
         )
         emitted = wasm_build.emit_tree(native: true)
-        app = emitted[:app]
-        tree = emitted[:tree]
-        plan = emitted[:plan]
-        manifest = emitted[:manifest]
 
         screens = EntryBuilder.write_native_entry(
-          tree_dir: tree,
-          app_dir: app,
+          tree_dir: emitted[:tree],
+          app_dir: emitted[:app],
           demo: @demo,
-          manifest: manifest,
+          manifest: emitted[:manifest],
           models: @models,
           sync_windows: @sync_windows,
           endpoint: @endpoint,
           mount_path: @mount_path,
-          migration_plan: plan,
+          migration_plan: emitted[:plan],
           shell_fingerprint: emitted[:shell_fingerprint]
         )
         @out.puts "wrote main_native.rb with screens: #{screens.empty? ? 'none' : screens.join(', ')}"
+        emitted[:tree]
+      end
 
-        out_dir = File.join(tree, "build")
+      def compile_to_c(tree, out_dir)
         FileUtils.mkdir_p(out_dir)
         app_c = File.join(out_dir, "app.c")
-        sqlite_src = @toolchain.fetch("SQLITE_SRC")
+        cpath = sqlite_src
+        path_env = { "PATH" => [File.join(spinel_home, "bin"), ENV.fetch("PATH", "")].join(File::PATH_SEPARATOR) }
 
         flags = @runner.run(["spin", "flags"], cwd: tree, env: path_env).split
         @runner.run(
@@ -184,20 +253,40 @@ module InstantRecord
             *flags, "main_native.rb", "-o", app_c
           ],
           cwd: tree,
-          env: path_env.merge("CPATH" => sqlite_src),
+          env: path_env.merge("CPATH" => cpath),
           log: "spinel.log"
         )
+        app_c
+      end
 
-        check_generated_c!(app_c)
+      def check_generated_c!(app_c)
+        generated = File.binread(app_c).force_encoding(Encoding::UTF_8).scrub
+        loose = self.class.loose_node_fields(generated)
+        unless loose.empty?
+          raise BuildError,
+            "Some screen gives params: or args: a hash that does not hold only strings (the compiler typed a node's " \
+            "#{loose.join(', ')} loosely). Call to_s on a value that comes from a record, and write Node.strings for an empty hash."
+        end
 
-        includes = [
+        wrong = self.class.certain_type_errors(generated)
+        unless wrong.empty?
+          raise BuildError,
+            "A hash given to params: or args: must hold strings. Call to_s on a value that comes from a record:\n  " \
+            "#{wrong.join("\n  ")}"
+        end
+      end
+
+      def compiler_includes(out_dir)
+        [
           "-I#{File.join(spinel_home, 'lib')}",
           "-I#{File.join(spinel_home, 'lib/regexp')}",
           "-I#{sqlite_src}",
           "-I#{out_dir}",
           "-I#{File.join(@pipeline_dir, 'native')}"
         ]
+      end
 
+      def compile_objects(cc, toolchain_identity, includes, app_c, out_dir)
         pic = @target ? [] : ["-fPIC"]
         app_obj = File.join(out_dir, "app.o")
         @runner.run([*cc, *self.class::CFLAGS, *pic, *includes, "-c", app_c, "-o", app_obj], log: "cc.log")
@@ -206,9 +295,9 @@ module InstantRecord
         native_shim_headers = header_entries([
           File.join(@pipeline_dir, "native/instant_record_native.h"),
           File.join(out_dir, "app.h")
-        ]) + [["spinel_lib_headers", directory_headers_digest(File.join(spinel_home, "lib"))]]
+        ]) + spinel_lib_headers
 
-        objects = [
+        [
           app_obj,
           cached_object(
             name: "native_shim",
@@ -238,125 +327,91 @@ module InstantRecord
             extra_inputs: sqlite_headers
           )
         ]
+      end
 
-        if @target
-          runtime = File.join(@build_dir, "libspinel_rt.a")
-          objects.concat(cross_runtime(cc, spinel_home, runtime, toolchain_identity))
-        else
-          objects.concat(PACKAGES.map { |name| File.join(spinel_home, "packages", name, "sp_#{name}.o") })
-        end
+      def host_package_objects
+        PACKAGES.map { |name| File.join(spinel_home, "packages", name, "sp_#{name}.o") }
+      end
 
+      def archive_library(objects)
         library = File.join(@build_dir, "libinstant_record_app.a")
-        File.delete(library) if File.exist?(library)
+        FileUtils.rm_f(library)
         @runner.run(["ar", "rcs", library, *objects])
+        library
+      end
 
-        if @target
-          @out.puts "built #{library} and #{runtime} for #{@target}"
-          return Pathname(@build_dir)
-        end
-
+      def link_host_binary(cc, includes, library)
         host = File.join(@build_dir, "host")
         @runner.run(
           [
             *cc, "-O2", *includes,
             File.join(@pipeline_dir, "native/host.c"),
             library,
-            File.join(spinel_home, "lib/libspinel_rt.a"),
+            host_runtime_archive,
             "-lm", "-o", host
           ],
           log: "link.log"
         )
+        host
+      end
 
+      def link_shared_library(cc, library)
         shared = File.join(@build_dir, self.class.shared_library_name)
-        shared_args =
-          if self.class.darwin?
-            ["-dynamiclib", "-O2", "-Wl,-force_load,#{library}", File.join(spinel_home, "lib/libspinel_rt.a")]
-          else
-            ["-shared", "-O2", "-Wl,--whole-archive", library, "-Wl,--no-whole-archive", File.join(spinel_home, "lib/libspinel_rt.a")]
-          end
-        @runner.run([*cc, *shared_args, "-lm", "-o", shared], log: "link-shared.log")
-
-        @out.puts "built #{library}, #{shared} and #{host} (#{File.size(host)} bytes)"
-        Pathname(@build_dir)
+        @runner.run([*cc, *shared_library_linker_args(library), "-lm", "-o", shared], log: "link-shared.log")
+        shared
       end
 
-      def generate_contracts
-        screens_dir = File.join(@source_root, "app/screens")
-        contracts = NativeContracts.extract_dir(screens_dir)
-        return [] if contracts.empty?
-
-        generated_dir = File.join(@build_dir, "generated")
-        FileUtils.mkdir_p(generated_dir)
-
-        swift_source = SwiftCodegen.generate(contracts)
-        swift_path = File.join(generated_dir, "InstantRecordContracts.swift")
-        File.write(swift_path, swift_source)
-        if @swift_out && @swift_out != swift_path
-          FileUtils.mkdir_p(File.dirname(@swift_out))
-          File.write(@swift_out, swift_source)
+      def shared_library_linker_args(library)
+        if self.class.darwin?
+          ["-dynamiclib", "-O2", "-Wl,-force_load,#{library}", host_runtime_archive]
+        else
+          ["-shared", "-O2", "-Wl,--whole-archive", library, "-Wl,--no-whole-archive", host_runtime_archive]
         end
-        @out.puts "wrote #{swift_path} (#{contracts.size} contracts)"
-
-        if @kotlin
-          kotlin_source = KotlinCodegen.generate(contracts, package: @kotlin_package)
-          kotlin_path = File.join(generated_dir, "InstantRecordContracts.kt")
-          File.write(kotlin_path, kotlin_source)
-          if @kotlin_out && @kotlin_out != kotlin_path
-            FileUtils.mkdir_p(File.dirname(@kotlin_out))
-            File.write(@kotlin_out, kotlin_source)
-          end
-          @out.puts "wrote #{kotlin_path} (#{contracts.size} contracts)"
-        end
-
-        contracts
       end
 
-      private
+      def spinel_home
+        @toolchain.fetch("SPINEL_HOME")
+      end
 
-      def check_generated_c!(app_c)
-        generated = File.binread(app_c).force_encoding(Encoding::UTF_8).scrub
-        loose = self.class.loose_node_fields(generated)
-        unless loose.empty?
-          raise BuildError,
-            "Some screen gives params: or args: a hash that does not hold only strings (the compiler typed a node's " \
-            "#{loose.join(', ')} loosely). Call to_s on a value that comes from a record, and write Node.strings for an empty hash."
-        end
+      def sqlite_src
+        @toolchain.fetch("SQLITE_SRC")
+      end
 
-        wrong = self.class.certain_type_errors(generated)
-        unless wrong.empty?
-          raise BuildError,
-            "A hash given to params: or args: must hold strings. Call to_s on a value that comes from a record:\n  " \
-            "#{wrong.join("\n  ")}"
-        end
+      def host_runtime_archive
+        File.join(spinel_home, "lib/libspinel_rt.a")
       end
 
       def resolve_compiler
-        if @target
-          sdk = @runner.run(["xcrun", "--sdk", @target, "--show-sdk-path"]).strip
-          arch = Etc.uname[:machine]
-          triple = @target == "iphoneos" ? "arm64-apple-ios#{IOS_MINIMUM}" : "#{arch}-apple-ios#{IOS_MINIMUM}-simulator"
-          cc = ["xcrun", "--sdk", @target, "clang", "-target", triple, "-isysroot", sdk]
-          identity = {
-            "target" => @target,
-            "triple" => triple,
-            "sdk_path" => sdk,
-            "sdk_version" => probe_output(["xcrun", "--sdk", @target, "--show-sdk-version"], required: true),
-            "sdk_build_version" => probe_output(["xcrun", "--sdk", @target, "--show-sdk-build-version"], required: true),
-            "compiler_version" => probe_output(["xcrun", "--sdk", @target, "clang", "--version"], required: true)
-          }
-          [cc, identity]
-        else
-          cc_bin = ENV.fetch("CC", "cc")
-          identity = {
-            "target" => "host",
-            "platform" => "#{Etc.uname[:sysname]}-#{Etc.uname[:machine]}",
-            "cc" => Toolchain.which(cc_bin) || cc_bin,
-            "sdkroot" => ENV["SDKROOT"].to_s,
-            "deployment_target" => ENV["MACOSX_DEPLOYMENT_TARGET"].to_s,
-            "compiler_version" => probe_output([cc_bin, "--version"])
-          }
-          [[cc_bin], identity]
-        end
+        @target ? resolve_cross_compiler(@target) : resolve_host_compiler
+      end
+
+      def resolve_cross_compiler(target)
+        sdk = @runner.run(["xcrun", "--sdk", target, "--show-sdk-path"]).strip
+        arch = Etc.uname[:machine]
+        triple = target == "iphoneos" ? "arm64-apple-ios#{IOS_MINIMUM}" : "#{arch}-apple-ios#{IOS_MINIMUM}-simulator"
+        cc = ["xcrun", "--sdk", target, "clang", "-target", triple, "-isysroot", sdk]
+        identity = {
+          "target" => target,
+          "triple" => triple,
+          "sdk_path" => sdk,
+          "sdk_version" => probe_output(["xcrun", "--sdk", target, "--show-sdk-version"], required: true),
+          "sdk_build_version" => probe_output(["xcrun", "--sdk", target, "--show-sdk-build-version"], required: true),
+          "compiler_version" => probe_output(["xcrun", "--sdk", target, "clang", "--version"], required: true)
+        }
+        [cc, identity]
+      end
+
+      def resolve_host_compiler
+        cc_bin = ENV.fetch("CC", "cc")
+        identity = {
+          "target" => "host",
+          "platform" => "#{Etc.uname[:sysname]}-#{Etc.uname[:machine]}",
+          "cc" => Toolchain.which(cc_bin) || cc_bin,
+          "sdkroot" => ENV["SDKROOT"].to_s,
+          "deployment_target" => ENV["MACOSX_DEPLOYMENT_TARGET"].to_s,
+          "compiler_version" => probe_output([cc_bin, "--version"])
+        }
+        [[cc_bin], identity]
       end
 
       def probe_output(cmd, required: false)
@@ -391,6 +446,10 @@ module InstantRecord
 
           [File.basename(path), file_digest(path)]
         end
+      end
+
+      def spinel_lib_headers
+        [["spinel_lib_headers", directory_headers_digest(File.join(spinel_home, "lib"))]]
       end
 
       def directory_headers_digest(dir, pattern: "**/*.{h,hh,hpp,inc,def}", exclude: [])
@@ -492,47 +551,55 @@ module InstantRecord
         value.to_s.gsub(/[^A-Za-z0-9_.-]+/, "_")
       end
 
-      def cross_runtime(cc, spinel_home, runtime, toolchain_identity)
+      def cross_runtime(cc, runtime, toolchain_identity)
+        members = cross_runtime_members(toolchain_identity)
+        build_cross_runtime_archive(cc, members, runtime, toolchain_identity)
+        cross_package_objects(cc, toolchain_identity)
+      end
+
+      def cross_runtime_members(toolchain_identity)
         lib = File.join(spinel_home, "lib")
         regexp_dir = File.join(lib, "regexp")
-        regexp = ["-I#{regexp_dir}", "-I#{File.join(regexp_dir, 'shim')}"]
+        regexp_includes = ["-I#{regexp_dir}", "-I#{File.join(regexp_dir, 'shim')}"]
         runtime_cflags = self.class::RUNTIME_CFLAGS
         re_src_paths = self.class.makefile_list(spinel_home, "RE_SRC")
         re_src_full = re_src_paths.map { |path| File.join(spinel_home, path) }
 
         regexp_headers = [[
           "spinel_regexp_headers",
-          directory_headers_digest(regexp_dir, pattern: "**/*.{c,h,hh,hpp,inc,def}", exclude: re_src_full)
+          directory_headers_digest(regexp_dir, pattern: INCLUDED_SOURCE_GLOB, exclude: re_src_full)
         ]]
-        lib_headers = [["spinel_lib_headers", directory_headers_digest(lib)]]
+        lib_headers = spinel_lib_headers
 
-        members = re_src_paths.map do |path|
+        re_members = re_src_paths.map do |path|
           keyed_object(
             name: "re_#{sanitize_cache_name(path.delete_suffix('.c'))}",
             source: File.join(spinel_home, path),
             cflags: runtime_cflags,
-            includes: regexp,
+            includes: regexp_includes,
             extra_inputs: regexp_headers,
             toolchain_identity: toolchain_identity
           )
         end
 
-        members.concat(
-          self.class.makefile_list(spinel_home, "RT_MEMBERS").map do |member|
-            keyed_object(
-              name: "rt_#{sanitize_cache_name(member)}",
-              source: File.join(lib, "#{member}.c"),
-              cflags: runtime_cflags,
-              includes: ["-I#{lib}", *regexp],
-              extra_inputs: lib_headers,
-              toolchain_identity: toolchain_identity
-            )
-          end
-        )
+        rt_members = self.class.makefile_list(spinel_home, "RT_MEMBERS").map do |member|
+          keyed_object(
+            name: "rt_#{sanitize_cache_name(member)}",
+            source: File.join(lib, "#{member}.c"),
+            cflags: runtime_cflags,
+            includes: ["-I#{lib}", *regexp_includes],
+            extra_inputs: lib_headers,
+            toolchain_identity: toolchain_identity
+          )
+        end
 
+        re_members + rt_members
+      end
+
+      def build_cross_runtime_archive(cc, members, runtime, toolchain_identity)
         archive_key = archive_cache_key(
           name: "libspinel_rt",
-          cflags: runtime_cflags,
+          cflags: self.class::RUNTIME_CFLAGS,
           toolchain_identity: toolchain_identity,
           member_keys: members.map { |member| [member[:name], member[:key]] }
         )
@@ -544,13 +611,19 @@ module InstantRecord
         end
 
         copy_atomically(cached_archive, runtime)
+      end
+
+      def cross_package_objects(cc, toolchain_identity)
+        lib = File.join(spinel_home, "lib")
+        lib_headers = spinel_lib_headers
+        runtime_cflags = self.class::RUNTIME_CFLAGS
 
         PACKAGES.map do |name|
           folder = File.join(spinel_home, "packages", name)
           source = File.join(folder, "sp_#{name}.c")
           pkg_headers = lib_headers + [[
             "package_#{name}_headers",
-            directory_headers_digest(folder, pattern: "**/*.{c,h,hh,hpp,inc,def}", exclude: [source])
+            directory_headers_digest(folder, pattern: INCLUDED_SOURCE_GLOB, exclude: [source])
           ]]
           cached_object(
             name: "sp_#{sanitize_cache_name(name)}",
@@ -562,6 +635,22 @@ module InstantRecord
             extra_inputs: pkg_headers
           )
         end
+      end
+
+      def strip_trailing_slashes(value)
+        return nil unless value
+
+        str = value.to_s
+        str.empty? ? nil : str.sub(%r{/+\z}, "")
+      end
+
+      def normalize_target(target)
+        return nil if target.nil? || target.to_s.empty?
+
+        value = target.to_s
+        return value if TARGETS.include?(value)
+
+        raise ArgumentError, "Unknown target #{value}. Leave it out for this machine, or use #{TARGETS.join(' or ')}."
       end
     end
   end
