@@ -68,65 +68,56 @@ module InstantRecord
 
       def render_props_struct(name:, fields:, indent:, top_level:, component_name: nil, action_type: nil)
         protocols = top_level ? "NativeProps, Codable, Equatable, Sendable" : "Codable, Equatable, Sendable"
-        lines = ["#{indent}public struct #{name}: #{protocols} {"]
         inner = "#{indent}    "
+        sections = []
 
         if top_level
-          lines << "#{inner}public typealias Action = #{action_type}" if action_type
-          lines << %(#{inner}public static let componentName = #{swift_string(component_name)})
+          constants = []
+          constants << "#{inner}public typealias Action = #{action_type}" if action_type
+          constants << %(#{inner}public static let componentName = #{swift_string(component_name)})
+          sections << constants
         end
 
         nested_fields = fields.select { |f| f.one? || f.many? }
         nested_fields.each do |field|
-          lines << "" if lines.last != "#{indent}public struct #{name}: #{protocols} {"
-          lines.concat(render_props_struct(
+          sections << render_props_struct(
             name: nested_type_name(field),
             fields: field.fields,
             indent: inner,
             top_level: false
-          ))
+          )
         end
 
-        if fields.any?
-          lines << "" if lines.last != "#{indent}public struct #{name}: #{protocols} {"
-          fields.each do |field|
-            lines << "#{inner}public let #{swift_ident(camel_case(field.name))}: #{swift_field_type(field)}"
-          end
-        end
-
-        lines << "" if lines.last != "#{indent}public struct #{name}: #{protocols} {"
         if fields.empty?
-          lines << "#{inner}public init() {}"
+          sections << ["#{inner}public init() {}"]
         else
+          properties = fields.map do |field|
+            "#{inner}public let #{swift_ident(camel_case(field.name))}: #{swift_field_type(field)}"
+          end
           params = fields.map do |field|
             param = "#{swift_ident(camel_case(field.name))}: #{swift_field_type(field)}"
             field.optional? ? "#{param} = nil" : param
           end
-          lines << "#{inner}public init(#{params.join(', ')}) {"
-          fields.each do |field|
+          assignments = fields.map do |field|
             ident = swift_ident(camel_case(field.name))
-            lines << "#{inner}    self.#{ident} = #{ident}"
+            "#{inner}    self.#{ident} = #{ident}"
           end
-          lines << "#{inner}}"
+          sections << properties
+          sections << ["#{inner}public init(#{params.join(', ')}) {", *assignments, "#{inner}}"]
         end
 
         if needs_coding_keys?(fields)
-          lines << ""
-          lines << "#{inner}private enum CodingKeys: String, CodingKey {"
-          fields.each do |field|
+          cases = fields.map do |field|
             camel = camel_case(field.name)
             ident = swift_ident(camel)
-            if camel == field.name
-              lines << "#{inner}    case #{ident}"
-            else
-              lines << "#{inner}    case #{ident} = #{swift_string(field.name)}"
-            end
+            camel == field.name ? "#{inner}    case #{ident}" : "#{inner}    case #{ident} = #{swift_string(field.name)}"
           end
-          lines << "#{inner}}"
+          sections << ["#{inner}private enum CodingKeys: String, CodingKey {", *cases, "#{inner}}"]
         end
 
-        lines << "#{indent}}"
-        lines
+        # One blank line between sections, none before the first.
+        body = sections.flat_map { |section| ["", *section] }.drop(1)
+        ["#{indent}public struct #{name}: #{protocols} {", *body, "#{indent}}"]
       end
 
       def render_action_enum(enum_name, actions)
