@@ -79,10 +79,16 @@ module InstantRecord
         clamped_offset = [offset.to_i, 0].max
 
         table_sql = quote_ident(info.table)
-        total = connection.get_first_value("SELECT COUNT(*) FROM #{table_sql}#{where_sql}", binds).to_i
-
         sql = "SELECT #{selected} FROM #{table_sql}#{where_sql}#{order_sql} LIMIT ? OFFSET ?"
-        rows = connection.execute(sql, binds + [clamped_limit, clamped_offset]).dup
+        rows = nil
+        total = nil
+        connection.prepare("SELECT COUNT(*) FROM #{table_sql}#{where_sql}") do |counted|
+          counted.bind_params(binds)
+          rows = connection.execute(sql, binds + [clamped_limit, clamped_offset]).dup
+          # Rows that do not fill their page are the last: they tell the total.
+          last_page = rows.any? && rows.size < clamped_limit
+          total = last_page ? clamped_offset + rows.size : counted.step.first.to_i
+        end
 
         {
           "model" => info.name,
