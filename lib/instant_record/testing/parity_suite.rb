@@ -413,7 +413,7 @@ module InstantRecord
       end
 
       # 8. Exercise frontend/http.js (`write` and `localHttpClient.request`) directly
-      # against live AppHost#request in Node (covers frontend/http.js:36-70).
+      # against live AppHost#request in Node.
       def scenario_frontend_http_compiled_fetch_path
         wasm_driver = @drivers[:wasm]
         @network.register_client("frontend_http_wasm")
@@ -422,10 +422,36 @@ module InstantRecord
 
         res = client.verify_frontend_http
         assert_equal!(true, res["ok"], "frontend/http.js: verify_frontend_http must succeed")
-        assert_equal!(200, res["pageStatus"], "frontend/http.js: localHttpClient GET must return 200")
         assert_equal!(true, res["containsWrittenTitle"], "frontend/http.js: write() POST must persist to AppHost SQLite")
-        assert_true!(res["calls"].any? { |c| c["method"] == "POST" && c["path"] == "/todo/issues" }, "frontend/http.js: must send POST /todo/issues")
-        assert_true!(res["calls"].any? { |c| c["path"].include?("_inertia=1") && c["path"].include?("_only=issues") }, "frontend/http.js: localHttpClient must set _inertia=1 and _only")
+
+        # What the frontend sends: these two requests, with these headers and nothing added to the address.
+        sent = res["calls"].map { |call| call.slice("method", "path", "headers") }
+        expected = [
+          {
+            "method" => "POST", "path" => "/todo/issues",
+            "headers" => { "x-requested-with" => "XMLHttpRequest", "x-xsrf-token" => "test-csrf-token" }
+          },
+          {
+            "method" => "GET", "path" => "/email?member=maya&inbox=support",
+            "headers" => {
+              "accept" => "text/html, application/xhtml+xml",
+              "x-inertia" => "true",
+              "x-inertia-partial-component" => "Email/Inbox",
+              "x-inertia-partial-data" => "mail",
+              "x-requested-with" => "XMLHttpRequest"
+            }
+          }
+        ]
+        assert_equal!(expected, sent, "frontend/http.js: write() and localHttpClient must send their headers")
+
+        # What the compiled app answers: the page object, with the one prop the headers asked for.
+        page = res["page"]
+        assert_equal!(200, page["status"], "frontend/http.js: localHttpClient GET must return 200")
+        assert_equal!("true", page["headers"]["x-inertia"], "frontend/http.js: the compiled app must answer X-Inertia with a page object")
+        assert_true!(page["headers"]["content-type"].to_s.start_with?("application/json"), "frontend/http.js: the page object must be JSON")
+        object = JSON.parse(page["data"])
+        assert_equal!("Email/Inbox", object["component"], "frontend/http.js: page object component")
+        assert_equal!(%w[errors mail], object["props"].keys.sort, "frontend/http.js: a partial reload must carry only the props it names")
 
         client.sync(ENDPOINT)
         assert_converged!({ wasm: client }, label: "frontend_http_compiled_fetch_path")
