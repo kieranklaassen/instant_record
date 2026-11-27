@@ -379,6 +379,76 @@ class SchemaLockTest < ActiveSupport::TestCase
     end
   end
 
+  test "replay words a failed schema read as Active Record does" do
+    in_app do |dir|
+      InstantRecord::Compiler.lock_schema(root: dir)
+      edit_lock(dir) do |lock|
+        lock["versions"].first["schema_sql"] << <<~SQL
+          PRAGMA writable_schema = ON;
+          INSERT INTO sqlite_master VALUES ('table', 'broken', 'broken', 0, 'CREATE VIRTUAL TABLE broken USING missing_module(x)');
+          PRAGMA writable_schema = RESET;
+        SQL
+      end
+      report = InstantRecord::Compiler.verify_schema(root: dir)
+
+      assert_match(/\ASQLite3::SQLException: no such module: missing_module/, replay(report, V1).detail)
+    end
+  end
+
+  test "replay words a schema read that fails outside SQLite as Active Record does" do
+    in_app do |dir|
+      InstantRecord::Compiler.lock_schema(root: dir)
+      edit_lock(dir) do |lock|
+        lock["versions"].first["schema_sql"] << <<~SQL
+          CREATE TABLE odd (id varchar);
+          PRAGMA writable_schema = ON;
+          UPDATE sqlite_master SET name = x'7aff' WHERE name = 'odd';
+        SQL
+      end
+      report = InstantRecord::Compiler.verify_schema(root: dir)
+
+      assert_match(/\AEncoding::UndefinedConversionError: /, replay(report, V1).detail)
+    end
+  end
+
+  test "replay words a schema read that fails as its rows are read as Active Record does" do
+    in_app do |dir|
+      InstantRecord::Compiler.lock_schema(root: dir)
+      edit_lock(dir) do |lock|
+        lock["versions"].first["schema_sql"] << <<~SQL
+          CREATE TABLE odd (id varchar);
+          PRAGMA writable_schema = ON;
+          UPDATE sqlite_master SET sql = 'garbage' WHERE name = 'odd';
+          PRAGMA writable_schema = OFF;
+          PRAGMA schema_version = 99;
+        SQL
+      end
+      report = InstantRecord::Compiler.verify_schema(root: dir)
+
+      assert_equal "SQLite3::CorruptException: malformed database schema (odd)", replay(report, V1).detail
+    end
+  end
+
+  test "replay words a failed schema read with the query log tags" do
+    tags = ->(sql, *) { "#{sql} /*application:App*/" }
+    in_app do |dir|
+      InstantRecord::Compiler.lock_schema(root: dir)
+      edit_lock(dir) do |lock|
+        lock["versions"].first["schema_sql"] << <<~SQL
+          PRAGMA writable_schema = ON;
+          INSERT INTO sqlite_master VALUES ('table', 'broken', 'broken', 0, 'CREATE VIRTUAL TABLE broken USING missing_module(x)');
+          PRAGMA writable_schema = RESET;
+        SQL
+      end
+      ActiveRecord.query_transformers << tags
+      report = InstantRecord::Compiler.verify_schema(root: dir)
+
+      assert_includes replay(report, V1).detail, "/*application:App*/"
+    ensure
+      ActiveRecord.query_transformers.delete(tags)
+    end
+  end
+
   test "replay reports a failed integrity check" do
     in_app do |dir|
       add_sql_migration(dir, V2, "CREATE TABLE counts (id varchar, n integer CHECK (n >= 0));")

@@ -383,19 +383,40 @@ module InstantRecord
         end
 
         def introspect_tables(conn)
-          tables = conn.select_values(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name ASC"
-          )
-          tables.each_with_object({}) do |table, map|
-            cols = conn.select_all("PRAGMA table_info(#{conn.quote_table_name(table)})").map { |row| row["name"].to_s }
-            map[table] = cols.to_set
+          table_names(conn).each_with_object({}) do |table, map|
+            map[table] = table_info(conn, table).to_set { |_cid, name| name.to_s }
+          end
+        end
+
+        def table_names(conn)
+          read_rows(conn, "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name ASC").map(&:first)
+        end
+
+        # Rows of cid, name, type, notnull, dflt_value, pk.
+        def table_info(conn, table)
+          read_rows(conn, "PRAGMA table_info(#{conn.quote_table_name(table)})")
+        end
+
+        # Every replay reads the whole schema, so these reads skip Active Record.
+        # It still words the error of one that fails. The read is not run again: the
+        # first attempt can change what a second one sees.
+        def read_rows(conn, sql)
+          sql = conn.send(:preprocess_query, sql) # Query log tags are part of some error texts.
+          begin
+            conn.raw_connection.prepare(sql) do |statement|
+              rows = []
+              while (row = statement.step)
+                rows << row
+              end
+              rows
+            end
+          rescue StandardError => e
+            raise conn.send(:translate_exception_class, e, sql, [])
           end
         end
 
         def table_exists?(conn, name)
-          conn.select_value(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = #{conn.quote(name)}"
-          ) == 1
+          read_rows(conn, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = #{conn.quote(name)}").any?
         end
 
         def remaining_creates_table?(remaining, table_name)
@@ -413,7 +434,7 @@ module InstantRecord
         end
 
         def verify_integrity!(conn)
-          result = conn.select_values("PRAGMA integrity_check")
+          result = read_rows(conn, "PRAGMA integrity_check").map(&:first)
           raise "SQLite PRAGMA integrity_check failed: #{result.join(', ')}" unless result == ["ok"]
         end
 
@@ -427,15 +448,11 @@ module InstantRecord
           end
 
           has_outbox = table_exists?(conn, "instant_record_outbox")
-          tables = conn.select_values(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name ASC"
-          )
-
           seeded_outbox = []
-          tables.each_with_index do |table, idx|
+          table_names(conn).each_with_index do |table, idx|
             next if INTERNAL_TABLES.include?(table)
 
-            columns = conn.select_all("PRAGMA table_info(#{conn.quote_table_name(table)})")
+            columns = table_info(conn, table)
             next if columns.empty?
 
             row_attrs = build_sample_row(columns, table, idx, now)
@@ -459,11 +476,10 @@ module InstantRecord
 
         def build_sample_row(columns, table, idx, now)
           attrs = {}
-          columns.each_with_index do |col, col_idx|
-            name = col["name"].to_s
-            type = col["type"].to_s.downcase
-            pk = col["pk"].to_i > 0
-            dflt = col["dflt_value"]
+          columns.each_with_index do |(_cid, name, type, _notnull, dflt, pk), col_idx|
+            name = name.to_s
+            type = type.to_s.downcase
+            pk = pk.to_i > 0
 
             attrs[name] =
               if name == "id" && !type.include?("int")
@@ -525,6 +541,8 @@ module InstantRecord
         def verify_schema_parity!(from_version, head_schema, upgraded_schema)
           head_schema.each do |table, expected_cols|
             actual_cols = upgraded_schema[table]
+            next if actual_cols == expected_cols
+
             unless actual_cols
               raise "upgrade from #{from_version} is missing table #{table.inspect} present at HEAD"
             end
@@ -563,7 +581,8 @@ module InstantRecord
               if model && model.respond_to?(:table_name) && head_schema.key?(model.table_name)
                 model.table_name
               else
-                guess = mutation[:record_type].to_s.tableize
+                record_type = mutation[:record_type].to_s
+                guess = model_index[:guessed_tables][record_type] ||= record_type.tableize
                 head_schema.key?(guess) ? guess : nil
               end
             next unless table_name
@@ -587,7 +606,7 @@ module InstantRecord
             by_name[klass.name] = klass if klass.name
             by_table[klass.table_name] = klass if klass.respond_to?(:table_name) && klass.table_name
           end
-          { by_name: by_name, by_table: by_table }
+          { by_name: by_name, by_table: by_table, guessed_names: {}, guessed_tables: {} }
         end
 
         def resolve_record_type(table, model_index)
@@ -595,7 +614,7 @@ module InstantRecord
             return klass.name
           end
 
-          ActiveSupport::Inflector.classify(table)
+          model_index[:guessed_names][table] ||= ActiveSupport::Inflector.classify(table)
         end
 
         def find_model(record_type, model_index)
