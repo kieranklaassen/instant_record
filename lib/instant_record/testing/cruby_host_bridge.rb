@@ -64,17 +64,8 @@ class PipeTransport
     @exchanges = []
   end
 
-  def get_json(path)
-    JSON.parse(exchange("GET", path, ""))
-  rescue JSON::ParserError => e
-    raise InstantRecord::Client::Transport::Error, "GET #{path} invalid JSON: #{e.message}"
-  end
-
-  def post_json(path, payload)
-    JSON.parse(exchange("POST", path, JSON.generate(payload)))
-  rescue JSON::ParserError => e
-    raise InstantRecord::Client::Transport::Error, "POST #{path} invalid JSON: #{e.message}"
-  end
+  def get_json(path) = exchange_json("GET", path)
+  def post_json(path, payload) = exchange_json("POST", path, payload)
 
   def each_event(path, &block)
     parser = InstantRecord::Client::Transport::SseParser.new(&block)
@@ -82,6 +73,12 @@ class PipeTransport
   end
 
   private
+
+  def exchange_json(method, path, payload = nil)
+    JSON.parse(exchange(method, path, payload ? JSON.generate(payload) : ""))
+  rescue JSON::ParserError => e
+    raise InstantRecord::Client::Transport::Error, "#{method} #{path} invalid JSON: #{e.message}"
+  end
 
   def exchange(method, path, body)
     url = "#{InstantRecord.config.endpoint}#{path}"
@@ -110,10 +107,9 @@ class RecordingNotifier
   end
 end
 
-ClientState = Struct.new(:id, :db_path, :shard, :stream_parser, :stream_events, :history_marks, keyword_init: true)
-
-clients = {}
-counter = 0
+# What InstantRecord::Client keeps in memory for one client between commands.
+CARRIED_STATE = %i[stream_parser stream_events].freeze
+ClientState = Struct.new(:id, :shard, *CARRIED_STATE, keyword_init: true)
 
 MIGRATIONS_DIR = File.expand_path("../../../db/migrate", __dir__)
 
@@ -144,14 +140,25 @@ def init_schema!(shard)
   end
 end
 
-def with_client(client, transport: nil, notifier: nil, endpoint: nil)
+def create_client(id, shard, db_path)
+  ActiveRecord::Base.connection_handler.establish_connection(
+    { adapter: "sqlite3", database: db_path },
+    owner_name: ActiveRecord::Base.name,
+    role: :writing,
+    shard: shard
+  )
+  init_schema!(shard)
+  ClientState.new(id: id, shard: shard, stream_events: [])
+end
+
+# Runs the block as the given client and sends the fields it returns as the
+# reply, with whatever the block wrote to stderr.
+def reply_as(client, transport: nil, notifier: nil, endpoint: nil)
   InstantRecord::Client.transport = transport if transport
   InstantRecord::Client.notifier = notifier if notifier
   InstantRecord.config.endpoint = endpoint if endpoint && !endpoint.to_s.empty?
   InstantRecord::Client.streaming = false
-  InstantRecord::Client.instance_variable_set(:@stream_parser, client.stream_parser)
-  InstantRecord::Client.instance_variable_set(:@stream_events, client.stream_events)
-  InstantRecord::Client.instance_variable_set(:@history_marks, client.history_marks)
+  CARRIED_STATE.each { |name| InstantRecord::Client.instance_variable_set(:"@#{name}", client[name]) }
   InstantRecord::Client.instance_variable_set(:@changed_records, [])
   InstantRecord::Client.instance_variable_set(:@unlisted_changes, false)
 
@@ -159,12 +166,11 @@ def with_client(client, transport: nil, notifier: nil, endpoint: nil)
   prev_stderr = $stderr
   $stderr = captured
 
-  val = ActiveRecord::Base.connected_to(role: :writing, shard: client.shard) { yield }
+  fields = ActiveRecord::Base.connected_to(role: :writing, shard: client.shard) { yield }
 
-  client.stream_parser = InstantRecord::Client.instance_variable_get(:@stream_parser)
-  client.stream_events = InstantRecord::Client.instance_variable_get(:@stream_events)
-  client.history_marks = InstantRecord::Client.instance_variable_get(:@history_marks)
-  [val, captured.string.lines(chomp: true)]
+  CARRIED_STATE.each { |name| client[name] = InstantRecord::Client.instance_variable_get(:"@#{name}") }
+  $stderr = prev_stderr
+  write_msg({ type: "result", **fields, errors: captured.string.lines(chomp: true) })
 ensure
   $stderr = prev_stderr if prev_stderr
 end
@@ -177,6 +183,157 @@ def model_class(name)
   end
 end
 
+def html_page(body)
+  { status: 200, headers: [["Content-Type", "text/html"]], body: body, exit: 0 }
+end
+
+def redirect_to(path)
+  { status: 302, headers: [["Location", path]], body: "", exit: 0 }
+end
+
+def handle_request(client, cmd)
+  verb = cmd["method"].to_s.upcase
+  body_str = cmd["body"].to_s
+  if verb == "POST" && cmd["contentType"].to_s.start_with?("application/x-www-form-urlencoded")
+    override = URI.decode_www_form(body_str).to_h["_method"]
+    verb = override.upcase if override && override.match?(/\A(?:patch|put|delete)\z/i)
+  end
+  route = URI.parse(cmd["path"].to_s).path
+  params = URI.decode_www_form(body_str).to_h
+
+  reply_as(client) do
+    case "#{verb} #{route}"
+    when "GET /todo"
+      issues = Issue.order(created_at: :desc)
+      html = issues.map { |i| %(<li data-id="#{CGI.escapeHTML(i.id.to_s)}" class="#{i.state}">#{CGI.escapeHTML(i.title.to_s)}</li>) }.join("\n")
+      html_page("<ul class=\"issues\">#{html}</ul>")
+    when "POST /todo/issues"
+      Issue.create!(title: params["issue[title]"] || params["title"])
+      redirect_to("/todo")
+    when %r{\APATCH /todo/issues/([^/]+)\z}
+      Issue.find($1).update!(state: params["done"] == "1" ? "done" : "open")
+      redirect_to("/todo")
+    when %r{\ADELETE /todo/issues/([^/]+)\z}
+      Issue.find($1).destroy!
+      redirect_to("/todo")
+    when "GET /auth"
+      notes = AuthNote.order(created_at: :desc)
+      html = notes.map { |n| %(<article data-id="#{CGI.escapeHTML(n.id.to_s)}">#{CGI.escapeHTML(n.title.to_s)}</article>) }.join("\n")
+      html_page("<section class=\"auth-notes\">#{html}</section>")
+    when "POST /auth/notes"
+      AuthNote.new(
+        title: params["note[title]"],
+        body: params["note[body]"].to_s,
+        audience: params["note[audience]"] || "owner",
+        owner_id: params["note[owner_id]"].to_s
+      ).save
+      redirect_to("/auth")
+    when %r{\ADELETE /auth/notes/([^/]+)\z}
+      AuthNote.find_by(id: $1)&.destroy!
+      redirect_to("/auth")
+    else
+      { status: 404, headers: [], body: "Not Found", exit: 0 }
+    end
+  end
+end
+
+def handle_sync(client, cmd)
+  transport = PipeTransport.new(client.id)
+  notifier = RecordingNotifier.new
+  reply_as(client, transport: transport, notifier: notifier, endpoint: cmd["endpoint"]) do
+    {
+      changed: InstantRecord::Client.sync_pass,
+      pending: InstantRecord::Client.pending_count,
+      cursor: InstantRecord::Client.cursor,
+      notice: notifier.last_notice,
+      exchanges: transport.exchanges,
+      exit: 0
+    }
+  end
+end
+
+def handle_sync_plan(client)
+  reply_as(client) do
+    mutations = InstantRecord::Client.pending_mutations
+    push = mutations.empty? ? "" : JSON.generate(InstantRecord::Client.mutations_payload(mutations))
+    { plan: { "push" => push, "bootstrap" => !InstantRecord::Client.bootstrapped? } }
+  end
+end
+
+def handle_consume_stream(client, cmd)
+  notifier = RecordingNotifier.new
+  reply_as(client, notifier: notifier) do
+    {
+      applied: InstantRecord::Client.consume_stream(cmd["chunk"].to_s),
+      cursor: InstantRecord::Client.cursor,
+      bootstrapped: InstantRecord::Client.bootstrapped?,
+      notice: notifier.last_notice,
+      exit: 0
+    }
+  end
+end
+
+def handle_sync_state(client)
+  reply_as(client) do
+    {
+      bootstrapped: InstantRecord::Client.bootstrapped?,
+      cursor: InstantRecord::Client.cursor,
+      pending: InstantRecord::Client.pending_count,
+      identity: InstantRecord::Client.identity_key.to_s
+    }
+  end
+end
+
+def handle_history(client, cmd)
+  reply_as(client) do
+    meta_key = "history:#{cmd['key']}"
+    response = cmd["response"].to_s
+    if response.empty?
+      mark = InstantRecord::SyncMetadata.get(meta_key)
+      { history: { "ok" => !mark.nil?, "applied" => 0, "has_more" => mark == "more" } }
+    else
+      page = JSON.parse(response)
+      records = Array(page["records"])
+      more = page["has_more"] == true
+      InstantRecord::OutboxMutation.transaction do
+        records.each { |rec| InstantRecord::Client.apply_change(rec) }
+        InstantRecord::SyncMetadata.set(meta_key, more ? "more" : "end")
+      end
+      { history: { "ok" => true, "applied" => records.size, "has_more" => more } }
+    end
+  end
+end
+
+def handle_local_write(client, cmd)
+  skew = cmd["clockSkew"].to_f
+  stamp = Time.now.utc + skew
+  attrs = (cmd["attributes"] || {}).transform_keys(&:to_s)
+  attrs["updated_at"] ||= stamp if skew != 0.0
+  reply_as(client) do
+    InstantRecord::HLC.with_clock(-> { Time.now.utc + skew }) do
+      klass = model_class(cmd["model"])
+      record =
+        case cmd["operation"].to_s
+        when "create"
+          attrs["id"] = cmd["id"] if cmd["id"]
+          attrs["created_at"] ||= stamp if skew != 0.0
+          klass.create!(attrs.slice(*klass.column_names))
+        when "update"
+          klass.find_by(id: cmd["id"])&.tap { |found| found.update!(attrs.slice(*klass.column_names)) }
+        when "destroy"
+          klass.find_by(id: cmd["id"])&.tap(&:destroy!)
+        else
+          raise ArgumentError, "Unknown local_write operation: #{cmd['operation']}"
+        end
+      { record_id: record&.id }
+    end
+  end
+end
+
+clients = {}
+counter = 0
+client_for = ->(cmd) { clients.fetch(cmd["client"].to_s) }
+
 write_msg({ type: "ready" })
 
 while (cmd = read_msg)
@@ -186,178 +343,15 @@ while (cmd = read_msg)
       counter += 1
       cid = cmd["client"].to_s
       db_path = File.join(tmpdir, "#{cid.gsub(/[^a-zA-Z0-9_-]/, '_')}_#{counter}.sqlite3")
-      shard = :"client_#{counter}"
-      ActiveRecord::Base.connection_handler.establish_connection(
-        { adapter: "sqlite3", database: db_path },
-        owner_name: ActiveRecord::Base.name,
-        role: :writing,
-        shard: shard
-      )
-      init_schema!(shard)
-      clients[cid] = ClientState.new(
-        id: cid,
-        db_path: db_path,
-        shard: shard,
-        stream_parser: nil,
-        stream_events: [],
-        history_marks: {}
-      )
+      clients[cid] = create_client(cid, :"client_#{counter}", db_path)
       write_msg({ type: "result", ok: true, db_path: db_path, errors: [] })
-
-    when "request"
-      client = clients.fetch(cmd["client"].to_s)
-      verb = cmd["method"].to_s.upcase
-      body_str = cmd["body"].to_s
-      content_type = cmd["contentType"].to_s
-      if verb == "POST" && content_type.start_with?("application/x-www-form-urlencoded")
-        override = URI.decode_www_form(body_str).to_h["_method"]
-        verb = override.upcase if override && override.match?(/\A(?:patch|put|delete)\z/i)
-      end
-      route = URI.parse(cmd["path"].to_s).path
-      params = URI.decode_www_form(body_str).to_h
-
-      res, errors = with_client(client) do
-        if verb == "GET" && route == "/todo"
-          issues = Issue.order(created_at: :desc)
-          html = issues.map { |i| %(<li data-id="#{CGI.escapeHTML(i.id.to_s)}" class="#{i.state}">#{CGI.escapeHTML(i.title.to_s)}</li>) }.join("\n")
-          { status: 200, headers: [["Content-Type", "text/html"]], body: "<ul class=\"issues\">#{html}</ul>" }
-        elsif verb == "POST" && route == "/todo/issues"
-          Issue.create!(title: params["issue[title]"] || params["title"])
-          { status: 302, headers: [["Location", "/todo"]], body: "" }
-        elsif verb == "PATCH" && route =~ %r{\A/todo/issues/([^/]+)\z}
-          Issue.find(Regexp.last_match(1)).update!(state: params["done"] == "1" ? "done" : "open")
-          { status: 302, headers: [["Location", "/todo"]], body: "" }
-        elsif verb == "DELETE" && route =~ %r{\A/todo/issues/([^/]+)\z}
-          Issue.find(Regexp.last_match(1)).destroy!
-          { status: 302, headers: [["Location", "/todo"]], body: "" }
-        elsif verb == "GET" && route == "/auth"
-          notes = AuthNote.order(created_at: :desc)
-          html = notes.map { |n| %(<article data-id="#{CGI.escapeHTML(n.id.to_s)}">#{CGI.escapeHTML(n.title.to_s)}</article>) }.join("\n")
-          { status: 200, headers: [["Content-Type", "text/html"]], body: "<section class=\"auth-notes\">#{html}</section>" }
-        elsif verb == "POST" && route == "/auth/notes"
-          note = AuthNote.new(
-            title: params["note[title]"],
-            body: params["note[body]"].to_s,
-            audience: params["note[audience]"] || "owner",
-            owner_id: params["note[owner_id]"].to_s
-          )
-          note.save
-          { status: 302, headers: [["Location", "/auth"]], body: "" }
-        elsif verb == "DELETE" && route =~ %r{\A/auth/notes/([^/]+)\z}
-          AuthNote.find_by(id: Regexp.last_match(1))&.destroy!
-          { status: 302, headers: [["Location", "/auth"]], body: "" }
-        else
-          { status: 404, headers: [], body: "Not Found" }
-        end
-      end
-      write_msg({ type: "result", **res, exit: 0, errors: errors })
-
-    when "sync"
-      client = clients.fetch(cmd["client"].to_s)
-      transport = PipeTransport.new(client.id)
-      notifier = RecordingNotifier.new
-      res, errors = with_client(client, transport: transport, notifier: notifier, endpoint: cmd["endpoint"]) do
-        changed = InstantRecord::Client.sync_pass
-        {
-          changed: changed,
-          pending: InstantRecord::Client.pending_count,
-          cursor: InstantRecord::Client.cursor,
-          notice: notifier.last_notice,
-          exchanges: transport.exchanges
-        }
-      end
-      write_msg({ type: "result", **res, exit: 0, errors: errors })
-
-    when "sync_plan"
-      client = clients.fetch(cmd["client"].to_s)
-      plan, errors = with_client(client) do
-        mutations = InstantRecord::Client.pending_mutations
-        push = mutations.empty? ? "" : JSON.generate(InstantRecord::Client.mutations_payload(mutations))
-        { "push" => push, "bootstrap" => !InstantRecord::Client.bootstrapped? }
-      end
-      write_msg({ type: "result", plan: plan, errors: errors })
-
-    when "consume_stream"
-      client = clients.fetch(cmd["client"].to_s)
-      notifier = RecordingNotifier.new
-      res, errors = with_client(client, notifier: notifier) do
-        applied = InstantRecord::Client.consume_stream(cmd["chunk"].to_s)
-        {
-          applied: applied,
-          cursor: InstantRecord::Client.cursor,
-          bootstrapped: InstantRecord::Client.bootstrapped?,
-          notice: notifier.last_notice
-        }
-      end
-      write_msg({ type: "result", **res, exit: 0, errors: errors })
-
-    when "sync_state"
-      client = clients.fetch(cmd["client"].to_s)
-      res, errors = with_client(client) do
-        {
-          bootstrapped: InstantRecord::Client.bootstrapped?,
-          cursor: InstantRecord::Client.cursor,
-          pending: InstantRecord::Client.pending_count,
-          identity: InstantRecord::Client.identity_key.to_s
-        }
-      end
-      write_msg({ type: "result", **res, errors: errors })
-
-    when "history"
-      client = clients.fetch(cmd["client"].to_s)
-      res, errors = with_client(client) do
-        meta_key = "history:#{cmd['key']}"
-        response = cmd["response"].to_s
-        if response.empty?
-          mark = InstantRecord::SyncMetadata.get(meta_key)
-          { "ok" => !mark.nil?, "applied" => 0, "has_more" => mark == "more" }
-        else
-          page = JSON.parse(response)
-          records = Array(page["records"])
-          more = page["has_more"] == true
-          InstantRecord::OutboxMutation.transaction do
-            records.each { |rec| InstantRecord::Client.apply_change(rec) }
-            InstantRecord::SyncMetadata.set(meta_key, more ? "more" : "end")
-          end
-          { "ok" => true, "applied" => records.size, "has_more" => more }
-        end
-      end
-      write_msg({ type: "result", history: res, errors: errors })
-
-    when "local_write"
-      client = clients.fetch(cmd["client"].to_s)
-      skew = cmd["clockSkew"].to_f
-      stamp = Time.now.utc + skew
-      attrs = (cmd["attributes"] || {}).transform_keys(&:to_s)
-      record_id, errors = with_client(client) do
-        InstantRecord::HLC.with_clock(-> { Time.now.utc + skew }) do
-          klass = model_class(cmd["model"])
-          case cmd["operation"].to_s
-          when "create"
-            attrs["id"] = cmd["id"] if cmd["id"]
-            attrs["created_at"] ||= stamp if skew != 0.0
-            attrs["updated_at"] ||= stamp if skew != 0.0
-            klass.create!(attrs.slice(*klass.column_names)).id
-          when "update"
-            rec = klass.find_by(id: cmd["id"])
-            if rec
-              attrs["updated_at"] ||= stamp if skew != 0.0
-              rec.update!(attrs.slice(*klass.column_names))
-              rec.id
-            end
-          when "destroy"
-            rec = klass.find_by(id: cmd["id"])
-            if rec
-              rec.destroy!
-              rec.id
-            end
-          else
-            raise ArgumentError, "Unknown local_write operation: #{cmd['operation']}"
-          end
-        end
-      end
-      write_msg({ type: "result", record_id: record_id, errors: errors })
-
+    when "request"        then handle_request(client_for.(cmd), cmd)
+    when "sync"           then handle_sync(client_for.(cmd), cmd)
+    when "sync_plan"      then handle_sync_plan(client_for.(cmd))
+    when "consume_stream" then handle_consume_stream(client_for.(cmd), cmd)
+    when "sync_state"     then handle_sync_state(client_for.(cmd))
+    when "history"        then handle_history(client_for.(cmd), cmd)
+    when "local_write"    then handle_local_write(client_for.(cmd), cmd)
     when "shutdown"
       write_msg({ type: "result", ok: true })
       break
