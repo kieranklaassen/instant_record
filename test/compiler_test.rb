@@ -156,6 +156,223 @@ class CompilerTest < ActiveSupport::TestCase
     end
   end
 
+  test "BrowserMigrations.plan matches SQLite3Adapter DDL across fast-path and fallback operations" do
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "db/migrate"))
+      File.write(File.join(dir, "db/schema.rb"), ("# header\n" * 600) + "ActiveRecord::Schema[8.1].define(version: 2026_11_20_000003) do\nend\n")
+      mig1 = File.join(dir, "db/migrate/20261120000001_create_entities.rb")
+      mig2 = File.join(dir, "db/migrate/20261120000002_alter_entities.rb")
+      mig3 = File.join(dir, "db/migrate/20261120000003_fallback_options.rb")
+
+      File.write(mig1, <<~RUBY)
+        class CreateEntities < ActiveRecord::Migration[8.1]
+          def change
+            create_table :entities, id: :string, primary_key: :uid do |t|
+              t.string :title, :slug, null: false, index: true
+              t.text :note, default: "it's \\"ok\\""
+              t.integer :count, null: false, default: 0
+              t.decimal :price, precision: 10, scale: 2, null: false
+              t.float :ratio, default: 1.5
+              t.boolean :active, default: true, null: false
+              t.boolean :archived, default: false, null: false
+              t.datetime :seen_at, precision: 3
+              t.column :code, :string, limit: 32, default: ""
+              t.index [:title, :slug], unique: true
+              t.timestamps
+            end
+            create_table :settings, id: false do |t|
+              t.string :key, null: false, primary_key: true
+              t.string :val
+            end
+          end
+        end
+      RUBY
+      File.write(mig2, <<~RUBY)
+        class AlterEntities < ActiveRecord::Migration[8.1]
+          def change
+            add_column :entities, :very_long_descriptive_column_name_for_index_truncation, :string, default: nil
+            add_column :entities, :required_tag, :string, default: nil, null: false
+            add_index :entities, [:very_long_descriptive_column_name_for_index_truncation, :title]
+            add_index :entities, :slug, where: "active = 1"
+            execute "UPDATE entities SET count = 1"
+          end
+        end
+      RUBY
+      File.write(mig3, <<~RUBY)
+        class FallbackOptions < ActiveRecord::Migration[8.1]
+          def change
+            create_table :scratch_rows, temporary: true do |t|
+              t.string :label
+            end
+            add_index :entities, [:title, :count], order: :desc
+          end
+        end
+      RUBY
+
+      plan = InstantRecord::Compiler::BrowserMigrations.plan(root: dir)
+      reference = InstantRecord::Compiler::BrowserMigrations.new(ActiveRecord::Base.connection)
+
+      assert_equal 20261120000003, plan["version"]
+      assert_equal reference.compile(mig1), plan["migrations"]["20261120000001"]
+      assert_equal reference.compile(mig2), plan["migrations"]["20261120000002"]
+      assert_equal reference.compile(mig3), plan["migrations"]["20261120000003"]
+
+      # Verify mig1 and mig2 compile strictly via the pure-Ruby fast path without touching SQLite3Adapter.
+      fast_compiler = InstantRecord::Compiler::BrowserMigrations.new
+      assert_equal reference.compile(mig1), fast_compiler.compile(mig1)
+      assert_equal reference.compile(mig2), fast_compiler.compile(mig2)
+      assert_nil fast_compiler.instance_variable_get(:@connection)
+    end
+  end
+
+  test "BrowserMigrations.plan matches SQLite3Adapter on decimal defaults, non-native and time limits, integer bounds, and non-boolean options" do
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "db/migrate"))
+      File.write(File.join(dir, "db/schema.rb"), "ActiveRecord::Schema[8.1].define(version: 2026_11_20_000003) do\nend\n")
+      mig_fast = File.join(dir, "db/migrate/20261120000001_fast_edge_types.rb")
+      mig_fallback = File.join(dir, "db/migrate/20261120000002_fallback_edge_types.rb")
+      mig_alters = File.join(dir, "db/migrate/20261120000003_edge_alters.rb")
+
+      File.write(mig_fast, <<~RUBY)
+        class FastEdgeTypes < ActiveRecord::Migration[8.1]
+          def change
+            create_table :fast_edge_items, id: false do |t|
+              t.column :big_id, :bigint, limit: 8
+              t.column :ext_uid, :uuid, limit: 36
+              t.column :raw_blob, :blob, limit: 16
+              t.time :clock_at, limit: 4
+              t.datetime :plain_dt, precision: nil, limit: 4
+              t.column :plain_ts, :timestamp, precision: nil, limit: 4
+              t.integer :tiny_ok, limit: 1, default: 127
+              t.integer :tiny_min, limit: 1, default: -128
+            end
+          end
+        end
+      RUBY
+      File.write(mig_fallback, <<~RUBY)
+        class FallbackEdgeTypes < ActiveRecord::Migration[8.1]
+          def change
+            create_table :fallback_edge_items, id: false do |t|
+              t.integer :pk_num, primary_key: 1
+              t.decimal :d_no_scale, precision: 10, default: 0
+              t.decimal :d_scale_zero, precision: 10, scale: 0, default: 1.5
+              t.decimal :d_rounded, precision: 10, scale: 2, default: 1.555
+              t.decimal :d_tiny, default: 0.00001
+              t.decimal :d_huge, precision: 10, scale: 2, default: 1000000000000000
+              t.column :virt_col, :virtual
+              t.float :inf_float, default: #{10**400}
+            end
+            create_table :edge_str_pk, id: false do |t|
+              t.string :code, primary_key: 1
+            end
+          end
+        end
+      RUBY
+      File.write(mig_alters, <<~RUBY)
+        class EdgeAlters < ActiveRecord::Migration[8.1]
+          def change
+            add_column :fast_edge_items, :extra_big, :bigint, limit: 8
+            add_column :fast_edge_items, :extra_uid, :uuid, limit: 36
+            add_column :fast_edge_items, :extra_time, :time, limit: 4
+            add_column :fast_edge_items, :extra_dec, :decimal, precision: 10, scale: 2, default: 1.555
+            add_column :fast_edge_items, :extra_virt, :virtual
+            add_index :fast_edge_items, :ext_uid, name: false
+          end
+        end
+      RUBY
+
+      plan = InstantRecord::Compiler::BrowserMigrations.plan(root: dir)
+      reference = InstantRecord::Compiler::BrowserMigrations.new(ActiveRecord::Base.connection)
+
+      assert_equal reference.compile(mig_fast), plan["migrations"]["20261120000001"]
+      assert_equal reference.compile(mig_fallback), plan["migrations"]["20261120000002"]
+      assert_equal reference.compile(mig_alters), plan["migrations"]["20261120000003"]
+
+      fast_compiler = InstantRecord::Compiler::BrowserMigrations.new
+      assert_equal reference.compile(mig_fast), fast_compiler.compile(mig_fast)
+      assert_nil fast_compiler.instance_variable_get(:@connection)
+
+      # Out-of-range integer defaults must fail via SQLite3Adapter validation, matching reference behavior.
+      [
+        "create_table(:bad) { |t| t.integer :a, limit: 1, default: 200 }",
+        "create_table(:bad) { |t| t.integer :a, limit: 2, default: 40000 }",
+        "create_table(:bad) { |t| t.integer :a, limit: 4, default: 3000000000 }",
+        "create_table(:bad) { |t| t.integer :a, default: 9223372036854775808 }",
+        "create_table(:bad) { |t| t.integer :a, limit: 0, default: 1 }",
+        "add_column :edge_items, :bad, :integer, limit: 1, default: 200"
+      ].each_with_index do |body, i|
+        Dir.mktmpdir do |err_dir|
+          FileUtils.mkdir_p(File.join(err_dir, "db/migrate"))
+          File.write(File.join(err_dir, "db/schema.rb"), "ActiveRecord::Schema[8.1].define(version: 1) do\nend\n")
+          File.write(File.join(err_dir, "db/migrate/1_bad_#{i}.rb"), <<~RUBY)
+            class Bad#{i} < ActiveRecord::Migration[8.1]
+              def change
+                #{body}
+              end
+            end
+          RUBY
+          err = assert_raises(InstantRecord::Compiler::BuildError, "expected RangeError for #{body}") do
+            InstantRecord::Compiler::BrowserMigrations.plan(root: err_dir)
+          end
+          assert_match(/out of range/i, err.message)
+        end
+      end
+    end
+  end
+
+  test "BrowserMigrations.plan reflects in-place same-size same-mtime edits and companion changes without stale caching" do
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "db/migrate"))
+      File.write(File.join(dir, "db/schema.rb"), "ActiveRecord::Schema[8.1].define(version: 1) do\nend\n")
+      mig = File.join(dir, "db/migrate/1_create_notes.rb")
+      src_a = "class CreateNotes < ActiveRecord::Migration[8.1]\n  def change\n    create_table :notes do |t|\n      t.string :aaaa\n    end\n  end\nend\n"
+      src_b = "class CreateNotes < ActiveRecord::Migration[8.1]\n  def change\n    create_table :notes do |t|\n      t.string :bbbb\n    end\n  end\nend\n"
+      assert_equal src_a.bytesize, src_b.bytesize
+
+      File.write(mig, src_a)
+      stat = File.stat(mig)
+      first = InstantRecord::Compiler::BrowserMigrations.plan(root: dir)
+      assert_includes first["migrations"]["1"].first, '"aaaa"'
+
+      File.write(mig, src_b)
+      File.utime(stat.atime, stat.mtime, mig)
+      second = InstantRecord::Compiler::BrowserMigrations.plan(root: dir)
+      assert_includes second["migrations"]["1"].first, '"bbbb"'
+      refute_equal first["history"]["1"], second["history"]["1"]
+
+      FileUtils.mkdir_p(File.join(dir, "db/browser_migrate"))
+      companion = File.join(dir, "db/browser_migrate/1_create_notes.sql")
+      File.write(companion, "CREATE TABLE notes (id integer PRIMARY KEY);")
+      third = InstantRecord::Compiler::BrowserMigrations.plan(root: dir)
+      assert_equal ["CREATE TABLE notes (id integer PRIMARY KEY);"], third["migrations"]["1"]
+
+      File.delete(companion)
+      fourth = InstantRecord::Compiler::BrowserMigrations.plan(root: dir)
+      assert_equal second["migrations"]["1"], fourth["migrations"]["1"]
+    end
+  end
+
+  test "BrowserMigrations.plan is thread-safe and does not leak SQLite connections" do
+    demo_root = File.join(GEM_ROOT, "demo")
+    migration_paths = [File.join(GEM_ROOT, "db/migrate"), File.join(demo_root, "db/migrate")]
+    expected = InstantRecord::Compiler::BrowserMigrations.plan(root: demo_root, migration_paths: migration_paths)
+
+    GC.start
+    open_before = ObjectSpace.each_object(SQLite3::Database).count { |db| !db.closed? }
+
+    results = 6.times.map do
+      Thread.new do
+        4.times.map { InstantRecord::Compiler::BrowserMigrations.plan(root: demo_root, migration_paths: migration_paths) }
+      end
+    end.flat_map(&:value)
+
+    results.each { |plan| assert_equal expected, plan }
+
+    GC.start
+    open_after = ObjectSpace.each_object(SQLite3::Database).count { |db| !db.closed? }
+    assert_operator open_after, :<=, open_before
+  end
+
   test "AppStage and GemVendor stage the real demo via local_first reachability with all seams intact" do
     Dir.mktmpdir do |dir|
       app = File.join(dir, "app-src")
