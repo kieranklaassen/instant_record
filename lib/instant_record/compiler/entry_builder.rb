@@ -248,7 +248,7 @@ module InstantRecord
             input = raw.empty? ? {} : JSON.parse(raw)
             conflict = input["conflict"].to_s
             conflict = "lww" if conflict.empty?
-            result = InstantRecord::Branch.replay_mutations(Array(input["mutations"]), conflict: conflict)
+            result = InstantRecord::Branch.replay_mutations(Array(input["mutations"]), conflict: conflict.to_sym)
             <<write:out>>JSON.generate(result))
             0
           end
