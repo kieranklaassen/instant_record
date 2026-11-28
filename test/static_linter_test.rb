@@ -533,4 +533,337 @@ class StaticLinterTest < ActiveSupport::TestCase
       refute File.exist?(marker_log), "StaticLinter pre-flight must abort before Roundhouse runs"
     end
   end
+
+  test "catches integer overflow edge forms including non-decimal bases, dot calls, chains, =begin, and heredocs" do
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "edge_ints.rb"), <<~RUBY)
+        module EdgeInts
+          HEX_BAD = 0x8000_0000
+          OCT_BAD = 020000000000
+          OCT_O_BAD = 0o20000000000
+          BIN_BAD = 0b1000_0000_0000_0000_0000_0000_0000_0000
+          DEC_D_BAD = 0d2147483648
+          DIV_MIN = (-2_147_483_648) / -1
+          NEG_MIN = -(-2_147_483_648)
+          DOT_ADD = 2_147_483_647.+(1)
+          SAFE_BYTE = 3&.gigabytes
+          A = 1 << 20
+          B = A << 12
+          INTERP = <<~TXT
+            value: \#{2**31}
+          TXT
+        end
+      RUBY
+
+      # Isolated file with trailing dot + comment before operator (no other << or big literal).
+      File.write(File.join(dir, "dot_shift.rb"), <<~RUBY)
+        X = 1. # comment before operator
+          <<(31)
+      RUBY
+
+      # Isolated file with =begin..=end splitting an expression whose literals are < 10 digits.
+      File.write(File.join(dir, "begin_expr.rb"), <<~RUBY)
+        X = 500_000_000 *
+        =begin
+        embedded doc comment inside expression
+        =end
+        5
+      RUBY
+
+      # Addition-only constant doubling chain from small literals (no *, **, <<, or large literals).
+      chain_lines = ["A0 = 1"]
+      (1..31).each { |i| chain_lines << "A#{i} = A#{i - 1} + A#{i - 1}" }
+      File.write(File.join(dir, "add_chain.rb"), "#{chain_lines.join("\n")}\n")
+
+      # Bitwise OR/XOR/AND + hybrid doubling chains using `-~x == x + 1` (no *, **, <<, or large literals).
+      or_chain = ["A0 = 1"]
+      (1..30).each { |i| or_chain << "A#{i} = A#{i - 1} | -~A#{i - 1}" }
+      or_chain << "OVERFLOW = -~A30"
+      File.write(File.join(dir, "or_chain.rb"), "#{or_chain.join("\n")}\n")
+
+      xor_chain = ["A0 = 1"]
+      (1..30).each { |i| xor_chain << "A#{i} = A#{i - 1} ^ -~A#{i - 1}" }
+      xor_chain << "OVERFLOW = -~A30"
+      File.write(File.join(dir, "xor_chain.rb"), "#{xor_chain.join("\n")}\n")
+
+      and_chain = ["X0 = -2"]
+      (1..30).each { |i| and_chain << "X#{i} = X#{i - 1} & ~(-X#{i - 1})" }
+      and_chain << "OVERFLOW = -X30"
+      File.write(File.join(dir, "and_chain.rb"), "#{and_chain.join("\n")}\n")
+
+      hybrid_chain = ["A0 = 1"]
+      (1..18).each { |i| hybrid_chain << "A#{i} = A#{i - 1} | -~A#{i - 1}" }
+      (19..30).each { |i| hybrid_chain << "A#{i} = A#{i - 1} + A#{i - 1}" }
+      hybrid_chain << "OVERFLOW = A30 + A30"
+      File.write(File.join(dir, "hybrid_chain.rb"), "#{hybrid_chain.join("\n")}\n")
+
+      result = StaticLinter.lint(dir, staged: true)
+      refute result.ok?
+      assert_equal 8, result.files_checked
+
+      by_file = result.diagnostics.group_by(&:file)
+      assert_equal [2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14], by_file["edge_ints.rb"].map(&:line), by_file["edge_ints.rb"].map(&:to_s).join("\n")
+      assert_equal [1], by_file["dot_shift.rb"].map(&:line), by_file["dot_shift.rb"].map(&:to_s).join("\n")
+      assert_equal [1], by_file["begin_expr.rb"].map(&:line), by_file["begin_expr.rb"].map(&:to_s).join("\n")
+      assert_equal [32], by_file["add_chain.rb"].map(&:line), by_file["add_chain.rb"].map(&:to_s).join("\n")
+      assert_equal [32], by_file["or_chain.rb"].map(&:line), by_file["or_chain.rb"].map(&:to_s).join("\n")
+      assert_equal [32], by_file["xor_chain.rb"].map(&:line), by_file["xor_chain.rb"].map(&:to_s).join("\n")
+      assert_equal [32], by_file["and_chain.rb"].map(&:line), by_file["and_chain.rb"].map(&:to_s).join("\n")
+      assert_equal [32], by_file["hybrid_chain.rb"].map(&:line), by_file["hybrid_chain.rb"].map(&:to_s).join("\n")
+    end
+  end
+
+  test "handles syntax errors, non-UTF-8/BOM/CRLF encodings, and skips clean files while preserving files_checked" do
+    Dir.mktmpdir do |dir|
+      File.binwrite(File.join(dir, "broken.rb"), "class Broken\n  X = 1 << 31\n  def foo(\n")
+      File.binwrite(File.join(dir, "clean.rb"), "class Clean\n  def greet(name)\n    \"hello \#{name}\"\n  end\nend\n")
+      File.binwrite(File.join(dir, "latin1.rb"), "# encoding: iso-8859-1\n# caf\xE9\nX = 1 << 31\n".b)
+      File.binwrite(File.join(dir, "shift_jis.rb"), "  # encoding: shift_jis\nY = 2**31\n".b)
+      File.binwrite(File.join(dir, "utf8_bom.rb"), "\xEF\xBB\xBFZ = 3.gigabytes\n".b)
+      File.binwrite(File.join(dir, "crlf.rb"), "class Crlf\r\n  server_only do\r\n    SECRET = 1\r\n  end\r\n  LEAK = SECRET\r\nend\r\n")
+
+      result = StaticLinter.lint(dir, staged: true)
+      assert_equal 6, result.files_checked
+      assert_equal [
+        ["crlf.rb", 5, :server_only_constant],
+        ["latin1.rb", 3, :integer_overflow],
+        ["shift_jis.rb", 2, :integer_overflow],
+        ["utf8_bom.rb", 1, :integer_overflow]
+      ], result.diagnostics.map { |d| [d.file, d.line, d.rule] }
+    end
+  end
+
+  test "catches server_only variations, client constant-path redefinitions, and namespace prefix matches" do
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "defs.rb"), <<~RUBY)
+        module App
+          self.server_only do
+            class HiddenMod; end
+            SECRET_A = 1
+          end
+          server_only() { SECRET_B = 2 }
+          server_only \\
+          do
+            REDEF_PATH = 3
+            REDEF_OR = 4
+          end
+        end
+      RUBY
+      File.write(File.join(dir, "redef.rb"), <<~RUBY)
+        class Setup
+          ::App::REDEF_PATH = 4
+          def define_client
+            ::App::REDEF_OR ||= 5
+          end
+        end
+      RUBY
+      File.write(File.join(dir, "refs.rb"), <<~RUBY)
+        module App
+          a = SECRET_A
+          b = SECRET_B
+          c = REDEF_PATH
+          d = REDEF_OR
+          e = HiddenMod::NestedConst
+        end
+      RUBY
+
+      collected = StaticLinter.collect_server_only_constants(dir)
+      assert_equal %w[App::HiddenMod App::SECRET_A App::SECRET_B], collected.keys.sort
+
+      result = StaticLinter.lint(dir, staged: true)
+      assert_equal [
+        ["refs.rb", 2, :server_only_constant],
+        ["refs.rb", 3, :server_only_constant],
+        ["refs.rb", 6, :server_only_constant]
+      ], result.diagnostics.map { |d| [d.file, d.line, d.rule] }
+
+      # Defining a child namespace under a server_only namespace still flags bare
+      # constant reads inside that child via namespace prefix lookup.
+      File.write(File.join(dir, "child_ns.rb"), "class App::HiddenMod::Child\n  X\nend\n")
+      child_res = StaticLinter.lint(dir, staged: true)
+      child_diags = child_res.diagnostics.select { |d| d.file == "child_ns.rb" }
+      assert_equal [[2, :server_only_constant]], child_diags.map { |d| [d.line, d.rule] }
+    end
+  end
+
+  test "catches untyped screen hashes in Screen subclasses outside app/screens and ignores non-inheriting classes" do
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "custom_screen.rb"), <<~RUBY)
+        class CustomScreen < ::Screen
+          def render
+            row params: (Hash.new)
+          end
+        end
+      RUBY
+      File.write(File.join(dir, "mentions_screen_only.rb"), <<~RUBY)
+        # Screen helper that does not inherit from Screen
+        class PlainBuilder
+          def render
+            row params: {}
+          end
+        end
+      RUBY
+
+      result = StaticLinter.lint(dir, staged: true)
+      assert_equal 2, result.files_checked
+      assert_equal [["custom_screen.rb", 3, :untyped_screen_hash]], result.diagnostics.map { |d| [d.file, d.line, d.rule] }
+    end
+  end
+
+  test "catches prefilter boundary forms: comment backslashes, string hashes, unary dot calls, compound op=~, spaced ::, shebang Shift_JIS, and unnormalized only_files" do
+    Dir.mktmpdir do |dir|
+      # 1. Trailing backslash inside a `#` comment or after `.` before comment/blank line
+      File.write(File.join(dir, "comment_backslash_mul.rb"), "X = 100_000.\n# a\\\n*(30_000)\n")
+      File.write(File.join(dir, "comment_backslash_shift.rb"), "X = 1.\n# a\\\n<<(31)\n")
+      File.write(File.join(dir, "comment_backslash_dot.rb"), "X = 100_000\n# a\\\n.*(30_000)\n")
+      File.write(File.join(dir, "dot_backslash_comment.rb"), "X = 100_000.\\\n  # comment\n  *(30_000)\n")
+      File.write(File.join(dir, "dot_backslash_blank.rb"), "X = 100_000.\\\n\n  *(30_000)\n")
+
+      # 2. `#` inside a string literal before a trailing call dot and inline comment
+      File.write(File.join(dir, "string_hash_dot.rb"), "foo(\"#\"); 100_000. # comment\n  *(30_000)\n")
+      File.write(File.join(dir, "string_hash_scope.rb"), "foo(\"#\"); 100_000:: # comment\n  *(30_000)\n")
+
+      # 3. Compound op=~ constant definitions and client redefinitions
+      File.write(File.join(dir, "compound_so.rb"), "server_only do\n  SECRET_OR ||=~1\n  SECRET_REDEF ||=~1\nend\n")
+      File.write(File.join(dir, "compound_redef.rb"), "SECRET_REDEF ||=~1\n")
+      File.write(File.join(dir, "compound_ref.rb"), "SECRET_OR\nSECRET_REDEF\n")
+
+      # 4. Whitespace/comments after leading `::` in Screen inheritance and client class/module redefs
+      File.write(File.join(dir, "spaced_screen.rb"), "class SpacedScreen < :: Screen\n  def render = row(params: {})\nend\n")
+      File.write(File.join(dir, "spaced_ns_so.rb"), "server_only do\n  class SpacedShared; end\nend\n")
+      File.write(File.join(dir, "spaced_ns_redef.rb"), "class :: # comment\n  SpacedShared\nend\n")
+      File.write(File.join(dir, "spaced_ns_ref.rb"), "SpacedShared\n")
+
+      # 5. Shebang with --encoding=utf-8, leading CR, and multi-coding Emacs Shift_JIS magic comments
+      File.binwrite(
+        File.join(dir, "shebang_sjis.rb"),
+        "#!/usr/bin/env ruby --encoding=utf-8\n# encoding: shift_jis\nserver_only do\n  \x82\x60 = 1\nend\n".b
+      )
+      File.binwrite(File.join(dir, "shebang_sjis_ref.rb"), "# encoding: shift_jis\n\x82\x60\n".b)
+      File.binwrite(File.join(dir, "cr_sjis.rb"), "\r# encoding: shift_jis\nX = 100_000.\n# a\x95\x5C\n*(30_000)\n".b)
+      File.binwrite(
+        File.join(dir, "emacs_decoding_sjis.rb"),
+        "# -*- decoding: utf-8; coding: shift_jis -*-\nserver_only do\n  \x82\x61 = 1\nend\n".b
+      )
+      File.binwrite(File.join(dir, "emacs_decoding_sjis_ref.rb"), "# encoding: shift_jis\n\x82\x61\n".b)
+      File.binwrite(
+        File.join(dir, "emacs_multi_coding_sjis.rb"),
+        "# -*- coding: utf-8; coding: shift_jis -*-\n\x82\x62 = 100_000\nY = \x82\x62 * 30_000\n".b
+      )
+      File.binwrite(
+        File.join(dir, "quoted_sjis.rb"),
+        "# coding: \"shift_jis\"\n\x82\x63 = 100_000\nY = \x82\x63 * 30_000\n".b
+      )
+      File.binwrite(
+        File.join(dir, "vtab_sjis.rb"),
+        "# coding:\vshift_jis\nserver_only do\n  \x82\x64 = 1\nend\n".b
+      )
+      File.binwrite(File.join(dir, "vtab_sjis_ref.rb"), "# encoding: shift_jis\n\x82\x64\n".b)
+      File.binwrite(
+        File.join(dir, "bang_line1_sjis.rb"),
+        "#! coding: shift_jis\n\x82\x65 = 100_000\nY = \x82\x65 * 30_000\n".b
+      )
+      File.binwrite(
+        File.join(dir, "spaced_bang_line1_sjis.rb"),
+        " #! coding: shift_jis\nserver_only do\n  \x82\x66 = 1\nend\n\x82\x66\n".b
+      )
+      File.binwrite(
+        File.join(dir, "bom_bang_line1_sjis.rb"),
+        "\xEF\xBB\xBF#! coding: shift_jis\n\x82\x67 = 100_000\nY = \x82\x67 * 30_000\n".b
+      )
+
+      # 6. Dot-call unary operators (.+@, .-@, .~) as LHS of binary int ops
+      File.write(File.join(dir, "unary_dot_plus.rb"), "X = 100_000.+@ * 30_000\n")
+      File.write(File.join(dir, "unary_dot_minus.rb"), "X = 100_000.-@ * -30_000\n")
+      File.write(File.join(dir, "unary_dot_tilde.rb"), "X = 100_000.~ * -30_000\n")
+
+      # 7. Heredoc-split multi-token expressions across all three rules
+      File.write(File.join(dir, "heredoc_split_mul.rb"), "foo(<<~TXT); X = 100_000.\nhello\nTXT\n  *(30_000)\n")
+      File.write(File.join(dir, "heredoc_split_bytes.rb"), "foo(<<~TXT); X = 2.\nhello\nTXT\n  gigabytes\n")
+      File.write(File.join(dir, "heredoc_split_screen.rb"), "class HScreen < Screen\n  def body\n    foo(<<~TXT); row(params: {\nhello\nTXT\n})\n  end\nend\n")
+      File.write(File.join(dir, "heredoc_split_so.rb"), "server_only do\n  class HShared; end\nend\n")
+      File.write(File.join(dir, "heredoc_split_redef.rb"), "foo(<<~TXT); class\nhello\nTXT\n  HShared\nend\n")
+      File.write(File.join(dir, "heredoc_split_ref.rb"), "HShared\n")
+
+      result = StaticLinter.lint(dir, staged: true)
+      found = result.diagnostics.map { |d| [d.file, d.line, d.rule] }
+      assert_equal [
+        ["bang_line1_sjis.rb", 3, :integer_overflow],
+        ["bom_bang_line1_sjis.rb", 3, :integer_overflow],
+        ["comment_backslash_dot.rb", 1, :integer_overflow],
+        ["comment_backslash_mul.rb", 1, :integer_overflow],
+        ["comment_backslash_shift.rb", 1, :integer_overflow],
+        ["compound_ref.rb", 1, :server_only_constant],
+        ["cr_sjis.rb", 2, :integer_overflow],
+        ["dot_backslash_blank.rb", 1, :integer_overflow],
+        ["dot_backslash_comment.rb", 1, :integer_overflow],
+        ["emacs_decoding_sjis_ref.rb", 2, :server_only_constant],
+        ["emacs_multi_coding_sjis.rb", 3, :integer_overflow],
+        ["heredoc_split_bytes.rb", 1, :integer_overflow],
+        ["heredoc_split_mul.rb", 1, :integer_overflow],
+        ["heredoc_split_screen.rb", 3, :untyped_screen_hash],
+        ["quoted_sjis.rb", 3, :integer_overflow],
+        ["shebang_sjis_ref.rb", 2, :server_only_constant],
+        ["spaced_bang_line1_sjis.rb", 5, :server_only_constant],
+        ["spaced_screen.rb", 2, :untyped_screen_hash],
+        ["string_hash_dot.rb", 1, :integer_overflow],
+        ["string_hash_scope.rb", 1, :integer_overflow],
+        ["unary_dot_minus.rb", 1, :integer_overflow],
+        ["unary_dot_plus.rb", 1, :integer_overflow],
+        ["unary_dot_tilde.rb", 1, :integer_overflow],
+        ["vtab_sjis_ref.rb", 2, :server_only_constant]
+      ], found, result.diagnostics.map(&:to_s).join("\n")
+
+      # 7. Unnormalized `only_files` path still recognizes `app/screens/` and normalizes Diagnostic#file
+      FileUtils.mkdir_p(File.join(dir, "app/screens"))
+      File.write(File.join(dir, "app/screens/my_screen.rb"), "def body\n  row params: {}\nend\n")
+      only_res = StaticLinter.lint(dir, staged: true, only_files: ["./app/screens/my_screen.rb"])
+      assert_equal [["app/screens/my_screen.rb", 2, :untyped_screen_hash]], only_res.diagnostics.map { |d| [d.file, d.line, d.rule] }
+    end
+  end
+
+  test "FastVisitor visits every Prism child slot on overridden container nodes" do
+    fast_visitor = StaticLinter.const_get(:FastVisitor)
+    probe_code = <<~RUBY
+      a = 1; @b = 2; c = "x \#{1 + 2}"; d = [1, { k: (3 && 4 || 5) }]
+      def f(x, y = 1, k: 2)
+        return y
+      rescue StandardError => e
+        e
+      else
+        x
+      ensure
+        nil
+      end
+      f(1, k: 2) { |p| p }
+    RUBY
+    root = Prism.parse(probe_code).value
+    ignored = [
+      Prism::RequiredParameterNode,
+      Prism::BlockLocalVariableNode,
+      Prism::RestParameterNode,
+      Prism::KeywordRestParameterNode,
+      Prism::BlockParameterNode
+    ]
+
+    record_visits = lambda do |klass|
+      visited = []
+      recorder = Class.new(klass) do
+        Prism::Visitor.instance_methods(false).grep(/\Avisit_.*_node\z/).each do |meth|
+          define_method(meth) do |node|
+            visited << node.object_id unless ignored.any? { |type| node.is_a?(type) }
+            super(node)
+          end
+        end
+      end.new
+      root.accept(recorder)
+      visited
+    end
+
+    visited_by_base = record_visits.call(Prism::Visitor)
+    visited_by_fast = record_visits.call(fast_visitor)
+
+    assert_operator visited_by_fast.length, :>, 30
+    assert_equal visited_by_base.sort, visited_by_fast.sort
+  end
 end
