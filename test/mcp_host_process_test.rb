@@ -118,7 +118,142 @@ class McpHostProcessTest < ActiveSupport::TestCase
     end
   end
 
+  test "close escalates TERM to KILL and reaps a hung host ignoring SIGTERM" do
+    Dir.mktmpdir do |dir|
+      pid_file = File.join(dir, "hung.pid")
+      hung = File.join(dir, "hung_host")
+      File.write(hung, <<~RUBY)
+        #!#{RbConfig.ruby}
+        Signal.trap("TERM", "IGNORE")
+        File.write(#{pid_file.inspect}, Process.pid.to_s)
+        $stdout.binmode
+        $stdout.write("ok 0 0\\n")
+        $stdout.flush
+        sleep 60
+      RUBY
+      File.chmod(0o755, hung)
+
+      host = InstantRecord::Mcp::HostProcess.new(binary: hung, database: File.join(dir, "a.sqlite3"))
+      pid = File.read(pid_file).to_i
+      assert_equal 1, Process.kill(0, pid)
+
+      Timeout.timeout(10) { host.close }
+      assert_equal false, host.alive?
+      assert_raises(Errno::ESRCH) { Process.kill(0, pid) }
+    ensure
+      if defined?(pid) && pid && pid > 0
+        Process.kill("KILL", pid) rescue Errno::ESRCH
+      end
+    end
+  end
+
+  test "spawn_process! propagates Open3.popen3 failure instead of NoMethodError from close" do
+    Dir.mktmpdir do |dir|
+      unspawnable = File.join(dir, "bad_interpreter_host")
+      File.write(unspawnable, "#!#{File.join(dir, "missing_interpreter")}\n")
+      File.chmod(0o755, unspawnable)
+
+      err = assert_raises(Errno::ENOENT) do
+        InstantRecord::Mcp::HostProcess.new(binary: unspawnable, database: File.join(dir, "a.sqlite3"))
+      end
+      refute_kind_of NoMethodError, err
+    end
+  end
+
+  test "boot and open create parent directories, update database_path, and leave it unchanged on error" do
+    Dir.mktmpdir do |dir|
+      host = InstantRecord::Mcp::HostProcess.new(binary: write_fake_host(dir), database: nil, chdir: dir)
+      boot_db = File.join(dir, "nested", "boot", "replica.sqlite3")
+      open_db = File.join(dir, "nested", "open", "replica.sqlite3")
+      failing_db = File.join(dir, "nested", "fail", "fail.sqlite3")
+
+      refute Dir.exist?(File.dirname(boot_db))
+      boot_result = host.boot(boot_db)
+      assert_kind_of InstantRecord::Mcp::HostProcess::Result, boot_result
+      assert Dir.exist?(File.dirname(boot_db))
+      assert_equal boot_db, host.database_path
+      assert_equal boot_db, host.call("pwd_db", "").out
+
+      refute Dir.exist?(File.dirname(open_db))
+      open_result = host.open(open_db)
+      assert_kind_of InstantRecord::Mcp::HostProcess::Result, open_result
+      assert Dir.exist?(File.dirname(open_db))
+      assert_equal open_db, host.database_path
+      assert_equal open_db, host.call("pwd_db", "").out
+
+      err = assert_raises(InstantRecord::Mcp::HostError) { host.open(failing_db) }
+      assert_equal "Cannot open database", err.message
+      assert_equal open_db, host.database_path
+    ensure
+      host&.close
+    end
+  end
+
+  test "raises HostCrashedError on malformed headers, negative lengths, unexpected responses, and mid-frame EOF" do
+    cases = [
+      ["ok 1\n", /\AMalformed ok frame from native host:/],
+      ["exchange\n", /\AMalformed exchange frame from native host:/],
+      ["error\n", /\AMalformed error frame from native host:/],
+      ["ok nope 0\n", /\AInvalid frame header from native host:/],
+      ["ok -1 0\n", /\AInvalid frame header from native host: negative frame length/],
+      ["ok 0 -2\n", /\AInvalid frame header from native host: negative frame length/],
+      ["exchange -3\n", /\AInvalid frame header from native host: negative frame length/],
+      ["error -4\n", /\AInvalid frame header from native host: negative frame length/],
+      ["unknown 0\n", /\AUnexpected response from native host:/],
+      ["ok 10 0\nabc", /\ANative host closed stream mid-frame \(expected 10 bytes, got 3\)\z/]
+    ]
+
+    Dir.mktmpdir do |dir|
+      cases.each do |raw_reply, expected_pattern|
+        host = InstantRecord::Mcp::HostProcess.new(binary: write_raw_reply_host(dir, raw_reply), database: File.join(dir, "a.sqlite3"))
+        err = assert_raises(InstantRecord::Mcp::HostCrashedError) { host.call("probe", "") }
+        assert_match expected_pattern, err.message, "Unexpected message for #{raw_reply.inspect}"
+      ensure
+        host&.close
+      end
+    end
+  end
+
+  test "multi-exchange failure completes every exchange handshake and reports the first error" do
+    Dir.mktmpdir do |dir|
+      attempts = 0
+      exchange = lambda do |_req|
+        attempts += 1
+        raise RuntimeError, "attempt #{attempts}"
+      end
+
+      host = InstantRecord::Mcp::HostProcess.new(
+        binary: write_fake_host(dir),
+        database: File.join(dir, "replica.sqlite3"),
+        exchange: exchange
+      )
+      err = assert_raises(InstantRecord::Mcp::ExchangeError) { host.call("double_sync", "http://example.test") }
+      assert_equal 2, attempts
+      assert_equal "Sync request failed: RuntimeError: attempt 1", err.message
+      assert_equal "echo:still-synced", host.call("echo", "still-synced").out
+    ensure
+      host&.close
+    end
+  end
+
   private
+
+  def write_raw_reply_host(dir, raw_reply)
+    path = File.join(dir, "raw_reply_host")
+    File.write(path, <<~RUBY)
+      #!#{RbConfig.ruby}
+      $stdin.binmode
+      $stdout.binmode
+      $stdout.write("ok 0 0\\n")
+      $stdout.flush
+      $stdin.gets
+      $stdout.write(#{raw_reply.b.inspect})
+      $stdout.flush
+      exit 0
+    RUBY
+    File.chmod(0o755, path)
+    path
+  end
 
   def write_fake_host(dir)
     path = File.join(dir, "fake_host")
@@ -179,13 +314,28 @@ class McpHostProcessTest < ActiveSupport::TestCase
             resp_len = $stdin.gets.to_i
             resp = read_exact(resp_len).force_encoding(Encoding::UTF_8)
             send_ok("changed resp=#{resp}")
+          when "double_sync"
+            2.times do |i|
+              req = "GET #{input}/step#{i}\n".b
+              $stdout.write("exchange #{req.bytesize}\n")
+              $stdout.write(req)
+              $stdout.flush
+              resp_len = $stdin.gets.to_i
+              read_exact(resp_len)
+            end
+            send_ok("done")
           else
             send_error("No entry named #{entry}")
           end
         when "boot", "open"
           size = parts[1].to_i
-          db = read_exact(size).force_encoding(Encoding::UTF_8)
-          send_ok
+          next_db = read_exact(size).force_encoding(Encoding::UTF_8)
+          if File.basename(next_db) == "fail.sqlite3"
+            send_error("Cannot open database")
+          else
+            db = next_db
+            send_ok
+          end
         else
           exit 2
         end
