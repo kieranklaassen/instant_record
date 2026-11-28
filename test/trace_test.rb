@@ -153,6 +153,121 @@ class TraceTest < Minitest::Test
     assert_equal index.call(expected), index.call(clean)
   end
 
+  def test_ruby_redactor_preserves_edge_cases_across_tables_indexes_outbox_and_metadata
+    redactor = InstantRecord::Trace::Redactor.new(
+      schema: { "users" => %w[id email phone full_name role] },
+      salt: "edge-salt"
+    )
+    raw = build_sqlite_bytes do |db|
+      db.execute("CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT, phone TEXT, full_name TEXT, role TEXT)")
+      db.execute("CREATE INDEX idx_users_email ON users(email)")
+      db.execute("CREATE TABLE empty_contacts (id INTEGER PRIMARY KEY, email TEXT, phone TEXT)")
+      db.execute('CREATE TABLE "quoted ""table""" (id INTEGER PRIMARY KEY, "user""_email" TEXT, note TEXT)')
+      db.execute("CREATE TABLE instant_record_outbox (id TEXT PRIMARY KEY, record_type TEXT, changes_payload TEXT)")
+      db.execute("CREATE TABLE instant_record_sync_metadata (key TEXT PRIMARY KEY, value TEXT)")
+
+      db.execute("INSERT INTO users VALUES ('u-1', 'alice@private.example', '+1-212-555-0100', 'Alice A', 'admin')")
+      db.execute("INSERT INTO users VALUES ('u-2', '', NULL, 'alt@private.example', 'member')")
+      db.execute("INSERT INTO users VALUES ('u-3', 'charlie@private.example', 'phone-mail@private.example', 'Charlie', 'member')")
+      db.execute('INSERT INTO "quoted ""table""" VALUES (1, \'quoted@private.example\', \'safe\')')
+      db.execute("INSERT INTO instant_record_outbox VALUES ('m-1', 'User', ?)", [JSON.generate("id" => "u-1", "email" => "alice@private.example", "role" => "admin")])
+      db.execute("INSERT INTO instant_record_outbox VALUES ('m-2', 'User', ?)", [JSON.generate("id" => "u-2", "role" => "member")])
+      db.execute("INSERT INTO instant_record_outbox VALUES ('m-3', 'User', 'not-json{')")
+      db.execute("INSERT INTO instant_record_outbox VALUES ('m-4', NULL, '')")
+      db.execute("INSERT INTO instant_record_sync_metadata VALUES ('identity', '')")
+      db.execute("INSERT INTO instant_record_sync_metadata VALUES ('cursor', '7')")
+    end
+
+    result = redactor.redact_database(raw)
+    clean = result[:bytes]
+
+    assert_equal Encoding::BINARY, clean.encoding
+    assert_equal Digest::SHA256.hexdigest(raw), result[:original_digest]
+    assert_equal Digest::SHA256.hexdigest(clean), result[:digest]
+    refute_includes clean, "private.example".b
+    assert_equal(
+      {
+        "empty_contacts" => %w[email phone],
+        "instant_record_outbox" => %w[changes_payload],
+        'quoted "table"' => ['user"_email'],
+        "users" => %w[email full_name phone]
+      },
+      result[:redacted_columns]
+    )
+
+    read_sqlite_bytes(clean) do |db|
+      assert_equal "ok", db.get_first_value("PRAGMA integrity_check")
+      assert_equal 0, db.get_first_value("PRAGMA freelist_count")
+      assert_equal "delete", db.get_first_value("PRAGMA journal_mode")
+
+      u1 = db.execute("SELECT email, phone, full_name, role FROM users WHERE id = 'u-1'").first
+      assert_equal [
+        redactor.pseudonymize("alice@private.example", "email"),
+        redactor.pseudonymize("+1-212-555-0100", "phone"),
+        redactor.pseudonymize("Alice A", "full_name"),
+        "admin"
+      ], u1
+
+      u2 = db.execute("SELECT email, phone, full_name FROM users WHERE id = 'u-2'").first
+      assert_equal ["", nil, redactor.pseudonymize("alt@private.example", "full_name")], u2
+      assert_match(/\Aredacted-[0-9a-f]{12}@redacted\.invalid\z/, u2[2])
+
+      u3_phone = db.get_first_value("SELECT phone FROM users WHERE id = 'u-3'")
+      assert_equal redactor.pseudonymize("phone-mail@private.example", "phone"), u3_phone
+      assert_match(/\Aredacted-[0-9a-f]{12}@redacted\.invalid\z/, u3_phone)
+
+      quoted_val = db.get_first_value('SELECT "user""_email" FROM "quoted ""table""" WHERE id = 1')
+      assert_equal redactor.pseudonymize("quoted@private.example", 'user"_email'), quoted_val
+
+      assert_equal "not-json{", db.get_first_value("SELECT changes_payload FROM instant_record_outbox WHERE id = 'm-3'")
+      assert_equal "", db.get_first_value("SELECT value FROM instant_record_sync_metadata WHERE key = 'identity'")
+    end
+  end
+
+  def test_ruby_redactor_attributes_and_pseudonymize_handle_nested_overrides_and_types
+    redactor = InstantRecord::Trace::Redactor.new(
+      schema: { "users" => %w[id email phone role] },
+      pii_columns: { "users" => ["custom_secret"], "*" => ["global_pii"] },
+      safe_columns: { "users" => ["city"], "*" => ["safe_email"] },
+      salt: "attr-salt"
+    )
+
+    attrs = {
+      "id" => "u-1",
+      "email" => "alice@private.example",
+      "phone" => 555_1234,
+      "city" => "Metropolis",
+      "safe_email" => "keep-me",
+      "bio" => "  padded@private.example  ",
+      "custom_secret" => { "k" => "v" },
+      "global_pii" => ["one", "", nil],
+      "nested" => {
+        "street" => "10 Main St",
+        "items" => [{ "first_name" => "Bob", "role" => "member" }, "plain"]
+      }
+    }
+
+    first = redactor.redact_attributes("User", attrs)
+    second = redactor.redact_attributes(:users, attrs)
+    assert_equal first, second
+
+    assert_equal "u-1", first["id"]
+    assert_equal redactor.pseudonymize("alice@private.example", "email"), first["email"]
+    assert_equal redactor.pseudonymize(555_1234, "phone"), first["phone"]
+    assert_match(/\A\+1-555-[0-9a-f]{4}\z/, first["phone"])
+    assert_equal "Metropolis", first["city"]
+    assert_equal "keep-me", first["safe_email"]
+    assert_equal redactor.pseudonymize("padded@private.example", "email"), first["bio"]
+    assert_equal redactor.pseudonymize(JSON.generate("k" => "v"), "custom_secret"), first["custom_secret"]
+    assert_equal [redactor.pseudonymize("one", "global_pii"), "", nil], first["global_pii"]
+    assert_equal redactor.pseudonymize("10 Main St", "street"), first["nested"]["street"]
+    assert_equal redactor.pseudonymize("Bob", "first_name"), first["nested"]["items"][0]["first_name"]
+    assert_equal "member", first["nested"]["items"][0]["role"]
+    assert_equal "plain", first["nested"]["items"][1]
+    assert_nil redactor.pseudonymize(nil, "email")
+    assert_equal "", redactor.pseudonymize("", "email")
+  end
+
   def test_replayer_runs_deterministic_node_replay_and_reproduces_wasm_trap
     Dir.mktmpdir("irtrace-replay-") do |dir|
       wasm_path = File.join(dir, "app-test.wasm")
