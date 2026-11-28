@@ -337,7 +337,272 @@ class PayloadBatchTest < Minitest::Test
     server&.close
   end
 
+  def test_record_payloads_exact_parity_across_types_timezones_and_edge_cases
+    ActiveRecord::Schema.define do
+      create_table :rich_items, id: :string, force: true do |t|
+        t.string :title
+        t.text :body
+        t.integer :count
+        t.boolean :active
+        t.date :due_on
+        t.datetime :happened_at
+        t.integer :server_version
+        t.timestamps
+      end
+    end
+
+    custom_usec_class = Struct.new(:stamp) do
+      def usec = 0
+      def iso8601(precision = 0) = "#{stamp}.#{'0' * precision}Z"
+    end
+    custom_type = Class.new(ActiveModel::Type::Value) do
+      define_method(:deserialize) { |v| v ? custom_usec_class.new(v) : nil }
+    end
+
+    rich = Class.new(ActiveRecord::Base) do
+      self.table_name = "rich_items"
+      define_singleton_method(:name) { "RichItem" }
+      include InstantRecord::Syncable
+      attribute :title, custom_type.new
+    end
+
+    plain_rich = Class.new(ActiveRecord::Base) do
+      self.table_name = "rich_items"
+      define_singleton_method(:name) { "PlainRichItem" }
+      include InstantRecord::Syncable
+    end
+
+    plain_rich.insert_all!([
+      { id: "r-1", title: "2026-01-02T03:04:05", body: "hello", count: 10, active: true, due_on: Date.new(2026, 5, 1), happened_at: Time.utc(2024, 2, 29, 12, 30, 45, 123456), server_version: 2, created_at: Time.utc(2026, 11, 28, 5, 6, 7, 890123), updated_at: Time.utc(2026, 11, 28, 5, 6, 7, 0) },
+      { id: "r-2", title: nil, body: nil, count: nil, active: false, due_on: nil, happened_at: nil, server_version: nil, created_at: Time.utc(2026, 3, 15, 0, 0, 0, 0), updated_at: Time.utc(2026, 3, 15, 23, 59, 59, 999999) },
+      { id: "r'quote\\slash", title: "2026-06-07T08:09:10", body: "quoted", count: -5, active: true, due_on: Date.new(2025, 12, 31), happened_at: Time.utc(2026, 7, 4, 1, 2, 3, 456000), server_version: 0, created_at: Time.utc(2026, 7, 4, 1, 2, 3, 0), updated_at: Time.utc(2026, 7, 4, 1, 2, 3, 456789) }
+    ])
+    InstantRecord::SyncMetadata.set("#{HLC::RECORD_PREFIX}PlainRichItem:r'quote\\slash", "2026-11-28T00:00:00.000000Z-0000-00000000")
+    InstantRecord::SyncMetadata.set("#{HLC::RECORD_PREFIX}RichItem:r-1", "2026-11-28T00:00:00.000001Z-0000-00000000")
+
+    # Plain model without sync_state column, with Date, nil server_version, leap day, special chars in key
+    assert_exact_payload_parity(plain_rich.order(:id))
+    assert_exact_payload_parity(plain_rich.order(:id).to_a)
+    # Custom type returning an object responding to :usec
+    assert_exact_payload_parity(rich.order(:id))
+    assert_exact_payload_parity(rich.order(:id).to_a)
+
+    # Non-UTC and GMT time zones with time_zone_aware_attributes enabled
+    previous_tz_aware = plain_rich.time_zone_aware_attributes
+    begin
+      plain_rich.time_zone_aware_attributes = true
+      plain_rich.reset_column_information
+      ["UTC", "GMT", "America/New_York"].each do |zone|
+        Time.use_zone(zone) do
+          assert_exact_payload_parity(plain_rich.order(:id), "zone=#{zone}")
+        end
+      end
+    ensure
+      plain_rich.time_zone_aware_attributes = previous_tz_aware
+      plain_rich.reset_column_information
+    end
+
+    # ActiveRecord.default_timezone = :local
+    previous_default_tz = ActiveRecord.default_timezone
+    begin
+      ActiveRecord.default_timezone = :local
+      assert_exact_payload_parity(plain_rich.order(:id), "default_timezone=:local")
+    ensure
+      ActiveRecord.default_timezone = previous_default_tz
+    end
+  end
+
+  def test_record_payloads_preserves_frozen_and_shared_attributes_and_heterogeneous_arrays
+    seed(@open, 3)
+    seed(@ruled, 2)
+
+    frozen_model = syncable_model("FrozenModel") do
+      def attributes
+        super.freeze
+      end
+    end
+    shared_hash = { "id" => "open-0", "title" => "kept", "sync_state" => "synced", "server_version" => 1 }
+    shared_model = syncable_model("SharedModel") do
+      define_method(:attributes) { shared_hash }
+    end
+    custom_id_model = syncable_model("CustomId") do
+      def id = "custom:#{super}"
+    end
+    custom_bracket_model = syncable_model("CustomBracket") do
+      def [](attr)
+        attr == :server_version ? 42 : super
+      end
+    end
+
+    [frozen_model, shared_model, custom_id_model, custom_bracket_model].each do |model|
+      assert_exact_payload_parity(model.order(:id), model.name)
+      assert_exact_payload_parity(model.order(:id).to_a, "#{model.name} array")
+    end
+    assert shared_hash.key?("sync_state"), "shared attribute hash must not be mutated"
+
+    # Heterogeneous array: multiple classes, mixed select projections, duplicates, singleton overrides
+    r_full = @open.order(:id).first
+    r_narrow = @open.select(:id, :title, :server_version).order(:id).second
+    r_ruled = @ruled.order(:id).first
+    r_ext = @open.order(:id).last
+    r_ext.extend(Module.new { def [](attr) = attr == :server_version ? 99 : super })
+    mixed = [r_full, r_narrow, r_full, r_ruled, r_ext]
+
+    assert_exact_payload_parity(mixed, "heterogeneous array")
+    assert_equal [], InstantRecord.record_payloads(@open.none)
+    assert_equal [], InstantRecord.record_payloads(@open.where(id: []))
+    assert_equal [], InstantRecord.record_payloads([])
+  end
+
+  def test_record_payloads_query_cache_and_row_reader_api
+    seed(@open, 3)
+
+    ActiveRecord::Base.cache do
+      first = InstantRecord.record_payloads(@open.order(:id))
+      second = InstantRecord.record_payloads(@open.order(:id))
+      expected = @open.order(:id).to_a.map { |r| InstantRecord.record_payload(r) }
+      assert_equal expected, first
+      assert_equal expected, second
+    end
+
+    # Duplicate column names from a join fall back cleanly to Active Record instantiation.
+    assert_exact_payload_parity(@open.select("items.*", "items.id AS id").order(:id), "duplicate select column")
+
+    # Plain non-Syncable ActiveRecord model (zero find callbacks).
+    plain_ar = Class.new(ActiveRecord::Base) do
+      self.table_name = "items"
+      define_singleton_method(:name) { "PlainAr" }
+    end
+    assert_exact_payload_parity(plain_ar.order(:id), "non-syncable AR model")
+
+    # When SyncActions is enforcing a server mutator, Syncable's after_find still runs.
+    noted = []
+    InstantRecord::SyncActions.singleton_class.class_eval do
+      alias_method :orig_enforcing_server_mutator?, :enforcing_server_mutator?
+      alias_method :orig_server_note_read, :server_note_read
+      remove_method :enforcing_server_mutator?, :server_note_read
+      define_method(:enforcing_server_mutator?) { true }
+      define_method(:server_note_read) { |record| noted << record.id }
+    end
+    begin
+      assert_exact_payload_parity(@open.order(:id), "enforcing server mutator")
+    ensure
+      InstantRecord::SyncActions.singleton_class.class_eval do
+        remove_method :enforcing_server_mutator?, :server_note_read
+        alias_method :enforcing_server_mutator?, :orig_enforcing_server_mutator?
+        alias_method :server_note_read, :orig_server_note_read
+        remove_method :orig_enforcing_server_mutator?, :orig_server_note_read
+      end
+    end
+    assert_equal %w[open-0 open-1 open-2], noted.uniq.sort
+
+    reader = InstantRecord::PayloadBatch::RowReader.new
+    rows = @open.order(:id).to_a
+    assert_equal rows.map(&:attributes), rows.map { |r| reader.attributes(r) }
+  end
+
+  def test_record_payloads_honors_singleton_bracket_missing_version_usec_pk_callbacks_and_non_plain_stamps
+    seed(@open, 3)
+
+    # Finding #1a: unloaded relation whose after_find extends a row with singleton [] or read_attribute.
+    singleton_bracket = syncable_model("SingletonBracket") do
+      after_find do
+        extend(Module.new { def [](attr) = attr == :server_version ? 999 : super }) if id == "open-1"
+      end
+    end
+    singleton_reader = syncable_model("SingletonReader") do
+      after_find do
+        extend(Module.new { def read_attribute(attr, &block) = attr.to_s == "server_version" ? 777 : super }) if id == "open-2"
+      end
+    end
+    assert_exact_payload_parity(singleton_bracket.order(:id), "singleton [] in after_find")
+    assert_exact_payload_parity(singleton_reader.order(:id), "singleton read_attribute in after_find")
+
+    # Finding #1b: partial select omitting server_version raises ActiveModel::MissingAttributeError on fallback path.
+    virt_model = syncable_model("VirtModel") { attribute :virtual_tag, :string, default: "v" }
+    assert_raises(ActiveModel::MissingAttributeError) do
+      InstantRecord.record_payloads(virt_model.select(:id, :title).order(:id))
+    end
+
+    # Finding #2: :usec-typed primary_key and server_version keep unformatted Ruby values on rows 1..N.
+    ActiveRecord::Schema.define do
+      create_table :dt_key_items, id: false, force: true do |t|
+        t.datetime :happened_at, null: false
+        t.datetime :server_version
+        t.string :title
+      end
+    end
+    dt_pk = Class.new(ActiveRecord::Base) do
+      self.table_name = "dt_key_items"
+      self.primary_key = "happened_at"
+      define_singleton_method(:name) { "DtPkItem" }
+      include InstantRecord::Syncable
+    end
+    t1 = Time.utc(2026, 1, 1, 1, 2, 3, 123456)
+    t2 = Time.utc(2026, 1, 2, 4, 5, 6, 654321)
+    dt_pk.insert_all!([
+      { happened_at: t1, server_version: t1, title: "one" },
+      { happened_at: t2, server_version: t2, title: "two" }
+    ])
+    InstantRecord::SyncMetadata.set("#{HLC::RECORD_PREFIX}DtPkItem:#{t2}", "2026-11-28T00:00:00.000002Z-0000-00000000")
+    assert_exact_payload_parity(dt_pk.order(:happened_at), "datetime pk and server_version")
+
+    # Finding #3: init_with_attributes, attributes_builder, and reset_callbacks(:find) + custom after_find.
+    init_override = syncable_model("InitOverride") do
+      def init_with_attributes(attributes, &block)
+        super
+        write_attribute(:title, "init:#{self[:title]}")
+        self
+      end
+    end
+    builder_override = syncable_model("BuilderOverride") do
+      def self.attributes_builder
+        super
+      end
+    end
+    fired = []
+    custom_find = syncable_model("CustomFindOnly") do
+      reset_callbacks(:find)
+      after_find do
+        fired << id
+        write_attribute(:title, "found:#{id}")
+      end
+    end
+    assert_exact_payload_parity(init_override.order(:id), "init_with_attributes override")
+    refute InstantRecord::PayloadBatch.direct_relation?(builder_override.order(:id))
+    assert_exact_payload_parity(builder_override.order(:id), "attributes_builder override")
+    refute InstantRecord::PayloadBatch.direct_relation?(custom_find.order(:id))
+    fired.clear
+    assert_exact_payload_parity(custom_find.order(:id), "reset_callbacks(:find) + custom after_find")
+    assert_equal %w[open-0 open-1 open-2 open-0 open-1 open-2], fired
+
+    # Finding #4: PayloadBatch.stamps handles non-String keys, nil, and invalid UTF-8 safely.
+    InstantRecord::SyncMetadata.set("123", "num-stamp")
+    assert_equal({ "123" => "num-stamp" }, InstantRecord::PayloadBatch.stamps([123]))
+    assert_equal({ "123" => "num-stamp" }, InstantRecord::PayloadBatch.stamps([nil, 123]))
+    assert_equal({}, InstantRecord::PayloadBatch.stamps([nil]))
+    bad_utf8 = "\xFF".dup.force_encoding(Encoding::UTF_8)
+    refute InstantRecord::PayloadBatch.send(:plain_sql_string?, bad_utf8)
+    assert_equal({}, InstantRecord::PayloadBatch.stamps([bad_utf8]))
+  end
+
   private
+
+  def assert_exact_payload_parity(records, label = nil)
+    materialized = records.is_a?(ActiveRecord::Relation) ? records.spawn.to_a : records
+    expected = materialized.map { |r| InstantRecord.record_payload(r) }
+    actual = InstantRecord.record_payloads(records)
+
+    assert_equal expected, actual, label
+    assert_equal expected.to_json, actual.to_json, label
+    expected.zip(actual).each_with_index do |(exp, act), idx|
+      assert_equal exp.keys, act.keys, "#{label} row #{idx} top keys"
+      assert_equal exp[:id].class, act[:id].class, "#{label} row #{idx} id class"
+      assert_equal exp[:version].class, act[:version].class, "#{label} row #{idx} version class"
+      assert_equal exp[:attributes].keys, act[:attributes].keys, "#{label} row #{idx} attr keys"
+      assert_equal exp[:attributes].values.map(&:class), act[:attributes].values.map(&:class), "#{label} row #{idx} attr value classes"
+    end
+  end
 
   # Four rows that belong to another, "parent".
   def children
