@@ -31,6 +31,7 @@ module InstantRecord
       def item: (String title, ?action: String, ?args: Hash[String, String], ?link: String, ?replace: String, ?sheet: String, ?params: Hash[String, String], ?image: String, ?role: String, ?selected: bool) -> InstantRecord::Native::Node
       def swipe: (String label, action: String, ?args: Hash[String, String], ?role: String, ?edge: String, ?image: String) -> InstantRecord::Native::Node
       def field: (String name, ?label: String, ?value: String, ?multiline: bool) -> InstantRecord::Native::Node
+      def web: (String path) -> InstantRecord::Native::Node
       def more: (String key, query: String) -> InstantRecord::Native::Node
       def act: (InstantRecord::Native::Node node, String label, String action, Hash[String, String] args, String role) -> nil
     end

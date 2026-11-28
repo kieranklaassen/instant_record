@@ -460,7 +460,15 @@ A read of a table is narrowed to the values of a column when *every* query on th
 
 Other conditions (a range, `NULL`, an expression) are passed over: they do not narrow, and do not stop another column from narrowing. It counts as a read of the whole table when any query on it has a top-level `OR` in its `WHERE`, or when no column is left that every query limits. A statement with a top-level `UNION`, `INTERSECT` or `EXCEPT` narrows nothing (an apostrophe or `(` in a comment or a quoted name before it can hide it). Any other is judged by its top-level `WHERE` alone: a table it reads more than once (a self-join, a subquery on the same table) is narrowed by that `WHERE`, so a change only its other reads need can be missed. A change whose row does not carry the column, or that moves the row to another value, counts as touching the read.
 
-### 9. Native iOS screens (experimental)
+### 9. Native iOS (experimental)
+
+Three ways to put your app on an iPhone, which mix in one app: **Ruby screens** from the phone's own database, **SwiftUI views** fed typed props from Ruby, and **Rails pages** under native tabs and bars that change with a deploy. The guides are in [docs/ios](docs/ios/README.md).
+
+```sh
+bin/rails generate instant_record:ios Shop --hybrid                    # Rails pages, no compiler
+bin/rails generate instant_record:ios Shop --screen catalog            # Ruby screens and SwiftUI views
+bin/rails generate instant_record:ios Shop --hybrid --screen catalog   # all three
+```
 
 Write iOS screens in Ruby under `app/screens` subclassing `InstantRecord::Native::Screen`, compile your app's models and screens to static libraries, and generate a thin SwiftUI Xcode project:
 

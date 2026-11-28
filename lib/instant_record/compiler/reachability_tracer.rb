@@ -1255,8 +1255,8 @@ module InstantRecord
         total_bytes = input.bytesize
 
         while (m = ERB_REGEXP.match(input, char_pos))
-          m_byte_begin = m.bytebegin(0)
-          ind_b = m.bytebegin(1)
+          m_byte_begin = m.byteoffset(0)[0]
+          ind_b = m.byteoffset(1)[0]
           ch = ind_b ? input.getbyte(ind_b) : nil
 
           has_lspace = false
@@ -1284,8 +1284,8 @@ module InstantRecord
             end
           end
 
-          r_b = m.bytebegin(4)
-          r_e = r_b ? m.byteend(4) : nil
+          r_b = m.byteoffset(4)[0]
+          r_e = r_b ? m.byteoffset(4)[1] : nil
           has_rspace = !r_b.nil?
           is_bol = has_rspace
 
@@ -1310,7 +1310,7 @@ module InstantRecord
             else
               src << " @_=(" << code << ");"
             end
-            if has_rspace && m.bytebegin(3).nil?
+            if has_rspace && m.byteoffset(3)[0].nil?
               if r_e - r_b == 1 && input.getbyte(r_b) == 10
                 pending_nl += 1
               else
@@ -1380,13 +1380,13 @@ module InstantRecord
               end
             end
           elsif ch == 37 # "%"
-            nl = pending_nl + count_newlines(input, m.bytebegin(2), m.byteend(0))
+            nl = pending_nl + count_newlines(input, m.byteoffset(2)[0], m.byteoffset(0)[1])
             pending_nl = 0
             append_erb_text_placeholder(src, nl)
           end
 
           char_pos = m.end(0)
-          byte_pos = m.byteend(0)
+          byte_pos = m.byteoffset(0)[1]
         end
 
         if byte_pos < total_bytes

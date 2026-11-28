@@ -41,6 +41,52 @@ class IosGeneratorTest < Rails::Generators::TestCase
     assert File.file?(File.expand_path(File.join(project[%r{HEADER_SEARCH_PATHS = "\$\(SRCROOT\)/(.+)";}, 1], "instant_record_native.h"), folder))
   end
 
+  test "a hybrid app holds no compiled Ruby" do
+    run_generator %w[Shop --hybrid --server http://localhost:4000]
+
+    assert_file "native/ios/Shop/Shop/ShopApp.swift" do |app|
+      assert_match "HybridView(host: host)", app
+      assert_match '?? "http://localhost:4000"', app
+      assert_no_match(/AppHost|LibraryEngine|<%/, app)
+    end
+    assert_no_file "native/ios/Shop/Shop/LibraryEngine.swift"
+    assert_no_file "native/ios/Shop/Shop/Shop-Bridging-Header.h"
+    assert_file "native/ios/Shop/Shop.xcodeproj/project.pbxproj" do |project|
+      assert_no_match(/Bridging|linstant_record_app|SEARCH_PATHS/, project)
+      assert_match "/* ShopApp.swift in Sources */", project
+    end
+  end
+
+  test "a hybrid app with a screen holds both, and the screens its routes may open" do
+    run_generator %w[Shop --hybrid --screen mailbox]
+
+    assert_file "native/ios/Shop/Shop/ShopApp.swift" do |app|
+      assert_match 'Route("mailbox")', app
+      assert_match "screens: rubyScreens", app
+    end
+    assert_file "native/ios/Shop/Shop/RubyScreens.swift", /\[.*"mailbox".*"thread".*\]/
+    assert_file "native/ios/Shop/Shop/LibraryEngine.swift"
+    assert_file "native/ios/Shop/Shop.xcodeproj/project.pbxproj", /linstant_record_app/
+  end
+
+  test "run again with --force, it leaves the app's own file and writes the rest" do
+    run_generator %w[Shop --hybrid --screen mailbox]
+    File.write(File.join(destination_root, "native/ios/Shop/Shop/ShopApp.swift"), "// mine")
+    File.write(File.join(destination_root, "native/ios/Shop/Shop/RubyScreens.swift"), "// old")
+
+    run_generator %w[Shop --hybrid --screen mailbox --force]
+
+    assert_file "native/ios/Shop/Shop/ShopApp.swift", "// mine"
+    assert_file "native/ios/Shop/Shop/RubyScreens.swift", /rubyScreens/
+  end
+
+  test "an app of neither kind is refused, and nothing is written" do
+    output = capture(:stderr) { run_generator %w[Shop] }
+
+    assert_match(/--screen.*--hybrid/, output)
+    assert_no_file "native/ios/Shop"
+  end
+
   test "a name that is not a Swift type name is refused, and nothing is written" do
     output = capture(:stderr) { run_generator %w[my-shop --screen catalog] }
 

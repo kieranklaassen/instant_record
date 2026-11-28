@@ -1,5 +1,9 @@
 # Ruby screens on iPhone
 
+The guides, and the other two ways to make an app (SwiftUI views and Rails
+pages with native bars), are in [docs/ios](../../docs/ios/README.md). This is
+the reference for the renderer, sync and the Inbox demo.
+
 A Rails app's screens, written in Ruby, drawn with stock iOS controls. The
 app's models, its sync client and its screens are compiled to a C library
 that runs inside the app. `InstantRecordNative` is a Swift package with no
@@ -219,6 +223,7 @@ files a note as a GitHub issue through a relay.
 | `field`, `bottom` | `TextField` (one that grows with `multiline:`), a bar pinned under the screen |
 | `more` | a spinner at the foot of the list while the next page loads, or a line to tap when it could not |
 | `swift` | the registered SwiftUI view |
+| `web` | a page Rails serves, with no bar of its own |
 
 ## How it looks
 
@@ -337,5 +342,7 @@ On macOS arm64 with Xcode 27.2, in the iPhone 17 simulator on iOS 26.5:
 everything above, and a fresh `rails new` app with one synced model and one
 screen, generated, built and launched twice.
 
-Not signed or run on a phone. No Android renderer, no tab bar, no sign-in
-screen. In the development mode there is no paging and no event stream.
+Not signed or run on a phone. No Android renderer, no sign-in screen. A tab bar
+comes with a hybrid app ([docs/ios](../../docs/ios/README.md)), which was run in
+the iPhone 17 simulator on iOS 27.2 against a Rails app with ruby_native 0.21.1
+and Turbo, with its Ruby screens asked of Rails (`-dev`) and not compiled. In the development mode there is no paging and no event stream.

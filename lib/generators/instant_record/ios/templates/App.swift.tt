@@ -13,9 +13,9 @@ struct <%= app_name %>App: App {
 
     init() {
         // Views written in SwiftUI that a screen asks for by name
-        // (`swift "Name" do ... end`) are registered here:
-        //   views.register("Name") { props, actions in NameView(props: props, actions: actions) }
-        let views = Screens()
+        // (`swift "Name" do ... end`) are registered here.
+        var views = Screens()
+        register(&views)
 
         let defaults = UserDefaults.standard
         let server = defaults.string(forKey: "server") ?? "<%= options[:server] %>"
@@ -32,4 +32,8 @@ struct <%= app_name %>App: App {
     var body: some Scene {
         WindowGroup { AppView(host: host) }
     }
+}
+
+private func register(_ views: inout Screens) {
+    // views.register("Name") { props, actions in NameView(props: props) }
 }

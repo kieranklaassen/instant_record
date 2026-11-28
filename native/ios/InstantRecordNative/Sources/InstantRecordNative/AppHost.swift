@@ -67,11 +67,7 @@ public final class AppHost: ObservableObject {
     @Published public var path: [Route] = [] {
         didSet {
             // A screen pushed over the others is told it opened, before it is drawn.
-            if path.count == oldValue.count + 1, Array(path.dropLast()) == oldValue, let opened = path.last {
-                thread.run { self.act("open", [:], [:], on: opened) }
-                // Opening may write, as marking a message read does.
-                schedule.request()
-            }
+            if path.count == oldValue.count + 1, Array(path.dropLast()) == oldValue, let opened = path.last { tellOpened(opened) }
             show()
         }
     }
@@ -80,14 +76,21 @@ public final class AppHost: ObservableObject {
     @Published public var sheet: Route? {
         didSet {
             guard sheet != oldValue else { return }
-            if let sheet {
-                thread.run { self.act("open", [:], [:], on: sheet) }
-                schedule.request()
-            }
+            if let sheet { tellOpened(sheet) }
             show()
         }
     }
-    private var showing: [Route] { [root] + path + (sheet.map { [$0] } ?? []) }
+    // Screens on show in another's stack, such as one a web page opened.
+    private var guests: [ObjectIdentifier: [Route]] = [:]
+    private var showing: [Route] {
+        ([root] + path + (sheet.map { [$0] } ?? []) + guests.values.flatMap { $0 }).filter(\.isScreen)
+    }
+
+    /// The server whose pages this app's screens can link to (`page:/orders`)
+    /// and hold (`web`). A HybridHost sets it.
+    public var site: HybridSite?
+    /// The screen the app was made with, whatever has since replaced it.
+    let home: String
 
     /// The SwiftUI views a screen can ask for by name.
     public let views: Screens
@@ -125,6 +128,7 @@ public final class AppHost: ObservableObject {
                 pace: SyncSchedule.Pace = SyncSchedule.Pace(), clock: Timekeeper = MainClock(), reachability: Reachability = NetworkPath()) {
         self.engine = engine
         self.root = root
+        home = root.screen
         self.views = views
         self.store = store
         self.transport = transport
@@ -169,6 +173,7 @@ public final class AppHost: ObservableObject {
     /// The app came to the front, or left it. In front it syncs at once and
     /// follows the server's events, which is how changes from elsewhere arrive.
     public func front(_ on: Bool) {
+        guard on != inFront else { return }
         schedule.front(on)
         inFront = on
         follow()
@@ -190,6 +195,7 @@ public final class AppHost: ObservableObject {
     /// drawn again from the local database, and the write goes to the server
     /// soon after.
     public func perform(_ action: String, args: [String: String] = [:], values: [String: String] = [:], on route: Route) {
+        guard route.isScreen else { return }
         let fieldValues = typed[route] ?? [:]
         let mergedValues = values.isEmpty ? fieldValues : fieldValues.merging(values) { _, explicit in explicit }
         thread.run {
@@ -304,6 +310,23 @@ public final class AppHost: ObservableObject {
         } else {
             DispatchQueue.main.sync {}
         }
+    }
+
+    /// What another's stack shows over its own first page, oldest first. A
+    /// screen that was just pushed there is told it opened.
+    func visited(_ routes: [Route], in stack: ObjectIdentifier) {
+        let before = guests[stack] ?? []
+        guard routes != before else { return }
+        guests[stack] = routes.isEmpty ? nil : routes
+        if routes.count > before.count, let opened = routes.last { tellOpened(opened) }
+        show()
+    }
+
+    private func tellOpened(_ route: Route) {
+        guard route.isScreen else { return }
+        thread.run { self.act("open", [:], [:], on: route) }
+        // Opening may write, as marking a message read does.
+        schedule.request()
     }
 
     private func show() {
