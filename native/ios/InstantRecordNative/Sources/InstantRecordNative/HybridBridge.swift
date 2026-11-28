@@ -1,9 +1,8 @@
 import Foundation
 
 /// The script every page of a hybrid app runs. It reads the page's
-/// `data-native-*` elements, says what they ask for whenever that changes,
-/// and is the `window.RubyNative` the ruby_native gem's helpers call. It runs
-/// in the page's own world, because those helpers call it from `onclick`.
+/// `data-native` elements (InstantRecord::NativeHelper), says what they ask
+/// for whenever that changes, and is the page's `window.InstantRecord`.
 enum HybridBridge {
     static let caller = "instantRecordCall"
     static let handler = "instantRecordHybrid"
@@ -12,53 +11,18 @@ enum HybridBridge {
     (() => {
       if (window.instantRecordHybrid) return
       const post = message => window.webkit.messageHandlers.instantRecordHybrid.postMessage(message)
-      const has = (el, name) => el.hasAttribute("data-native-" + name)
-      const get = (el, name) => el.getAttribute("data-native-" + name)
-      const truthy = (el, name) => has(el, name) && get(el, name) !== "false"
-      const find = name => document.querySelector(`[data-native-${name}]`)
-
-      const item = el => ({
-        title: get(el, "title") || "", icon: get(el, "icon") || "",
-        href: get(el, "href"), click: get(el, "click"),
-        inTitle: get(el, "position") === "title",
-        leading: ["leading", "left"].includes(get(el, "position")),
-        selected: truthy(el, "selected"), destructive: truthy(el, "destructive"),
-        replace: get(el, "action") === "replace",
-        share: has(el, "share"), shareURL: get(el, "share-url"),
-        items: [...el.querySelectorAll("[data-native-menu-item]")].map(item)
-      })
-
-      const navbar = () => {
-        const bar = find("navbar")
-        if (!bar) return null
-        const all = name => [...bar.querySelectorAll(`[data-native-${name}]`)].map(item)
-        const title = get(bar, "navbar") || (get(bar, "navbar-title") === "false" ? "" : document.title)
-        return {
-          title, pullToRefresh: get(bar, "pull-to-refresh") !== "false",
-          buttons: all("button"), segments: all("segment"), submit: all("submit-button")[0] || null
-        }
-      }
-
-      const fab = () => {
-        const el = find("fab")
-        return el && { ...item(el), color: get(el, "color") }
-      }
-
-      const badges = () => {
-        try {
-          const said = JSON.parse(get(find("badge-tabs"), "badge-tabs"))
-          return Object.fromEntries(Object.entries(said).filter(([, value]) => value !== null).map(([key, value]) => [key, String(value)]))
-        } catch { return {} }
-      }
-
-      // Shown once: the element stops being a toast as it is read, so a page
-      // that comes back from the cache does not show it again.
-      const toast = () => {
-        const el = find("toast-message")
-        if (!el) return null
-        const said = { message: get(el, "toast-message"), icon: get(el, "toast-icon") }
-        el.remove()
-        return said
+      // What the page's elements say, put together. A toast is said once: its
+      // element goes as it is read, so a page back from the cache is silent.
+      const said = () => {
+        const all = { badges: {} }
+        document.querySelectorAll("[data-native]").forEach(el => {
+          let part
+          try { part = JSON.parse(el.getAttribute("data-native")) } catch { return }
+          if (part.toast) el.remove()
+          Object.assign(all, part, { badges: { ...all.badges, ...part.badges } })
+        })
+        if (all.navbar && !all.navbar.title && !all.navbar.buttons?.some(button => button.inTitle)) all.navbar = { ...all.navbar, title: document.title }
+        return all
       }
 
       let places = []
@@ -77,11 +41,8 @@ enum HybridBridge {
       let last = ""
       const gather = () => {
         mark()
-        const badge = find("badge-tab")
-        const signals = {
-          url: location.href, tabs: !!find("tabs"), form: !!find("form"), navbar: navbar(), fab: fab(),
-          badge: badge && get(badge, "badge-tab"), badges: badges(), toast: toast()
-        }
+        const { tabs, form, navbar, fab, badges, toast } = said()
+        const signals = { url: location.href, tabs: !!tabs, form: !!form, navbar: navbar || null, fab: fab || null, badges, toast: toast || null }
         const text = JSON.stringify(signals)
         if (text === last) return
         last = signals.toast ? "" : text
@@ -107,21 +68,16 @@ enum HybridBridge {
         }
       }
 
-      // Methods of Ruby Native's that this shell does not have do nothing.
-      const known = {
-        postMessage(message) { if (message?.action === "back") post({ type: "back" }) },
-        visit(url, options) { post({ type: "visit", url: String(url), replace: options?.action === "replace" }) },
-        share(options) { post({ type: "share", url: String(options?.url || location.href) }) }
-      }
-      window.RubyNative = new Proxy(known, { get: (target, name) => target[name] ?? (name === "then" ? undefined : () => {}) })
-
       window.InstantRecord = Object.freeze({
+        back() { post({ type: "back" }) },
+        visit(url, options) { post({ type: "visit", url: String(url), replace: options?.replace === true }) },
+        share(url) { post({ type: "share", url: String(url || location.href) }) },
         call: (name, args = {}) => window.webkit.messageHandlers.instantRecordCall.postMessage({ name, arguments: args })
       })
 
       document.addEventListener("click", event => {
         const el = event.target?.closest?.("[data-native-haptic]")
-        if (el) post({ type: "haptic", feedback: get(el, "haptic") || "success" })
+        if (el) post({ type: "haptic", feedback: el.getAttribute("data-native-haptic") || "success" })
       }, true)
 
       // Ahead of Turbo and Inertia, which would otherwise fetch the page.

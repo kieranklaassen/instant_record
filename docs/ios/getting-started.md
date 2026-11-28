@@ -7,34 +7,14 @@ You need a Mac with Xcode, and a Rails app with InstantRecord.
 This needs no compiler toolchain.
 
 ```sh
-bundle add ruby_native
-bin/rails generate ruby_native:install
 bin/rails generate instant_record:ios Shop --hybrid
 ```
 
-List at least two tabs in `config/ruby_native.yml`:
-
-```yaml
-app:
-  name: Shop
-tabs:
-  - title: Orders
-    path: /orders
-    icon: shippingbox
-  - title: Account
-    path: /account
-    icon: person
-```
-
-Put the tab bar and the gem's stylesheet in your layout:
+It writes `config/native.yml`. List at least two tabs there, then put the bar in your layout:
 
 ```erb
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<%= stylesheet_link_tag :ruby_native %>
-...
-<body>
-  <%= native_tabs_tag %>
-  <div class="native-inset-top"></div>
+<head><%= native_head %></head>
+<body><%= native_tabs %><div class="native-top"></div>
 ```
 
 Start Rails, then build and open the app:

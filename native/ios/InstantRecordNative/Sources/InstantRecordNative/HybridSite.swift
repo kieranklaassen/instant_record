@@ -8,6 +8,8 @@ public final class HybridSite {
     public let server: URL
     /// What pages may ask of the device.
     public var capabilities: Capabilities?
+    /// Draws pages on the device, in an app with compiled Rails.
+    private(set) var local: LocalPages?
     let data: WKWebsiteDataStore
     let outside: @MainActor (URL) -> Void
     /// The native place an address opens, if it opens one.
@@ -27,10 +29,24 @@ public final class HybridSite {
         self.outside = outside
     }
 
+    func draw(with app: AppHost, pages: LocalPages? = nil) {
+        local = pages ?? LocalPages(app: app, server: server)
+        app.changed = { [weak self] in self?.tabs.forEach { $0.tab?.recordsChanged() } }
+    }
+
+    private struct Held { weak var tab: HybridTab? }
+    private var tabs: [Held] = []
+    func hold(_ tab: HybridTab) { tabs = tabs.filter { $0.tab != nil } + [Held(tab: tab)] }
+
+    /// Whether an address is this app's: the server's, or the device's own.
+    func owns(_ url: URL) -> Bool {
+        url.scheme == LocalPages.scheme ? local != nil && url.host == "app" : Origin(url) == Origin(server)
+    }
+
     func use(_ routes: [HybridConfig.Place]) { self.routes = routes }
 
     func place(at url: URL) -> (route: Route, sheet: Bool)? {
-        guard Origin(url) == Origin(server) else { return nil }
+        guard owns(url) else { return nil }
         // The first that matches decides, also that it is a page.
         guard let place = routes.first(where: { $0.params(for: url) != nil }) else { return nil }
         return place.route(for: url).map { ($0, place.sheet) }

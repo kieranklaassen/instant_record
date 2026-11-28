@@ -1,7 +1,7 @@
 import Foundation
 
 /// The native elements one page asks for, as the page script gathered them
-/// from its `data-native-*` elements (HybridBridge).
+/// from its `data-native` elements (HybridBridge).
 public struct PageSignals: Decodable, Equatable {
     public struct Item: Decodable, Equatable {
         public var title = ""
@@ -55,20 +55,19 @@ public struct PageSignals: Decodable, Equatable {
 
     /// The page's address when this was gathered.
     public let url: String
-    /// The page carries `native_tabs_tag`.
+    /// The page carries `native_tabs`.
     public let tabs: Bool
     /// The page is a form, which Back passes over.
     public let form: Bool
     public let navbar: Navbar?
     public let fab: Item?
-    public let badge: String?
     public let badges: [String: String]
     public let toast: Toast?
 
     /// The badge for a tab, as drawn: a count, a short word, or a dot. A dot
     /// is a blank, which iOS draws as one. Nothing for zero or false.
     func badge(for tab: HybridConfig.Tab) -> String? {
-        let said = badges[tab.key] ?? (tab.badge ? badge : nil)
+        let said = badges[tab.key]
         switch said {
         case nil, "", "0", "false": return nil
         case "true": return " "

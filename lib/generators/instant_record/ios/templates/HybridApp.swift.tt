@@ -2,7 +2,7 @@ import InstantRecordNative
 import SwiftUI
 
 /// <%= app_name %> on iPhone. Its tabs and pages come from Rails
-/// (config/ruby_native.yml), so a deploy changes them.<% if compiled? %> A tab or a route that
+/// (config/native.yml), so a deploy changes them.<% if compiled? %> A tab or a route that
 /// names a Ruby screen is drawn by it, from the phone's own database.<% end %>
 ///
 /// Launch arguments:
@@ -15,7 +15,7 @@ struct <%= app_name %>App: App {
     @StateObject private var host: HybridHost
 
     init() {
-        // Views written in SwiftUI, by the name Ruby or config/ruby_native.yml
+        // Views written in SwiftUI, by the name Ruby or config/native.yml
         // gives them, are registered here.
         var views = Screens()
         register(&views)

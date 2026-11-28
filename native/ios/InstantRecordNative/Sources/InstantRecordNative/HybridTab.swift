@@ -36,6 +36,7 @@ public final class HybridTab: NSObject, ObservableObject {
         start = path
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = site.data
+        if let local = site.local { configuration.setURLSchemeHandler(local, forURLScheme: LocalPages.scheme) }
         configuration.applicationNameForUserAgent = Self.agent
         configuration.userContentController.addUserScript(
             WKUserScript(source: HybridBridge.script, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page))
@@ -54,6 +55,7 @@ public final class HybridTab: NSObject, ObservableObject {
             web.observe(\.url) { [weak self] _, _ in DispatchQueue.main.async { self?.moved() } },
             web.observe(\.canGoBack) { [weak self] _, _ in DispatchQueue.main.async { self?.moved() } },
         ]
+        site.hold(self)
         site.watch(self) { [weak self] in self?.tellRoutes() }
         #if DEBUG
         web.isInspectable = true
@@ -65,14 +67,16 @@ public final class HybridTab: NSObject, ObservableObject {
         Task { @MainActor in site.unwatch(id) }
     }
 
-    /// What the ruby_native gem's `native_app?`, `native_platform` and
-    /// `native_version` read. The last word tells this shell from others.
+    /// What `native_app?` reads, and a server's log.
     static var agent: String {
         let info = Bundle.main.infoDictionary ?? [:]
-        let version = info["CFBundleShortVersionString"] as? String ?? "1.0"
-        let build = info["CFBundleVersion"] as? String ?? "1"
         let os = ProcessInfo.processInfo.operatingSystemVersion
-        return "Ruby Native iOS/\(version)/\(build) iOS/\(os.majorVersion).\(os.minorVersion).\(os.patchVersion) RubyNative/0.21.1 InstantRecord/1"
+        #if os(iOS)
+        let system = "iOS"
+        #else
+        let system = "macOS"
+        #endif
+        return "InstantRecordNative/1 \(system)/\(os.majorVersion).\(os.minorVersion) App/\(info["CFBundleShortVersionString"] as? String ?? "1.0")"
     }
 
     /// Load the tab's first page, once.
@@ -104,16 +108,41 @@ public final class HybridTab: NSObject, ObservableObject {
 
     private func go(_ href: String, replace: Bool = false) {
         guard let url = URL(string: href, relativeTo: web.url ?? server)?.absoluteURL else { return }
-        switch HybridNavigation.decide(url, server: server) {
+        switch decide(url) {
         case .outside: site.outside(url)
         case .refuse: break
         case .stay:
+            if let local = site.local {
+                let here = LocalPages.local(url)
+                Task {
+                    let target = await local.has(here) ? here : LocalPages.remote(url, server: server)
+                    self.move(to: target, replace: replace)
+                }
+                return
+            }
+            move(to: url, replace: replace)
+        }
+    }
+
+    private func decide(_ url: URL, mainFrame: Bool = true, method: String = "GET") -> HybridNavigation {
+        site.owns(url) ? .stay : HybridNavigation.decide(url, server: server, mainFrame: mainFrame, method: method)
+    }
+
+    /// The app's data changed: a page drawn from it is drawn again in place.
+    func recordsChanged() {
+        guard web.url?.scheme == LocalPages.scheme else { return }
+        run("""
+        const event = new CustomEvent("instant-record:records-changed", { cancelable: true })
+        if (window.dispatchEvent(event) && window.Turbo?.session?.refresh && !document.activeElement?.closest?.("form")) window.Turbo.session.refresh(location.href)
+        """)
+    }
+
+    private func move(to url: URL, replace: Bool) {
             asked = url
             // A page that is there moves itself, so that Turbo and history
             // are its own. Without one the web view loads.
-            guard web.url != nil, failure == nil else { web.load(URLRequest(url: url)); return }
+            guard let at = web.url, at.scheme == url.scheme, failure == nil else { web.load(URLRequest(url: url)); return }
             run("window.instantRecordHybrid.visit(url, replace)", ["url": url.absoluteString, "replace": replace])
-        }
     }
 
     /// A tap on a native element.
@@ -132,7 +161,7 @@ public final class HybridTab: NSObject, ObservableObject {
 
     /// The address a share element shares: its own, or the page's.
     public func shared(_ item: PageSignals.Item) -> URL {
-        item.shareURL.flatMap { URL(string: $0, relativeTo: web.url ?? server)?.absoluteURL } ?? web.url ?? server
+        (item.shareURL.flatMap { URL(string: $0, relativeTo: web.url ?? server)?.absoluteURL } ?? web.url ?? server).atServer(server)
     }
 
     func dismissToast() { toast = nil }
@@ -160,6 +189,7 @@ public final class HybridTab: NSObject, ObservableObject {
     // Only the main frame of the app's own server is listened to.
     private func trusts(_ message: WKScriptMessage) -> Bool {
         let from = message.frameInfo.securityOrigin
+        if from.protocol == LocalPages.scheme { return message.frameInfo.isMainFrame && site.local != nil && from.host == "app" }
         return message.frameInfo.isMainFrame && Origin(scheme: from.protocol, host: from.host, port: from.port) == Origin(server)
     }
 
@@ -194,8 +224,9 @@ public final class HybridTab: NSObject, ObservableObject {
     }
 
     private func share(_ address: String) {
-        guard let url = URL(string: address, relativeTo: web.url ?? server)?.absoluteURL, Origin(url) != nil else { return }
-        sharing = url
+        guard let url = URL(string: address, relativeTo: web.url ?? server)?.absoluteURL, site.owns(url) || Origin(url) != nil else { return }
+        // What is shared is the server's address: the device's opens nowhere else.
+        sharing = url.scheme == LocalPages.scheme ? LocalPages.remote(url, server: server) : url
     }
 
     private func feel(_ feedback: String) {
@@ -227,8 +258,19 @@ extension HybridTab: WKNavigationDelegate, WKUIDelegate {
         guard let url = action.request.url else { return decisionHandler(.cancel) }
         // No target frame is a new window, which this app has none of.
         let mainFrame = action.targetFrame?.isMainFrame ?? true
-        switch HybridNavigation.decide(url, server: server, mainFrame: mainFrame, method: action.request.httpMethod ?? "GET") {
+        let method = action.request.httpMethod ?? "GET"
+        switch decide(url, mainFrame: mainFrame, method: method) {
         case .stay:
+            // A link from a page on the device to one the library lacks.
+            if mainFrame, method == "GET", url.scheme == LocalPages.scheme, action.navigationType == .linkActivated, let local = site.local {
+                decisionHandler(.cancel)
+                Task {
+                    let here = await local.has(url)
+                    self.asked = here ? url : LocalPages.remote(url, server: server)
+                    self.web.load(URLRequest(url: self.asked!))
+                }
+                return
+            }
             if mainFrame { asked = url }
             decisionHandler(.allow)
         case .outside:
@@ -240,7 +282,7 @@ extension HybridTab: WKNavigationDelegate, WKUIDelegate {
 
     public func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         // decidePolicyFor has sent an address of another server outside.
-        if let url = action.request.url, HybridNavigation.decide(url, server: server) == .stay { webView.load(action.request) }
+        if let url = action.request.url, decide(url) == .stay { webView.load(action.request) }
         return nil
     }
 
@@ -316,4 +358,8 @@ extension HybridTab: WKNavigationDelegate, WKUIDelegate {
         completionHandler(panel.runModal() == .alertFirstButtonReturn)
     }
     #endif
+}
+
+private extension URL {
+    func atServer(_ server: URL) -> URL { scheme == LocalPages.scheme ? LocalPages.remote(self, server: server) : self }
 }

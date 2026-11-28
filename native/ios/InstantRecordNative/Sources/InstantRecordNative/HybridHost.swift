@@ -52,6 +52,8 @@ public final class HybridHost: ObservableObject {
         store = HybridConfigStore(server: site.server, defaults: defaults, exchange: exchange)
         config = store.kept() ?? .bare
         app?.site = site
+        // With compiled Rails its pages are drawn here, with or without a network.
+        if let app, app.drawsPages { site.draw(with: app) }
         show(config)
     }
 

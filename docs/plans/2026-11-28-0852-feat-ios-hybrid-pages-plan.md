@@ -79,7 +79,7 @@ A Ruby screen is compiled into the app binary, and so is a SwiftUI view. Outside
 - Considered and not built: more than one `screen` tab. The compiled library opens one database at a time. A second registered one falls back to its `path`.
 - Not built: sharing a web sign-in with the Ruby screen's sync. Their requests keep separate cookies, so a mixed app's screen data must be public or carry its own token. The README says so.
 - Config keys read: `app.entry_path`, `appearance.tint_color` (string or light and dark), and a tab's `title`, `titles`, `path`, `icon`, `icons.ios`, `key`, `badge`, `eager` and `screen`. Others are ignored, `auto_route` and `search` among them.
-- Not claimed: hybrid pages work offline. They are fetched. Compiled browser pages need a service worker, which a web view allows only for app-bound domains.
+- Superseded: hybrid pages work offline. They are fetched. Compiled browser pages need a service worker, which a web view allows only for app-bound domains.
 
 ---
 
@@ -87,7 +87,7 @@ A Ruby screen is compiled into the app binary, and so is a SwiftUI view. Outside
 
 ### Key Technical Decisions
 
-- KTD1. **Speak the gem's public contract and depend on the gem in the app, not in InstantRecord.** An app adds `gem "ruby_native"`. InstantRecord ships only the shell. `config_as_json` deep-copies the YAML, so `screen:` passes through. Contract source: `ruby_native` 0.21.1, `config/signals.yml` and `lib/ruby_native/helper.rb`.
+- KTD1. **Replaced 2026-11-28, user-directed:** no dependency on ruby_native; InstantRecord has its own helpers, config and markup, inspired by it, and pages are drawn on the device (`LocalPages`). What follows is the first version. **Speak the gem's public contract and depend on the gem in the app, not in InstantRecord.** An app adds `gem "ruby_native"`. InstantRecord ships only the shell. `config_as_json` deep-copies the YAML, so `screen:` passes through. Contract source: `ruby_native` 0.21.1, `config/signals.yml` and `lib/ruby_native/helper.rb`.
 - KTD2. **Follow Normal Mode: one web view for each tab, with its own history.** It needs no Turbo and no push stack, so Back is the web view's.
 - KTD3. **A page script gathers signals into one JSON snapshot, and Swift draws from it.** A `MutationObserver` sends a new snapshot when signals change. Tests run the script in a real web view on the Mac.
 - KTD4. **The user agent says `Ruby Native iOS/<version>/<build> iOS/<os>` and `RubyNative/0.21.1 InstantRecord/1`.** `native_app?` matches on that text, so it is a protocol token. The last token lets a server tell the shells apart.

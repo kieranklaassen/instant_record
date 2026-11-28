@@ -88,4 +88,4 @@ views.register("ProductView") { props, actions in ProductView(props: props, acti
 
 ## A view with no Ruby screen
 
-A tab or a route in `config/ruby_native.yml` can name a view directly. It is then given the address's params, all strings, and has no Ruby to send actions to. See [Mixing the three](mixing.md).
+A tab or a route in `config/native.yml` can name a view directly. It is then given the address's params, all strings, and has no Ruby to send actions to. See [Mixing the three](mixing.md).
