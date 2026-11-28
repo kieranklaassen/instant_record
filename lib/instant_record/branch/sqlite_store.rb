@@ -15,73 +15,104 @@ module InstantRecord
     # deltas while the staging branch is open; `restore_main!` reconnects
     # directly to that live `main` file without overwriting it.
     class SqliteStore
+      SQLITE_FILE_SUFFIXES = ["", "-wal", "-shm", "-journal"].freeze
+
       attr_reader :branch_path
 
-      def self.fork!(name:, directory: nil)
-        config = ActiveRecord::Base.connection_db_config.configuration_hash.dup
-        adapter = config[:adapter].to_s
-        unless adapter.include?("sqlite")
-          raise Branch::Error, "Staging branches require a local SQLite database (got #{adapter.inspect})"
-        end
+      class << self
+        def fork!(name:, directory: nil)
+          config = ActiveRecord::Base.connection_db_config.configuration_hash.dup
+          adapter = config[:adapter].to_s
+          unless adapter.include?("sqlite")
+            raise Branch::Error, "Staging branches require a local SQLite database (got #{adapter.inspect})"
+          end
 
-        db_spec = config[:database].to_s
-        memory = db_spec == ":memory:" || db_spec.empty?
-        token = SecureRandom.hex(8)
-        safe_name = name.to_s.gsub(/[^a-zA-Z0-9_-]+/, "-").slice(0, 32)
-        safe_name = "staging" if safe_name.empty?
+          db_spec = config[:database].to_s
+          memory = db_spec == ":memory:" || db_spec.empty?
+          token = SecureRandom.hex(8)
+          safe_name = sanitize_name(name)
 
-        work_dir = directory || (memory ? Dir.mktmpdir("instant_record_branch_") : File.dirname(File.expand_path(db_spec)))
-        FileUtils.mkdir_p(work_dir)
-        owns_dir = memory && directory.nil?
+          work_dir = directory || (memory ? Dir.mktmpdir("instant_record_branch_") : File.dirname(File.expand_path(db_spec)))
+          owns_dir = memory && directory.nil?
+          branch_path = File.join(work_dir, ".ir-branch-#{safe_name}-#{token}.sqlite3")
+          main_backup_path = memory ? File.join(work_dir, ".ir-main-#{token}.sqlite3") : nil
 
-        branch_path = File.join(work_dir, ".ir-branch-#{safe_name}-#{token}.sqlite3")
-        main_backup_path = memory ? File.join(work_dir, ".ir-main-#{token}.sqlite3") : nil
+          store = new(
+            main_config: config,
+            branch_path: branch_path,
+            main_backup_path: main_backup_path,
+            owns_dir: owns_dir ? work_dir : nil
+          )
 
-        src_raw = ActiveRecord::Base.connection.raw_connection
-        if memory
-          backup_database(src_raw, main_backup_path)
-          FileUtils.cp(main_backup_path, branch_path)
-        else
-          backup_database(src_raw, branch_path)
-        end
-
-        store = new(
-          main_config: config,
-          branch_path: branch_path,
-          main_backup_path: main_backup_path,
-          owns_dir: owns_dir ? work_dir : nil
-        )
-        store.activate_branch!
-        store
-      end
-
-      def self.backup_database(source_db, destination_path)
-        require "sqlite3"
-        dest = SQLite3::Database.new(destination_path)
-        begin
-          backup = SQLite3::Backup.new(dest, "main", source_db, "main")
+          activating = false
+          completed = false
           begin
-            backup.step(-1)
+            FileUtils.mkdir_p(work_dir)
+            src_raw = ActiveRecord::Base.connection.raw_connection
+            if memory
+              backup_database(src_raw, main_backup_path)
+              FileUtils.cp(main_backup_path, branch_path)
+            else
+              backup_database(src_raw, branch_path)
+            end
+
+            activating = true
+            store.activate_branch!
+            completed = true
+            store
           ensure
-            backup.finish
+            unless completed
+              if activating
+                begin
+                  store.restore_main!
+                rescue StandardError
+                  nil
+                end
+              end
+              begin
+                store.cleanup!
+              rescue StandardError
+                nil
+              end
+            end
+          end
+        end
+
+        def backup_database(source_db, destination_path)
+          require "sqlite3"
+          dest = SQLite3::Database.new(destination_path)
+          copy_database(source_db, dest)
+        ensure
+          dest&.close
+        end
+
+        def restore_into_memory(source_path, memory_db)
+          require "sqlite3"
+          src = SQLite3::Database.new(source_path)
+          copy_database(src, memory_db)
+        ensure
+          src&.close
+        end
+
+        private
+
+        def copy_database(source_db, destination_db)
+          backup = SQLite3::Backup.new(destination_db, "main", source_db, "main")
+          status = backup.step(-1)
+          unless status == SQLite3::Constants::ErrorCode::DONE
+            raise Branch::Error, "SQLite backup failed with status #{status}"
           end
         ensure
-          dest.close
+          backup&.finish
         end
-      end
 
-      def self.restore_into_memory(source_path, memory_db)
-        require "sqlite3"
-        src = SQLite3::Database.new(source_path)
-        begin
-          backup = SQLite3::Backup.new(memory_db, "main", src, "main")
-          begin
-            backup.step(-1)
-          ensure
-            backup.finish
-          end
-        ensure
-          src.close
+        def sanitize_name(name)
+          cleaned = name.to_s
+            .gsub(/[^a-zA-Z0-9_-]+/, "-")
+            .gsub(/\A-+|-+\z/, "")
+            .slice(0, 32)
+            .sub(/-+\z/, "")
+          cleaned.empty? ? "staging" : cleaned
         end
       end
 
@@ -105,18 +136,20 @@ module InstantRecord
       end
 
       def restore_main!
+        reconnect_to(@main_config)
         if @main_backup_path
-          reconnect_to(@main_config)
           self.class.restore_into_memory(@main_backup_path, ActiveRecord::Base.connection.raw_connection)
-        else
-          reconnect_to(@main_config)
         end
       end
 
       def cleanup!
         remove_sqlite_files(@branch_path)
-        remove_sqlite_files(@main_backup_path) if @main_backup_path
-        FileUtils.rm_rf(@owns_dir) if @owns_dir && File.directory?(@owns_dir)
+      ensure
+        begin
+          remove_sqlite_files(@main_backup_path)
+        ensure
+          FileUtils.rm_rf(@owns_dir) if @owns_dir && !@owns_dir.empty?
+        end
       end
 
       private
@@ -130,9 +163,8 @@ module InstantRecord
       def remove_sqlite_files(base_path)
         return unless base_path
 
-        ["", "-wal", "-shm", "-journal"].each do |suffix|
-          file = "#{base_path}#{suffix}"
-          FileUtils.rm_f(file) if File.exist?(file)
+        SQLITE_FILE_SUFFIXES.each do |suffix|
+          FileUtils.rm_f("#{base_path}#{suffix}")
         end
       end
     end
