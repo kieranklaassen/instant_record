@@ -1,5 +1,5 @@
 require_relative "../native/contract"
-require_relative "swift_codegen"
+require_relative "codegen_naming"
 
 module InstantRecord
   class Compiler
@@ -7,6 +7,9 @@ module InstantRecord
     # extracted `InstantRecord::Native::Contract` definitions (optional target
     # alongside Swift for Android / Jetpack Compose hosts).
     module KotlinCodegen
+      include CodegenNaming
+      extend CodegenNaming
+
       KEYWORDS = %w[
         as break class continue do else false for fun if in interface is null object
         package return super this throw true try typealias typeof val var when while
@@ -69,43 +72,66 @@ module InstantRecord
         nested_fields = fields.select { |f| f.one? || f.many? }
         has_body = top_level || nested_fields.any?
 
-        if fields.empty?
-          lines << "#{indent}class #{name}#{has_body ? ' {' : ''}"
-        else
-          lines << "#{indent}data class #{name}("
-          fields.each do |field|
-            camel = SwiftCodegen.camel_case(field.name)
-            ident = kotlin_ident(camel)
-            annotation = serializable && camel != field.name ? %(@SerialName(#{kotlin_string(field.name)}) ) : ""
-            default_suffix = field.optional? ? " = null" : ""
-            lines << "#{indent}    #{annotation}val #{ident}: #{kotlin_field_type(field)}#{default_suffix},"
-          end
-          lines << "#{indent})#{has_body ? ' {' : ''}"
-        end
+        lines.concat(render_data_class_header(
+          name: name,
+          fields: fields,
+          indent: indent,
+          has_body: has_body,
+          serializable: serializable
+        ))
 
         if has_body
-          inner = "#{indent}    "
-          if top_level
-            lines << "#{inner}companion object {"
-            lines << %(#{inner}    const val COMPONENT_NAME: String = #{kotlin_string(component_name)})
-            lines << "#{inner}}"
-          end
-
-          nested_fields.each do |field|
-            lines << "" if top_level || nested_fields.first != field
-            lines.concat(render_data_class(
-              name: SwiftCodegen.nested_type_name(field),
-              fields: field.fields,
-              indent: inner,
-              top_level: false,
-              serializable: serializable
-            ))
-          end
-
-          lines << "#{indent}}"
+          lines.concat(render_data_class_body(
+            indent: indent,
+            top_level: top_level,
+            component_name: component_name,
+            nested_fields: nested_fields,
+            serializable: serializable
+          ))
         end
 
         lines
+      end
+
+      def render_data_class_header(name:, fields:, indent:, has_body:, serializable:)
+        open_brace = has_body ? " {" : ""
+        return ["#{indent}class #{name}#{open_brace}"] if fields.empty?
+
+        params = fields.map { |field| render_data_class_field(field, indent: indent, serializable: serializable) }
+        ["#{indent}data class #{name}(", *params, "#{indent})#{open_brace}"]
+      end
+
+      def render_data_class_field(field, indent:, serializable:)
+        camel = camel_case(field.name)
+        ident = kotlin_ident(camel)
+        annotation = serializable && camel != field.name ? %(@SerialName(#{kotlin_string(field.name)}) ) : ""
+        default_suffix = field.optional? ? " = null" : ""
+        "#{indent}    #{annotation}val #{ident}: #{kotlin_field_type(field)}#{default_suffix},"
+      end
+
+      def render_data_class_body(indent:, top_level:, component_name:, nested_fields:, serializable:)
+        inner = "#{indent}    "
+        sections = []
+
+        if top_level
+          sections << [
+            "#{inner}companion object {",
+            %(#{inner}    const val COMPONENT_NAME: String = #{kotlin_string(component_name)}),
+            "#{inner}}"
+          ]
+        end
+
+        nested_fields.each do |field|
+          sections << render_data_class(
+            name: nested_type_name(field),
+            fields: field.fields,
+            indent: inner,
+            top_level: false,
+            serializable: serializable
+          )
+        end
+
+        [*sections.flat_map { |section| ["", *section] }.drop(1), "#{indent}}"]
       end
 
       def render_action_interface(interface_name, actions)
@@ -118,61 +144,70 @@ module InstantRecord
 
         actions.each do |action|
           lines << ""
-          type_name = SwiftCodegen.pascal_case(action.name)
-          if action.params.empty?
-            lines << "    data object #{type_name} : #{interface_name} {"
-            lines << "        override val actionName: String = #{kotlin_string(action.name)}"
-            lines << "        override val actionArgs: Map<String, String> = emptyMap()"
-            lines << "        override val actionValues: Map<String, String> = emptyMap()"
-            lines << "    }"
-          else
-            lines << "    data class #{type_name}("
-            action.params.each do |param|
-              ident = kotlin_ident(SwiftCodegen.camel_case(param.name))
-              base = SCALAR_TYPES.fetch(param.type)
-              type = param.optional? ? "#{base}?" : base
-              default_suffix = param.optional? ? " = null" : ""
-              lines << "        val #{ident}: #{type}#{default_suffix},"
-            end
-            lines << "    ) : #{interface_name} {"
-            lines << "        override val actionName: String = #{kotlin_string(action.name)}"
-            lines.concat(render_action_map("actionArgs", action.args))
-            lines.concat(render_action_map("actionValues", action.values))
-            lines << "    }"
-          end
+          lines.concat(render_action_member(interface_name, action))
         end
 
         lines << "}"
         lines
       end
 
-      def render_action_map(property_name, params)
-        if params.empty?
-          return ["        override val #{property_name}: Map<String, String> = emptyMap()"]
+      def render_action_member(interface_name, action)
+        type_name = pascal_case(action.name)
+        if action.params.empty?
+          return [
+            "    data object #{type_name} : #{interface_name} {",
+            "        override val actionName: String = #{kotlin_string(action.name)}",
+            "        override val actionArgs: Map<String, String> = emptyMap()",
+            "        override val actionValues: Map<String, String> = emptyMap()",
+            "    }"
+          ]
         end
 
+        params = action.params.map { |param| render_action_param(param) }
+        [
+          "    data class #{type_name}(",
+          *params,
+          "    ) : #{interface_name} {",
+          "        override val actionName: String = #{kotlin_string(action.name)}",
+          *render_action_map("actionArgs", action.args),
+          *render_action_map("actionValues", action.values),
+          "    }"
+        ]
+      end
+
+      def render_action_param(param)
+        ident = kotlin_ident(camel_case(param.name))
+        base = SCALAR_TYPES.fetch(param.type)
+        type = param.optional? ? "#{base}?" : base
+        default_suffix = param.optional? ? " = null" : ""
+        "        val #{ident}: #{type}#{default_suffix},"
+      end
+
+      def render_action_map(property_name, params)
+        return ["        override val #{property_name}: Map<String, String> = emptyMap()"] if params.empty?
+
         if params.any?(&:optional?)
-          lines = ["        override val #{property_name}: Map<String, String> = buildMap {"]
-          params.each do |param|
-            ident = kotlin_ident(SwiftCodegen.camel_case(param.name))
-            encoded = param.type == "string" ? "it" : "it.toString()"
+          entries = params.map do |param|
+            ident = kotlin_ident(camel_case(param.name))
+            key = kotlin_string(param.name)
             if param.optional?
-              lines << "            #{ident}?.let { put(#{kotlin_string(param.name)}, #{encoded}) }"
+              "            #{ident}?.let { put(#{key}, #{kotlin_to_string_expr('it', param.type)}) }"
             else
-              direct = param.type == "string" ? ident : "#{ident}.toString()"
-              lines << "            put(#{kotlin_string(param.name)}, #{direct})"
+              "            put(#{key}, #{kotlin_to_string_expr(ident, param.type)})"
             end
           end
-          lines << "        }"
-          lines
+          ["        override val #{property_name}: Map<String, String> = buildMap {", *entries, "        }"]
         else
           entries = params.map do |param|
-            ident = kotlin_ident(SwiftCodegen.camel_case(param.name))
-            expr = param.type == "string" ? ident : "#{ident}.toString()"
-            "#{kotlin_string(param.name)} to #{expr}"
+            ident = kotlin_ident(camel_case(param.name))
+            "#{kotlin_string(param.name)} to #{kotlin_to_string_expr(ident, param.type)}"
           end
           ["        override val #{property_name}: Map<String, String> = mapOf(#{entries.join(', ')})"]
         end
+      end
+
+      def kotlin_to_string_expr(expr, type)
+        type == "string" ? expr : "#{expr}.toString()"
       end
 
       def kotlin_field_type(field)
@@ -181,9 +216,9 @@ module InstantRecord
           when :scalar
             SCALAR_TYPES.fetch(field.type)
           when :one
-            SwiftCodegen.nested_type_name(field)
+            nested_type_name(field)
           when :many
-            "List<#{SwiftCodegen.nested_type_name(field)}>"
+            "List<#{nested_type_name(field)}>"
           when :many_scalar
             "List<#{SCALAR_TYPES.fetch(field.type)}>"
           end
@@ -192,7 +227,7 @@ module InstantRecord
 
       def tree_needs_serial_name?(fields)
         fields.any? do |field|
-          SwiftCodegen.camel_case(field.name) != field.name ||
+          camel_case(field.name) != field.name ||
             ((field.one? || field.many?) && tree_needs_serial_name?(field.fields))
         end
       end
@@ -202,7 +237,7 @@ module InstantRecord
       end
 
       def kotlin_string(value)
-        SwiftCodegen.swift_string(value).gsub("$", "\\$")
+        %("#{escape_string(value).gsub('$', '\\$')}")
       end
     end
   end

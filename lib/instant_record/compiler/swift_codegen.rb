@@ -1,4 +1,5 @@
 require_relative "../native/contract"
+require_relative "codegen_naming"
 
 module InstantRecord
   class Compiler
@@ -6,6 +7,9 @@ module InstantRecord
     # `NativeAction` enums, and `@Observable` state stores from extracted
     # `InstantRecord::Native::Contract` definitions.
     module SwiftCodegen
+      include CodegenNaming
+      extend CodegenNaming
+
       KEYWORDS = %w[
         associatedtype class deinit enum extension fileprivate func import init inout internal
         let open operator private precedencegroup protocol public rethrows static struct
@@ -21,6 +25,9 @@ module InstantRecord
         "bool" => "Bool",
         "date" => "Date"
       }.freeze
+
+      StateField = Data.define(:camel, :ident, :target, :type, :keyword)
+      private_constant :StateField
 
       module_function
 
@@ -71,15 +78,11 @@ module InstantRecord
         inner = "#{indent}    "
         sections = []
 
-        if top_level
-          constants = []
-          constants << "#{inner}public typealias Action = #{action_type}" if action_type
-          constants << %(#{inner}public static let componentName = #{swift_string(component_name)})
-          sections << constants
-        end
+        sections << render_props_header(inner, component_name, action_type) if top_level
 
-        nested_fields = fields.select { |f| f.one? || f.many? }
-        nested_fields.each do |field|
+        fields.each do |field|
+          next unless field.one? || field.many?
+
           sections << render_props_struct(
             name: nested_type_name(field),
             fields: field.fields,
@@ -88,172 +91,216 @@ module InstantRecord
           )
         end
 
-        if fields.empty?
-          sections << ["#{inner}public init() {}"]
-        else
-          properties = fields.map do |field|
-            "#{inner}public let #{swift_ident(camel_case(field.name))}: #{swift_field_type(field)}"
-          end
-          params = fields.map do |field|
-            param = "#{swift_ident(camel_case(field.name))}: #{swift_field_type(field)}"
-            field.optional? ? "#{param} = nil" : param
-          end
-          assignments = fields.map do |field|
-            ident = swift_ident(camel_case(field.name))
-            "#{inner}    self.#{ident} = #{ident}"
-          end
-          sections << properties
-          sections << ["#{inner}public init(#{params.join(', ')}) {", *assignments, "#{inner}}"]
+        sections.concat(render_props_members(fields, inner))
+        sections << render_coding_keys(fields, inner) if needs_coding_keys?(fields)
+
+        ["#{indent}public struct #{name}: #{protocols} {", *join_sections(sections), "#{indent}}"]
+      end
+
+      def render_props_header(inner, component_name, action_type)
+        lines = []
+        lines << "#{inner}public typealias Action = #{action_type}" if action_type
+        lines << %(#{inner}public static let componentName = #{swift_string(component_name)})
+        lines
+      end
+
+      def render_props_members(fields, inner)
+        return [["#{inner}public init() {}"]] if fields.empty?
+
+        properties = []
+        params = []
+        assignments = []
+
+        fields.each do |field|
+          ident = swift_ident(camel_case(field.name))
+          type = swift_field_type(field)
+          properties << "#{inner}public let #{ident}: #{type}"
+          params << (field.optional? ? "#{ident}: #{type} = nil" : "#{ident}: #{type}")
+          assignments << "#{inner}    self.#{ident} = #{ident}"
         end
 
-        if needs_coding_keys?(fields)
-          cases = fields.map do |field|
-            camel = camel_case(field.name)
-            ident = swift_ident(camel)
-            camel == field.name ? "#{inner}    case #{ident}" : "#{inner}    case #{ident} = #{swift_string(field.name)}"
-          end
-          sections << ["#{inner}private enum CodingKeys: String, CodingKey {", *cases, "#{inner}}"]
-        end
+        [
+          properties,
+          ["#{inner}public init(#{params.join(', ')}) {", *assignments, "#{inner}}"]
+        ]
+      end
 
-        # One blank line between sections, none before the first.
-        body = sections.flat_map { |section| ["", *section] }.drop(1)
-        ["#{indent}public struct #{name}: #{protocols} {", *body, "#{indent}}"]
+      def render_coding_keys(fields, inner)
+        cases = fields.map do |field|
+          camel = camel_case(field.name)
+          ident = swift_ident(camel)
+          camel == field.name ? "#{inner}    case #{ident}" : "#{inner}    case #{ident} = #{swift_string(field.name)}"
+        end
+        ["#{inner}private enum CodingKeys: String, CodingKey {", *cases, "#{inner}}"]
       end
 
       def render_action_enum(enum_name, actions)
-        lines = ["public enum #{enum_name}: NativeAction, Equatable, Sendable {"]
+        sections = [
+          actions.map { |action| render_action_case(action) },
+          render_action_name_property(actions),
+          render_action_dictionary("actionArgs", actions, :args),
+          render_action_dictionary("actionValues", actions, :values)
+        ]
 
-        actions.each do |action|
+        ["public enum #{enum_name}: NativeAction, Equatable, Sendable {", *join_sections(sections), "}"]
+      end
+
+      def render_action_case(action)
+        case_name = swift_ident(camel_case(action.name))
+        return "    case #{case_name}" if action.params.empty?
+
+        params = action.params.map do |param|
+          base = SCALAR_TYPES.fetch(param.type)
+          type = param.optional? ? "#{base}?" : base
+          "#{swift_ident(camel_case(param.name))}: #{type}"
+        end
+        "    case #{case_name}(#{params.join(', ')})"
+      end
+
+      def render_action_name_property(actions)
+        cases = actions.map do |action|
           case_name = swift_ident(camel_case(action.name))
-          if action.params.empty?
-            lines << "    case #{case_name}"
-          else
-            params = action.params.map do |param|
-              base = SCALAR_TYPES.fetch(param.type)
-              type = param.optional? ? "#{base}?" : base
-              "#{swift_ident(camel_case(param.name))}: #{type}"
-            end
-            lines << "    case #{case_name}(#{params.join(', ')})"
-          end
+          "        case .#{case_name}: #{swift_string(action.name)}"
         end
 
-        lines << ""
-        lines << "    public var actionName: String {"
-        lines << "        switch self {"
-        actions.each do |action|
-          case_name = swift_ident(camel_case(action.name))
-          lines << "        case .#{case_name}: #{swift_string(action.name)}"
-        end
-        lines << "        }"
-        lines << "    }"
-
-        lines << ""
-        lines.concat(render_action_dictionary("actionArgs", actions, :args))
-        lines << ""
-        lines.concat(render_action_dictionary("actionValues", actions, :values))
-
-        lines << "}"
-        lines
+        [
+          "    public var actionName: String {",
+          "        switch self {",
+          *cases,
+          "        }",
+          "    }"
+        ]
       end
 
       def render_action_dictionary(property_name, actions, slot_method)
-        lines = [
-          "    public var #{property_name}: [String: String] {",
-          "        switch self {"
-        ]
+        cases = actions.flat_map { |action| render_action_dictionary_case(action, slot_method) }
 
-        actions.each do |action|
-          case_name = swift_ident(camel_case(action.name))
-          selected = action.public_send(slot_method)
-          if selected.empty?
-            lines << "        case .#{case_name}: return [:]"
-          else
-            bindings = action.params.map do |param|
-              selected.include?(param) ? "let #{swift_ident(camel_case(param.name))}" : "_"
-            end
-            if selected.any?(&:optional?)
-              lines << "        case .#{case_name}(#{bindings.join(', ')}):"
-              lines << "            var out: [String: String] = [:]"
-              selected.each do |param|
-                ident = swift_ident(camel_case(param.name))
-                if param.optional?
-                  lines << "            if let #{ident} { out[#{swift_string(param.name)}] = #{encode_expr(ident, param.type)} }"
-                else
-                  lines << "            out[#{swift_string(param.name)}] = #{encode_expr(ident, param.type)}"
-                end
-              end
-              lines << "            return out"
-            else
-              pairs = selected.map do |param|
-                ident = swift_ident(camel_case(param.name))
-                "#{swift_string(param.name)}: #{encode_expr(ident, param.type)}"
-              end
-              lines << "        case .#{case_name}(#{bindings.join(', ')}): return [#{pairs.join(', ')}]"
-            end
-          end
+        [
+          "    public var #{property_name}: [String: String] {",
+          "        switch self {",
+          *cases,
+          "        }",
+          "    }"
+        ]
+      end
+
+      def render_action_dictionary_case(action, slot_method)
+        case_name = swift_ident(camel_case(action.name))
+        selected = action.public_send(slot_method)
+        return ["        case .#{case_name}: return [:]"] if selected.empty?
+
+        bindings = action.params.map do |param|
+          selected.include?(param) ? "let #{swift_ident(camel_case(param.name))}" : "_"
+        end
+        pattern = "        case .#{case_name}(#{bindings.join(', ')})"
+
+        return render_optional_action_dictionary_case(pattern, selected) if selected.any?(&:optional?)
+
+        pairs = selected.map do |param|
+          ident = swift_ident(camel_case(param.name))
+          "#{swift_string(param.name)}: #{encode_expr(ident, param.type)}"
+        end
+        ["#{pattern}: return [#{pairs.join(', ')}]"]
+      end
+
+      def render_optional_action_dictionary_case(pattern, selected)
+        entries = selected.map do |param|
+          ident = swift_ident(camel_case(param.name))
+          assignment = "out[#{swift_string(param.name)}] = #{encode_expr(ident, param.type)}"
+          param.optional? ? "            if let #{ident} { #{assignment} }" : "            #{assignment}"
         end
 
-        lines << "        }"
-        lines << "    }"
-        lines
+        [
+          "#{pattern}:",
+          "            var out: [String: String] = [:]",
+          *entries,
+          "            return out"
+        ]
       end
 
       def render_observable_state(state_name, props_name, action_name, fields)
-        field_names = fields.map { |f| camel_case(f.name) }
-        snapshot_prop = field_names.include?("snapshot") ? "_snapshot" : "snapshot"
-        lines = [
+        state_fields = fields.map { |field| build_state_field(field, props_name) }
+        snapshot_prop = state_fields.any? { |field| field.camel == "snapshot" } ? "_snapshot" : "snapshot"
+
+        sections = [
+          ["    public typealias Props = #{props_name}"],
+          render_state_properties(state_fields, snapshot_prop, props_name),
+          render_state_init(state_fields, snapshot_prop, props_name),
+          render_state_apply(state_fields, snapshot_prop, props_name)
+        ]
+        sections << render_state_send(action_name) if action_name
+
+        [
           "@Observable",
           "public final class #{state_name}: NativePropsState {",
-          "    public typealias Props = #{props_name}",
-          ""
+          *join_sections(sections),
+          "}"
         ]
+      end
 
-        fields.each do |field|
-          camel = camel_case(field.name)
-          ident = swift_ident(camel)
-          type = swift_field_type(field, qualifier: props_name)
-          if KEYWORDS.include?(camel)
-            storage = state_storage_name(camel)
-            lines << "    private var #{storage}: #{type}"
-            lines << "    public var #{ident}: #{type} { #{storage} }"
+      def build_state_field(field, props_name)
+        camel = camel_case(field.name)
+        ident = swift_ident(camel)
+        keyword = KEYWORDS.include?(camel)
+        StateField.new(
+          camel: camel,
+          ident: ident,
+          target: keyword ? state_storage_name(camel) : ident,
+          type: swift_field_type(field, qualifier: props_name),
+          keyword: keyword
+        )
+      end
+
+      def render_state_properties(state_fields, snapshot_prop, props_name)
+        lines = state_fields.flat_map do |field|
+          if field.keyword
+            [
+              "    private var #{field.target}: #{field.type}",
+              "    public var #{field.ident}: #{field.type} { #{field.target} }"
+            ]
           else
-            lines << "    public private(set) var #{ident}: #{type}"
+            ["    public private(set) var #{field.ident}: #{field.type}"]
           end
         end
         lines << "    public private(set) var #{snapshot_prop}: #{props_name}"
         lines << "    @ObservationIgnored private let _actions: TypedActions<#{props_name}.Action>"
-        lines << ""
-        lines << "    public init(props: #{props_name}, actions: TypedActions<#{props_name}.Action>) {"
-        fields.each do |field|
-          camel = camel_case(field.name)
-          ident = swift_ident(camel)
-          target = KEYWORDS.include?(camel) ? state_storage_name(camel) : ident
-          lines << "        self.#{target} = props.#{ident}"
-        end
-        lines << "        self.#{snapshot_prop} = props"
-        lines << "        self._actions = actions"
-        lines << "    }"
-        lines << ""
-        lines << "    public func apply(_ props: #{props_name}) {"
-        lines << "        guard self.#{snapshot_prop} != props else { return }"
-        fields.each do |field|
-          camel = camel_case(field.name)
-          ident = swift_ident(camel)
-          target = KEYWORDS.include?(camel) ? state_storage_name(camel) : ident
-          lines << "        if self.#{target} != props.#{ident} { self.#{target} = props.#{ident} }"
-        end
-        lines << "        self.#{snapshot_prop} = props"
-        lines << "    }"
-
-        if action_name
-          lines << ""
-          lines << "    public func send(_ action: #{action_name}) {"
-          lines << "        _actions.send(action)"
-          lines << "    }"
-        end
-
-        lines << "}"
         lines
+      end
+
+      def render_state_init(state_fields, snapshot_prop, props_name)
+        assignments = state_fields.map { |field| "        self.#{field.target} = props.#{field.ident}" }
+        [
+          "    public init(props: #{props_name}, actions: TypedActions<#{props_name}.Action>) {",
+          *assignments,
+          "        self.#{snapshot_prop} = props",
+          "        self._actions = actions",
+          "    }"
+        ]
+      end
+
+      def render_state_apply(state_fields, snapshot_prop, props_name)
+        updates = state_fields.map do |field|
+          "        if self.#{field.target} != props.#{field.ident} { self.#{field.target} = props.#{field.ident} }"
+        end
+        [
+          "    public func apply(_ props: #{props_name}) {",
+          "        guard self.#{snapshot_prop} != props else { return }",
+          *updates,
+          "        self.#{snapshot_prop} = props",
+          "    }"
+        ]
+      end
+
+      def render_state_send(action_name)
+        [
+          "    public func send(_ action: #{action_name}) {",
+          "        _actions.send(action)",
+          "    }"
+        ]
+      end
+
+      def join_sections(sections)
+        sections.flat_map { |section| ["", *section] }.drop(1)
       end
 
       def state_storage_name(camel)
@@ -281,37 +328,8 @@ module InstantRecord
         type == "string" ? ident : "NativeWire.encode(#{ident})"
       end
 
-      def nested_type_name(field)
-        return field.type_name if field.type_name
-
-        base = field.many? ? singularize(field.name) : field.name
-        pascal_case(base)
-      end
-
       def needs_coding_keys?(fields)
         fields.any? { |field| camel_case(field.name) != field.name }
-      end
-
-      def camel_case(name)
-        parts = name.to_s.split("_")
-        return name.to_s if parts.length <= 1
-
-        parts.first + parts[1..].map { |part| part.empty? ? "" : part[0].upcase + part[1..] }.join
-      end
-
-      def pascal_case(name)
-        name.to_s.split("_").map { |part| part.empty? ? "" : part[0].upcase + part[1..] }.join
-      end
-
-      def singularize(name)
-        word = name.to_s
-        return "#{word[0..-4]}y" if word.end_with?("ies") && word.length > 3
-        return word[0..-3] if word.match?(/(?:ch|sh|x|z|ss)es\z/)
-        return "person" if word == "people"
-        return "child" if word == "children"
-        return word[0..-2] if word.end_with?("s") && !word.end_with?("ss") && word.length > 1
-
-        "#{word}_item"
       end
 
       def swift_ident(name)
@@ -319,13 +337,7 @@ module InstantRecord
       end
 
       def swift_string(value)
-        escaped = value.to_s
-          .gsub("\\", "\\\\")
-          .gsub("\"", "\\\"")
-          .gsub("\n", "\\n")
-          .gsub("\r", "\\r")
-          .gsub("\t", "\\t")
-        %("#{escaped}")
+        %("#{escape_string(value)}")
       end
     end
   end
