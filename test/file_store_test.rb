@@ -1,6 +1,8 @@
 require "test_helper"
 require "tmpdir"
 require "stringio"
+require "rack/mock"
+require "rack/request"
 
 class FileStoreTest < Minitest::Test
   def setup
@@ -14,6 +16,27 @@ class FileStoreTest < Minitest::Test
 
   def append(bytes, at:, key: "clip/one", upload: "first")
     @store.append(key, upload, StringIO.new(bytes), at: at, length: bytes.bytesize)
+  end
+
+  def stub_singleton(target, method_name, replacement)
+    singleton = target.singleton_class
+    had_own = singleton.method_defined?(method_name, false)
+    original = target.method(method_name)
+    singleton.remove_method(method_name) if had_own
+    singleton.define_method(method_name) { |*args, **kwargs, &block| replacement.call(*args, **kwargs, &block) }
+    yield
+  ensure
+    singleton.remove_method(method_name) if singleton.method_defined?(method_name, false)
+    singleton.define_method(method_name, original) if had_own
+  end
+
+  def serve(key, method: "GET", headers: {})
+    env = Rack::MockRequest.env_for("/#{key}", { method: method }.merge(headers))
+    status, response_headers, response_body = @store.serve(key, Rack::Request.new(env))
+    bytes = +""
+    response_body.each { |part| bytes << part }
+    response_body.close if response_body.respond_to?(:close)
+    [status, response_headers, bytes]
   end
 
   def test_pieces_make_the_file_when_the_last_one_lands
@@ -76,20 +99,19 @@ class FileStoreTest < Minitest::Test
     append("hello", at: 0)
     failure = IOError.new("flush failed")
     original_open = File.method(:open)
-    File.define_singleton_method(:open) do |*args, &block|
+    wrapped_open = lambda do |*args, &block|
       original_open.call(*args) do |file|
         file.define_singleton_method(:fsync) { raise failure }
         block.call(file)
       end
     end
 
-    begin
+    stub_singleton(File, :open, wrapped_open) do
       error = assert_raises(IOError) { append(" world", at: 5) }
       assert_same failure, error
-    ensure
-      File.define_singleton_method(:open, original_open)
     end
 
+    refute_includes File.singleton_methods(false), :open
     assert_equal 5, @store.offset("clip/one", "first")
     assert_equal 11, append(" world", at: 5)
     @store.finish("clip/one", "first")
@@ -120,11 +142,8 @@ class FileStoreTest < Minitest::Test
       false
     end
 
-    @store.define_singleton_method(:exist?) { |key| checked.call(key) }
-    begin
+    stub_singleton(@store, :exist?, checked) do
       assert @store.finish("clip/one", "first")
-    ensure
-      @store.singleton_class.remove_method(:exist?)
     end
 
     assert_equal "second", File.binread(@store.path("clip/one"))
@@ -170,15 +189,13 @@ class FileStoreTest < Minitest::Test
     gone = "#{@store.path('clip/one')}.gone.part"
     File.utime(Time.now - 3 * 86_400, Time.now - 3 * 86_400, old)
     original_mtime = File.method(:mtime)
-    File.define_singleton_method(:mtime) do |path|
+    wrapped_mtime = lambda do |path|
       File.unlink(path) if path == gone
       original_mtime.call(path)
     end
 
-    begin
+    stub_singleton(File, :mtime, wrapped_mtime) do
       assert_equal 1, @store.sweep(before: Time.now - 86_400)
-    ensure
-      File.define_singleton_method(:mtime, original_mtime)
     end
 
     refute File.exist?(gone)
@@ -223,5 +240,100 @@ class FileStoreTest < Minitest::Test
     assert_equal 16, explicit.chunk_size
   ensure
     InstantRecord.config.file_chunk_size = previous
+  end
+
+  def test_serve_returns_full_file_ranges_and_head
+    append("hello world", at: 0)
+    @store.finish("clip/one", "first")
+
+    status, headers, body = serve("clip/one")
+    assert_equal 200, status
+    assert_equal "hello world", body
+    assert_equal "11", headers["content-length"]
+    assert_equal "application/octet-stream", headers["content-type"]
+
+    range_status, range_headers, range_body = serve("clip/one", headers: { "HTTP_RANGE" => "bytes=6-10" })
+    assert_equal 206, range_status
+    assert_equal "world", range_body
+    assert_equal "bytes 6-10/11", range_headers["content-range"]
+    assert_equal "5", range_headers["content-length"]
+
+    head_status, head_headers, head_body = serve("clip/one", method: "HEAD")
+    assert_equal 200, head_status
+    assert_equal "11", head_headers["content-length"]
+    assert_empty head_body
+  end
+
+  def test_discard_removes_only_the_named_partial_and_is_idempotent
+    append("aaaa", at: 0, upload: "first")
+    append("bbbb", at: 0, upload: "second")
+
+    @store.discard("clip/one", "first")
+    assert_equal 0, @store.offset("clip/one", "first")
+    assert_equal 4, @store.offset("clip/one", "second")
+
+    # Discarding again or discarding an absent upload is a clean no-op.
+    @store.discard("clip/one", "first")
+    @store.discard("clip/one", "never-started")
+
+    @store.finish("clip/one", "second")
+    @store.discard("clip/one", "second")
+    assert @store.exist?("clip/one")
+    assert_equal "bbbb", File.binread(@store.path("clip/one"))
+
+    assert_raises(ArgumentError) { @store.discard("clip/one", "../bad") }
+  end
+
+  def test_delete_is_idempotent_for_missing_keys
+    @store.delete("clip/missing")
+    append("data", at: 0)
+    @store.finish("clip/one", "first")
+
+    @store.delete("clip/one")
+    @store.delete("clip/one")
+    refute @store.exist?("clip/one")
+  end
+
+  def test_append_rejects_negative_or_non_integer_offset_and_length
+    [-1, "0", 1.5, nil].each do |bad_at|
+      assert_raises(ArgumentError, "expected at=#{bad_at.inspect} to fail") do
+        @store.append("clip/one", "first", StringIO.new("abc"), at: bad_at, length: 3)
+      end
+    end
+
+    [-1, "3", 2.5, nil].each do |bad_length|
+      assert_raises(ArgumentError, "expected length=#{bad_length.inspect} to fail") do
+        @store.append("clip/one", "first", StringIO.new("abc"), at: 0, length: bad_length)
+      end
+    end
+
+    assert_equal 0, @store.offset("clip/one", "first"), "invalid arguments wrote nothing"
+    assert_equal 0, @store.append("clip/one", "first", StringIO.new(""), at: 0, length: 0)
+  end
+
+  def test_keys_cannot_escape_the_store_root
+    [
+      "",
+      nil,
+      ".",
+      "..",
+      "../outside",
+      "clip/../../outside",
+      "clip/../other",
+      "clip/./one",
+      "/etc/passwd",
+      File.join(@root, "clip/one"),
+      "clip/one\0.bin",
+      "clip/",
+      "clip//one",
+      "clip\\..\\outside"
+    ].each do |bad_key|
+      assert_raises(ArgumentError, "expected key=#{bad_key.inspect} to be rejected") { @store.path(bad_key) }
+    end
+
+    %w[clip/one mix/stem/one clip/~abcdef0123456789 ~top clip/a..b].each do |valid_key|
+      resolved = @store.path(valid_key)
+      assert resolved.start_with?("#{@root}/"), "expected #{valid_key.inspect} to resolve inside root"
+    end
   end
 end

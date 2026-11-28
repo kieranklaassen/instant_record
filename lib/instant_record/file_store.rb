@@ -43,7 +43,9 @@ module InstantRecord
 
     def initialize(root, chunk_size: nil)
       @root = File.expand_path(root.to_s)
+      @root_prefix = @root == "/" ? "/" : "#{@root}/"
       @chunk_size = chunk_size.nil? ? nil : validate_chunk_size!(chunk_size)
+      @files = Rack::Files.new(@root, {}, "application/octet-stream")
     end
 
     def chunk_size
@@ -64,6 +66,8 @@ module InstantRecord
     # and nothing is written: the lock makes two senders of one upload take
     # turns, and the second finds the partial already past its piece.
     def append(key, upload, io, at:, length:)
+      validate_non_negative_integer!(at, :at)
+      validate_non_negative_integer!(length, :length)
       limit = chunk_size
       raise ChunkTooLarge.new(limit) if length > limit
 
@@ -111,7 +115,8 @@ module InstantRecord
 
     # The record is gone: its file and every partial of it.
     def delete(key)
-      FileUtils.rm_f([path(key), *partials(key)])
+      file_path = path(key)
+      FileUtils.rm_f([file_path, *partials(file_path)])
     end
 
     # Partials no piece has reached since `before`: uploads that were given up.
@@ -131,10 +136,21 @@ module InstantRecord
     # The file as a Rack response: ranges, HEAD and If-Modified-Since are
     # Rack::Files's.
     def serve(key, request)
-      Rack::Files.new(root, {}, "application/octet-stream").serving(request, path(key))
+      @files.serving(request, path(key))
     end
 
-    def path(key) = File.join(root, key)
+    def path(key)
+      raw = key.to_s
+      if raw.empty? || raw.include?("\0") || raw.start_with?("/") || raw.include?("\\") ||
+          raw.split("/", -1).any? { |segment| segment.empty? || segment == "." || segment == ".." }
+        raise ArgumentError, "invalid file key: #{key.inspect}"
+      end
+
+      resolved = File.expand_path(File.join(@root, raw))
+      raise ArgumentError, "invalid file key: #{key.inspect}" unless resolved.start_with?(@root_prefix)
+
+      resolved
+    end
 
     private
 
@@ -150,8 +166,14 @@ module InstantRecord
       value
     end
 
-    def partials(key)
-      folder, name = File.split(path(key))
+    def validate_non_negative_integer!(value, name)
+      raise ArgumentError, "#{name} must be a non-negative integer, got #{value.inspect}" unless value.is_a?(Integer) && value >= 0
+
+      value
+    end
+
+    def partials(file_path)
+      folder, name = File.split(file_path)
       return [] unless File.directory?(folder)
 
       Dir.children(folder)

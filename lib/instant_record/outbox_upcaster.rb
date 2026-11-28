@@ -33,33 +33,32 @@ module InstantRecord
       def apply_global(mutation, changes)
         working_mutation = normalize_mutation(mutation)
         working_changes = stringify_hash(changes)
-        version = normalize_version(working_mutation[:schema_version])
+        return [working_mutation, working_changes] if registry.empty?
 
-        registry.each do |rule|
-          next if rule[:record_type] && rule[:record_type] != working_mutation[:record_type].to_s
-          next unless applicable?(rule, working_mutation[:operation], version)
-
-          working_changes = invoke(rule[:transform], working_changes, working_mutation)
-          version = advance_version(rule, version)
-          working_mutation[:schema_version] = version if version
-        end
-
+        working_changes = apply_rules(registry, working_mutation, working_changes)
         [working_mutation, working_changes]
       end
 
       # Apply model-declared `upcast_outbox` transforms to a changes hash.
       def apply_for_model(model, changes, mutation = {})
-        return stringify_hash(changes) unless model.respond_to?(:instant_record_outbox_upcasters)
+        working_changes = stringify_hash(changes)
+        return working_changes unless model.respond_to?(:instant_record_outbox_upcasters)
 
         rules = model.instant_record_outbox_upcasters
-        return stringify_hash(changes) if rules.empty?
+        return working_changes if rules.empty?
 
         working_mutation = normalize_mutation(mutation)
-        working_changes = stringify_hash(changes)
+        apply_rules(rules, working_mutation, working_changes, normalize: true)
+      end
+
+      private
+
+      def apply_rules(rules, working_mutation, working_changes, normalize: false)
         version = normalize_version(working_mutation[:schema_version])
 
         rules.each do |raw_rule|
-          rule = normalize_rule(raw_rule)
+          rule = normalize ? normalize_rule(raw_rule) : raw_rule
+          next if rule[:record_type] && rule[:record_type] != working_mutation[:record_type].to_s
           next unless applicable?(rule, working_mutation[:operation], version)
 
           working_changes = invoke(rule[:transform], working_changes, working_mutation)
@@ -69,8 +68,6 @@ module InstantRecord
 
         working_changes
       end
-
-      private
 
       def normalize_mutation(mutation)
         hash = mutation.respond_to?(:to_h) ? mutation.to_h : {}
@@ -82,9 +79,13 @@ module InstantRecord
       end
 
       def normalize_version(value)
-        return nil if value.nil? || value.to_s.strip.empty?
+        return value if value.is_a?(Integer)
+        return nil if value.nil?
 
-        Integer(value.to_s, 10)
+        str = value.to_s.strip
+        return nil if str.empty?
+
+        Integer(str, 10)
       end
 
       def normalize_operations(operation)
@@ -138,12 +139,21 @@ module InstantRecord
       def invoke(transform, changes, mutation)
         working = changes.dup
         result =
-          case transform.arity
+          case positional_capacity(transform)
           when 0 then transform.call
           when 1 then transform.call(working)
           else transform.call(working, mutation)
           end
         (result.is_a?(Hash) ? result : working).transform_keys(&:to_s)
+      end
+
+      def positional_capacity(transform)
+        return transform.arity unless transform.respond_to?(:parameters)
+
+        params = transform.parameters
+        return 2 if params.any? { |type, _| type == :rest }
+
+        params.count { |type, _| type == :req || type == :opt }
       end
     end
   end
