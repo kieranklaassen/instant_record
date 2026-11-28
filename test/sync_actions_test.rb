@@ -731,6 +731,42 @@ class SyncActionsTest < Minitest::Test
     refute InstantRecord::AppliedMutation.exists?(mutation_id: "mut-stale-1")
   end
 
+  def test_mutations_controller_checks_json_content_type_before_auth_and_serves_preflight
+    previous_auth = InstantRecord.config.authenticate_request
+
+    status, headers, = InstantRecord::MutationsController.action(:preflight).call(
+      Rack::MockRequest.env_for("/instant_record/mutations", method: "OPTIONS")
+    )
+    assert_equal 204, status
+    InstantRecord::CORS_HEADERS.each { |k, v| assert_equal v, headers[k] }
+
+    InstantRecord.config.authenticate_request = ->(_req) { raise InstantRecord::Unauthorized }
+    form_env = Rack::MockRequest.env_for(
+      "/instant_record/mutations",
+      method: "POST",
+      input: "mutations=[]",
+      "CONTENT_TYPE" => "application/x-www-form-urlencoded"
+    )
+    status, headers, = InstantRecord::MutationsController.action(:create).call(form_env)
+    assert_equal 415, status
+    InstantRecord::CORS_HEADERS.each { |k, v| assert_equal v, headers[k] }
+
+    { InstantRecord::Unauthorized => 401, InstantRecord::Forbidden => 403 }.each do |error_class, expected|
+      InstantRecord.config.authenticate_request = ->(_req) { raise error_class }
+      json_env = Rack::MockRequest.env_for(
+        "/instant_record/mutations",
+        method: "POST",
+        input: JSON.generate(mutations: []),
+        "CONTENT_TYPE" => "application/json"
+      )
+      status, headers, = InstantRecord::MutationsController.action(:create).call(json_env)
+      assert_equal expected, status
+      InstantRecord::CORS_HEADERS.each { |k, v| assert_equal v, headers[k] }
+    end
+  ensure
+    InstantRecord.config.authenticate_request = previous_auth
+  end
+
   def test_malformed_non_hash_args_is_rejected_cleanly_without_raising
     result = on_server do
       InstantRecord::MutationApplier.apply(

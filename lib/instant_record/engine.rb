@@ -1,5 +1,6 @@
 require "instant_record/routing"
 require "instant_record/sync_scope"
+require "instant_record/sync_endpoint"
 require "instant_record/files"
 require "instant_record/outbox_upcaster"
 require "instant_record/shell"

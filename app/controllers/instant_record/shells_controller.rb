@@ -1,3 +1,5 @@
+require "instant_record/sync_endpoint"
+
 module InstantRecord
   # Prebuilt SQLite cold-start shell delivery, partitioned by SyncScope.
   #
@@ -12,18 +14,14 @@ module InstantRecord
   #   SyncScope identity matches the partition the grant was issued for.
   #   Marked `private, no-store` so private shells never enter shared caches.
   class ShellsController < ActionController::API
+    include SyncEndpoint
+
     HEADERS = InstantRecord::CORS_HEADERS.merge(
       "cache-control" => "private, no-store",
       "vary" => "Authorization, Cookie"
     ).freeze
 
-    before_action { headers.merge!(HEADERS) }
-    rescue_from InstantRecord::Unauthorized, with: -> { head :unauthorized }
-    rescue_from InstantRecord::Forbidden, with: -> { head :forbidden }
-
-    def preflight
-      head :no_content
-    end
+    self.sync_headers = HEADERS
 
     def show
       SyncScope.authenticate!(request)

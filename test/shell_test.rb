@@ -661,6 +661,30 @@ class ShellTest < ActiveSupport::TestCase
     end
   end
 
+  test "ShellsController preflight and auth errors carry private no-store CORS headers" do
+    require "action_controller"
+    require "rack/mock"
+    require File.expand_path("../app/controllers/instant_record/shells_controller", __dir__)
+
+    previous_auth = InstantRecord.config.authenticate_request
+    status, headers, = InstantRecord::ShellsController.action(:preflight).call(
+      Rack::MockRequest.env_for("/instant_record/shell", method: "OPTIONS")
+    )
+    assert_equal 204, status
+    InstantRecord::ShellsController::HEADERS.each { |k, v| assert_equal v, headers[k] }
+
+    { InstantRecord::Unauthorized => 401, InstantRecord::Forbidden => 403 }.each do |error_class, expected|
+      InstantRecord.config.authenticate_request = ->(_req) { raise error_class }
+      status, headers, = InstantRecord::ShellsController.action(:show).call(
+        Rack::MockRequest.env_for("/instant_record/shell")
+      )
+      assert_equal expected, status
+      InstantRecord::ShellsController::HEADERS.each { |k, v| assert_equal v, headers[k] }
+    end
+  ensure
+    InstantRecord.config.authenticate_request = previous_auth
+  end
+
   class Client < ActiveRecord::Base
     self.abstract_class = true
   end
