@@ -37,6 +37,8 @@ module InstantRecord
         lib/instant_record/native/screen.rb
       ].freeze
 
+      COPY_DIRS = COPY.map { |rel| File.dirname(rel) }.uniq.freeze
+
       SQLITE_DATABASE_YML = <<~YAML
         default: &default
           adapter: sqlite3
@@ -51,21 +53,25 @@ module InstantRecord
 
       attr_reader :adapter, :server_only_constants
 
-      TOP_LEVEL_EXCLUDED_DIRS = {
-        "db" => true,
-        "test" => true,
-        "spec" => true,
-        "tmp" => true,
-        "vendor" => true,
-        "node_modules" => true
-      }.freeze
-      LIB_EXCLUDED_DIRS = {
-        "tasks" => true,
-        "generators" => true
-      }.freeze
+      def self.excluded_dirs_by_prefix(prefixes = StaticLinter::NON_COMPILED_PREFIXES)
+        prefixes.each_with_object({}) do |prefix, map|
+          trimmed = prefix.sub(%r{\A/+}, "").sub(%r{/+\z}, "")
+          next if trimmed.empty?
+
+          slash = trimmed.rindex("/")
+          parent = slash ? trimmed.byteslice(0, slash + 1).freeze : "".freeze
+          child = slash ? trimmed.byteslice(slash + 1, trimmed.bytesize - slash - 1).freeze : trimmed.freeze
+          (map[parent] ||= {})[child] = true
+        end.transform_values(&:freeze).freeze
+      end
+      private_class_method :excluded_dirs_by_prefix
+
+      EXCLUDED_DIRS_BY_PREFIX = excluded_dirs_by_prefix
+      TOP_LEVEL_EXCLUDED_DIRS = (EXCLUDED_DIRS_BY_PREFIX[""] || {}.freeze)
+      LIB_EXCLUDED_DIRS = (EXCLUDED_DIRS_BY_PREFIX["lib/"] || {}.freeze)
       CONTRACT_MARKER = "contract".freeze
       NUL_BYTE = "\0".freeze
-      private_constant :TOP_LEVEL_EXCLUDED_DIRS, :LIB_EXCLUDED_DIRS, :CONTRACT_MARKER, :NUL_BYTE
+      private_constant :EXCLUDED_DIRS_BY_PREFIX, :TOP_LEVEL_EXCLUDED_DIRS, :LIB_EXCLUDED_DIRS, :CONTRACT_MARKER, :NUL_BYTE
 
       def self.vendor(gem_src:, app_dir:, demo: false, target: :wasm, adapter: nil)
         new(gem_src: gem_src, app_dir: app_dir, demo: demo, target: target, adapter: adapter).run
@@ -91,12 +97,12 @@ module InstantRecord
       private
 
       def standard_base_adapter?
-        @adapter == HostAdapters::Wasm || @adapter == HostAdapters::Native || (
-          @adapter.is_a?(HostAdapters::Base) &&
-            @adapter.method(:install).owner == HostAdapters::Base &&
-            @adapter.method(:adapt_compiled_mutate_signatures).owner == HostAdapters::Base &&
-            @adapter.method(:adapt_sync_actions).owner == HostAdapters::Base
-        )
+        @adapter.is_a?(HostAdapters::Base) &&
+          @adapter.method(:install).owner == HostAdapters::Base &&
+          @adapter.method(:adapt_compiled_mutate_signatures).owner == HostAdapters::Base &&
+          @adapter.method(:adapt_sync_actions).owner == HostAdapters::Base
+      rescue NameError
+        false
       end
 
       def run_standard_pipeline
@@ -161,8 +167,7 @@ module InstantRecord
         ir_concerns = "#{@app}/app/models/concerns/instant_record"
         FileUtils.rm_rf(ir_concerns) if File.exist?(ir_concerns) || File.symlink?(ir_concerns)
 
-        ensure_dir("#{@app}/lib/instant_record/client")
-        ensure_dir("#{@app}/lib/instant_record/native")
+        COPY_DIRS.each { |dir| ensure_dir("#{@app}/#{dir}") }
         ensure_dir("#{@app}/app/models/concerns")
         ensure_dir("#{@app}/app/models/instant_record")
         ensure_dir("#{@app}/config")
@@ -225,8 +230,7 @@ module InstantRecord
         ir_lib = "#{@app}/lib/instant_record"
         FileUtils.rm_rf(ir_lib) if File.exist?(ir_lib) || File.symlink?(ir_lib)
 
-        ensure_dir("#{@app}/lib/instant_record/client")
-        ensure_dir("#{@app}/lib/instant_record/native")
+        COPY_DIRS.each { |dir| ensure_dir("#{@app}/#{dir}") }
         ensure_dir("#{@app}/app/models/instant_record")
 
         COPY.each do |rel|
@@ -282,15 +286,15 @@ module InstantRecord
       end
 
       def walk_staged_ruby(dir, prefix, skip_ir_lib:, skip_app_views:, overridden:, out:)
+        excluded_dirs = EXCLUDED_DIRS_BY_PREFIX[prefix]
+        skip_ir_here = skip_ir_lib && prefix == "lib/"
+        skip_views_here = skip_app_views && prefix == "app/"
+
         Dir.each_child(dir) do |entry|
           next if entry.start_with?(".")
-          if prefix.empty?
-            next if TOP_LEVEL_EXCLUDED_DIRS[entry]
-          elsif prefix == "lib/"
-            next if LIB_EXCLUDED_DIRS[entry] || (skip_ir_lib && entry == "instant_record")
-          elsif skip_app_views && prefix == "app/" && entry == "views"
-            next
-          end
+          next if excluded_dirs && excluded_dirs[entry]
+          next if skip_ir_here && entry == "instant_record"
+          next if skip_views_here && entry == "views"
 
           full = "#{dir}/#{entry}"
           st = File.lstat(full)
@@ -302,7 +306,7 @@ module InstantRecord
               overridden: overridden,
               out: out
             )
-          elsif entry.end_with?(".rb") && (st.file? || (st.symlink? && !File.directory?(full)))
+          elsif entry.end_with?(".rb") && (st.file? || (st.symlink? && File.file?(full)))
             rel = prefix.empty? ? entry : "#{prefix}#{entry}"
             next if overridden && overridden.key?(rel)
 
@@ -325,16 +329,8 @@ module InstantRecord
             if rel == "lib/instant_record.rb"
               raw
             else
-              source =
-                if raw.encoding == Encoding::UTF_8
-                  raw
-                elsif raw.frozen?
-                  raw.dup.force_encoding(Encoding::UTF_8)
-                else
-                  raw.force_encoding(Encoding::UTF_8)
-                end
               AstLowerer.lower(
-                source,
+                normalize_source_encoding(raw),
                 runtime: :client,
                 rewrite_syncable_include: rel.start_with?("app/models/")
               )
@@ -352,17 +348,15 @@ module InstantRecord
                   (include_ir_lib && rel.start_with?("lib/instant_record/"))
               false
             else
+              if dirty_rels && dirty_rels.key?(rel)
+                target = "#{@app}/#{rel}"
+                ensure_dir(File.dirname(target))
+                File.binwrite(target, raw_bytes)
+              end
               next
             end
 
-          source =
-            if raw_bytes.encoding == Encoding::UTF_8
-              raw_bytes
-            elsif raw_bytes.frozen?
-              raw_bytes.dup.force_encoding(Encoding::UTF_8)
-            else
-              raw_bytes.force_encoding(Encoding::UTF_8)
-            end
+          source = normalize_source_encoding(raw_bytes)
           output = AstLowerer.lower(
             source,
             runtime: :client,
@@ -374,6 +368,16 @@ module InstantRecord
             File.binwrite("#{@app}/#{rel}", output)
           end
         end
+      end
+
+      def normalize_source_encoding(raw)
+        return raw if raw.encoding == Encoding::UTF_8 && raw.valid_encoding?
+
+        utf8 = raw.frozen? ? raw.dup : raw
+        utf8.force_encoding(Encoding::UTF_8)
+        return utf8 if utf8.valid_encoding?
+
+        utf8.force_encoding(Encoding::BINARY)
       end
 
       # Remove class-level `contract ... do ... end` declarations from staged

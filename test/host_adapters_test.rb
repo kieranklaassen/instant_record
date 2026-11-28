@@ -407,6 +407,20 @@ class HostAdaptersTest < ActiveSupport::TestCase
     end
   end
 
+  test "Demo.adapt_demo_views handles non-ASCII UTF-8 scope directories and view content without encoding errors" do
+    Dir.mktmpdir do |app|
+      view_path = File.join(app, "app/views/café/items/index.html.erb")
+      FileUtils.mkdir_p(File.dirname(view_path))
+      content = "<h1>Café — ☕</h1>\n"
+      File.binwrite(view_path, content)
+
+      HostAdapters::Demo.adapt_demo_views(app)
+
+      expected = "<% content_for(:demo_scope, \"café\") %>\n#{content}".b
+      assert_equal expected, File.binread(view_path)
+    end
+  end
+
   test "Demo.rewrite_server_url_helpers rewrites route helpers and literal paths and reports errors" do
     marker = InstantRecord::NETWORK_MARKER
     slack_rel = "app/helpers/slack_helper.rb"

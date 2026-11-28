@@ -302,4 +302,282 @@ class GemVendorTest < ActiveSupport::TestCase
       assert_raises(BuildError) { GemVendor.vendor(gem_src: broken_gem, app_dir: File.join(dir, "bad_actions")) }
     end
   end
+
+  test "COPY_DIRS covers every directory in COPY and excluded dirs match StaticLinter::NON_COMPILED_PREFIXES" do
+    assert GemVendor::COPY_DIRS.frozen?
+    expected_copy_dirs = GemVendor::COPY.map { |rel| File.dirname(rel) }.uniq
+    assert_equal expected_copy_dirs, GemVendor::COPY_DIRS
+    GemVendor::COPY.each do |rel|
+      assert_includes GemVendor::COPY_DIRS, File.dirname(rel)
+    end
+
+    excluded_by_prefix = GemVendor.const_get(:EXCLUDED_DIRS_BY_PREFIX)
+    reconstructed = excluded_by_prefix.flat_map do |parent, dirs|
+      dirs.keys.map { |dir| "#{parent}#{dir}/" }
+    end.sort
+    assert_equal StaticLinter::NON_COMPILED_PREFIXES.sort, reconstructed
+
+    top_level = GemVendor.const_get(:TOP_LEVEL_EXCLUDED_DIRS)
+    lib_level = GemVendor.const_get(:LIB_EXCLUDED_DIRS)
+    expected_top = StaticLinter::NON_COMPILED_PREFIXES.select { |p| p.count("/") == 1 }.map { |p| p.delete_suffix("/") }.sort
+    expected_lib = StaticLinter::NON_COMPILED_PREFIXES.select { |p| p.start_with?("lib/") }.map { |p| p.delete_prefix("lib/").delete_suffix("/") }.sort
+    assert_equal expected_top, top_level.keys.sort
+    assert_equal expected_lib, lib_level.keys.sort
+
+    deep = GemVendor.send(:excluded_dirs_by_prefix, %w[spec/ app/assets/ config/locales/custom/])
+    assert_equal({ "" => { "spec" => true }, "app/" => { "assets" => true }, "config/locales/" => { "custom" => true } }, deep)
+  end
+
+  test "HostAdapters::Base overrides and stubbed install take the disk fallback cleanly" do
+    base_class = Class.new do
+      include HostAdapters::Base
+
+      def host_source
+        HostAdapters::Wasm.host_source
+      end
+    end
+
+    install_override_class = Class.new(base_class) do
+      attr_reader :called
+
+      def install(gem_src:, app_dir:)
+        @called = true
+        super
+        File.write(File.join(app_dir, "lib/instant_record/override_install.rb"), <<~RUBY)
+          module InstantRecord
+            server_only do
+              INSTALL_OVERRIDE_SECRET = 1
+            end
+          end
+        RUBY
+      end
+    end
+
+    sync_actions_override_class = Class.new(base_class) do
+      attr_reader :called
+
+      private
+
+      def adapt_sync_actions(app_dir)
+        @called = true
+        super
+        path = File.join(app_dir, "lib/instant_record/sync_actions.rb")
+        File.write(path, File.read(path) + "# custom_sync_actions_override\n")
+      end
+    end
+
+    mutate_override_class = Class.new(base_class) do
+      attr_reader :called
+
+      private
+
+      def adapt_compiled_mutate_signatures(app_dir)
+        @called = true
+        super
+        path = File.join(app_dir, "lib/instant_record.rb")
+        File.write(path, File.read(path) + "# custom_mutate_override\n")
+      end
+    end
+
+    Dir.mktmpdir do |dir|
+      # Unmodified Base includer uses the standard in-memory pipeline.
+      plain_adapter = base_class.new
+      plain_gv = GemVendor.new(gem_src: GEM_ROOT, app_dir: File.join(dir, "plain"), adapter: plain_adapter)
+      assert plain_gv.send(:standard_base_adapter?)
+      assert_equal GemVendor::COPY.length + 1, plain_gv.run
+
+      # Overriding #install falls back to the disk pipeline.
+      install_adapter = install_override_class.new
+      install_app = File.join(dir, "install_override")
+      install_gv = GemVendor.new(gem_src: GEM_ROOT, app_dir: install_app, adapter: install_adapter)
+      refute install_gv.send(:standard_base_adapter?)
+      install_gv.run
+      assert install_adapter.called
+      assert_equal({ "InstantRecord::INSTALL_OVERRIDE_SECRET" => "lib/instant_record/override_install.rb:3" }, install_gv.server_only_constants)
+      refute_includes File.read(File.join(install_app, "lib/instant_record/override_install.rb")), "INSTALL_OVERRIDE_SECRET"
+
+      # Overriding private #adapt_sync_actions falls back to the disk pipeline.
+      sync_adapter = sync_actions_override_class.new
+      sync_app = File.join(dir, "sync_override")
+      sync_gv = GemVendor.new(gem_src: GEM_ROOT, app_dir: sync_app, adapter: sync_adapter)
+      refute sync_gv.send(:standard_base_adapter?)
+      sync_gv.run
+      assert sync_adapter.called
+      assert_includes File.read(File.join(sync_app, "lib/instant_record/sync_actions.rb")), "# custom_sync_actions_override"
+
+      # Overriding private #adapt_compiled_mutate_signatures falls back to the disk pipeline.
+      mutate_adapter = mutate_override_class.new
+      mutate_app = File.join(dir, "mutate_override")
+      mutate_gv = GemVendor.new(gem_src: GEM_ROOT, app_dir: mutate_app, adapter: mutate_adapter)
+      refute mutate_gv.send(:standard_base_adapter?)
+      mutate_gv.run
+      assert mutate_adapter.called
+      assert_includes File.read(File.join(mutate_app, "lib/instant_record.rb")), "# custom_mutate_override"
+
+      # Runtime stubbing of #install on a built-in adapter also falls back safely.
+      stub_app = File.join(dir, "stubbed_wasm")
+      stub_called = false
+      HostAdapters::Wasm.define_singleton_method(:install) do |gem_src:, app_dir:|
+        stub_called = true
+        super(gem_src: gem_src, app_dir: app_dir)
+      end
+      begin
+        stub_gv = GemVendor.new(gem_src: GEM_ROOT, app_dir: stub_app, target: :wasm)
+        refute stub_gv.send(:standard_base_adapter?)
+        stub_gv.run
+        assert stub_called
+      ensure
+        HostAdapters::Wasm.singleton_class.send(:remove_method, :install)
+      end
+    end
+  end
+
+  test "handles symlinked files and dirs, hidden ruby files and dirs, and iso-8859-1 sources" do
+    Dir.mktmpdir do |dir|
+      app = File.join(dir, "app")
+      external = File.join(dir, "external")
+      FileUtils.mkdir_p(File.join(app, "app/models/.hidden_dir"))
+      FileUtils.mkdir_p(File.join(app, "app/screens"))
+      FileUtils.mkdir_p(File.join(app, "spec"))
+      FileUtils.mkdir_p(File.join(app, "node_modules/pkg"))
+      FileUtils.mkdir_p(File.join(external, "linked_dir"))
+
+      # Symlinked regular .rb file should be scanned and lowered.
+      linked_target = File.join(external, "linked_item.rb")
+      File.write(linked_target, <<~RUBY)
+        class LinkedItem < ApplicationRecord
+          include InstantRecord::Syncable
+          server_only do
+            LINKED_FILE_SECRET = 1
+          end
+        end
+      RUBY
+      File.symlink(linked_target, File.join(app, "app/models/linked_item.rb"))
+
+      # Symlinked directory must not be traversed (matches Dir.glob("**/*.rb")).
+      linked_dir_file = File.join(external, "linked_dir/nested.rb")
+      File.write(linked_dir_file, "class LinkedDirModel\n  server_only { LINKED_DIR_SECRET = 1 }\nend\n")
+      File.symlink(File.join(external, "linked_dir"), File.join(app, "app/models/linked_dir"))
+
+      # Dangling symlink must be skipped safely without raising ENOENT.
+      File.symlink(File.join(external, "does_not_exist.rb"), File.join(app, "app/models/dangling.rb"))
+
+      # Hidden .rb files and hidden directories must be ignored.
+      hidden_file = File.join(app, "app/models/.hidden.rb")
+      hidden_dir_file = File.join(app, "app/models/.hidden_dir/nested.rb")
+      File.write(hidden_file, "class HiddenFile\n  server_only { HIDDEN_FILE_SECRET = 1 }\nend\n")
+      File.write(hidden_dir_file, "class HiddenDir\n  server_only { HIDDEN_DIR_SECRET = 1 }\nend\n")
+
+      # Additional non-compiled prefixes (spec/, node_modules/) must be excluded.
+      File.write(File.join(app, "spec/sample_spec.rb"), "server_only { SPEC_SECRET = 1 }\n")
+      File.write(File.join(app, "node_modules/pkg/tool.rb"), "server_only { NODE_SECRET = 1 }\n")
+
+      # Non-UTF-8 (# coding: iso-8859-1) model and screens with Latin-1 bytes (\xE9).
+      latin_model = (
+        "# coding: iso-8859-1\n" \
+        "class LatinModel < ApplicationRecord\n" \
+        "  include InstantRecord::Syncable\n" \
+        "  LABEL = \"caf\xE9\"\n" \
+        "  server_only do\n" \
+        "    LATIN_MODEL_SECRET = \"caf\xE9\"\n" \
+        "  end\n" \
+        "  client_only do\n" \
+        "    def label = \"caf\xE9\"\n" \
+        "  end\n" \
+        "end\n"
+      ).b
+      latin_screen = (
+        "# coding: iso-8859-1\n" \
+        "class LatinScreen < InstantRecord::Native::Screen\n" \
+        "  TITLE = \"caf\xE9\"\n" \
+        "  contract \"LatinView\" do |c|\n" \
+        "    c.string :title\n" \
+        "  end\n" \
+        "  server_only do\n" \
+        "    LATIN_SCREEN_SECRET = \"caf\xE9\"\n" \
+        "  end\n" \
+        "  def body\n" \
+        "    swift(\"LatinView\") { prop \"title\", TITLE }\n" \
+        "  end\n" \
+        "end\n"
+      ).b
+      plain_latin_screen = (
+        "# coding: iso-8859-1\n" \
+        "class PlainLatinScreen < InstantRecord::Native::Screen\n" \
+        "  def body\n" \
+        "    text(\"caf\xE9\")\n" \
+        "  end\n" \
+        "end\n"
+      ).b
+
+      File.binwrite(File.join(app, "app/models/latin_model.rb"), latin_model)
+      File.binwrite(File.join(app, "app/screens/latin_screen.rb"), latin_screen)
+      File.binwrite(File.join(app, "app/screens/plain_latin_screen.rb"), plain_latin_screen)
+
+      gv = GemVendor.new(gem_src: GEM_ROOT, app_dir: app, demo: false, target: :native)
+      gv.run
+
+      assert_equal(
+        {
+          "LatinModel::LATIN_MODEL_SECRET" => "app/models/latin_model.rb:6",
+          "LinkedItem::LINKED_FILE_SECRET" => "app/models/linked_item.rb:4",
+          "LatinScreen::LATIN_SCREEN_SECRET" => "app/screens/latin_screen.rb:8"
+        },
+        gv.server_only_constants
+      )
+
+      staged_linked = File.read(linked_target)
+      assert_includes staged_linked, "include Syncable"
+      refute_includes staged_linked, "LINKED_FILE_SECRET"
+
+      assert_includes File.read(linked_dir_file), "LINKED_DIR_SECRET"
+      assert_includes File.read(hidden_file), "HIDDEN_FILE_SECRET"
+      assert_includes File.read(hidden_dir_file), "HIDDEN_DIR_SECRET"
+
+      staged_latin_model = File.binread(File.join(app, "app/models/latin_model.rb"))
+      assert_includes staged_latin_model, "include Syncable".b
+      assert_includes staged_latin_model, "def label = \"caf\xE9\"".b
+      refute_includes staged_latin_model, "LATIN_MODEL_SECRET".b
+      refute_includes staged_latin_model, "client_only".b
+
+      staged_latin_screen = File.binread(File.join(app, "app/screens/latin_screen.rb"))
+      assert_includes staged_latin_screen, "TITLE = \"caf\xE9\"".b
+      refute_includes staged_latin_screen, "contract \"LatinView\"".b
+      refute_includes staged_latin_screen, "LATIN_SCREEN_SECRET".b
+      # Stripping the 3-line server_only block removes 3 lines; stripping contract preserves its lines.
+      assert_equal latin_screen.count("\n") - 3, staged_latin_screen.count("\n")
+
+      # Direct strip_native_contracts on an iso-8859-1 screen preserves exact line count and bytes.
+      contract_only_latin = (
+        "# coding: iso-8859-1\n" \
+        "class ContractLatinScreen < InstantRecord::Native::Screen\n" \
+        "  contract \"Latin\" do |c|\n" \
+        "    c.string :label\n" \
+        "  end\n" \
+        "  def body = text(\"caf\xE9\")\n" \
+        "end\n"
+      ).b
+      stripped_latin = gv.send(:strip_native_contracts, contract_only_latin)
+      refute_includes stripped_latin, "contract \"Latin\"".b
+      assert_includes stripped_latin, "text(\"caf\xE9\")".b
+      assert_equal contract_only_latin.count("\n"), stripped_latin.count("\n")
+
+      assert_equal plain_latin_screen, File.binread(File.join(app, "app/screens/plain_latin_screen.rb"))
+    end
+  end
+
+  test "lower_and_write_app_sources writes deferred dirty_rels outside lowered app directories" do
+    Dir.mktmpdir do |dir|
+      app = File.join(dir, "app")
+      FileUtils.mkdir_p(File.join(app, "config"))
+      config_path = File.join(app, "config/demo_override.rb")
+      File.write(config_path, "OLD = 1\n")
+
+      gv = GemVendor.new(gem_src: GEM_ROOT, app_dir: app, target: :wasm)
+      dirty = { "config/demo_override.rb" => "NEW = 2\n" }
+      gv.send(:lower_and_write_app_sources, dirty, dirty_rels: dirty)
+
+      assert_equal "NEW = 2\n", File.read(config_path)
+    end
+  end
 end
