@@ -125,6 +125,178 @@ class NativeCodegenTest < ActiveSupport::TestCase
     refute_includes plain, "@SerialName"
   end
 
+  test "CodegenNaming and SwiftCodegen share inflection, nested naming, and escaping rules" do
+    naming = InstantRecord::Compiler::CodegenNaming
+    swift = InstantRecord::Compiler::SwiftCodegen
+    kotlin = InstantRecord::Compiler::KotlinCodegen
+
+    {
+      "categories" => "category",
+      "boxes" => "box",
+      "dishes" => "dish",
+      "matches" => "match",
+      "buzzes" => "buzz",
+      "glasses" => "glass",
+      "people" => "person",
+      "children" => "child",
+      "items" => "item",
+      "data" => "data_item",
+      "glass" => "glass_item",
+      "a" => "a_item"
+    }.each do |plural, singular|
+      assert_equal singular, naming.singularize(plural)
+      assert_equal singular, swift.singularize(plural)
+    end
+
+    assert_equal "itemCount", swift.camel_case("item_count")
+    assert_equal "ItemCount", swift.pascal_case("item_count")
+
+    inferred = InstantRecord::Native::ContractField.new(name: "categories", kind: :many, fields: [])
+    overridden = InstantRecord::Native::ContractField.new(name: "line_items", kind: :many, type_name: "LineItem", fields: [])
+    single = InstantRecord::Native::ContractField.new(name: "billing_address", kind: :one, fields: [])
+
+    assert_equal "Category", swift.nested_type_name(inferred)
+    assert_equal "LineItem", swift.nested_type_name(overridden)
+    assert_equal "BillingAddress", swift.nested_type_name(single)
+
+    assert_equal '"a\\"b\\n\\r\\t$100"', swift.swift_string("a\"b\n\r\t$100")
+    assert_equal '"a\\"b\\n\\r\\t\\$100 \\${name}"', kotlin.kotlin_string("a\"b\n\r\t$100 ${name}")
+  end
+
+  test "SwiftCodegen handles snapshot collision, keyword state storage, optional action params, and empty contracts" do
+    contracts = [
+      InstantRecord::Native::Contract.new(
+        component: "EdgeView",
+        fields: [
+          InstantRecord::Native::ContractField.new(name: "snapshot", kind: :scalar, type: "string"),
+          InstantRecord::Native::ContractField.new(name: "default", kind: :scalar, type: "int"),
+          InstantRecord::Native::ContractField.new(name: "class", kind: :scalar, type: "string", optional: true)
+        ],
+        actions: [
+          InstantRecord::Native::ContractAction.new(
+            name: "default",
+            params: [
+              InstantRecord::Native::ActionParam.new(name: "target_id", type: "string", slot: :arg),
+              InstantRecord::Native::ActionParam.new(name: "retry_count", type: "int", slot: :arg, optional: true),
+              InstantRecord::Native::ActionParam.new(name: "active", type: "bool", slot: :value)
+            ]
+          )
+        ]
+      ),
+      InstantRecord::Native::Contract.new(component: "EmptyView", fields: [], actions: [])
+    ]
+
+    swift = InstantRecord::Compiler::SwiftCodegen.generate(contracts)
+
+    assert_includes swift, "public private(set) var snapshot: String"
+    assert_includes swift, "public private(set) var _snapshot: EdgeViewProps"
+    assert_includes swift, "guard self._snapshot != props else { return }"
+    assert_includes swift, "self._snapshot = props"
+
+    assert_includes swift, "private var _defaultValue: Int"
+    assert_includes swift, "public var `default`: Int { _defaultValue }"
+    assert_includes swift, "self._defaultValue = props.`default`"
+    assert_includes swift, "if self._defaultValue != props.`default` { self._defaultValue = props.`default` }"
+    assert_includes swift, "private var _classValue: String?"
+    assert_includes swift, "public var `class`: String? { _classValue }"
+
+    assert_includes swift, "case .`default`(let targetId, let retryCount, _):"
+    assert_includes swift, 'out["target_id"] = targetId'
+    assert_includes swift, 'if let retryCount { out["retry_count"] = NativeWire.encode(retryCount) }'
+    assert_includes swift, 'case .`default`(_, _, let active): return ["active": NativeWire.encode(active)]'
+
+    assert_includes swift, "public struct EmptyViewProps: NativeProps, Codable, Equatable, Sendable {\n    public static let componentName = \"EmptyView\"\n\n    public init() {}\n}"
+    refute_includes swift, "EmptyViewAction"
+    refute_includes swift, "CodingKeys"
+  end
+
+  test "KotlinCodegen handles keyword collisions, SerialName import scoping, empty classes, and action maps" do
+    plain_contract = InstantRecord::Native::Contract.new(
+      component: "PlainCard",
+      fields: [
+        InstantRecord::Native::ContractField.new(name: "object", kind: :scalar, type: "string"),
+        InstantRecord::Native::ContractField.new(name: "when", kind: :scalar, type: "int", optional: true)
+      ],
+      actions: [
+        InstantRecord::Native::ContractAction.new(
+          name: "submit_form",
+          params: [
+            InstantRecord::Native::ActionParam.new(name: "object", type: "string", slot: :arg),
+            InstantRecord::Native::ActionParam.new(name: "count", type: "int", slot: :arg),
+            InstantRecord::Native::ActionParam.new(name: "when", type: "bool", slot: :value, optional: true),
+            InstantRecord::Native::ActionParam.new(name: "note", type: "string", slot: :value)
+          ]
+        )
+      ]
+    )
+
+    plain_kt = InstantRecord::Compiler::KotlinCodegen.generate([plain_contract])
+    refute_includes plain_kt, "import kotlinx.serialization.SerialName"
+    assert_includes plain_kt, "import kotlinx.serialization.Serializable"
+    assert_includes plain_kt, "val `object`: String,"
+    assert_includes plain_kt, "val `when`: Int? = null,"
+    assert_includes plain_kt, 'override val actionArgs: Map<String, String> = mapOf("object" to `object`, "count" to count.toString())'
+    assert_includes plain_kt, '`when`?.let { put("when", it.toString()) }'
+    assert_includes plain_kt, 'put("note", note)'
+
+    nested_and_empty = [
+      InstantRecord::Native::Contract.new(
+        component: "NestedSnake",
+        fields: [
+          InstantRecord::Native::ContractField.new(
+            name: "meta",
+            kind: :one,
+            fields: [
+              InstantRecord::Native::ContractField.new(name: "updated_at", kind: :scalar, type: "date"),
+              InstantRecord::Native::ContractField.new(name: "empty", kind: :one, fields: [])
+            ]
+          )
+        ],
+        actions: []
+      ),
+      InstantRecord::Native::Contract.new(component: "EmptyCard", fields: [], actions: [])
+    ]
+
+    nested_kt = InstantRecord::Compiler::KotlinCodegen.generate(nested_and_empty)
+    assert_includes nested_kt, "import kotlinx.serialization.SerialName"
+    assert_includes nested_kt, '@SerialName("updated_at") val updatedAt: String,'
+    assert_includes nested_kt, "        @Serializable\n        class Empty\n"
+    assert_includes nested_kt, "class EmptyCardProps {\n    companion object {"
+    refute_includes nested_kt, "sealed interface EmptyCardAction"
+  end
+
+  test "SwiftCodegen and KotlinCodegen produce deterministic byte-for-byte output" do
+    contracts = InstantRecord::Compiler::NativeContracts.extract_dir(File.join(GEM_ROOT, "demo/app/screens"))
+
+    swift_first = InstantRecord::Compiler::SwiftCodegen.generate(contracts)
+    swift_second = InstantRecord::Compiler::SwiftCodegen.generate(contracts)
+    assert_equal swift_first, swift_second
+
+    kotlin_first = InstantRecord::Compiler::KotlinCodegen.generate(contracts)
+    kotlin_second = InstantRecord::Compiler::KotlinCodegen.generate(contracts)
+    assert_equal kotlin_first, kotlin_second
+  end
+
+  test "KotlinCodegen can be required standalone without loading SwiftCodegen" do
+    ruby = RbConfig.ruby
+    script = <<~RUBY
+      contract = InstantRecord::Native::Contract.new(
+        component: "StandaloneCard",
+        fields: [InstantRecord::Native::ContractField.new(name: "item_count", kind: :scalar, type: "int")]
+      )
+      kotlin = InstantRecord::Compiler::KotlinCodegen.generate([contract])
+      print [defined?(InstantRecord::Compiler::SwiftCodegen).nil?, kotlin.include?("val itemCount: Int")].join(",")
+    RUBY
+    out, status = Open3.capture2e(
+      ruby, "-I#{File.join(GEM_ROOT, 'lib')}",
+      "-rinstant_record/native",
+      "-rinstant_record/compiler/kotlin_codegen",
+      "-e", script
+    )
+    assert status.success?, "standalone load failed:\n#{out}"
+    assert_equal "true,true", out
+  end
+
   test "the demo Inbox app's InstantRecordContracts.swift matches Prism codegen from demo/app/screens" do
     contracts = InstantRecord::Compiler::NativeContracts.extract_dir(File.join(GEM_ROOT, "demo/app/screens"))
     assert_equal %w[ConversationView InboxSummary], contracts.map(&:component)
