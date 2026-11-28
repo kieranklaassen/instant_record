@@ -88,6 +88,7 @@ module InstantRecord
         def visit_global_variable_read_node(_); end
         def visit_constant_read_node(_); end
         def visit_required_parameter_node(_); end
+        def visit_required_keyword_parameter_node(_); end
         def visit_local_variable_target_node(_); end
         def visit_instance_variable_target_node(_); end
         def visit_constant_target_node(_); end
@@ -203,25 +204,8 @@ module InstantRecord
         def visit_block_parameters_node(node)
           node.parameters&.accept(self)
         end
-      end
-      private_constant :FastVisitor
-
-      class MutateDefVisitor < FastVisitor
-        def initialize(adapter, source, edits)
-          @adapter = adapter
-          @source = source
-          @edits = edits
-        end
 
         def visit_def_node(node)
-          if node.name == :mutate && node.parameters&.keyword_rest
-            @edits << @adapter.send(
-              :replace_def_edit,
-              @source, node,
-              signature: "mutate(mutator_name, args = {}, mutation_id: nil)",
-              body: "SyncActions.mutate(mutator_name, args, mutation_id: mutation_id)"
-            )
-          end
           node.receiver&.accept(self)
           node.parameters&.accept(self)
           node.body&.accept(self)
@@ -256,6 +240,27 @@ module InstantRecord
           node.else_clause&.accept(self)
         end
       end
+      private_constant :FastVisitor
+
+      class MutateDefVisitor < FastVisitor
+        def initialize(adapter, source, edits)
+          @adapter = adapter
+          @source = source
+          @edits = edits
+        end
+
+        def visit_def_node(node)
+          if node.name == :mutate && node.parameters&.keyword_rest
+            @edits << @adapter.send(
+              :replace_def_edit,
+              @source, node,
+              signature: "mutate(mutator_name, args = {}, mutation_id: nil)",
+              body: "SyncActions.mutate(mutator_name, args, mutation_id: mutation_id)"
+            )
+          end
+          super
+        end
+      end
       private_constant :MutateDefVisitor
 
       class SyncActionsVisitor < FastVisitor
@@ -271,9 +276,7 @@ module InstantRecord
             @edits << @adapter.send(:delete_lines_edit, @source, node)
             return
           end
-          node.constant_path.accept(self)
-          node.superclass&.accept(self)
-          node.body&.accept(self)
+          super
         end
 
         def visit_module_node(node)
@@ -281,8 +284,7 @@ module InstantRecord
             @edits << @adapter.send(:delete_lines_edit, @source, node)
             return
           end
-          node.constant_path.accept(self)
-          node.body&.accept(self)
+          super
         end
 
         def visit_def_node(node)
@@ -304,27 +306,7 @@ module InstantRecord
             return
           end
 
-          node.receiver&.accept(self)
-          node.parameters&.accept(self)
-          node.body&.accept(self)
-        end
-
-        def visit_call_node(node)
-          node.receiver&.accept(self)
-          node.arguments&.accept(self)
-          node.block&.accept(self)
-        end
-
-        def visit_if_node(node)
-          node.predicate.accept(self)
-          node.statements&.accept(self)
-          node.subsequent&.accept(self)
-        end
-
-        def visit_unless_node(node)
-          node.predicate.accept(self)
-          node.statements&.accept(self)
-          node.else_clause&.accept(self)
+          super
         end
       end
       private_constant :SyncActionsVisitor
@@ -582,38 +564,7 @@ module InstantRecord
               end
             end
 
-            node.receiver&.accept(self)
-            node.arguments&.accept(self)
-            node.block&.accept(self)
-          end
-
-          def visit_def_node(node)
-            node.receiver&.accept(self)
-            node.parameters&.accept(self)
-            node.body&.accept(self)
-          end
-
-          def visit_class_node(node)
-            node.constant_path.accept(self)
-            node.superclass&.accept(self)
-            node.body&.accept(self)
-          end
-
-          def visit_module_node(node)
-            node.constant_path.accept(self)
-            node.body&.accept(self)
-          end
-
-          def visit_if_node(node)
-            node.predicate.accept(self)
-            node.statements&.accept(self)
-            node.subsequent&.accept(self)
-          end
-
-          def visit_unless_node(node)
-            node.predicate.accept(self)
-            node.statements&.accept(self)
-            node.else_clause&.accept(self)
+            super
           end
         end
         private_constant :ServerUrlVisitor
@@ -634,38 +585,7 @@ module InstantRecord
               end
             end
 
-            node.predicate.accept(self)
-            node.statements&.accept(self)
-            node.subsequent&.accept(self)
-          end
-
-          def visit_def_node(node)
-            node.receiver&.accept(self)
-            node.parameters&.accept(self)
-            node.body&.accept(self)
-          end
-
-          def visit_class_node(node)
-            node.constant_path.accept(self)
-            node.superclass&.accept(self)
-            node.body&.accept(self)
-          end
-
-          def visit_module_node(node)
-            node.constant_path.accept(self)
-            node.body&.accept(self)
-          end
-
-          def visit_call_node(node)
-            node.receiver&.accept(self)
-            node.arguments&.accept(self)
-            node.block&.accept(self)
-          end
-
-          def visit_unless_node(node)
-            node.predicate.accept(self)
-            node.statements&.accept(self)
-            node.else_clause&.accept(self)
+            super
           end
         end
         private_constant :ThreadParentTernaryVisitor
@@ -753,10 +673,10 @@ module InstantRecord
             st = File.lstat(full)
             if st.directory?
               walk_demo_views(full, top_scope || entry, entry, "#{rel_prefix}#{entry}/", rb_files)
-            elsif entry.end_with?(".html.erb") && !entry.start_with?("_") && parent_name != "layouts" && (st.file? || (st.symlink? && !File.directory?(full)))
+            elsif entry.end_with?(".html.erb") && !entry.start_with?("_") && parent_name != "layouts" && (st.file? || (st.symlink? && File.file?(full)))
               scope = top_scope || entry
-              File.binwrite(full, "<% content_for(:demo_scope, \"#{scope}\") %>\n#{File.binread(full)}")
-            elsif rb_files && entry.end_with?(".rb") && (st.file? || (st.symlink? && !File.directory?(full)))
+              File.binwrite(full, "<% content_for(:demo_scope, \"#{scope}\") %>\n".b << File.binread(full))
+            elsif rb_files && entry.end_with?(".rb") && (st.file? || (st.symlink? && File.file?(full)))
               rb_files["#{rel_prefix}#{entry}"] = File.binread(full)
             end
           end
