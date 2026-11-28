@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 require "json"
 
 module InstantRecord
@@ -23,22 +25,24 @@ module InstantRecord
           )
         end
 
-        if json_string?(server_val, Array) || json_string?(client_val, Array)
-          s_arr = parse_json(server_val, Array) || []
-          c_arr = parse_json(client_val, Array) || []
+        s_arr = parse_json_string(server_val, Array)
+        c_arr = parse_json_string(client_val, Array)
+        if s_arr || c_arr
           b_arr = parse_json(base_val, Array) || []
-          return JSON.generate(merge_arrays(b_arr, s_arr, c_arr))
+          return JSON.generate(merge_arrays(b_arr, s_arr || [], c_arr || []))
         end
 
-        if json_string?(server_val, Hash) || json_string?(client_val, Hash)
-          s_hash = parse_json(server_val, Hash) || {}
-          c_hash = parse_json(client_val, Hash) || {}
+        s_hash = parse_json_string(server_val, Hash)
+        c_hash = parse_json_string(client_val, Hash)
+        if s_hash || c_hash
           b_hash = parse_json(base_val, Hash)
-          return JSON.generate(merge_hashes(b_hash, s_hash, c_hash, incoming_wins: incoming_wins))
+          return JSON.generate(merge_hashes(b_hash, s_hash || {}, c_hash || {}, incoming_wins: incoming_wins))
         end
 
-        separator = server_val.to_s.include?(", ") || client_val.to_s.include?(", ") ? ", " : ","
-        merged = merge_arrays(split_csv(base_val), split_csv(server_val), split_csv(client_val))
+        s_str = server_val.to_s
+        c_str = client_val.to_s
+        separator = (s_str.include?(", ") || c_str.include?(", ")) ? ", " : ","
+        merged = merge_arrays(split_csv(base_val), split_csv(s_str), split_csv(c_str))
         merged.join(separator)
       end
 
@@ -46,6 +50,8 @@ module InstantRecord
 
       # An unknown base is an empty one: nothing can have been removed from it.
       def merge_arrays(base_arr, server_arr, client_arr)
+        return server_arr | client_arr if base_arr.empty?
+
         client_added = client_arr - base_arr
         client_removed = base_arr - client_arr
         (server_arr - client_removed) | client_added
@@ -72,10 +78,17 @@ module InstantRecord
         merged
       end
 
-      # A string that spells out a JSON Array or Hash.
-      def json_string?(value, type)
+      # Parse a string that spells out a JSON Array or Hash, else nil.
+      def parse_json_string(value, type)
+        return nil unless value.is_a?(String) && !value.empty?
+
         opening = type == Array ? "[" : "{"
-        value.is_a?(String) && value.lstrip.start_with?(opening) && !parse_json(value, type).nil?
+        return nil unless value.start_with?(opening) || value.lstrip.start_with?(opening)
+
+        parsed = JSON.parse(value)
+        parsed if parsed.is_a?(type)
+      rescue JSON::ParserError
+        nil
       end
 
       # The Array or Hash that `value` is or spells out in JSON, else nil.
@@ -90,7 +103,21 @@ module InstantRecord
       end
 
       def split_csv(value)
-        value.to_s.split(",").map(&:strip).reject(&:empty?)
+        return [] if value.nil?
+
+        str = value.is_a?(String) ? value : value.to_s
+        return [] if str.empty?
+
+        parts = str.split(",")
+        out = []
+        i = 0
+        len = parts.size
+        while i < len
+          part = parts[i].strip
+          out << part unless part.empty?
+          i += 1
+        end
+        out
       end
     end
   end

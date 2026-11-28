@@ -450,17 +450,177 @@ class ColumnMergeEdgesTest < Minitest::Test
     server_update(record, { title: "v3" }, at: 2)
 
     reads = merge_reads { update(model, { "state" => "mine" }, hlc: client_hlc(3)) }
-    assert_match(/"version" = .* ORDER BY .*"id" DESC LIMIT/, reads[0])
-    assert_match(/version > .* ORDER BY .*"version" ASC, .*"id" ASC\z/, reads[1])
-    assert_match(/instant_record_sync_metadata.* IN \(/, reads[2])
-    assert_equal 3, reads.size
+    assert_match(/"version" = 1 OR \([^)]*"version" > 1/, reads[0])
+    assert_match(/LEFT JOIN "instant_record_sync_metadata"/, reads[0])
+    assert_equal 1, reads.size
 
     lose_history("r-1")
     assert_equal 1, merge_reads { update(model, { "state" => "x" }, hlc: client_hlc(3)) }.size
     # Without a base version, the log says only whether the client created the record.
     created = merge_reads { update(model, { "state" => "x" }, hlc: client_hlc(3), base_version: 0) }
-    assert_match(/"operation" = .* ORDER BY .*"id" DESC LIMIT/, created.first)
+    assert_match(/"operation" = 'create'/, created.first)
     assert_equal 1, created.size
+  end
+
+  def test_destroy_at_base_version_is_used_as_base_while_later_destroy_is_ignored
+    model, record = synced_record(title: "v1", state: "open") { sync_merge :state, :server_wins }
+    log_change_row(version: 1, payload: {}, operation: "destroy")
+    server_update(record, { title: "v2" }, at: 1)
+    log_change_row(version: 3, payload: {}, operation: "destroy")
+
+    # Because the latest row at base_version=1 is a destroy with payload {},
+    # state changed from nil to "open" after base and therefore collides.
+    assert update(model, { "state" => "mine" }, hlc: client_hlc(3))[:skipped]
+  end
+
+  def test_invalid_or_non_hash_json_payload_in_change_log_makes_columns_collide
+    ["{broken json", "[1,2,3]", "null"].each_with_index do |raw_json, idx|
+      id = "bad-json-#{idx}"
+      model, record = synced_record(id: id, title: "v1", state: "open") { sync_merge :state, :server_wins }
+      server_update(record, { title: "v2" }, at: 1)
+      change = InstantRecord::Change.find_by!(record_id: id, version: 2)
+      ActiveRecord::Base.connection.execute(
+        "UPDATE instant_record_changes SET attributes_payload = #{ActiveRecord::Base.connection.quote(raw_json)} WHERE id = #{change.id}"
+      )
+
+      assert update(model, { "state" => "mine" }, hlc: client_hlc(3), id: id)[:skipped], raw_json
+    end
+  end
+
+  def test_notes_read_handles_empty_single_and_multiple_clocks
+    _model, record = synced_record(title: "v1", state: "open")
+    assert_equal({}, InstantRecord::ColumnMerge::Notes.read(record, []))
+    c1 = client_hlc(1)
+    c2 = client_hlc(2)
+    assert_equal({}, InstantRecord::ColumnMerge::Notes.read(record, [c1]))
+
+    InstantRecord::ColumnMerge::Notes.write(record, c1, from: c1, merged: client_hlc(5), columns: ["title"])
+    InstantRecord::ColumnMerge::Notes.write(record, c2, from: c2, merged: client_hlc(6), columns: ["state"])
+
+    single = InstantRecord::ColumnMerge::Notes.read(record, [c1])
+    assert_equal({ c1 => { "from" => c1, "merged" => client_hlc(5), "columns" => ["title"] } }, single)
+
+    multi = InstantRecord::ColumnMerge::Notes.read(record, [c1, c2, client_hlc(9)])
+    assert_equal [c1, c2].sort, multi.keys.sort
+    assert_equal ["state"], multi[c2]["columns"]
+  end
+
+  def test_record_id_with_single_quote_merges_safely
+    id = "r'1-quote"
+    model, record = synced_record(id: id, title: "v1", state: "open") { sync_merge :state, :server_wins }
+    server_update(record, { title: "v2" }, at: 1)
+
+    res = update(model, { "state" => "mine" }, hlc: client_hlc(3), id: id)
+    assert res[:merged]
+    assert_equal ["v2", "mine"], [record.reload.title, record.state]
+  end
+
+  def test_non_joined_fallback_path_matches_joined_behavior
+    model, record = synced_record(title: "v1", state: "open", owner: "a,b") do
+      sync_merge :state, :server_wins
+      sync_merge :owner, :union
+    end
+    server_update(record, { title: "v2", owner: "a,b,c" }, at: 2)
+
+    orig = InstantRecord::ColumnMerge.instance_method(:join_metadata?)
+    InstantRecord::ColumnMerge.define_method(:join_metadata?) { |_conn| false }
+    begin
+      res = update(model, { "title" => "older", "state" => "mine", "owner" => "a,b,d" }, hlc: client_hlc(1))
+      assert res[:merged]
+      assert_equal ["v2", "mine", "a,b,c,d"], [record.reload.title, record.state, record.owner]
+
+      # Also exercise base_version == 0 own-create path without joined metadata
+      own_id = "own-fallback"
+      HLC.with_clock(-> { @t0 + 1 }) do
+        on_server do
+          InstantRecord::MutationApplier.apply(
+            id: "m-own-create", record_type: "Task", record_id: own_id, operation: "create",
+            base_version: 0, hlc: client_hlc(1), changes: { "title" => "c0", "state" => "open" }
+          )
+        end
+      end
+      r1 = update(model, { "state" => "s1" }, hlc: client_hlc(2), base_version: 0, id: own_id)
+      r2 = update(model, { "state" => "s2" }, hlc: client_hlc(3), base_version: 0, id: own_id)
+      refute r1[:skipped]
+      refute r2[:skipped]
+      assert_equal "s2", model.find(own_id).state
+    ensure
+      InstantRecord::ColumnMerge.define_method(:join_metadata?, orig)
+      InstantRecord::ColumnMerge.send(:private, :join_metadata?)
+    end
+  end
+
+  def test_model_overriding_read_attribute_falls_back_to_attributes_in_unlogged_check
+    model, record = synced_record(title: "v1", state: "open") do
+      sync_merge :state, :server_wins
+
+      def _read_attribute(attr_name, &block)
+        val = super
+        attr_name.to_s == "state" ? "decorated:#{val}" : val
+      end
+    end
+    server_update(record, { title: "v2" }, at: 1)
+
+    res = update(model, { "state" => "closed" }, hlc: client_hlc(2))
+    refute res[:skipped]
+    assert res[:merged]
+    assert_equal ["v2", "closed"], [record.reload.title, record.read_attribute_before_type_cast("state")]
+  end
+
+  def test_parse_json_times_true_preserves_unlogged_comparison_parity
+    previous = ActiveSupport.parse_json_times
+    ActiveSupport.parse_json_times = true
+    begin
+      model, record = synced_record(title: "v1", state: "open") do
+        sync_merge :state, :server_wins
+      end
+      server_update(record, { title: "v2" }, at: 1)
+
+      res = update(model, { "state" => "closed" }, hlc: client_hlc(2))
+      refute res[:skipped]
+      assert res[:merged]
+      assert_equal ["v2", "closed"], [record.reload.title, record.state]
+    ensure
+      ActiveSupport.parse_json_times = previous
+    end
+  end
+
+  def test_date_and_bigdecimal_as_logged_parity_with_unlogged_updates
+    ActiveRecord::Base.transaction do
+      ActiveRecord::Base.connection.create_table(:typed_merge_items, id: :string) do |t|
+        t.date :due_on
+        t.decimal :amount, precision: 10, scale: 2
+        t.string :title
+        t.integer :server_version, null: false, default: 0
+        t.string :sync_state, null: false, default: "synced"
+        t.timestamps
+      end
+
+      model = syncable_model("TypedTask") do
+        self.table_name = "typed_merge_items"
+        sync_merge :due_on, :server_wins
+        sync_merge :amount, :server_wins
+      end
+      InstantRecord.sync(model)
+
+      rec = HLC.with_clock(-> { @t0 }) do
+        on_server { model.create!(id: "td-1", title: "v1", due_on: Date.new(2026, 1, 10), amount: BigDecimal("12.50"), updated_at: @t0) }
+      end
+      server_update(rec, { title: "v2" }, at: 1)
+
+      # Disjoint client update on unchanged Date & BigDecimal columns must merge cleanly
+      res = update(model, { "due_on" => "2026-02-01", "amount" => "99.95" }, hlc: client_hlc(3), id: "td-1")
+      assert res[:merged]
+      assert_equal [Date.new(2026, 2, 1), BigDecimal("99.95")], [rec.reload.due_on, rec.amount]
+
+      # Unlogged direct DB update on Date & BigDecimal must collide under :server_wins
+      rec.update_columns(due_on: Date.new(2026, 3, 15), amount: BigDecimal("42.00"))
+      res2 = update(model, { "due_on" => "2026-04-01", "amount" => "50.00" }, hlc: client_hlc(5), base_version: 2, id: "td-1")
+      assert res2[:skipped]
+      assert_equal [Date.new(2026, 3, 15), BigDecimal("42.00")], [rec.reload.due_on, rec.amount]
+
+      raise ActiveRecord::Rollback
+    end
   end
 
   # --- Union: comma-separated strings ----------------------------------------
