@@ -278,6 +278,139 @@ class McpReplicaTest < ActiveSupport::TestCase
     assert_equal "Second file", @replica.find(model: "Note", id: "n-1")["record"]["title"]
   end
 
+  test "models reports counts on empty and populated tables with and without sync_state without sharing column hashes" do
+    write do |db|
+      db.execute_batch(<<~SQL)
+        CREATE TABLE empty_synced_items (
+          id TEXT PRIMARY KEY,
+          label TEXT,
+          sync_state TEXT NOT NULL DEFAULT 'synced'
+        );
+        CREATE TABLE plain_items (
+          id TEXT PRIMARY KEY,
+          label TEXT
+        );
+        CREATE TABLE empty_plain_items (
+          id TEXT PRIMARY KEY,
+          label TEXT
+        );
+        INSERT INTO plain_items VALUES ('p-1', 'Alpha'), ('p-2', 'Beta');
+        UPDATE instant_record_sync_metadata
+          SET value = 'Issue,Note,EmptySyncedItem,PlainItem,EmptyPlainItem'
+          WHERE key = 'compiled_models';
+      SQL
+    end
+    @replica.refresh_schema!
+
+    first = @replica.models["models"]
+    by_name = first.each_with_object({}) { |m, acc| acc[m["name"]] = m }
+
+    assert_equal [3, 1], [by_name["Issue"]["count"], by_name["Issue"]["pending_count"]]
+    assert_equal [1, 0], [by_name["Note"]["count"], by_name["Note"]["pending_count"]]
+    assert_equal [0, 0], [by_name["EmptySyncedItem"]["count"], by_name["EmptySyncedItem"]["pending_count"]]
+    assert_equal [2, 0], [by_name["PlainItem"]["count"], by_name["PlainItem"]["pending_count"]]
+    assert_equal [0, 0], [by_name["EmptyPlainItem"]["count"], by_name["EmptyPlainItem"]["pending_count"]]
+
+    # Mutating returned column metadata must not affect subsequent calls.
+    by_name["Issue"]["columns"].first["name"] = "mutated"
+    by_name["Issue"]["columns"] << { "name" => "extra" }
+
+    second = @replica.models["models"].find { |m| m["name"] == "Issue" }
+    assert_equal "id", second["columns"].first["name"]
+    refute_includes second["columns"].map { |c| c["name"] }, "extra"
+  end
+
+  test "query total matches across full pages, short last pages, offset past end, and repeated cached binds" do
+    # Full page (limit 2, offset 0) and short last page (limit 2, offset 2)
+    full_page = @replica.query(model: "Issue", order: "id asc", limit: 2, offset: 0)
+    assert_equal [2, 3], [full_page["count"], full_page["total"]]
+    assert_equal %w[i-1 i-2], full_page["rows"].map { |r| r["id"] }
+
+    last_page = @replica.query(model: "Issue", order: "id asc", limit: 2, offset: 2)
+    assert_equal [1, 3], [last_page["count"], last_page["total"]]
+    assert_equal %w[i-3], last_page["rows"].map { |r| r["id"] }
+
+    past_end = @replica.query(model: "Issue", order: "id asc", limit: 2, offset: 10)
+    assert_equal [0, 3], [past_end["count"], past_end["total"]]
+    assert_equal [], past_end["rows"]
+
+    # Reuse the same IN (?, ?) statement shape with normal binds followed by a nested hash.
+    both = @replica.query(model: "Issue", where: { "state" => %w[open done] }, order: "id asc", limit: 2, offset: 0)
+    assert_equal [2, 3], [both["count"], both["total"]]
+
+    nested = @replica.query(model: "Issue", where: { "state" => [{}, "open"] }, order: "id asc", limit: 2, offset: 0)
+    assert_equal [0, 2], [nested["count"], nested["total"]]
+    assert_equal [], nested["rows"]
+  end
+
+  test "search handles NULLs, integers, LIKE wildcards, multi-term queries, custom columns, and multi-model limits" do
+    write do |db|
+      db.execute_batch(<<~SQL)
+        CREATE TABLE logs (
+          id TEXT PRIMARY KEY,
+          title TEXT,
+          detail TEXT,
+          code INTEGER,
+          updated_at TEXT
+        );
+        INSERT INTO logs VALUES ('l-1', NULL, '50% off_sale\\path', 42099, '2026-11-21T01:00:00Z');
+        INSERT INTO logs VALUES ('l-2', 'Release 100% done', NULL, 777, '2026-11-21T02:00:00Z');
+        UPDATE instant_record_sync_metadata
+          SET value = 'Issue,Note,Log'
+          WHERE key = 'compiled_models';
+      SQL
+    end
+    @replica.refresh_schema!
+
+    # Special LIKE characters (%, _, \) with NULL sibling column
+    special = @replica.search(query: "50% off_sale\\path", models: ["Log"])
+    assert_equal ["l-1"], special["matches"].map { |m| m["id"] }
+    assert_equal ["detail"], special["matches"].first["matched_columns"]
+
+    # Duplicate terms and mixed special + plain terms
+    mixed = @replica.search(query: "release 100% release", models: ["Log"])
+    assert_equal ["l-2"], mixed["matches"].map { |m| m["id"] }
+    assert_equal ["title"], mixed["matches"].first["matched_columns"]
+
+    # Custom integer column search
+    by_code = @replica.search(query: "209", models: ["Log"], columns: %w[code title])
+    assert_equal ["l-1"], by_code["matches"].map { |m| m["id"] }
+    assert_equal ["code"], by_code["matches"].first["matched_columns"]
+
+    # Multi-model limit slicing preserves model order and caps total matches
+    limited = @replica.search(query: "release", models: %w[Issue Note Log], limit: 2)
+    assert_equal 2, limited["count"]
+    assert_equal %w[i-1 n-1], limited["matches"].map { |m| m["id"] }
+
+    all_three = @replica.search(query: "release", models: %w[Issue Note Log], limit: 10)
+    assert_equal 3, all_three["count"]
+    assert_equal %w[i-1 n-1 l-2], all_three["matches"].map { |m| m["id"] }
+  end
+
+  test "close, reopen, and refresh_schema! finalize cached statements cleanly and reflect renamed columns" do
+    # Warm cached statements across every read path
+    @replica.models
+    @replica.find(model: "Note", id: "n-1")
+    @replica.query(model: "Issue", where: { "state" => "open" }, order: "updated_at desc", limit: 2)
+    @replica.search(query: "release", limit: 5)
+
+    # Column rename underneath is picked up on cached statements immediately
+    write { |db| db.execute("ALTER TABLE notes RENAME COLUMN body TO content") }
+    renamed = @replica.find(model: "Note", id: "n-1")["record"]
+    assert_equal "Run tests and tag release", renamed["content"]
+    refute renamed.key?("body")
+
+    # refresh_schema! clears cached statements without error
+    @replica.refresh_schema!
+    assert_equal 1, @replica.query(model: "Note", where: { "content" => { "like" => "tag release" } })["total"]
+
+    # reopen and repeated close never raise SQLite3::BusyException from unfinalized statements
+    @replica.reopen
+    assert_equal "Release checklist", @replica.find(model: "Note", id: "n-1")["record"]["title"]
+    @replica.close
+    @replica.close
+  end
+
   private
 
   def write(path = @db_path)
