@@ -355,6 +355,120 @@ class ShellTest < ActiveSupport::TestCase
     assert_equal 2, prepared.size
   end
 
+  test "omitted columns keep SQLite defaults while explicit nil writes null" do
+    ActiveRecord::Base.transaction do
+      ActiveRecord::Base.connection.create_table :shell_sparse, id: :string do |t|
+        t.string :label, default: "standard"
+        t.boolean :active, default: true
+        t.integer :rank, default: 7, null: false
+      end
+      sparse = Class.new(ActiveRecord::Base) do
+        self.table_name = "shell_sparse"
+        define_singleton_method(:name) { "SparseRow" }
+      end
+      InstantRecord.sync(sparse)
+
+      rows = read_shell([
+        { type: "SparseRow", attributes: { "id" => "full", "label" => "custom", "active" => false, "rank" => 2 } },
+        { type: "SparseRow", attributes: { "id" => "omitted" } },
+        { type: "SparseRow", attributes: { "id" => "nilled", "label" => nil, "active" => nil } }
+      ]) do |db|
+        db.execute("SELECT id, label, typeof(label), active, typeof(active), rank, typeof(rank) FROM shell_sparse ORDER BY id")
+      end
+
+      assert_equal [
+        ["full", "custom", "text", 0, "integer", 2, "integer"],
+        ["nilled", nil, "null", nil, "null", 7, "integer"],
+        ["omitted", "standard", "text", 1, "integer", 7, "integer"]
+      ], rows
+      raise ActiveRecord::Rollback
+    end
+  end
+
+  test "key precedence, version precedence, default-value hashes, and frozen inputs match wire rules" do
+    InstantRecord.sync(syncable_model("EdgeItem"))
+    frozen_ts = "2026-01-15T12:34:56.123456Z".freeze
+    # Omit "title" while keeping size == items column count (8) via an unknown key so
+    # both default-value and default_proc hashes exercise the fast-path guard.
+    default_hash = Hash.new("leaked").merge(
+      "id" => "e-def", "extra" => "ignored", "state" => "pub", "owner" => "u",
+      "server_version" => 5, "sync_state" => "dirty",
+      "created_at" => frozen_ts, "updated_at" => frozen_ts
+    )
+    default_proc_hash = Hash.new { |_h, k| "leaked_#{k}" }.merge(
+      "id" => "e-dproc", "extra" => "ignored", "state" => "pub", "owner" => "u",
+      "server_version" => 5, "sync_state" => "dirty",
+      "created_at" => frozen_ts, "updated_at" => frozen_ts
+    )
+    frozen_attrs = {
+      "id" => "e-frozen".freeze, "title" => "ice".freeze, "state" => "pub".freeze, "owner" => "u".freeze,
+      "server_version" => 1, "sync_state" => "pending".freeze,
+      "created_at" => frozen_ts, "updated_at" => frozen_ts
+    }.freeze
+
+    rows = read_shell([
+      { type: "EdgeItem", version: 0, "version" => 9, attributes: { "id" => "e-v0", "server_version" => 8, "created_at" => frozen_ts, "updated_at" => frozen_ts } },
+      { type: "EdgeItem", version: false, "version" => 9, attributes: { "id" => "e-vf", "server_version" => 8, "created_at" => frozen_ts, "updated_at" => frozen_ts } },
+      { type: "EdgeItem", attributes: { "id" => "e-va", "server_version" => 6, "created_at" => frozen_ts, "updated_at" => frozen_ts } },
+      { type: "EdgeItem", attributes: { "id" => "e-sym", "title" => "str", title: "sym", "created_at" => frozen_ts, "updated_at" => frozen_ts } },
+      { type: "EdgeItem", attributes: { id: "e-str", title: "sym", "title" => "str", created_at: frozen_ts, updated_at: frozen_ts } },
+      { type: "EdgeItem", attributes: default_hash },
+      { type: "EdgeItem", attributes: default_proc_hash },
+      { type: "EdgeItem", version: 2, attributes: frozen_attrs }.freeze
+    ]) do |db|
+      db.execute("SELECT id, title, server_version, sync_state, created_at FROM items ORDER BY id")
+    end
+
+    expected_ts = "2026-01-15 12:34:56.123456"
+    assert_equal [
+      ["e-def", nil, 5, "synced", expected_ts],
+      ["e-dproc", nil, 5, "synced", expected_ts],
+      ["e-frozen", "ice", 2, "synced", expected_ts],
+      ["e-str", "str", 0, "synced", expected_ts],
+      ["e-sym", "sym", 0, "synced", expected_ts],
+      ["e-v0", nil, 0, "synced", expected_ts],
+      ["e-va", nil, 6, "synced", expected_ts],
+      ["e-vf", nil, 9, "synced", expected_ts]
+    ], rows
+    assert_equal "2026-01-15T12:34:56.123456Z", frozen_ts
+
+    # Missing type on the very first record must fail in insert_plan, not via nil sentinel match.
+    err = assert_raises(NameError) { read_shell([{ attributes: { "id" => "no-type" } }]) }
+    refute_instance_of NoMethodError, err
+  end
+
+  test "built shell database keeps 1024-byte pages, delete journal mode, no freelist, and cursor last" do
+    InstantRecord.sync(syncable_model("PackedItem"))
+    records = Array.new(25) do |i|
+      {
+        type: "PackedItem",
+        version: i + 1,
+        attributes: {
+          "id" => format("p-%02d", i),
+          "title" => "Row #{i}",
+          "created_at" => "2026-01-15T12:34:56.123456Z",
+          "updated_at" => "2026-01-15T12:34:56.123456Z"
+        }
+      }
+    end
+
+    info = read_shell(records) do |db|
+      {
+        page_size: db.get_first_value("PRAGMA page_size"),
+        journal_mode: db.get_first_value("PRAGMA journal_mode"),
+        freelist_count: db.get_first_value("PRAGMA freelist_count"),
+        integrity_check: db.get_first_value("PRAGMA integrity_check"),
+        meta_keys: db.execute("SELECT key FROM instant_record_sync_metadata ORDER BY rowid").flatten
+      }
+    end
+
+    assert_equal 1024, info[:page_size]
+    assert_equal "delete", info[:journal_mode]
+    assert_equal 0, info[:freelist_count]
+    assert_equal "ok", info[:integrity_check]
+    assert_equal "cursor", info[:meta_keys].last
+  end
+
   test "the schema comes from portable migrations, or else from the connection" do
     from_connection = InstantRecord::Shell.send(:connection_schema_statements)
     resolve = ->(root, **options) { InstantRecord::Shell.resolve_schema_ddl(app_root: root, **options) }

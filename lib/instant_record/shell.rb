@@ -343,10 +343,11 @@ module InstantRecord
         final = root.join("#{partition}.#{cursor}.#{fingerprint.first(16)}.sqlite3")
         draft = root.join("#{final.basename}.#{SecureRandom.hex(4)}.tmp")
         stamp = Time.current.utc.strftime(DB_TIME)
-        database = SQLite3::Database.new(draft.to_s)
+        database = SQLite3::Database.new(":memory:")
         # Most tables in a shell may be empty, and an empty table or index still
         # takes a page. Small pages keep the download small.
         database.execute("PRAGMA page_size = 1024")
+        database.execute("PRAGMA temp_store = MEMORY")
         database.transaction do
           ddl.fetch(:statements).each { |sql| database.execute(sql) }
           insert_records(database, records)
@@ -361,14 +362,25 @@ module InstantRecord
           # a database without one is a database that still has to sync.
           metadata["cursor"] = cursor.to_s
 
-          metadata.each do |key, value|
-            database.execute(
-              "INSERT INTO instant_record_sync_metadata (key, value, created_at, updated_at) VALUES (?, ?, ?, ?)",
-              [key, value, stamp, stamp]
-            )
+          meta_stmt = database.prepare(
+            "INSERT INTO instant_record_sync_metadata (key, value, created_at, updated_at) VALUES (?, ?, ?, ?)"
+          )
+          begin
+            metadata.each do |key, value|
+              meta_stmt.reset!
+              meta_stmt.bind_param(1, key)
+              meta_stmt.bind_param(2, value)
+              meta_stmt.bind_param(3, stamp)
+              meta_stmt.bind_param(4, stamp)
+              meta_stmt.step
+            end
+          ensure
+            meta_stmt.close
           end
         end
-        database.execute("VACUUM")
+        # VACUUM INTO writes a freshly packed, page-aligned SQLite file directly
+        # from memory to draft in one pass without rollback-journal overhead.
+        database.execute("VACUUM INTO ?", [draft.to_s])
         database.close
         File.rename(draft, final)
 
@@ -382,63 +394,238 @@ module InstantRecord
         FileUtils.rm_f(draft) if draft
       end
 
-      # What every row of one type shares, with a statement per list of columns.
-      # Lives for one build: a model may be reloaded before the next.
-      InsertPlan = Struct.new(:table, :names, :datetimes, :dates, :statements)
+      # What every row of one type shares, with a prepared statement per column
+      # bitmask. Lives for one build: a model may be reloaded before the next.
+      InsertPlan = Struct.new(
+        :table, :names, :col_count, :key_index, :datetime_indices, :date_indices,
+        :server_version_idx, :server_version_bit,
+        :sync_state_idx, :sync_state_bit, :sync_state_literal,
+        :values, :statements, :full_mask
+      )
       private_constant :InsertPlan
+
+      PreparedInsert = Struct.new(:statement, :bind_indices)
+      private_constant :PreparedInsert
+
+      UNSET_TYPE = Object.new.freeze
+      private_constant :UNSET_TYPE
 
       # The statements are closed whatever happens: SQLite refuses to close a
       # database that has one open.
       def insert_records(database, records)
         plans = {}
-        records.each { |record| insert(database, record, plans) }
+        last_type = UNSET_TYPE
+        plan = nil
+        names = nil
+        col_count = 0
+        key_index = nil
+        datetime_indices = nil
+        datetime_count = 0
+        date_indices = nil
+        date_count = 0
+        sv_idx = nil
+        sv_bit = 0
+        ss_idx = nil
+        ss_bit = 0
+        ss_literal = false
+        values = nil
+        full_mask = 0
+        statements = nil
+
+        last_mask = -1
+        statement = nil
+        bind_indices = nil
+        bind_count = 0
+
+        records.each do |record|
+          type = record[:type] || record["type"]
+          unless type.equal?(last_type) || type == last_type
+            plan = plans[type] ||= insert_plan(type)
+            last_type = type
+            names = plan.names
+            col_count = plan.col_count
+            key_index = plan.key_index
+            datetime_indices = plan.datetime_indices
+            datetime_count = datetime_indices.size
+            date_indices = plan.date_indices
+            date_count = date_indices.size
+            sv_idx = plan.server_version_idx
+            sv_bit = plan.server_version_bit
+            ss_idx = plan.sync_state_idx
+            ss_bit = plan.sync_state_bit
+            ss_literal = plan.sync_state_literal
+            values = plan.values
+            full_mask = plan.full_mask
+            statements = plan.statements
+            last_mask = -1
+          end
+
+          raw = record[:attributes] || record["attributes"]
+          mask = 0
+
+          if raw
+            if raw.is_a?(Hash) && raw.size == col_count && raw.default.nil? && raw.default_proc.nil?
+              i = 0
+              while i < col_count
+                col = names[i]
+                val = raw[col]
+                break if val.nil? && !raw.key?(col)
+                values[i] = val
+                i += 1
+              end
+              mask = full_mask if i == col_count
+            end
+
+            if mask == 0
+              raw.each do |key, val|
+                idx = key_index[key]
+                if idx.nil?
+                  next if key.is_a?(String) || key.is_a?(Symbol)
+                  idx = key_index[key.to_s]
+                  next unless idx
+                end
+                values[idx] = val
+                mask |= (1 << idx)
+              end
+            end
+          end
+
+          if sv_idx
+            existing = (mask & sv_bit) != 0 ? values[sv_idx] : nil
+            values[sv_idx] = record[:version] || record["version"] || existing || 0
+            mask |= sv_bit
+          end
+
+          if ss_idx
+            values[ss_idx] = "synced" unless ss_literal
+            mask |= ss_bit
+          end
+
+          if datetime_count > 0
+            di = 0
+            while di < datetime_count
+              idx = datetime_indices[di]
+              if (mask & (1 << idx)) != 0
+                val = values[idx]
+                values[idx] = format_datetime(val) unless val.nil?
+              end
+              di += 1
+            end
+          end
+
+          if date_count > 0
+            di = 0
+            while di < date_count
+              idx = date_indices[di]
+              if (mask & (1 << idx)) != 0
+                val = values[idx]
+                values[idx] = val.iso8601 if val.is_a?(Date)
+              end
+              di += 1
+            end
+          end
+
+          unless mask == last_mask
+            entry = statements[mask] ||= prepare_insert(database, plan, mask)
+            last_mask = mask
+            statement = entry.statement
+            bind_indices = entry.bind_indices
+            bind_count = bind_indices.size
+          end
+
+          statement.reset!
+          bi = 0
+          while bi < bind_count
+            val = values[bind_indices[bi]]
+            val = sqlite_value(val) unless val.is_a?(String) || val.is_a?(Integer) || val.nil?
+            statement.bind_param(bi + 1, val)
+            bi += 1
+          end
+          statement.step
+        end
       ensure
-        plans.each_value { |plan| plan.statements.each_value(&:close) }
+        plans.each_value { |p| p.statements.each_value { |entry| entry.statement.close } }
       end
 
       def insert_plan(type)
         model = InstantRecord.synced_model(type) || type.to_s.constantize
-        of_type = ->(kind) { model.columns.filter_map { |column| column.name if column.type == kind } }
-        InsertPlan.new(model.table_name, model.column_names, of_type.(:datetime), of_type.(:date), {})
-      end
+        columns = model.columns
+        names = []
+        key_index = {}
+        datetime_indices = []
+        date_indices = []
+        sv_idx = nil
+        ss_idx = nil
+        ss_literal = false
 
-      def insert(database, record, plans)
-        type = record[:type] || record["type"]
-        plan = plans[type] ||= insert_plan(type)
-        attributes = row_attributes(record, plan)
-        statement = plan.statements[attributes.keys] ||= database.prepare(insert_sql(plan.table, attributes.keys))
-        statement.execute(attributes.values.map { |value| sqlite_value(value) })
-      end
-
-      # A row as the client's upsert would leave it: wire values with datetimes
-      # in the compiled runtime's format, server_version set, sync_state synced.
-      def row_attributes(record, plan)
-        raw = record[:attributes] || record["attributes"] || {}
-        attributes = raw.transform_keys(&:to_s).slice(*plan.names)
-        if plan.names.include?("server_version")
-          attributes["server_version"] = record[:version] || record["version"] || attributes["server_version"] || 0
-        end
-        attributes["sync_state"] = "synced" if plan.names.include?("sync_state")
-
-        plan.datetimes.each do |name|
-          value = attributes[name]
-          attributes[name] = format_datetime(value) unless value.nil?
-        end
-        plan.dates.each do |name|
-          value = attributes[name]
-          attributes[name] = value.iso8601 if value.is_a?(Date)
+        columns.each_with_index do |column, idx|
+          name = column.name
+          names << name
+          key_index[name] = idx
+          key_index[name.to_sym] = idx
+          case column.type
+          when :datetime then datetime_indices << idx
+          when :date then date_indices << idx
+          end
+          if name == "server_version"
+            sv_idx = idx
+          elsif name == "sync_state"
+            ss_idx = idx
+            ss_literal = (column.type != :datetime)
+          end
         end
 
-        attributes
+        InsertPlan.new(
+          model.table_name,
+          names,
+          names.size,
+          key_index,
+          datetime_indices,
+          date_indices,
+          sv_idx,
+          sv_idx ? (1 << sv_idx) : 0,
+          ss_idx,
+          ss_idx ? (1 << ss_idx) : 0,
+          ss_literal,
+          Array.new(names.size),
+          {},
+          (1 << names.size) - 1
+        )
       end
 
-      def insert_sql(table, names)
-        %(INSERT INTO "#{table}" (#{quote_names(names)}) VALUES (#{(["?"] * names.size).join(", ")}))
+      def prepare_insert(database, plan, mask)
+        names = plan.names
+        col_count = plan.col_count
+        ss_idx = plan.sync_state_literal ? plan.sync_state_idx : nil
+        cols = []
+        placeholders = []
+        bind_indices = []
+        i = 0
+        while i < col_count
+          if (mask & (1 << i)) != 0
+            cols << %("#{names[i]}")
+            if i == ss_idx
+              placeholders << "'synced'"
+            else
+              placeholders << "?"
+              bind_indices << i
+            end
+          end
+          i += 1
+        end
+        sql = %(INSERT INTO "#{plan.table}" (#{cols.join(", ")}) VALUES (#{placeholders.join(", ")}))
+        PreparedInsert.new(database.prepare(sql), bind_indices)
       end
 
       def format_datetime(value)
-        if value.is_a?(String) && WIRE_ENCODINGS.include?(value.encoding) && WIRE_TIME.match?(value)
-          return "#{value.byteslice(0, 10)} #{value.byteslice(11, 15)}"
+        if value.is_a?(String)
+          encoding = value.encoding
+          if (encoding == Encoding::UTF_8 || encoding == Encoding::US_ASCII) &&
+              value.bytesize == 27 && WIRE_TIME.match?(value)
+            formatted = value.byteslice(0, 26)
+            formatted.setbyte(10, 32)
+            return formatted
+          end
         end
 
         time = value.is_a?(String) ? Time.iso8601(value) : value.to_time
