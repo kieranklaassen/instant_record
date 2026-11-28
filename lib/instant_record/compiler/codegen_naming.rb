@@ -3,6 +3,15 @@ module InstantRecord
     # Shared contract identifier inflection, nested type naming, and string
     # escaping helpers used by native code generators.
     module CodegenNaming
+      ESCAPE_MAP = {
+        "\\" => "\\\\",
+        "\"" => "\\\"",
+        "\n" => "\\n",
+        "\r" => "\\r",
+        "\t" => "\\t"
+      }.freeze
+      private_constant :ESCAPE_MAP
+
       extend self
 
       def camel_case(name)
@@ -35,12 +44,7 @@ module InstantRecord
       end
 
       def escape_string(value)
-        value.to_s
-          .gsub("\\", "\\\\")
-          .gsub("\"", "\\\"")
-          .gsub("\n", "\\n")
-          .gsub("\r", "\\r")
-          .gsub("\t", "\\t")
+        value.to_s.gsub(/[\\"\n\r\t]/, ESCAPE_MAP)
       end
     end
   end

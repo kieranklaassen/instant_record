@@ -72,17 +72,18 @@ module InstantRecord
           when Prism::ModuleNode
             walk(node.body, namespace + [constant_name(node.constant_path)], contracts)
           when Prism::ClassNode
-            class_name = (namespace + [constant_name(node.constant_path)]).compact.join("::")
+            nested_namespace = namespace + [constant_name(node.constant_path)]
+            class_name = nested_namespace.compact.join("::")
             if node.body.is_a?(Prism::StatementsNode)
               node.body.body.each do |stmt|
                 if stmt.is_a?(Prism::CallNode) && stmt.receiver.nil? && stmt.name == :contract
                   contracts << parse_contract(stmt, class_name)
                 else
-                  walk(stmt, namespace + [constant_name(node.constant_path)], contracts)
+                  walk(stmt, nested_namespace, contracts)
                 end
               end
             else
-              walk(node.body, namespace + [constant_name(node.constant_path)], contracts)
+              walk(node.body, nested_namespace, contracts)
             end
           end
         end
@@ -106,12 +107,7 @@ module InstantRecord
         end
 
         def parse_contract_block(block, builder, allow_actions:)
-          fail_at!(block, "contract expects a `do |c| ... end` block") unless block.is_a?(Prism::BlockNode)
-
-          param_name = block_param_name(block)
-          return unless block.body
-
-          statements = block.body.is_a?(Prism::StatementsNode) ? block.body.body : [block.body]
+          param_name, statements = block_statements(block, "contract expects a `do |c| ... end` block")
           statements.each do |stmt|
             fail_at!(stmt, "Only declarative contract calls are allowed inside a contract block") unless stmt.is_a?(Prism::CallNode)
             check_receiver!(stmt, param_name)
@@ -147,15 +143,11 @@ module InstantRecord
         end
 
         def parse_prop_field(call, builder)
-          positional, kwargs = split_arguments(call)
-          unless positional.length == 1 || positional.length == 2
-            fail_at!(call, "prop expects (name, type = :string, optional: false)")
-          end
-          fail_at!(call, "prop does not take a block") if call.block
-
-          name = literal_name(positional[0], call, "field name")
-          type = positional[1] ? literal_name(positional[1], call, "field type") : "string"
-          optional = extract_optional!(kwargs, call, allowed: %i[optional])
+          name, type, optional = parse_typed_declaration(
+            call,
+            kind_label: "field",
+            usage_message: "prop expects (name, type = :string, optional: false)"
+          )
           builder.prop(name, type, optional: optional)
         end
 
@@ -206,26 +198,17 @@ module InstantRecord
         end
 
         def parse_action_block(block, action_builder)
-          fail_at!(block, "action expects a `do |a| ... end` block") unless block.is_a?(Prism::BlockNode)
-
-          param_name = block_param_name(block)
-          return unless block.body
-
-          statements = block.body.is_a?(Prism::StatementsNode) ? block.body.body : [block.body]
+          param_name, statements = block_statements(block, "action expects a `do |a| ... end` block")
           statements.each do |stmt|
             fail_at!(stmt, "Only arg/value declarations are allowed inside an action block") unless stmt.is_a?(Prism::CallNode)
             check_receiver!(stmt, param_name)
             fail_at!(stmt, "Unknown action parameter declaration #{stmt.name.inspect} (expected arg or value)") unless %i[arg value].include?(stmt.name)
-            fail_at!(stmt, "#{stmt.name} does not take a block") if stmt.block
 
-            positional, kwargs = split_arguments(stmt)
-            unless positional.length == 1 || positional.length == 2
-              fail_at!(stmt, "#{stmt.name} expects (name, type = :string, optional: false)")
-            end
-
-            name = literal_name(positional[0], stmt, "parameter name")
-            type = positional[1] ? literal_name(positional[1], stmt, "parameter type") : "string"
-            optional = extract_optional!(kwargs, stmt, allowed: %i[optional])
+            name, type, optional = parse_typed_declaration(
+              stmt,
+              kind_label: "parameter",
+              usage_message: "#{stmt.name} expects (name, type = :string, optional: false)"
+            )
 
             if stmt.name == :arg
               action_builder.arg(name, type, optional: optional)
@@ -235,6 +218,29 @@ module InstantRecord
           end
         rescue ArgumentError => e
           fail_at!(block, e.message)
+        end
+
+        def block_statements(block, error_message)
+          fail_at!(block, error_message) unless block.is_a?(Prism::BlockNode)
+
+          param_name = block_param_name(block)
+          return [param_name, []] unless block.body
+
+          statements = block.body.is_a?(Prism::StatementsNode) ? block.body.body : [block.body]
+          [param_name, statements]
+        end
+
+        def parse_typed_declaration(call, kind_label:, usage_message:)
+          positional, kwargs = split_arguments(call)
+          unless positional.length == 1 || positional.length == 2
+            fail_at!(call, usage_message)
+          end
+          fail_at!(call, "#{call.name} does not take a block") if call.block
+
+          name = literal_name(positional[0], call, "#{kind_label} name")
+          type = positional[1] ? literal_name(positional[1], call, "#{kind_label} type") : "string"
+          optional = extract_optional!(kwargs, call, allowed: %i[optional])
+          [name, type, optional]
         end
 
         def block_param_name(block)
