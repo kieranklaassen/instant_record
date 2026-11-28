@@ -115,8 +115,8 @@ public final class HybridTab: NSObject, ObservableObject {
             if let local = site.local {
                 let here = LocalPages.local(url)
                 Task {
-                    let target = await local.has(here) ? here : LocalPages.remote(url, server: server)
-                    self.move(to: target, replace: replace)
+                    if local.routes.isEmpty { await local.learn() }
+                    self.move(to: local.has(here) ? here : LocalPages.remote(url, server: server), replace: replace)
                 }
                 return
             }
@@ -131,10 +131,22 @@ public final class HybridTab: NSObject, ObservableObject {
     /// The app's data changed: a page drawn from it is drawn again in place.
     func recordsChanged() {
         guard web.url?.scheme == LocalPages.scheme else { return }
+        // Not under a form that is being filled in or sent: it would be lost.
         run("""
         const event = new CustomEvent("instant-record:records-changed", { cancelable: true })
-        if (window.dispatchEvent(event) && window.Turbo?.session?.refresh && !document.activeElement?.closest?.("form")) window.Turbo.session.refresh(location.href)
-        """)
+        const fields = [...document.querySelectorAll("input, textarea, select")].filter(field => field.type !== "hidden")
+        const filled = fields.some(field => field.type === "checkbox" || field.type === "radio" ? field.checked !== field.defaultChecked :
+          field.options ? [...field.options].some(option => option.selected !== option.defaultSelected && field.multiple) : field.value !== field.defaultValue)
+        const busy = document.querySelector("[aria-busy=true]") || document.activeElement?.matches?.("input, textarea, select, [contenteditable]") || form
+        if (window.dispatchEvent(event) && !busy && !filled) window.Turbo?.session?.refresh?.(location.href)
+        """, ["form": signals?.form ?? false])
+    }
+
+    /// What is on show is another account's.
+    func accountChanged() {
+        path = []
+        sheet = nil
+        if web.url?.scheme == LocalPages.scheme { web.reload() }
     }
 
     private func move(to url: URL, replace: Bool) {
@@ -171,8 +183,9 @@ public final class HybridTab: NSObject, ObservableObject {
         return HybridNavigation.back(over: earlier.map(forms.contains)).map { earlier[$0] }
     }
 
-    private func tellRoutes() {
-        run("window.instantRecordHybrid?.routes(patterns)", ["patterns": site.routes.map { ["pattern": $0.pattern, "page": $0.page] as [String: Any] }])
+    func tellRoutes() {
+        let drawn = site.local?.routes.filter { $0.verb == "GET" }.map(\.pattern) ?? []
+        run("window.instantRecordHybrid?.routes(patterns, drawn)", ["patterns": site.routes.map { ["pattern": $0.pattern, "page": $0.page] as [String: Any] }, "drawn": drawn])
     }
 
     private func moved() {
@@ -196,7 +209,10 @@ public final class HybridTab: NSObject, ObservableObject {
     fileprivate func answer(_ message: WKScriptMessage) async -> (Any?, String?) {
         guard trusts(message), let body = message.body as? [String: Any], let name = body["name"] as? String else { return (nil, "Not allowed") }
         guard let capabilities = site.capabilities else { return (nil, "This app was given no capabilities") }
-        do { return (try await capabilities.call(name, Capabilities.arguments(body["arguments"])), nil) } catch { return (nil, error.localizedDescription) }
+        do {
+            let said = try await capabilities.call(name, Capabilities.arguments(body["arguments"]))
+            return JSONSerialization.isValidJSONObject(said) ? (said, nil) : (nil, "\(name) answered what is not JSON")
+        } catch { return (nil, error.localizedDescription) }
     }
 
     fileprivate func hear(_ message: WKScriptMessage) {
@@ -261,15 +277,11 @@ extension HybridTab: WKNavigationDelegate, WKUIDelegate {
         let method = action.request.httpMethod ?? "GET"
         switch decide(url, mainFrame: mainFrame, method: method) {
         case .stay:
-            // A link from a page on the device to one the library lacks.
-            if mainFrame, method == "GET", url.scheme == LocalPages.scheme, action.navigationType == .linkActivated, let local = site.local {
-                decisionHandler(.cancel)
-                Task {
-                    let here = await local.has(url)
-                    self.asked = here ? url : LocalPages.remote(url, server: server)
-                    self.web.load(URLRequest(url: self.asked!))
-                }
-                return
+            if url.scheme == LocalPages.scheme {
+                // A frame shows no page of the device, and only a page of its own sends one a form.
+                let source = action.sourceFrame.securityOrigin
+                let own = source.protocol == LocalPages.scheme && source.host == "app" && action.sourceFrame.isMainFrame
+                guard mainFrame, method == "GET" || own else { return decisionHandler(.cancel) }
             }
             if mainFrame { asked = url }
             decisionHandler(.allow)

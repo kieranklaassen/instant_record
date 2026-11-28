@@ -24,8 +24,8 @@ struct ElementView: View {
             Stepper("\(node.text) \(value)", value: number, in: range, step: step)
         case "picker": picker
         case "dates":
-            DatePicker(node.text, selection: Binding(get: { Moment.date(value) ?? Date() }, set: { put($0.formatted(.iso8601)) }),
-                       displayedComponents: node.prop("time") == "true" ? [.date, .hourAndMinute] : .date)
+            DatePicker(node.text, selection: Binding(get: { (timed ? Moment.date(value) : Day.date(value)) ?? Date() }, set: { put(timed ? $0.formatted(.iso8601) : Day.written($0)) }),
+                       displayedComponents: timed ? [.date, .hourAndMinute] : .date)
         case "colors":
             ColorPicker(node.text, selection: Binding(get: { Color(hex: value) ?? .accentColor }, set: { put($0.hex) }), supportsOpacity: false)
         case "progress":
@@ -78,6 +78,7 @@ struct ElementView: View {
     }
 
     private func height(_ usual: Double) -> Double { amount("height") > 0 ? amount("height") : usual }
+    private var timed: Bool { node.prop("time") == "true" }
     private var total: Double { amount("total") > 0 ? amount("total") : 1 }
     private var step: Double { amount("step") > 0 ? amount("step") : 1 }
     // A range that ends before it starts would stop the app.
@@ -145,6 +146,21 @@ struct ElementView: View {
         ScrollView(.horizontal) { HStack { children } }.frame(height: height(240))
         #endif
     }
+}
+
+/// A day with no time, as the calendar on the wall has it.
+enum Day {
+    private static func formatter(_ zone: TimeZone) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = zone
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }
+
+    static func date(_ text: String, zone: TimeZone = .current) -> Date? { formatter(zone).date(from: text) }
+    static func written(_ date: Date, zone: TimeZone = .current) -> String { formatter(zone).string(from: date) }
 }
 
 private struct SliderView: View {

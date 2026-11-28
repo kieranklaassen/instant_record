@@ -35,21 +35,21 @@ public final class HybridHost: ObservableObject {
     /// - screens: the Ruby screens a route may open, by name.
     /// - views: SwiftUI views for an app with no compiled Ruby. With `app`,
     ///   its own are used.
-    public convenience init(server: URL, app: AppHost? = nil, screens: Set<String> = [], views: Screens = Screens(), capabilities: Capabilities? = nil, outside: @escaping @MainActor (URL) -> Void = HybridHost.open) {
+    public convenience init(server: URL, mount: String = "/instant_record", app: AppHost? = nil, screens: Set<String> = [], views: Screens = Screens(), capabilities: Capabilities? = nil, outside: @escaping @MainActor (URL) -> Void = HybridHost.open) {
         let site = HybridSite(server: server, outside: outside)
         // Given none, the standard ones. An empty one allows none.
         let capabilities = capabilities ?? Capabilities()
         site.capabilities = capabilities
         if app?.capabilities == nil { app?.capabilities = capabilities }
-        self.init(site: site, app: app, screens: screens, views: views, defaults: .standard, exchange: Transport().exchange)
+        self.init(site: site, app: app, screens: screens, views: views, mount: mount, defaults: .standard, exchange: Transport().exchange)
     }
 
-    init(site: HybridSite, app: AppHost?, screens: Set<String>, views: Screens, defaults: UserDefaults, exchange: @escaping (String) -> String) {
+    init(site: HybridSite, app: AppHost?, screens: Set<String>, views: Screens, mount: String = "/instant_record", defaults: UserDefaults, exchange: @escaping (String) -> String) {
         self.site = site
         self.app = app
         self.screens = app == nil ? [] : screens
         self.views = app?.views ?? views
-        store = HybridConfigStore(server: site.server, defaults: defaults, exchange: exchange)
+        store = HybridConfigStore(server: site.server, mount: mount, defaults: defaults, exchange: exchange)
         config = store.kept() ?? .bare
         app?.site = site
         // With compiled Rails its pages are drawn here, with or without a network.

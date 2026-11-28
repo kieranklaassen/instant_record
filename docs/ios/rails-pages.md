@@ -6,7 +6,7 @@ HTML, from your controllers and views, under native tabs and bars.
 
 In an app with compiled Rails, **on the device**: your router, controllers and ERB run on the phone, over the same SQLite file as its Ruby screens. A page opens with no network. A form's write is queued and synced. A change that arrives redraws a page that uses Turbo.
 
-What the compiled app has no route for comes from your server. So does every page of an app with no compiled Rails.
+What the compiled app has no route for comes from your server, and a link from either kind of page leads to the other. A form on a device page must lead to a compiled route. Files cannot be sent from one yet: use `sync_file`. So does every page of an app with no compiled Rails.
 
 | | Drawn on the device | Drawn by the server |
 |---|---|---|
@@ -75,5 +75,6 @@ The app follows a page as it changes, with or without a full load. It was run wi
 
 ## Safety
 
+- A page drawn on the device takes a form or a write only from its own pages: not from a frame, nor a server's page. A page with `Referrer-Policy: no-referrer` cannot `fetch` a write.
 - Only the main frame of your server, or of the app itself, can speak to the app.
 - A link to another origin opens outside. Other schemes are refused, apart from mail, phone, message and FaceTime.

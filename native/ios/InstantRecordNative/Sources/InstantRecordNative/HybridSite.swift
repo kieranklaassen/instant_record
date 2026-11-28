@@ -31,6 +31,15 @@ public final class HybridSite {
 
     func draw(with app: AppHost, pages: LocalPages? = nil) {
         local = pages ?? LocalPages(app: app, server: server)
+        let local = local
+        Task { [weak self] in
+            await local?.learn()
+            self?.tabs.forEach { $0.tab?.tellRoutes() }
+        }
+        app.switched = { [weak self] in
+            self?.local?.forget()
+            self?.tabs.forEach { $0.tab?.accountChanged() }
+        }
         app.changed = { [weak self] in self?.tabs.forEach { $0.tab?.recordsChanged() } }
     }
 

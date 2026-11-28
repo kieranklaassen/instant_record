@@ -35,9 +35,9 @@ struct <%= app_name %>App: App {
             AppHost.Store(database: folder.appending(path: "app.sqlite3").path, endpoint: address + "<%= mount_path %>")
         })
         app.start()
-        _host = StateObject(wrappedValue: HybridHost(server: server, app: app, screens: rubyScreens, capabilities: capabilities))
+        _host = StateObject(wrappedValue: HybridHost(server: server, mount: "<%= mount_path %>", app: app, screens: rubyScreens, capabilities: capabilities))
 <% else -%>
-        _host = StateObject(wrappedValue: HybridHost(server: server, views: views, capabilities: capabilities))
+        _host = StateObject(wrappedValue: HybridHost(server: server, mount: "<%= mount_path %>", views: views, capabilities: capabilities))
 <% end -%>
     }
 

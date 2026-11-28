@@ -49,9 +49,9 @@ module InstantRecord
       end
 
       def write_config
-        return unless hybrid?
+        return if !hybrid? || File.exist?(File.join(destination_root, "config/native.yml"))
 
-        create_file "config/native.yml", <<~YAML, skip: true
+        create_file "config/native.yml", <<~YAML
           # The app's tabs. A deploy changes them, with no new build.
           tint: "#2F6CA3"
           tabs:

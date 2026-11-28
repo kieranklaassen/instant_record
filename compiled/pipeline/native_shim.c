@@ -59,6 +59,7 @@ static void call_branch_outbox(void *ctx) { (void)ctx; sp_NativeBridge_s_branch_
 static void call_branch_replay(void *ctx) { (void)ctx; sp_NativeBridge_s_branch_replay(); }
 static void call_render(void *ctx)    { (void)ctx; sp_NativeBridge_s_render(); }
 static void call_action(void *ctx)    { (void)ctx; sp_NativeBridge_s_action(); }
+static void call_routes(void *ctx)    { (void)ctx; sp_NativeBridge_s_routes(); }
 static void call_open(void *ctx)      { (void)ctx; sp_NativeBridge_s_open(); }
 static void call_boot(void *ctx)      { (void)ctx; app_boot(); }
 
@@ -69,6 +70,7 @@ static const struct { const char *name; void (*fn)(void *); } entries[] = {
   { "notices", call_notices },
   { "branch_outbox", call_branch_outbox }, { "branch_replay", call_branch_replay },
   { "render", call_render },   { "action", call_action },   { "open", call_open },
+  { "routes", call_routes },
 };
 
 static int run_guarded(void (*fn)(void *)) {

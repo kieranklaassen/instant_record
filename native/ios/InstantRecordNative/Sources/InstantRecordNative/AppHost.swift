@@ -216,6 +216,13 @@ public final class AppHost: ObservableObject {
     /// Told on the main thread when the app's data may have changed, so that
     /// a page drawn from it can be drawn again.
     var changed: (() -> Void)?
+    /// Told when another database has been opened in this one's place.
+    var switched: (() -> Void)?
+
+    /// The pages the library draws, "VERB /path/:param" a line.
+    func routes() async -> String {
+        await withCheckedContinuation { done in thread.run { done.resume(returning: self.engine.call("routes", "") ?? "") } }
+    }
 
     /// One request through the app's own router, controllers and views.
     func page(_ request: String) async -> HTTPText.Reply? {
@@ -239,6 +246,7 @@ public final class AppHost: ObservableObject {
     // the same action: what came of it in `values`, or an "error" there.
     private func performNative(_ action: String, args: [String: String], on route: Route) {
         Task { @MainActor in
+            let before = await withCheckedContinuation { done in self.thread.run { done.resume(returning: self.open) } }
             var values: [String: String]
             do {
                 guard let capabilities else { throw Capabilities.Failure("This app was given no capabilities") }
@@ -246,8 +254,11 @@ public final class AppHost: ObservableObject {
             } catch {
                 values = ["error": error.localizedDescription]
             }
+            let answer = values
             self.thread.run {
-                self.act(action, args, values, on: route)
+                // Another account was opened while the person was asked.
+                guard self.open == before else { return }
+                self.act(action, args, answer, on: route)
                 self.draw()
             }
             self.schedule.request()
@@ -633,6 +644,7 @@ public final class AppHost: ObservableObject {
         loadNoticesIfNeeded(from: pos)
         DispatchQueue.main.async {
             self.root = route
+            self.switched?()
             if let drawn { self.screens[route] = drawn }
             self.fetchingFirst = first
             self.sheet = nil

@@ -25,8 +25,16 @@ enum HybridBridge {
         return all
       }
 
+      // By its parts: the origin of a scheme of one's own reads as "null".
+      const same = url => url.protocol === location.protocol && url.host === location.host
       let places = []
-      const opensNative = url => url.origin === location.origin && places.find(place => place.pattern.test(url.pathname))?.page === false
+      const opensNative = url => same(url) && places.find(place => place.pattern.test(url.pathname))?.page === false
+
+      // Pages are drawn on the device or by the server. A link from one kind to
+      // the other is the app's to follow.
+      let here = []
+      const local = location.protocol === "instant-record:"
+      const crosses = url => same(url) && here.length > 0 && here.some(page => page.test(url.pathname)) !== local
 
       let canGoBack = false
       const mark = () => {
@@ -58,7 +66,10 @@ enum HybridBridge {
 
       window.instantRecordHybrid = {
         gather() { last = ""; gather() },
-        routes(patterns) { places = patterns.map(place => ({ ...place, pattern: new RegExp(place.pattern) })) },
+        routes(patterns, drawn) {
+          places = patterns.map(place => ({ ...place, pattern: new RegExp(place.pattern) }))
+          here = drawn.map(pattern => new RegExp(pattern))
+        },
         back(can) { canGoBack = can; mark() },
         click(selector) { document.querySelector(selector)?.click() },
         visit(url, replace) {
@@ -84,11 +95,26 @@ enum HybridBridge {
       window.addEventListener("click", event => {
         const link = event.target?.closest?.("a[href]")
         if (!link || event.defaultPrevented || event.button > 0 || link.dataset.turboMethod || link.dataset.method || link.hasAttribute("download")) return
-        if (link.getAttribute("href").startsWith("#") || !opensNative(new URL(link.href))) return
+        if (link.getAttribute("href").startsWith("#") || !(opensNative(new URL(link.href)) || crosses(new URL(link.href)))) return
         event.preventDefault()
         event.stopImmediatePropagation()
         post({ type: "visit", url: link.href })
       }, true)
+
+      document.addEventListener("turbo:before-visit", event => {
+        const url = new URL(event.detail.url, location.href)
+        if (!crosses(url)) return
+        event.preventDefault()
+        post({ type: "visit", url: url.href })
+      })
+      document.addEventListener("turbo:before-fetch-response", event => {
+        const to = event.detail.fetchResponse?.header("X-Instant-Record-Location")
+        if (!to) return
+        event.preventDefault()
+        const url = new URL(to)
+        if (same(url)) window.Turbo.visit(to)
+        else post({ type: "visit", url: to })
+      })
 
       mark()
       document.addEventListener("DOMContentLoaded", gather)

@@ -315,6 +315,13 @@ module InstantRecord
             0
           end
 
+          # Out: the routes compiled in, so that a host asks for no page to learn
+          # whether there is one.
+          def self.routes
+            NativeHost.ir_host_give("out", "<<routes>>")
+            0
+          end
+
           # In: the SQLite file to work in from here on. The one open before is closed.
           def self.open
             NativeDatabase.open(NativeHost.ir_host_take("in"))
@@ -615,7 +622,7 @@ module InstantRecord
             "NativeBridge",
             read: ->(name) { %(NativeHost.ir_host_take("#{name}")) },
             write: ->(name) { "NativeHost.ir_host_give(\"#{name}\", " },
-            entries: NATIVE_ENTRIES,
+            entries: fill(NATIVE_ENTRIES, { "routes" => compiled_routes(tree_dir) }),
             shell_fingerprint: shell_fingerprint
           ) +
           fill(NATIVE_DATABASE, { "database" => indent(db_body, "    ") }) +
@@ -634,6 +641,17 @@ module InstantRecord
         File.write(File.join(tree_dir, "main_native.rb"), head + entry)
         install_native_host_adapter(tree_dir)
         found.map(&:first)
+      end
+
+      # The emitted route table's verbs and paths, a line each.
+      def compiled_routes(tree_dir)
+        file = File.join(tree_dir, "config/routes.rb")
+        return "" unless File.file?(file)
+
+        table = File.read(file)
+        routes = table.scan(/Route\.new\("([A-Z]+)", "([^"]+)"/).map { |verb, path| "#{verb} #{path}" }
+        routes << "GET /" if table[/def self\.root\n(.*?)\n  end/m, 1].to_s.include?("Route.new")
+        routes.uniq.join("\\n")
       end
 
       def install_native_host_adapter(tree_dir)

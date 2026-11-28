@@ -63,7 +63,8 @@ public final class Capabilities {
     /// An answer as strings by name, as Ruby takes them.
     static func strings(_ answer: [String: Any]) -> Arguments {
         answer.compactMapValues { value in
-            text(value) ?? (try? JSONSerialization.data(withJSONObject: value)).map { String(decoding: $0, as: UTF8.self) }
+            // What is not JSON would stop the app, and is left out.
+            text(value) ?? (JSONSerialization.isValidJSONObject(value) ? (try? JSONSerialization.data(withJSONObject: value)).map { String(decoding: $0, as: UTF8.self) } : nil)
         }
     }
 

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import WebKit
 
@@ -21,6 +22,9 @@ final class LocalPages: NSObject, WKURLSchemeHandler {
     private let copies: URL
     private var cookies: [String: String] = [:]
     private var running: Set<ObjectIdentifier> = []
+    private(set) var routes: [LocalRoute] = []
+    /// Where a page is sent that this app does not draw.
+    nonisolated static let elsewhere = "X-Instant-Record-Location"
 
     init(app: AppHost, server: URL, bundled: URL? = Bundle.main.url(forResource: "Pages", withExtension: nil),
          copies: URL = URL.cachesDirectory.appending(path: "instant-record-pages")) {
@@ -74,36 +78,73 @@ final class LocalPages: NSObject, WKURLSchemeHandler {
         var body: Data
     }
 
+    /// Ask the library once which pages it draws.
+    func learn() async { routes = LocalRoute.all(await app.routes()) }
+
+    /// Another account's session is not this one's.
+    func forget() { cookies = [:] }
+
+    /// Whether the library draws what is at an address.
+    func has(_ url: URL, method: String = "GET") -> Bool { routes.contains { $0.matches(method, url.path) } }
+
+    /// A write is taken from this app's own pages. A frame, and a page of a
+    /// server's, say another origin, or none.
+    static func own(_ request: URLRequest) -> Bool {
+        let method = request.httpMethod ?? "GET"
+        if ["GET", "HEAD"].contains(method) { return true }
+        if let origin = request.value(forHTTPHeaderField: "Origin") { return origin == "\(scheme)://app" }
+        return request.value(forHTTPHeaderField: "Referer")?.hasPrefix("\(scheme)://app/") ?? false
+    }
+
+    private func plain(_ url: URL?, _ status: Int, _ text: String) -> Answer {
+        Answer(url: url, status: status, headers: ["Content-Type": "text/plain; charset=utf-8"], body: Data(text.utf8))
+    }
+
+    // To an address this app does not draw: the page script of a Turbo visit
+    // reads the header, and a plain navigation runs the line.
+    private func away(to target: URL, at url: URL) -> Answer {
+        let json = (try? JSONEncoder().encode(target.absoluteString)).map { String(decoding: $0, as: UTF8.self).replacingOccurrences(of: "<", with: "\\u003c") } ?? "\"\""
+        return Answer(url: url, status: 200, headers: ["Content-Type": "text/html; charset=utf-8", Self.elsewhere: target.absoluteString],
+                      body: Data("<!doctype html><script>window.InstantRecord.visit(\(json), { replace: true })</script>".utf8))
+    }
+
     func answer(_ request: URLRequest) async -> Answer {
-        guard let url = request.url, url.host == "app" else { return Answer(url: request.url, status: 400, headers: [:], body: Data()) }
+        guard let url = request.url, url.host == "app" else { return plain(request.url, 400, "Not this app's.") }
+        guard Self.own(request) else { return plain(url, 403, "A write comes from this app's own pages.") }
         let get = request.httpMethod == nil || request.httpMethod == "GET"
         if get, let file = bundledFile(url.path) { return file.answer(for: url) }
         if get, isAsset(url.path) { return await asset(url) }
+        if routes.isEmpty { await learn() }
 
-        var (method, path, body, at) = (request.httpMethod ?? "GET", Self.path(url), request.body, url)
+        let sent = request.body
+        guard let text = String(data: sent, encoding: .utf8), !text.contains("\0") else { return plain(url, 415, "A file cannot be sent from a page drawn on the device.") }
+        let turbo = request.value(forHTTPHeaderField: "X-Turbo-Request-Id") != nil
+        var method = HTTPText.method(request.httpMethod ?? "GET", type: request.value(forHTTPHeaderField: "Content-Type") ?? "", text: text)
+        var (body, at) = (sent, url)
+        guard has(url, method: method) else {
+            return get ? away(to: Self.remote(url, server: server), at: url) : plain(url, 404, "This app draws no such page.")
+        }
         // A redirect is followed here: a web view follows none of a scheme's.
         for _ in 0..<5 {
-            let said = await app.page(HTTPText.request(method: method, path: path, headers: request.allHTTPHeaderFields ?? [:], body: body, host: Self.root.host!, cookies: cookies))
-            guard let said else { return Answer(url: at, status: 500, headers: ["Content-Type": "text/plain"], body: Data("The app could not draw this page.".utf8)) }
+            let said = await app.page(HTTPText.request(method: method, path: Self.path(at), headers: request.allHTTPHeaderFields ?? [:], body: body, host: Self.root.host!, cookies: cookies))
+            guard let said else { return plain(at, 500, "The app could not draw this page.") }
             keep(said.cookies)
-            guard (301...308).contains(said.status), said.status != 304, let to = said.headers["location"].flatMap({ URL(string: $0, relativeTo: at)?.absoluteURL }) else {
+            guard [301, 302, 303, 307, 308].contains(said.status), let to = said.headers["location"].flatMap({ URL(string: $0, relativeTo: at)?.absoluteURL }) else {
                 var headers = said.headers
                 headers["content-type"] = headers["content-type"] ?? "text/html; charset=utf-8"
                 headers["content-length"] = String(said.body.count)
                 return Answer(url: at, status: said.status, headers: headers, body: said.body)
             }
+            let ours = (to.scheme == Self.scheme && to.host == "app") || Origin(to) == Origin(server) || (Origin(to) != nil && to.host == "app")
+            guard ours, has(Self.local(to)) || said.status >= 307 else {
+                return away(to: ours ? Self.remote(to, server: server) : to, at: at)
+            }
+            // Turbo takes a form's answer only as a redirect it saw itself.
+            if turbo, !get { return away(to: Self.local(to), at: at) }
             at = Self.local(to)
-            path = Self.path(at)
             if said.status < 307 { (method, body) = ("GET", Data()) }
         }
-        return Answer(url: at, status: 508, headers: [:], body: Data())
-    }
-
-    /// Whether the library has a page at an address. Asked before a web view
-    /// goes there, so that one it lacks is the server's.
-    func has(_ url: URL) async -> Bool {
-        let said = await app.page(HTTPText.request(method: "GET", path: Self.path(url), headers: ["Accept": "text/html"], body: Data(), host: Self.root.host!, cookies: cookies))
-        return said.map { $0.status != 404 } ?? false
+        return plain(at, 508, "Too many redirects.")
     }
 
     private static func path(_ url: URL) -> String {
@@ -136,7 +177,7 @@ final class LocalPages: NSObject, WKURLSchemeHandler {
     }
 
     private func asset(_ url: URL) async -> Answer {
-        let copy = copies.appending(path: Data(url.absoluteString.utf8).base64EncodedString().replacingOccurrences(of: "/", with: "_").suffix(200).description)
+        let copy = copies.appending(path: SHA256.hash(data: Data(Self.remote(url, server: server).absoluteString.utf8)).map { String(format: "%02x", $0) }.joined())
         let fingerprinted = url.path.range(of: #"-[0-9a-f]{8,}\.\w+$"#, options: .regularExpression) != nil
         if fingerprinted, let data = try? Data(contentsOf: copy) { return File(data: data, type: File.type(url.path)).answer(for: url) }
         if let (data, response) = try? await URLSession.shared.data(from: Self.remote(url, server: server)), (response as? HTTPURLResponse)?.statusCode == 200 {
@@ -153,7 +194,7 @@ final class LocalPages: NSObject, WKURLSchemeHandler {
         let type: String
 
         func answer(for url: URL) -> Answer {
-            Answer(url: url, status: 200, headers: ["Content-Type": type, "Content-Length": String(data.count), "Access-Control-Allow-Origin": "*"], body: data)
+            Answer(url: url, status: 200, headers: ["Content-Type": type, "Content-Length": String(data.count), "Access-Control-Allow-Origin": "instant-record://app"], body: data)
         }
 
         static func type(_ path: String) -> String {
@@ -171,6 +212,31 @@ final class LocalPages: NSObject, WKURLSchemeHandler {
             default: "application/octet-stream"
             }
         }
+    }
+}
+
+/// One of the library's routes.
+struct LocalRoute: Equatable {
+    let verb: String
+    let parts: [String]
+
+    static func all(_ text: String) -> [LocalRoute] {
+        text.components(separatedBy: "\n").compactMap { line in
+            let words = line.split(separator: " ", maxSplits: 1)
+            guard words.count == 2, words[1].hasPrefix("/") else { return nil }
+            return LocalRoute(verb: String(words[0]), parts: words[1].split(separator: "/").map(String.init))
+        }
+    }
+
+    func matches(_ method: String, _ path: String) -> Bool {
+        let words = path.split(separator: "/")
+        guard (method == "HEAD" ? "GET" : method) == verb, words.count == parts.count else { return false }
+        return zip(parts, words).allSatisfy { $0.hasPrefix(":") || $0 == $1 }
+    }
+
+    /// The same match, for the page script.
+    var pattern: String {
+        "^/" + parts.map { $0.hasPrefix(":") ? "[^/]+" : NSRegularExpression.escapedPattern(for: $0) }.joined(separator: "/") + "/?$"
     }
 }
 
@@ -198,14 +264,24 @@ enum HTTPText {
         let body: Data
     }
 
+    /// Rails forms send PATCH and DELETE as POST and a _method. The server
+    /// that reads that is not between here and the app.
+    static func method(_ method: String, type: String, text: String) -> String {
+        guard method == "POST" else { return method }
+        var asked: String?
+        if type.isEmpty || type.hasPrefix("application/x-www-form-urlencoded") {
+            asked = URLComponents(string: "?" + text)?.queryItems?.first { $0.name == "_method" }?.value
+        } else if type.hasPrefix("multipart/form-data"), let found = text.range(of: #"name="_method"\r\n\r\n[A-Za-z]+"#, options: .regularExpression) {
+            asked = text[found].components(separatedBy: "\r\n").last
+        }
+        let verb = asked?.uppercased() ?? method
+        return ["PATCH", "PUT", "DELETE"].contains(verb) ? verb : method
+    }
+
     static func request(method: String, path: String, headers: [String: String], body: Data, host: String, cookies: [String: String]) -> String {
         let type = headers.first { $0.key.lowercased() == "content-type" }?.value ?? "application/x-www-form-urlencoded"
         let text = String(decoding: body, as: UTF8.self)
-        var verb = method
-        // Rails forms send PATCH and DELETE as POST and a _method. The server
-        // that reads that is not between here and the app.
-        if verb == "POST", type.hasPrefix("application/x-www-form-urlencoded"),
-           let override = URLComponents(string: "?" + text)?.queryItems?.first(where: { $0.name == "_method" })?.value?.uppercased(), ["PATCH", "PUT", "DELETE"].contains(override) { verb = override }
+        let verb = method
         func line(_ value: String) -> String { value.components(separatedBy: .newlines).joined(separator: " ") }
         var head = "\(verb) \(path) HTTP/1.1\r\nHost: \(host)\r\n"
         if !cookies.isEmpty { head += "Cookie: " + cookies.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "; ") + "\r\n" }
