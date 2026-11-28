@@ -237,4 +237,120 @@ class OutboxUpcasterTest < Minitest::Test
 
     assert_empty model.instant_record_outbox_upcasters
   end
+
+  def test_register_and_model_upcast_outbox_require_a_block
+    assert_raises(ArgumentError) { InstantRecord::OutboxUpcaster.register("Note", from: 1, to: 2) }
+    assert_raises(ArgumentError) { InstantRecord.upcast_outbox("Note") }
+    assert_raises(ArgumentError) do
+      syncable_model("Note") { upcast_outbox from: 1, to: 2 }
+    end
+  end
+
+  def test_from_only_to_only_and_equal_version_bounds
+    from_only_model = syncable_model("FromOnly") do
+      upcast_outbox from: 2 do |changes|
+        changes["tag"] = "from_2"
+      end
+    end
+    to_only_model = syncable_model("ToOnly") do
+      upcast_outbox to: 3 do |changes|
+        changes["tag"] = "below_3"
+      end
+    end
+    exact_model = syncable_model("Exact") do
+      upcast_outbox from: 2, to: 2 do |changes|
+        changes["tag"] = "exact_2"
+      end
+    end
+
+    assert_equal({}, InstantRecord::OutboxUpcaster.apply_for_model(from_only_model, {}, { schema_version: 1 }))
+    assert_equal({ "tag" => "from_2" }, InstantRecord::OutboxUpcaster.apply_for_model(from_only_model, {}, { schema_version: 2 }))
+    assert_equal({ "tag" => "from_2" }, InstantRecord::OutboxUpcaster.apply_for_model(from_only_model, {}, { schema_version: " 2 " }))
+    assert_equal({}, InstantRecord::OutboxUpcaster.apply_for_model(from_only_model, {}, { schema_version: 3 }))
+    assert_equal({ "tag" => "from_2" }, InstantRecord::OutboxUpcaster.apply_for_model(from_only_model, {}, { schema_version: "" }))
+
+    assert_equal({ "tag" => "below_3" }, InstantRecord::OutboxUpcaster.apply_for_model(to_only_model, {}, { schema_version: 1 }))
+    assert_equal({ "tag" => "below_3" }, InstantRecord::OutboxUpcaster.apply_for_model(to_only_model, {}, { schema_version: 2 }))
+    assert_equal({}, InstantRecord::OutboxUpcaster.apply_for_model(to_only_model, {}, { schema_version: 3 }))
+    assert_equal({}, InstantRecord::OutboxUpcaster.apply_for_model(to_only_model, {}, { schema_version: 4 }))
+
+    assert_equal({}, InstantRecord::OutboxUpcaster.apply_for_model(exact_model, {}, { schema_version: 1 }))
+    assert_equal({ "tag" => "exact_2" }, InstantRecord::OutboxUpcaster.apply_for_model(exact_model, {}, { schema_version: 2 }))
+    assert_equal({}, InstantRecord::OutboxUpcaster.apply_for_model(exact_model, {}, { schema_version: 3 }))
+  end
+
+  def test_transform_arities_and_non_hash_return_values
+    zero_arg_hash = -> { { replaced: "yes" } }
+    zero_arg_non_hash = -> { :ignored }
+    one_arg_optional_lambda = ->(changes = {}) { changes.merge("opt_lambda" => true) }
+    one_arg_optional_proc = proc { |changes = {}| changes["opt_proc"] = true; nil }
+    splat_lambda = ->(*args) { args[0].merge("splat_count" => args.length) }
+    one_plus_rest_lambda = ->(changes, *rest) { changes.merge("rest_op" => rest.first[:operation]) }
+    two_plus_rest_lambda = ->(changes, mutation, *rest) { changes.merge("two_rest" => [mutation[:record_id], rest.length]) }
+
+    InstantRecord::OutboxUpcaster.register("Note", &zero_arg_hash)
+    _, out = InstantRecord::OutboxUpcaster.apply_global({ record_type: "Note" }, { original: "no" })
+    assert_equal({ "replaced" => "yes" }, out)
+
+    InstantRecord.clear_outbox_upcasters!
+    InstantRecord::OutboxUpcaster.register("Note", &zero_arg_non_hash)
+    InstantRecord::OutboxUpcaster.register("Note", &one_arg_optional_lambda)
+    InstantRecord::OutboxUpcaster.register("Note", &one_arg_optional_proc)
+    InstantRecord::OutboxUpcaster.register("Note", &splat_lambda)
+    InstantRecord::OutboxUpcaster.register("Note", &one_plus_rest_lambda)
+    InstantRecord::OutboxUpcaster.register("Note", &two_plus_rest_lambda)
+
+    _, combined = InstantRecord::OutboxUpcaster.apply_global(
+      { record_type: "Note", record_id: "r-9", operation: "update" },
+      { title: "kept" }
+    )
+
+    assert_equal(
+      {
+        "title" => "kept",
+        "opt_lambda" => true,
+        "opt_proc" => true,
+        "splat_count" => 2,
+        "rest_op" => "update",
+        "two_rest" => ["r-9", 0]
+      },
+      combined
+    )
+  end
+
+  def test_global_upcaster_filters_by_record_type_and_normalizes_when_empty
+    mutation, changes = InstantRecord::OutboxUpcaster.apply_global(
+      { "record_type" => "Note", "operation" => "create" },
+      { title: "Hello" }
+    )
+    assert_equal({ record_type: "Note", operation: "create" }, mutation)
+    assert_equal({ "title" => "Hello" }, changes)
+
+    InstantRecord.upcast_outbox("LegacyMemo") do |c|
+      c["from_legacy"] = true
+    end
+    InstantRecord.upcast_outbox do |c|
+      c["from_any"] = true
+    end
+
+    _, note_changes = InstantRecord::OutboxUpcaster.apply_global(
+      { "record_type" => "Note", "operation" => "create" },
+      { title: "Hello" }
+    )
+    assert_equal({ "title" => "Hello", "from_any" => true }, note_changes)
+
+    _, memo_changes = InstantRecord::OutboxUpcaster.apply_global(
+      { "record_type" => "LegacyMemo", "operation" => "create" },
+      { title: "Old" }
+    )
+    assert_equal({ "title" => "Old", "from_legacy" => true, "from_any" => true }, memo_changes)
+  end
+
+  def test_apply_for_model_handles_models_without_upcasters
+    plain_object = Object.new
+    assert_equal({ "title" => "Plain" }, InstantRecord::OutboxUpcaster.apply_for_model(plain_object, { title: "Plain" }))
+
+    model_without_rules = syncable_model("PlainNote")
+    assert_equal({ "title" => "Empty" }, InstantRecord::OutboxUpcaster.apply_for_model(model_without_rules, { title: "Empty" }))
+  end
 end
