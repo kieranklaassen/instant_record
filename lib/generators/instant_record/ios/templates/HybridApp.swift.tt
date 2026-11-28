@@ -2,7 +2,7 @@ import InstantRecordNative
 import SwiftUI
 
 /// <%= app_name %> on iPhone. Its tabs and pages come from Rails
-/// (config/ruby_native.yml), so a deploy changes them.<% if compiled? %> A tab or a route that
+/// (config/native.yml), so a deploy changes them.<% if compiled? %> A tab or a route that
 /// names a Ruby screen is drawn by it, from the phone's own database.<% end %>
 ///
 /// Launch arguments:
@@ -15,7 +15,7 @@ struct <%= app_name %>App: App {
     @StateObject private var host: HybridHost
 
     init() {
-        // Views written in SwiftUI, by the name Ruby or config/ruby_native.yml
+        // Views written in SwiftUI, by the name Ruby or config/native.yml
         // gives them, are registered here.
         var views = Screens()
         register(&views)
@@ -23,6 +23,10 @@ struct <%= app_name %>App: App {
         let defaults = UserDefaults.standard
         let address = defaults.string(forKey: "server") ?? "<%= options[:server] %>"
         guard let server = URL(string: address), server.host != nil else { fatalError("Not a server's address: \(address)") }
+        // What Ruby, pages and views may ask of the device. Those that ask the
+        // person are added by group: capabilities.allow(.location). Say why in
+        // Info.plist.
+        let capabilities = Capabilities()
 <% if compiled? -%>
         let folder = URL.applicationSupportDirectory
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -31,9 +35,9 @@ struct <%= app_name %>App: App {
             AppHost.Store(database: folder.appending(path: "app.sqlite3").path, endpoint: address + "<%= mount_path %>")
         })
         app.start()
-        _host = StateObject(wrappedValue: HybridHost(server: server, app: app, screens: rubyScreens) { UIApplication.shared.open($0) })
+        _host = StateObject(wrappedValue: HybridHost(server: server, mount: "<%= mount_path %>", app: app, screens: rubyScreens, capabilities: capabilities))
 <% else -%>
-        _host = StateObject(wrappedValue: HybridHost(server: server, views: views) { UIApplication.shared.open($0) })
+        _host = StateObject(wrappedValue: HybridHost(server: server, mount: "<%= mount_path %>", views: views, capabilities: capabilities))
 <% end -%>
     }
 

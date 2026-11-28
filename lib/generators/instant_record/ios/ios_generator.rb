@@ -10,8 +10,8 @@ module InstantRecord
     #   bin/rails generate instant_record:ios Shop --hybrid
     #   bin/rails generate instant_record:ios Shop --hybrid --screen catalog
     #
-    # With --hybrid the app's tabs and pages come from Rails, through the
-    # ruby_native gem's config and helpers, and a --screen beside it lets
+    # With --hybrid the app's tabs and pages come from Rails, through
+    # config/native.yml and the native helpers, and a --screen beside it lets
     # Ruby screens be tabs and the places links open.
     #
     # The app is a thin Xcode project in native/ios/<Name>. It links the
@@ -22,7 +22,7 @@ module InstantRecord
 
       argument :app_name, type: :string, banner: "Name"
       class_option :screen, type: :string, desc: "The first screen, as app/screens names it (catalog for CatalogScreen)"
-      class_option :hybrid, type: :boolean, default: false, desc: "Tabs and pages that Rails serves, with native bars (the ruby_native gem)"
+      class_option :hybrid, type: :boolean, default: false, desc: "Tabs and pages that Rails serves, with native bars"
       class_option :server, type: :string, default: "http://localhost:3000", desc: "Where the Rails app answers"
       class_option :bundle_id, type: :string, desc: "The app's bundle identifier (com.example.<Name>)"
 
@@ -48,6 +48,18 @@ module InstantRecord
         create_file "#{folder}/#{app_name}/#{app_name}-Bridging-Header.h", %(#include "instant_record_native.h"\n)
       end
 
+      def write_config
+        return if !hybrid? || File.exist?(File.join(destination_root, "config/native.yml"))
+
+        create_file "config/native.yml", <<~YAML
+          # The app's tabs. A deploy changes them, with no new build.
+          tint: "#2F6CA3"
+          tabs:
+            - { title: Home, path: /, icon: house }
+            - { title: Account, path: /account, icon: person }
+        YAML
+      end
+
       # The project is written from the files now in the folder. Run this
       # generator again, with --force, after adding a Swift file.
       def write_project
@@ -58,7 +70,7 @@ module InstantRecord
 
       def show_next_steps
         say <<~MSG
-          #{"Add the gem the pages speak through, and list your tabs:\n\n  bundle add ruby_native\n  bin/rails generate ruby_native:install\n" if hybrid?}
+          #{"List your tabs in config/native.yml.\n" if hybrid?}
           Build the #{"libraries, then the " if compiled?}app:
 
             #{%(bin/rails "instant_record:native[iphonesimulator]"\n  ) if compiled?}xcodebuild -project #{folder}/#{app_name}.xcodeproj -scheme #{app_name} -destination 'platform=iOS Simulator,name=iPhone 17' build

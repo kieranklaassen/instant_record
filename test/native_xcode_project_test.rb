@@ -53,7 +53,7 @@ class NativeXcodeProjectTest < ActiveSupport::TestCase
       given = { folder: folder, name: "Shop", bundle_id: "com.example.Shop", package: "../pkg" }
       pbxproj = InstantRecord::Native::XcodeProject.new(**given).pbxproj
 
-      assert_no_match(/Bridging|SEARCH_PATHS|OTHER_LDFLAGS/, pbxproj)
+      assert_no_match(/Bridging|HEADER_SEARCH|LIBRARY_SEARCH|OTHER_LDFLAGS/, pbxproj)
       assert_unique_object_ids(pbxproj)
       assert_raises(ArgumentError) { InstantRecord::Native::XcodeProject.new(**given, headers: "../h") }
     end

@@ -89,6 +89,8 @@ public final class AppHost: ObservableObject {
     /// The server whose pages this app's screens can link to (`page:/orders`)
     /// and hold (`web`). A HybridHost sets it.
     public var site: HybridSite?
+    /// A compiled app draws pages. One that asks a server for screens does not.
+    public var drawsPages: Bool { engine.syncs }
     /// The screen the app was made with, whatever has since replaced it.
     let home: String
 
@@ -196,6 +198,7 @@ public final class AppHost: ObservableObject {
     /// soon after.
     public func perform(_ action: String, args: [String: String] = [:], values: [String: String] = [:], on route: Route) {
         guard route.isScreen else { return }
+        if action.hasPrefix("native:") { return performNative(action, args: args, on: route) }
         let fieldValues = typed[route] ?? [:]
         let mergedValues = values.isEmpty ? fieldValues : fieldValues.merging(values) { _, explicit in explicit }
         thread.run {
@@ -208,6 +211,58 @@ public final class AppHost: ObservableObject {
             }
         }
         schedule.request()
+    }
+
+    /// Told on the main thread when the app's data may have changed, so that
+    /// a page drawn from it can be drawn again.
+    var changed: (() -> Void)?
+    /// Told when another database has been opened in this one's place.
+    var switched: (() -> Void)?
+
+    /// The pages the library draws, "VERB /path/:param" a line.
+    func routes() async -> String {
+        await withCheckedContinuation { done in thread.run { done.resume(returning: self.engine.call("routes", "") ?? "") } }
+    }
+
+    /// One request through the app's own router, controllers and views.
+    func page(_ request: String) async -> HTTPText.Reply? {
+        let reading = request.hasPrefix("GET ") || request.hasPrefix("HEAD ")
+        let text: String? = await withCheckedContinuation { done in
+            thread.run {
+                let text = self.engine.call("request", request)
+                if text == nil { self.report() } else if !reading { self.draw() }
+                done.resume(returning: text)
+            }
+        }
+        // What a form wrote goes to the server soon after, as a tap's does.
+        if !reading { await MainActor.run { schedule.request() } }
+        return text.flatMap(HTTPText.reply)
+    }
+
+    /// What the device can do, for this app's screens and pages.
+    public var capabilities: Capabilities?
+
+    // A tap on something the device does. The screen hears how it went under
+    // the same action: what came of it in `values`, or an "error" there.
+    private func performNative(_ action: String, args: [String: String], on route: Route) {
+        Task { @MainActor in
+            let before = await withCheckedContinuation { done in self.thread.run { done.resume(returning: self.open) } }
+            var values: [String: String]
+            do {
+                guard let capabilities else { throw Capabilities.Failure("This app was given no capabilities") }
+                values = Capabilities.strings(try await capabilities.call(String(action.dropFirst("native:".count)), args))
+            } catch {
+                values = ["error": error.localizedDescription]
+            }
+            let answer = values
+            self.thread.run {
+                // Another account was opened while the person was asked.
+                guard self.open == before else { return }
+                self.act(action, args, answer, on: route)
+                self.draw()
+            }
+            self.schedule.request()
+        }
     }
 
     /// Put another screen in the first one's place, as choosing another
@@ -589,6 +644,7 @@ public final class AppHost: ObservableObject {
         loadNoticesIfNeeded(from: pos)
         DispatchQueue.main.async {
             self.root = route
+            self.switched?()
             if let drawn { self.screens[route] = drawn }
             self.fetchingFirst = first
             self.sheet = nil
@@ -635,6 +691,7 @@ public final class AppHost: ObservableObject {
     // A screen that cannot be drawn keeps the last one that could, and the
     // reason is shown.
     private func draw() {
+        if engine.notice().hasPrefix("records_changed") { DispatchQueue.main.async { self.changed?() } }
         let routes = lock.withLock { visible }
         var drawn: [Route: Node] = [:]
         var problem: String?

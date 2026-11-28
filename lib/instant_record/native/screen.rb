@@ -343,7 +343,199 @@ module InstantRecord
         node
       end
 
+      # -- Controls. Each is kept by `name` and reaches `perform` in `values`,
+      # as a field's text does. With an `action` it is performed at once.
+      # Amounts are strings, as every value that crosses is: min: "0".
+
+      # A switch. Its value is "true" or "false".
+      def toggle(name, label: "", on: false, action: "", args: Node.strings)
+        control("toggle", name, label, on ? "true" : "false", action, args)
+      end
+
+      # A slider says where the finger left it.
+      def slider(name, label: "", value: "", min: "0", max: "1", step: "0.01", action: "", args: Node.strings)
+        node = control("slider", name, label, value, action, args)
+        bounds(node, min, max, step)
+      end
+
+      def stepper(name, label: "", value: "0", min: "0", max: "100", step: "1", action: "", args: Node.strings)
+        node = control("stepper", name, label, value, action, args)
+        bounds(node, min, max, step)
+      end
+
+      # One of several `option`s. `style` is "menu", "segmented" or "inline".
+      def picker(name, label: "", value: "", style: "menu", action: "", args: Node.strings)
+        node = control("picker", name, label, value, action, args)
+        node.set("style", style)
+        inside(node) { yield }
+      end
+
+      def option(label, value)
+        node = add("option")
+        node.text = label
+        node.set("value", value)
+        node
+      end
+
+      # A day, and with `time: true` a moment, as ISO 8601.
+      def date_picker(name, label: "", value: "", time: false, action: "", args: Node.strings)
+        node = control("dates", name, label, value, action, args)
+        node.set("time", "true") if time
+        node
+      end
+
+      # A colour, as "#RRGGBB".
+      def color_picker(name, label: "", value: "", action: "", args: Node.strings)
+        control("colors", name, label, value, action, args)
+      end
+
+      # -- Showing.
+
+      # Without a `value` it turns, for work with no known end.
+      def progress(label = "", value: "", total: "1")
+        node = add("progress")
+        node.text = label
+        node.set("value", value)
+        node.set("total", total)
+        node
+      end
+
+      def gauge(label, value:, total: "1")
+        node = add("gauge")
+        node.text = label
+        node.set("value", value)
+        node.set("total", total)
+        node
+      end
+
+      def divider
+        add("divider")
+      end
+
+      # Words beside an icon.
+      def labeled(text, image:)
+        node = add("label")
+        node.text = text
+        node.set("image", image)
+        node
+      end
+
+      # A picture from the web, or from the app's server by its path. `label`
+      # is what it is called aloud.
+      def picture(url, label: "", height: "")
+        node = add("picture")
+        media(node, url, label, height)
+      end
+
+      # A button that opens the share sheet.
+      def share_link(text, url:)
+        node = add("share")
+        node.text = text
+        node.set("url", url)
+        node
+      end
+
+      def video(url, height: "")
+        node = add("video")
+        media(node, url, "", height)
+      end
+
+      # A 3D model, a USDZ, that a finger turns.
+      def model_3d(url, label: "", height: "")
+        node = add("model")
+        media(node, url, label, height)
+      end
+
+      # `style` is "bar", "line", "area", "point" or "pie". The block holds
+      # its points.
+      def chart(style: "bar", height: "")
+        node = add("chart")
+        node.set("style", style)
+        node.set("height", height)
+        inside(node) { yield }
+      end
+
+      def point(label, value, series: "")
+        node = add("point")
+        node.text = label
+        node.set("value", value)
+        node.set("series", series)
+        node
+      end
+
+      # A map of its pins.
+      def map_view(height: "")
+        node = add("map")
+        node.set("height", height)
+        inside(node) { yield }
+      end
+
+      def pin(label, latitude:, longitude:)
+        node = add("pin")
+        node.text = label
+        node.set("latitude", latitude)
+        node.set("longitude", longitude)
+        node
+      end
+
+      # -- Arranging.
+
+      # Outside a list: what scrolls, "vertical" or "horizontal".
+      def scroll(axis = "vertical")
+        node = add("scroll")
+        node.set("axis", axis)
+        inside(node) { yield }
+      end
+
+      # As many columns as fit, each at least `width` points.
+      def grid(width: "150")
+        node = add("grid")
+        node.set("width", width)
+        inside(node) { yield }
+      end
+
+      def disclosure(label)
+        node = add("disclosure")
+        node.text = label
+        inside(node) { yield }
+      end
+
+      def card
+        inside(add("card")) { yield }
+      end
+
+      # One child to a page, swiped between.
+      def pages(height: "")
+        node = add("pages")
+        node.set("height", height)
+        inside(node) { yield }
+      end
+
       private
+
+      def control(kind, name, label, value, action, args)
+        node = add(kind)
+        node.text = label
+        node.action = action
+        node.args = args
+        node.set("name", name)
+        node.set("value", value)
+        node
+      end
+
+      def bounds(node, min, max, step)
+        node.set("min", min)
+        node.set("max", max)
+        node.set("step", step)
+        node
+      end
+
+      def media(node, url, label, height)
+        node.set("url", url)
+        node.set("label", label)
+        node.set("height", height)
+        node
+      end
 
       def add(kind)
         node = Node.new(kind)

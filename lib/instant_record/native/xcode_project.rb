@@ -433,10 +433,19 @@ module InstantRecord
         ["CODE_SIGN_STYLE = Automatic", "CURRENT_PROJECT_VERSION = 1", "GENERATE_INFOPLIST_FILE = YES",
           "INFOPLIST_FILE = #{@name}/Info.plist",
           "INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES", "INFOPLIST_KEY_UILaunchScreen_Generation = YES",
-          "INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait",
+          "INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait",
+          %(INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"),
           "MARKETING_VERSION = 0.1",
           %(PRODUCT_BUNDLE_IDENTIFIER = "#{@bundle_id}"), %(PRODUCT_NAME = "$(TARGET_NAME)"),
-          "TARGETED_DEVICE_FAMILY = 1"] + (@libraries ? library_settings : [])
+          'TARGETED_DEVICE_FAMILY = "1,2"'] + (@libraries ? library_settings : mac_settings)
+      end
+
+      # The compiled libraries are built for iOS. An app without them also
+      # runs on the Mac, from the same source.
+      def mac_settings
+        ["SDKROOT = auto", %(SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx"), "SUPPORTS_MACCATALYST = NO",
+          "MACOSX_DEPLOYMENT_TARGET = 14.0",
+          %("LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks")]
       end
 
       def library_settings

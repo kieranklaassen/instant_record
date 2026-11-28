@@ -62,6 +62,34 @@ class LettersScreen < InstantRecord::Native::Screen
         end
         more "older:letters", query: "type=Letter&before_id=" + @box.letters.last.id unless @box.letters.empty?
         web "/letters/summary"
+        toggle "seen", label: "Seen", on: true, action: "seen"
+        slider "size", value: "0.5"
+        stepper "count", label: "Count", value: "2", max: "9"
+        picker "sort", value: "new", style: "segmented" do
+          option "Newest", "new"
+          option "Oldest", "old"
+        end
+        date_picker "due", label: "Due", time: true
+        color_picker "ink", value: "#112233"
+        progress "Sending", value: "0.4"
+        gauge "Full", value: "0.2"
+        divider
+        labeled "Letters", image: "inbox"
+        picture "/a.png", label: "A", height: "80"
+        share_link "Share", url: "/letters"
+        video "/a.mp4"
+        model_3d "/a.usdz", label: "Box"
+        chart style: "line" do
+          point "Mon", "3", series: "a"
+        end
+        map_view do
+          pin "Here", latitude: "52.3", longitude: "4.9"
+        end
+        grid do
+          card { text "One" }
+        end
+        disclosure("More") { text "Two" }
+        pages { scroll("horizontal") { text "Three" } }
         swift "LetterCount" do
           number "count", @box.letters.size
           flag "empty", @box.letters.empty?

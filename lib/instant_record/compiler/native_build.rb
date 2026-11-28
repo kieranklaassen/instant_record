@@ -22,7 +22,7 @@ module InstantRecord
     class NativeBuild
       CACHE_SCHEMA_VERSION = 1
       TARGETS = %w[iphonesimulator iphoneos].freeze
-      ENTRIES = (WasmBuild::REACTOR_EXPORTS.split(",").map { |name| name.split(".")[1] } + %w[render action open]).freeze
+      ENTRIES = (WasmBuild::REACTOR_EXPORTS.split(",").map { |name| name.split(".")[1] } + %w[render action open routes]).freeze
       CFLAGS = %w[-O2 -Wno-all -ffp-contract=off -DSP_INT_OVERFLOW_MODE_RAISE].freeze
       SQLITE_CFLAGS = %w[-O2 -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_ENABLE_FTS5].freeze
       RUNTIME_CFLAGS = %w[-O2 -Wno-all -ffunction-sections -fdata-sections -ffp-contract=off].freeze

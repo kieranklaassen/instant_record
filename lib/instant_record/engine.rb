@@ -4,6 +4,7 @@ require "instant_record/sync_endpoint"
 require "instant_record/files"
 require "instant_record/outbox_upcaster"
 require "instant_record/shell"
+require "instant_record/native_config"
 
 module InstantRecord
   class Engine < ::Rails::Engine
@@ -42,6 +43,7 @@ module InstantRecord
     initializer "instant_record.helpers" do
       ActiveSupport.on_load(:action_view) do
         include InstantRecord::SyncNoticesHelper
+        include InstantRecord::NativeHelper
       end
     end
 

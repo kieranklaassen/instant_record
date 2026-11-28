@@ -5,7 +5,7 @@ import XCTest
 
 final class HybridConfigTests: XCTestCase {
     private let server = URL(string: "http://localhost:3999")!
-    private let json = ##"{"app":{"entry_path":"/b"},"appearance":{"tint_color":{"light":"#112233","dark":"#AABBCC"}},"later":1,"tabs":[{"title":"A","titles":{"nl":"Aa"},"path":"/a","icon":"house","icons":{"ios":"star"},"key":"a","badge":true,"auto_route":false},{"title":"No path"},{"title":"B","path":"/b","screen":"mailbox"},{"title":"C","path":"/c","screen":"notes"}]}"##
+    private let json = ##"{"start":"/b","tint":{"light":"#112233","dark":"#AABBCC"},"later":1,"tabs":[{"title":"A","titles":{"nl":"Aa"},"path":"/a","icon":"star","key":"a","later":false},{"title":"No path"},{"title":"B","path":"/b","screen":"mailbox"},{"title":"C","path":"/c","screen":"notes"}]}"##
 
     private func config(_ languages: [String] = ["en"]) -> HybridConfig { HybridConfig(json: Data(json.utf8), languages: languages)! }
     private func defaults() -> UserDefaults {
@@ -18,7 +18,6 @@ final class HybridConfigTests: XCTestCase {
         let config = config()
         XCTAssertEqual(config.tabs.map(\.path), ["/a", "/b", "/c"])
         XCTAssertEqual(config.tabs[0].icon, "star")
-        XCTAssertTrue(config.tabs[0].badge)
         XCTAssertEqual(config.entryPath, "/b")
         XCTAssertEqual(config.tint?.dark, 0xAABBCC)
     }
@@ -165,7 +164,7 @@ final class HybridConfigTests: XCTestCase {
     }
 
     @MainActor func testTheEntryOpensOnTheFirstLaunch() async {
-        let json = #"200\#n{"app":{"entry_path":"/welcome"},"tabs":[{"title":"A","path":"/"},{"title":"B","path":"/b"}]}"#
+        let json = #"200\#n{"start":"/welcome","tabs":[{"title":"A","path":"/"},{"title":"B","path":"/b"}]}"#
         let host = HybridHost(site: HybridSite(server: server, data: .nonPersistent(), outside: { _ in }), app: nil, screens: [], views: Screens(), defaults: defaults(), exchange: { _ in json })
         let bare = host.shown[0].page
         await host.refresh()

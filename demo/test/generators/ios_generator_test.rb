@@ -52,7 +52,7 @@ class IosGeneratorTest < Rails::Generators::TestCase
     assert_no_file "native/ios/Shop/Shop/LibraryEngine.swift"
     assert_no_file "native/ios/Shop/Shop/Shop-Bridging-Header.h"
     assert_file "native/ios/Shop/Shop.xcodeproj/project.pbxproj" do |project|
-      assert_no_match(/Bridging|linstant_record_app|SEARCH_PATHS/, project)
+      assert_no_match(/Bridging|linstant_record_app|HEADER_SEARCH|LIBRARY_SEARCH/, project)
       assert_match "/* ShopApp.swift in Sources */", project
     end
   end
@@ -78,6 +78,15 @@ class IosGeneratorTest < Rails::Generators::TestCase
 
     assert_file "native/ios/Shop/Shop/ShopApp.swift", "// mine"
     assert_file "native/ios/Shop/Shop/RubyScreens.swift", /rubyScreens/
+  end
+
+  test "the tabs a developer listed are kept, and the config is asked for where the engine is mounted" do
+    FileUtils.mkdir_p(File.join(destination_root, "config"))
+    File.write(File.join(destination_root, "config/native.yml"), "mine")
+    run_generator %w[Shop --hybrid --force]
+
+    assert_file "config/native.yml", "mine"
+    assert_file "native/ios/Shop/Shop/ShopApp.swift", %r{mount: "/instant_record"}
   end
 
   test "an app of neither kind is refused, and nothing is written" do

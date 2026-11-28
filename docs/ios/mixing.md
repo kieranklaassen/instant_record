@@ -18,7 +18,7 @@ tabs:
   - { title: Map,     path: /map,     icon: map,         view: MapView }
 ```
 
-`path` is always needed. An app that does not have the screen or the view loads the page, and so does Ruby Native's own app, which ignores both keys. So you can deploy a new tab before the app that draws it natively is out.
+`path` is always needed. An app that does not have the screen or the view loads the page. So you can deploy a new tab before the app that draws it natively is out.
 
 The screen must be the app's first one, the name given to `--screen`. A compiled app opens one database at a time, so one tab is Ruby's.
 
@@ -42,7 +42,7 @@ routes:
 
 An app without the place, and a browser, follow the link.
 
-Routes see taps on links, native buttons' `href` and `RubyNative.visit`. They do not see a redirect, a form's answer, or a visit a script makes, so those stay pages. Keep the page working.
+Routes see taps on links, native buttons' `href` and `InstantRecord.visit`. They do not see a redirect, a form's answer, or a visit a script makes, so those stay pages. Keep the page working.
 
 A menu item's `replace:` in a screen a page opened swaps that screen. It does not change database, as it does on the first screen.
 
@@ -61,16 +61,16 @@ The page has no bar of its own there. Offline it says it could not be loaded, an
 
 ## Signing in
 
-Pages are signed in with cookies, in the web view. A Ruby screen syncs with its own requests, which carry no such cookie. In an app that mixes them, give the sync a token in `Transport(prepare:)`, or sync only what anyone may see. Signing out of the web does not empty the phone's database.
+A page the device draws reads the phone's database, as a Ruby screen does, and both sync with one token in `Transport(prepare:)`. A page the server draws is signed in with cookies, in the web view, which the sync does not use. Signing out of the web does not empty the phone's database.
 
 ## The app's file
 
 ```swift
 let app = AppHost(engine: engine, root: Route("catalog"), views: views, store: store)
 app.start()
-let host = HybridHost(server: server, app: app, screens: ["catalog", "product"]) { UIApplication.shared.open($0) }
+let host = HybridHost(server: server, app: app, screens: ["catalog", "product"])
 // ...
 WindowGroup { HybridView(host: host) }
 ```
 
-Without Ruby screens: `HybridHost(server: server, views: views) { ... }`.
+Without Ruby screens: `HybridHost(server: server, views: views)`.

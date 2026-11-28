@@ -40,8 +40,26 @@ end
 | `button`, `item`, `swipe` | a button, a menu's line, a row's swipe action |
 | `toolbar`, `bottom`, `field` | bar buttons, a pinned bar, a text box |
 | `more` | the next page of a long list |
+| `toggle`, `slider`, `stepper`, `picker`, `date_picker`, `color_picker` | controls |
+| `progress`, `gauge`, `labeled`, `divider` | how far, how full, words with an icon, a line |
+| `picture`, `video`, `model_3d`, `share_link` | media by URL: an image, a film, a USDZ, a share button |
+| `chart` with `point`, `map_view` with `pin` | a chart, a map |
+| `scroll`, `grid`, `card`, `pages`, `disclosure` | arrangements outside a list |
 | `swift` | one of your [SwiftUI views](swiftui-views.md) |
 | `web` | one of your [Rails pages](rails-pages.md), in the room that is left: beside a list, not in one |
+
+A control keeps its value by `name` until the next action, and `perform` reads it in `values`. With an `action` it is performed at once. Amounts are strings:
+
+```ruby
+slider "volume", value: "0.5", min: "0", max: "1", action: "set_volume"
+picker "sort", value: "new", style: "segmented" do
+  option "Newest", "new"
+  option "Oldest", "old"
+end
+chart style: "line" do
+  days.each { |day| point day.name, day.total.to_s }
+end
+```
 
 ## Where a link goes
 

@@ -2,8 +2,8 @@
 import WebKit
 import XCTest
 
-/// The page script in a real web view. The fixture is what the helpers of
-/// the ruby_native gem, 0.21.1, render.
+/// The page script in a real web view. The fixture is what the gem's
+/// helpers render (test/native_helper_test.rb keeps it so).
 @MainActor
 final class HybridTabTests: XCTestCase {
     private let server = URL(string: "http://localhost:3999")!
@@ -18,7 +18,7 @@ final class HybridTabTests: XCTestCase {
     }
 
     private func fixture() throws -> String {
-        try String(contentsOf: XCTUnwrap(Bundle.module.url(forResource: "ruby_native_page", withExtension: "html", subdirectory: "Fixtures")), encoding: .utf8)
+        try String(contentsOf: XCTUnwrap(Bundle.module.url(forResource: "native_page", withExtension: "html", subdirectory: "Fixtures")), encoding: .utf8)
     }
 
     private func wait(_ what: String, _ until: () async throws -> Bool) async throws {
@@ -33,13 +33,12 @@ final class HybridTabTests: XCTestCase {
         try await tab.web.callAsyncJavaScript(script, contentWorld: .page)
     }
 
-    func testReadsWhatTheGemsHelpersRender() async throws {
+    func testReadsWhatTheHelpersRender() async throws {
         let tab = try page(fixture())
         try await wait("signals") { tab.signals != nil }
         let signals = try XCTUnwrap(tab.signals), bar = try XCTUnwrap(signals.navbar)
         XCTAssertTrue(signals.tabs)
         XCTAssertTrue(signals.form)
-        XCTAssertEqual(signals.badge, "3")
         XCTAssertEqual(signals.badges, ["inbox": "true", "cart": "new"])
         XCTAssertEqual(tab.toast?.message, "Saved")
         XCTAssertEqual(bar.title, "Orders")
@@ -50,6 +49,7 @@ final class HybridTabTests: XCTestCase {
         XCTAssertTrue(bar.buttons[1].items[0].replace && bar.buttons[1].items[0].selected)
         XCTAssertTrue(bar.buttons[1].items[1].destructive)
         XCTAssertEqual(tab.shared(bar.buttons[2]).absoluteString, "http://localhost:3999/orders")
+        XCTAssertEqual(signals.fab?.href, "/x")
         XCTAssertEqual(bar.segments.map(\.selected), [true, false])
         XCTAssertEqual(bar.submit?.click, "#save")
     }
@@ -64,18 +64,12 @@ final class HybridTabTests: XCTestCase {
     }
 
     func testFollowsThePageAsItChanges() async throws {
-        let tab = page("<title>One</title><body><div data-native-navbar hidden></div>")
+        let tab = page(#"<title>One</title><body><div data-native='{"navbar":{"title":"","pullToRefresh":true,"buttons":[],"segments":[]}}' hidden></div>"#)
         try await wait("signals") { tab.signals?.navbar?.title == "One" }
-        _ = try await js(tab, "document.querySelector('[data-native-navbar]').setAttribute('data-native-navbar', 'Two')")
+        _ = try await js(tab, "document.title = 'Two'")
         try await wait("the change") { tab.signals?.navbar?.title == "Two" }
         _ = try await js(tab, "document.body = document.createElement('body')")
         try await wait("the bar going") { tab.signals?.navbar == nil }
-    }
-
-    func testABlankTitleStaysBlank() async throws {
-        let tab = page(#"<title>One</title><div data-native-navbar="" data-native-navbar-title="false" hidden></div>"#)
-        try await wait("signals") { tab.signals != nil }
-        XCTAssertEqual(tab.signals?.navbar?.title, "")
     }
 
     func testAToastIsShownOnce() async throws {
@@ -90,7 +84,7 @@ final class HybridTabTests: XCTestCase {
     func testBackPassesOverAFormAmongPagesTheirScriptPushes() async throws {
         let tab = page("<title>List</title><body><p>list</p>")
         try await wait("signals") { tab.signals != nil }
-        _ = try await js(tab, "history.pushState({}, '', '/new'); document.body.innerHTML = '<div data-native-form></div>'")
+        _ = try await js(tab, ##"history.pushState({}, '', '/new'); document.body.innerHTML = '<div data-native="{&quot;form&quot;:true}"></div>'"##)
         try await wait("the form") { tab.signals?.form == true }
         _ = try await js(tab, "history.pushState({}, '', '/done'); document.body.innerHTML = '<p>done</p>'")
         try await wait("the page after") { tab.signals?.url.hasSuffix("/done") == true && tab.canGoBack }
@@ -98,17 +92,10 @@ final class HybridTabTests: XCTestCase {
         try await wait("the list") { tab.web.url?.path == "/orders/1" }
     }
 
-    func testMethodsThisShellLacksDoNothing() async throws {
-        let tab = page("<body></body>")
-        try await wait("signals") { tab.signals != nil }
-        let answer = try await js(tab, "window.RubyNative?.scan({}); window.RubyNative.later(); await window.RubyNative; return 'fine'") as? String
-        XCTAssertEqual(answer, "fine")
-    }
-
     func testAnotherServersPageIsNotHeard() async throws {
-        let tab = page("<title>Evil</title><div data-native-navbar hidden></div>", at: "http://evil.test/", guarded: false)
+        let tab = page(#"<title>Evil</title><div data-native='{"navbar":{"title":"","pullToRefresh":true,"buttons":[],"segments":[]}}' hidden></div>"#, at: "http://evil.test/", guarded: false)
         try await wait("the page") { try await js(tab, "return !!window.instantRecordHybrid && document.readyState === 'complete'") as? Bool == true }
-        _ = try await js(tab, "window.RubyNative.visit('https://elsewhere.test/'); window.RubyNative.share({url: 'https://elsewhere.test/'})")
+        _ = try await js(tab, "window.InstantRecord.visit('https://elsewhere.test/'); window.InstantRecord.share('https://elsewhere.test/')")
         try await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertNil(tab.signals)
         XCTAssertNil(tab.sharing)
@@ -160,18 +147,6 @@ final class HybridTabTests: XCTestCase {
         try await wait("the view") { tab.path == [.view("Map")] }
     }
 
-    func testTheGemsFloatingButtonAndTitleMenuAreRead() async throws {
-        let tab = page(#"""
-        <div data-native-fab="true" data-native-icon="plus" data-native-href="/new" data-native-color="#112233" hidden></div>
-        <div data-native-navbar="" hidden><div data-native-button="" data-native-position="title"><div data-native-menu-item="" data-native-title="All" data-native-href="/all"></div></div></div>
-        """#)
-        try await wait("signals") { tab.signals != nil }
-        XCTAssertEqual(tab.signals?.fab?.href, "/new")
-        XCTAssertEqual(tab.signals?.fab?.color, "#112233")
-        XCTAssertEqual(tab.signals?.navbar?.buttons.first?.inTitle, true)
-        XCTAssertEqual(tab.signals?.navbar?.buttons.first?.items.map(\.title), ["All"])
-    }
-
     func testALinkToAnotherServerLeavesTheApp() async throws {
         let tab = page(#"<body><a id="a" href="https://elsewhere.test/x">x</a></body>"#)
         try await wait("signals") { tab.signals != nil }
@@ -180,7 +155,9 @@ final class HybridTabTests: XCTestCase {
         XCTAssertEqual(tab.web.url?.path, "/orders/1")
     }
 
-    func testTheAgentReadsAsRubyNativeToTheGem() {
-        XCTAssertNotNil(HybridTab.agent.range(of: #"Ruby Native iOS/[\d.]+/[\d.]+ iOS/[\d.]+ RubyNative/0\.21\.1 InstantRecord/1"#, options: .regularExpression))
+    func testBrokenJSONIsPassedOver() async throws {
+        let tab = page(#"<div data-native="{"></div><div data-native='{"tabs":true}'></div>"#)
+        try await wait("signals") { tab.signals != nil }
+        XCTAssertEqual(tab.signals?.tabs, true)
     }
 }

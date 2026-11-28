@@ -34,6 +34,7 @@ int ir_open(const char *database_path);
                   (each an object of strings); render again after
      "sync"       input the sync endpoint's address    one pass: push, then pull
      "stream"     input a text/event-stream chunk      changes the host fetched
+     "routes"     no input   the pages this library draws, "VERB /path/:param" a line
      "open"       input a database path                 what ir_open calls
      "notices"    input {"action":"list"|"retry"|"fork"|"dismiss",...}  quarantined sync notices
      "branch_outbox"  input {"exclude_ids":[...]}       staged OutboxMutations summary

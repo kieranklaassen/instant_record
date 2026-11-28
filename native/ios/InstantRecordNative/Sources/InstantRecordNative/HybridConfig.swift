@@ -1,9 +1,8 @@
 import Foundation
 
-/// What `/native/config.json` says about the app: its tabs and its tint. The
-/// file behind it is `config/ruby_native.yml`, which the ruby_native gem
-/// serves, so a deploy changes the app's tabs. Keys this shell has no use for
-/// are ignored.
+/// The app's tabs, routes and tint: `config/native.yml`, which the gem serves
+/// at `native/config`, so a deploy changes them. Keys this app has no use for
+/// are ignored, so that an older app reads a newer file.
 public struct HybridConfig: Equatable {
     public struct Tab: Equatable {
         public let title: String
@@ -11,12 +10,9 @@ public struct HybridConfig: Equatable {
         /// An SF Symbol's name.
         public let icon: String
         public let key: String
-        /// Whether a page's plain badge count goes on this tab.
-        public let badge: Bool
         /// Whether the tab loads before it is first chosen.
         public let eager: Bool
-        /// The Ruby screen that draws the tab in an app that has it. Ruby
-        /// Native's own apps ignore the key and load `path`.
+        /// The Ruby screen that draws the tab, in an app that has it.
         public let screen: String?
         /// The SwiftUI view that draws it, in an app that registered it.
         public let view: String?
@@ -68,7 +64,7 @@ public struct HybridConfig: Equatable {
     public let tint: (light: UInt32, dark: UInt32)?
 
     /// The app as one page, for a server with no config.
-    static let bare = HybridConfig(tabs: [Tab(title: "Home", path: "/", icon: "house", key: "", badge: false, eager: false, screen: nil, view: nil)], routes: [], entryPath: "/", tint: nil)
+    static let bare = HybridConfig(tabs: [Tab(title: "Home", path: "/", icon: "house", key: "", eager: false, screen: nil, view: nil)], routes: [], entryPath: "/", tint: nil)
 
     private init(tabs: [Tab], routes: [Place], entryPath: String, tint: (light: UInt32, dark: UInt32)?) {
         self.tabs = tabs
@@ -83,10 +79,9 @@ public struct HybridConfig: Equatable {
         guard let object = (try? JSONSerialization.jsonObject(with: json)) as? [String: Any] else { return nil }
         let listed = (object["tabs"] as? [Any] ?? []).compactMap { ($0 as? [String: Any]).flatMap { Self.tab($0, languages) } }
         guard let first = listed.first else { return nil }
-        let entry = (object["app"] as? [String: Any])?["entry_path"] as? String ?? ""
-        let appearance = object["appearance"] as? [String: Any]
+        let entry = object["start"] as? String ?? ""
         let routes = (object["routes"] as? [Any] ?? []).compactMap { ($0 as? [String: Any]).flatMap(Self.place) }
-        self.init(tabs: listed, routes: routes, entryPath: entry.hasPrefix("/") ? entry : first.path, tint: Self.tint(appearance?["tint_color"]))
+        self.init(tabs: listed, routes: routes, entryPath: entry.hasPrefix("/") ? entry : first.path, tint: Self.tint(object["tint"]))
     }
 
     public static func == (a: HybridConfig, b: HybridConfig) -> Bool {
@@ -116,11 +111,10 @@ public struct HybridConfig: Equatable {
     private static func tab(_ from: [String: Any], _ languages: [String]) -> Tab? {
         guard let path = from["path"] as? String, path.hasPrefix("/"), !path.hasPrefix("//") else { return nil }
         let titles = from["titles"] as? [String: String] ?? [:]
-        let icons = from["icons"] as? [String: Any] ?? [:]
         let title = languages.lazy.compactMap { titles[$0] ?? titles[String($0.prefix { $0 != "-" })] }.first
         return Tab(title: title ?? from["title"] as? String ?? "", path: path,
-                   icon: icons["ios"] as? String ?? from["icon"] as? String ?? "circle",
-                   key: from["key"] as? String ?? "", badge: from["badge"] as? Bool ?? false,
+                   icon: from["icon"] as? String ?? "circle",
+                   key: from["key"] as? String ?? "",
                    eager: from["eager"] as? Bool ?? false, screen: from["screen"] as? String, view: from["view"] as? String)
     }
 
@@ -141,6 +135,8 @@ public struct HybridConfig: Equatable {
 /// the server cannot be reached.
 struct HybridConfigStore {
     let server: URL
+    /// Where the gem's engine is mounted.
+    var mount = "/instant_record"
     let defaults: UserDefaults
     /// Asks for the config: a request in, "status\nbody" out (Transport.exchange).
     let exchange: (String) -> String
@@ -152,7 +148,7 @@ struct HybridConfigStore {
 
     /// The server's config now. Nil, and nothing kept, unless it is a good one.
     func fetch() -> HybridConfig? {
-        guard let address = URL(string: "/native/config.json", relativeTo: server)?.absoluteString else { return nil }
+        guard let address = URL(string: mount + "/native/config", relativeTo: server)?.absoluteString else { return nil }
         let reply = Reply(exchange("GET \(address)\n"))
         let body = Data(reply.body.utf8)
         guard reply.status == 200, let config = HybridConfig(json: body) else { return nil }

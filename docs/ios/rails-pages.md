@@ -1,63 +1,80 @@
 # Rails pages
 
-Rails serves HTML. Hidden elements in it say what should be native, and the app draws that. Nothing about a page is in the app's binary, so a deploy changes it.
+HTML, from your controllers and views, under native tabs and bars.
 
-The helpers are those of the [ruby_native](https://github.com/Ruby-Native/gem) gem, which is MIT licensed. The app that reads them is InstantRecord's own.
+## Where they are drawn
+
+In an app with compiled Rails, **on the device**: your router, controllers and ERB run on the phone, over the same SQLite file as its Ruby screens. A page opens with no network. A form's write is queued and synced. A change that arrives redraws a page that uses Turbo.
+
+What the compiled app has no route for comes from your server, and a link from either kind of page leads to the other. A form on a device page must lead to a compiled route. Files cannot be sent from one yet: use `sync_file`. So does every page of an app with no compiled Rails.
+
+| | Drawn on the device | Drawn by the server |
+|---|---|---|
+| Offline | yes | no |
+| A change ships with | an App Store build | a deploy |
+| Which | the compiled routes (`local_first`) | all others |
+
+The two do not mix for one address: a page in the compiled app is the compiled one until the next build. Keep what you want to change by deploy out of `local_first`.
+
+Stylesheets and scripts come from a `Pages` folder in the app, if it has one. Others are fetched once and kept, so add the folder for a first launch with no network: the generator does not yet.
+
+## Native parts
+
+```erb
+<%# the layout %>
+<head><%= native_head %></head>
+<body><%= native_tabs %><div class="native-top"></div> ...
+```
+
+```erb
+<%= native_bar "Orders",
+      buttons: [
+        native_button("New", icon: "plus", href: new_order_path),
+        native_button("More", icon: "ellipsis.circle", menu: [
+          native_button("Archive", click: "#archive"),
+          native_button("Delete", click: "#delete", destructive: true)
+        ])
+      ],
+      segments: [
+        native_button("Open", href: orders_path, selected: true),
+        native_button("Done", href: done_orders_path)
+      ] %>
+```
+
+| Helper | Draws |
+|---|---|
+| `native_tabs` | the tab bar, on this page |
+| `native_bar` | the bar: `buttons:`, `leading:`, `segments:`, `title_menu:`, `submit:`, `refresh:` |
+| `native_button` | a button, segment or menu line: `href:`, `click:`, `menu:`, `share:`, `selected:`, `destructive:`, `replace:` |
+| `native_form` | Back passes over the page |
+| `native_badge 3, tab: :inbox` | a count on the tab with that `key` |
+| `native_toast notice` | a word, once |
+| `native_floating_button` | a button over the page |
+| `data: native_haptic(:success)` | a tap you feel |
+| `native_app?` | whether the app is asking |
+
+`class="web-only"` hides in the app, and `class="native-only"` in a browser. Icons are SF Symbol names. In a page's JavaScript: `InstantRecord.visit`, `.share`, `.back` and [`.call`](capabilities.md).
+
+Each helper writes one hidden element with JSON. A part the app does not know is ignored, so a newer page works in an older app.
 
 ## Tabs
 
 ```yaml
-# config/ruby_native.yml
-appearance:
-  tint_color: "#AA3366"
+# config/native.yml
+tint: "#AA3366"
 tabs:
-  - { title: Orders, path: /orders, icon: shippingbox, badge: true }
+  - { title: Orders,  path: /orders,  icon: shippingbox, key: orders }
   - { title: Account, path: /account, icon: person }
 ```
 
-The bar shows on pages with `<%= native_tabs_tag %>`. Leave it out of a sign-in page. `<%= native_badge_tag 3 %>` puts a count on the tab with `badge: true`.
-
-The app reads the config at launch and each time it comes to the front. A copy is kept for when the server cannot be reached. A broken config never replaces a good one.
-
-## The navigation bar
-
-```erb
-<%= native_navbar_tag "Orders" do |navbar| %>
-  <% navbar.button "New", icon: "plus", href: new_order_path %>
-  <% navbar.button "More", icon: "ellipsis.circle" do |menu| %>
-    <% menu.item "Archive", click: "#archive" %>
-    <% menu.item "Delete", click: "#delete", destructive: true %>
-  <% end %>
-  <% navbar.segment "Open", href: orders_path, selected: true %>
-  <% navbar.segment "Done", href: done_orders_path %>
-<% end %>
-```
-
-`href` goes to a page. `click` clicks the element the selector finds, also one hidden with `class="native-hidden"`.
-
-## Forms
-
-```erb
-<%= native_form_tag %>
-<%= native_navbar_tag "New order" do |navbar| %>
-  <% navbar.submit_button title: "Place", click: "#place" %>
-<% end %>
-```
-
-Back passes over a page marked as a form.
-
-## Native or web?
-
-```erb
-<% unless native_app? %><nav>...</nav><% end %>
-```
+Also `start:` (the first address), `titles:` by language and `eager:`. The app reads it at launch and when it comes to the front. A broken file never replaces a good one.
 
 ## Turbo and Inertia
 
-Both work, and need nothing. The app follows the page as it changes, with or without a full load. For Inertia, the gem's `@ruby-native/react` and `@ruby-native/vue` packages are described as rendering the same elements. This shell has been run with Turbo, not with those packages.
+The app follows a page as it changes, with or without a full load. It was run with Turbo.
 
 ## Safety
 
-- Only the main frame of your own server can speak to the app. An iframe and another origin cannot.
-- A link to another origin opens outside the app. Other schemes are refused, apart from mail, phone, message and FaceTime links.
-- Pages share one cookie store across tabs. A Ruby screen's sync does not use it. See [Mixing the three](mixing.md#signing-in).
+- A page drawn on the device takes a form or a write only from its own pages: not from a frame, nor a server's page. A page with `Referrer-Policy: no-referrer` cannot `fetch` a write.
+- Only the main frame of your server, or of the app itself, can speak to the app.
+- A link to another origin opens outside. Other schemes are refused, apart from mail, phone, message and FaceTime.

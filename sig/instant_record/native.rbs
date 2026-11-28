@@ -33,6 +33,27 @@ module InstantRecord
       def field: (String name, ?label: String, ?value: String, ?multiline: bool) -> InstantRecord::Native::Node
       def web: (String path) -> InstantRecord::Native::Node
       def more: (String key, query: String) -> InstantRecord::Native::Node
+      def toggle: (String name, ?label: String, ?on: bool, ?action: String, ?args: Hash[String, String]) -> InstantRecord::Native::Node
+      def slider: (String name, ?label: String, ?value: String, ?min: String, ?max: String, ?step: String, ?action: String, ?args: Hash[String, String]) -> InstantRecord::Native::Node
+      def stepper: (String name, ?label: String, ?value: String, ?min: String, ?max: String, ?step: String, ?action: String, ?args: Hash[String, String]) -> InstantRecord::Native::Node
+      def picker: (String name, ?label: String, ?value: String, ?style: String, ?action: String, ?args: Hash[String, String]) -> InstantRecord::Native::Node
+      def option: (String label, String value) -> InstantRecord::Native::Node
+      def date_picker: (String name, ?label: String, ?value: String, ?time: bool, ?action: String, ?args: Hash[String, String]) -> InstantRecord::Native::Node
+      def color_picker: (String name, ?label: String, ?value: String, ?action: String, ?args: Hash[String, String]) -> InstantRecord::Native::Node
+      def progress: (?String label, ?value: String, ?total: String) -> InstantRecord::Native::Node
+      def gauge: (String label, value: String, ?total: String) -> InstantRecord::Native::Node
+      def labeled: (String text, image: String) -> InstantRecord::Native::Node
+      def picture: (String url, ?label: String, ?height: String) -> InstantRecord::Native::Node
+      def share_link: (String text, url: String) -> InstantRecord::Native::Node
+      def video: (String url, ?height: String) -> InstantRecord::Native::Node
+      def model_3d: (String url, ?label: String, ?height: String) -> InstantRecord::Native::Node
+      def chart: (?style: String, ?height: String) -> InstantRecord::Native::Node
+      def point: (String label, String value, ?series: String) -> InstantRecord::Native::Node
+      def map_view: (?height: String) -> InstantRecord::Native::Node
+      def pin: (String label, latitude: String, longitude: String) -> InstantRecord::Native::Node
+      def control: (String kind, String name, String label, String value, String action, Hash[String, String] args) -> InstantRecord::Native::Node
+      def bounds: (InstantRecord::Native::Node node, String min, String max, String step) -> InstantRecord::Native::Node
+      def media: (InstantRecord::Native::Node node, String url, String label, String height) -> InstantRecord::Native::Node
       def act: (InstantRecord::Native::Node node, String label, String action, Hash[String, String] args, String role) -> nil
     end
   end

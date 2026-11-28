@@ -6,8 +6,12 @@ import WebKit
 @MainActor
 public final class HybridSite {
     public let server: URL
+    /// What pages may ask of the device.
+    public var capabilities: Capabilities?
+    /// Draws pages on the device, in an app with compiled Rails.
+    private(set) var local: LocalPages?
     let data: WKWebsiteDataStore
-    let outside: (URL) -> Void
+    let outside: @MainActor (URL) -> Void
     /// The native place an address opens, if it opens one.
     private(set) var routes: [HybridConfig.Place] = [] {
         didSet { if routes != oldValue { changed.values.forEach { $0() } } }
@@ -15,20 +19,43 @@ public final class HybridSite {
     private var changed: [ObjectIdentifier: () -> Void] = [:]
 
     /// `outside` opens what is another server's, or mail's, or the phone's.
-    public convenience init(server: URL, outside: @escaping (URL) -> Void) {
+    public convenience init(server: URL, outside: @escaping @MainActor (URL) -> Void) {
         self.init(server: server, data: .default(), outside: outside)
     }
 
-    init(server: URL, data: WKWebsiteDataStore, outside: @escaping (URL) -> Void) {
+    init(server: URL, data: WKWebsiteDataStore, outside: @escaping @MainActor (URL) -> Void) {
         self.server = server
         self.data = data
         self.outside = outside
     }
 
+    func draw(with app: AppHost, pages: LocalPages? = nil) {
+        local = pages ?? LocalPages(app: app, server: server)
+        let local = local
+        Task { [weak self] in
+            await local?.learn()
+            self?.tabs.forEach { $0.tab?.tellRoutes() }
+        }
+        app.switched = { [weak self] in
+            self?.local?.forget()
+            self?.tabs.forEach { $0.tab?.accountChanged() }
+        }
+        app.changed = { [weak self] in self?.tabs.forEach { $0.tab?.recordsChanged() } }
+    }
+
+    private struct Held { weak var tab: HybridTab? }
+    private var tabs: [Held] = []
+    func hold(_ tab: HybridTab) { tabs = tabs.filter { $0.tab != nil } + [Held(tab: tab)] }
+
+    /// Whether an address is this app's: the server's, or the device's own.
+    func owns(_ url: URL) -> Bool {
+        url.scheme == LocalPages.scheme ? local != nil && url.host == "app" : Origin(url) == Origin(server)
+    }
+
     func use(_ routes: [HybridConfig.Place]) { self.routes = routes }
 
     func place(at url: URL) -> (route: Route, sheet: Bool)? {
-        guard Origin(url) == Origin(server) else { return nil }
+        guard owns(url) else { return nil }
         // The first that matches decides, also that it is a page.
         guard let place = routes.first(where: { $0.params(for: url) != nil }) else { return nil }
         return place.route(for: url).map { ($0, place.sheet) }

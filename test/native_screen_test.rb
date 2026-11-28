@@ -375,4 +375,24 @@ class NativeScreenTest < ActiveSupport::TestCase
   def rows(root)
     root.children.first.children.first.children.first.children
   end
+
+  class ControlsScreen < InstantRecord::Native::Screen
+    def body
+      toggle "on", label: "On", on: true, action: "flip"
+      picker("sort", value: "a") { option "A", "a" }
+      chart(style: "pie") { point "x", "1" }
+      map_view { pin "Home", latitude: "1", longitude: "2" }
+      button "Buzz", action: "native:haptics.play", args: { "style" => "success" }
+    end
+  end
+
+  test "controls carry their name, value and action, and holders their parts" do
+    toggle, picker, chart, map, button = JSON.parse(ControlsScreen.new.json)["children"]
+
+    assert_equal ["toggle", "On", "flip", { "name" => "on", "value" => "true" }], toggle.values_at("kind", "text", "action", "props")
+    assert_equal [["option", "A"]], picker["children"].map { |child| child.values_at("kind", "text") }
+    assert_equal({ "value" => "1" }, chart["children"].first["props"])
+    assert_equal({ "latitude" => "1", "longitude" => "2" }, map["children"].first["props"])
+    assert_equal "native:haptics.play", button["action"]
+  end
 end

@@ -344,5 +344,5 @@ screen, generated, built and launched twice.
 
 Not signed or run on a phone. No Android renderer, no sign-in screen. A tab bar
 comes with a hybrid app ([docs/ios](../../docs/ios/README.md)), which was run in
-the iPhone 17 simulator on iOS 27.2 against a Rails app with ruby_native 0.21.1
-and Turbo, with its Ruby screens asked of Rails (`-dev`) and not compiled. In the development mode there is no paging and no event stream.
+the iPhone 17 simulator on iOS 27.2 against a Rails app with Turbo, in
+an earlier form of its helpers, with its Ruby screens asked of Rails (`-dev`) and not compiled. In the development mode there is no paging and no event stream.

@@ -25,6 +25,8 @@ InstantRecord::Engine.routes.draw do
   post "sync_notices/:id/fork", to: "sync_notices#fork"
   post "sync_notices/:id/dismiss", to: "sync_notices#dismiss"
   delete "sync_notices/:id", to: "sync_notices#dismiss"
+  # A native app's tabs and routes (config/native.yml).
+  get "native/config", to: "native_config#show"
   # A native app's screens while developing. Answers 404 unless the app set
   # config.instant_record.native_dev, in a local environment, to this machine.
   post "native/render", to: "native_screens#show"
