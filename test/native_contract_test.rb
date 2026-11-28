@@ -325,6 +325,162 @@ class NativeContractTest < ActiveSupport::TestCase
     end
   end
 
+  test "NativeContracts::Extractor handles single-statement, multi-statement, and empty blocks" do
+    source = <<~RUBY
+      class SingleScreen < InstantRecord::Native::Screen
+        contract "SingleCard" do |c|
+          c.prop :title
+        end
+      end
+
+      class MultiScreen < InstantRecord::Native::Screen
+        contract "MultiCard" do |c|
+          c.prop :title, :string
+          c.prop :count, :int, optional: true
+          c.action :ping do |a|
+            a.arg :id
+          end
+          c.action :save do |a|
+            a.arg :id, :int
+            a.value :note, optional: true
+          end
+          c.action :empty do |a|
+          end
+        end
+      end
+
+      class EmptyScreen < InstantRecord::Native::Screen
+        contract "EmptyCard" do |c|
+        end
+      end
+    RUBY
+
+    contracts = InstantRecord::Compiler::NativeContracts.extract_source(source, path: "app/screens/blocks.rb")
+    assert_equal %w[SingleCard MultiCard EmptyCard], contracts.map(&:component)
+
+    single, multi, empty = contracts
+    assert_equal [["title", "string", false]], single.fields.map { |f| [f.name, f.type, f.optional?] }
+    assert_equal [["title", "string", false], ["count", "int", true]], multi.fields.map { |f| [f.name, f.type, f.optional?] }
+    assert_equal [["id", "string", :arg, false]], multi.actions[0].params.map { |p| [p.name, p.type, p.slot, p.optional?] }
+    assert_equal [["id", "int", :arg, false], ["note", "string", :value, true]],
+      multi.actions[1].params.map { |p| [p.name, p.type, p.slot, p.optional?] }
+    assert_empty multi.actions[2].params
+    assert_empty empty.fields
+  end
+
+  test "NativeContracts::Extractor resolves nested module and class namespaces" do
+    source = <<~RUBY
+      module Admin
+        module Billing
+          class InvoiceScreen < InstantRecord::Native::Screen
+            contract "InvoiceCard" do |c|
+              c.string :number
+            end
+
+            class LineDetailScreen < InstantRecord::Native::Screen
+              contract "LineDetail" do |c|
+                c.int :amount
+              end
+            end
+          end
+        end
+
+        class Reports::SummaryScreen < InstantRecord::Native::Screen
+          contract "ReportSummary" do |c|
+            c.bool :ready
+          end
+        end
+      end
+    RUBY
+
+    contracts = InstantRecord::Compiler::NativeContracts.extract_source(source, path: "app/screens/nested.rb")
+    assert_equal(
+      [
+        ["InvoiceCard", "Admin::Billing::InvoiceScreen"],
+        ["LineDetail", "Admin::Billing::InvoiceScreen::LineDetailScreen"],
+        ["ReportSummary", "Admin::Reports::SummaryScreen"]
+      ],
+      contracts.map { |c| [c.component, c.screen] }
+    )
+  end
+
+  test "NativeContracts::Extractor rejects invalid arg/value declarations, unknown kwargs, and non-literal types with line numbers" do
+    cases = [
+      [
+        "unknown action declaration",
+        "class S < Screen\n  contract \"V\" do |c|\n    c.action :go do |a|\n      a.string :id\n    end\n  end\nend\n",
+        %r{app/screens/edge\.rb:4: Unknown action parameter declaration :string \(expected arg or value\)}
+      ],
+      [
+        "arg missing name",
+        "class S < Screen\n  contract \"V\" do |c|\n    c.action :go do |a|\n      a.arg\n    end\n  end\nend\n",
+        %r{app/screens/edge\.rb:4: arg expects \(name, type = :string, optional: false\)}
+      ],
+      [
+        "value too many positional args",
+        "class S < Screen\n  contract \"V\" do |c|\n    c.action :go do |a|\n      a.value :note, :string, :extra\n    end\n  end\nend\n",
+        %r{app/screens/edge\.rb:4: value expects \(name, type = :string, optional: false\)}
+      ],
+      [
+        "arg with block",
+        "class S < Screen\n  contract \"V\" do |c|\n    c.action :go do |a|\n      a.arg :id do\n      end\n    end\n  end\nend\n",
+        %r{app/screens/edge\.rb:4: arg does not take a block}
+      ],
+      [
+        "prop with block",
+        "class S < Screen\n  contract \"V\" do |c|\n    c.prop :title do\n    end\n  end\nend\n",
+        %r{app/screens/edge\.rb:3: prop does not take a block}
+      ],
+      [
+        "action block passed as proc",
+        "class S < Screen\n  contract \"V\" do |c|\n    c.action :go, &helper\n  end\nend\n",
+        %r{app/screens/edge\.rb:3: action expects a `do \|a\| \.\.\. end` block}
+      ],
+      [
+        "unknown kwarg on prop",
+        "class S < Screen\n  contract \"V\" do |c|\n    c.prop :title, :string, default: \"hi\"\n  end\nend\n",
+        %r{app/screens/edge\.rb:3: Unknown keyword argument\(s\) :default on prop}
+      ],
+      [
+        "unknown kwarg on arg",
+        "class S < Screen\n  contract \"V\" do |c|\n    c.action :go do |a|\n      a.arg :id, :string, required: true\n    end\n  end\nend\n",
+        %r{app/screens/edge\.rb:4: Unknown keyword argument\(s\) :required on arg}
+      ],
+      [
+        "unknown kwarg on value",
+        "class S < Screen\n  contract \"V\" do |c|\n    c.action :go do |a|\n      a.value :note, :string, required: false\n    end\n  end\nend\n",
+        %r{app/screens/edge\.rb:4: Unknown keyword argument\(s\) :required on value}
+      ],
+      [
+        "non-literal type on prop",
+        "class S < Screen\n  contract \"V\" do |c|\n    c.prop :title, dynamic_type\n  end\nend\n",
+        %r{app/screens/edge\.rb:3: field type must be a string or symbol literal}
+      ],
+      [
+        "non-literal type on arg",
+        "class S < Screen\n  contract \"V\" do |c|\n    c.action :go do |a|\n      a.arg :id, dynamic_type\n    end\n  end\nend\n",
+        %r{app/screens/edge\.rb:4: parameter type must be a string or symbol literal}
+      ],
+      [
+        "non-literal type on value",
+        "class S < Screen\n  contract \"V\" do |c|\n    c.action :go do |a|\n      a.value :note, TYPE_CONST\n    end\n  end\nend\n",
+        %r{app/screens/edge\.rb:4: parameter type must be a string or symbol literal}
+      ],
+      [
+        "non-literal name on arg",
+        "class S < Screen\n  contract \"V\" do |c|\n    c.action :go do |a|\n      a.arg dynamic_name, :string\n    end\n  end\nend\n",
+        %r{app/screens/edge\.rb:4: parameter name must be a string or symbol literal}
+      ]
+    ]
+
+    cases.each do |label, source, pattern|
+      err = assert_raises(InstantRecord::Compiler::BuildError, "expected BuildError for #{label}") do
+        InstantRecord::Compiler::NativeContracts.extract_source(source, path: "app/screens/edge.rb")
+      end
+      assert_match(pattern, err.message, "unexpected error message for #{label}")
+    end
+  end
+
   private
 
   def contract_of(*fields)

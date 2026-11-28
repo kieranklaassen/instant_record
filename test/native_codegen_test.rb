@@ -163,6 +163,31 @@ class NativeCodegenTest < ActiveSupport::TestCase
     assert_equal '"a\\"b\\n\\r\\t\\$100 \\${name}"', kotlin.kotlin_string("a\"b\n\r\t$100 ${name}")
   end
 
+  test "CodegenNaming.escape_string, SwiftCodegen, and KotlinCodegen escape backslashes, quotes, control chars, and interpolations" do
+    naming = InstantRecord::Compiler::CodegenNaming
+    swift = InstantRecord::Compiler::SwiftCodegen
+    kotlin = InstantRecord::Compiler::KotlinCodegen
+
+    assert_equal 'a\\\\b', naming.escape_string('a\b')
+    assert_equal 'a\\\\', naming.escape_string('a\\')
+    assert_equal '\\\\(x)', naming.escape_string('\(x)')
+    assert_equal 'a\\\\\\"b\\n\\r\\t', naming.escape_string("a\\\"b\n\r\t")
+    assert_equal '\\\\n', naming.escape_string('\n')
+
+    assert_equal '"a\\\\b"', swift.swift_string('a\b')
+    assert_equal '"a\\\\"', swift.swift_string('a\\')
+    assert_equal '"\\\\(x)"', swift.swift_string('\(x)')
+    assert_equal '"a\\"b\\n\\r\\t"', swift.swift_string("a\"b\n\r\t")
+    assert_equal '"a\\\\\\"b"', swift.swift_string('a\"b')
+
+    assert_equal '"a\\\\b"', kotlin.kotlin_string('a\b')
+    assert_equal '"a\\\\"', kotlin.kotlin_string('a\\')
+    assert_equal '"\\\\(x)"', kotlin.kotlin_string('\(x)')
+    assert_equal '"a\\"b\\n\\r\\t"', kotlin.kotlin_string("a\"b\n\r\t")
+    assert_equal '"\\$100 \\${name}"', kotlin.kotlin_string('$100 ${name}')
+    assert_equal '"\\\\\\$100 \\\\\\${name}"', kotlin.kotlin_string('\$100 \${name}')
+  end
+
   test "SwiftCodegen handles snapshot collision, keyword state storage, optional action params, and empty contracts" do
     contracts = [
       InstantRecord::Native::Contract.new(
