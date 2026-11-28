@@ -8,11 +8,13 @@ class RecordsControllerTest < Minitest::Test
   def setup
     reset_instant_record_tables!
     @previous_scope = InstantRecord.config.scope_from
+    @previous_auth = InstantRecord.config.authenticate_request
   end
 
   def teardown
     InstantRecord.sync
     InstantRecord.config.scope_from = @previous_scope
+    InstantRecord.config.authenticate_request = @previous_auth
   end
 
   def test_multi_tenant_history_pages_return_quiet_tenants_rows_without_starvation_or_leakage
@@ -123,6 +125,23 @@ class RecordsControllerTest < Minitest::Test
 
     assert InstantRecord::SyncShape.needs_range?(model)
     refute pool.active_connection?
+  end
+
+  def test_preflight_and_auth_errors_include_cors_headers
+    status, headers, = InstantRecord::RecordsController.action(:preflight).call(
+      Rack::MockRequest.env_for("/instant_record/records", method: "OPTIONS")
+    )
+    assert_equal 204, status
+    InstantRecord::CORS_HEADERS.each { |k, v| assert_equal v, headers[k] }
+
+    { InstantRecord::Unauthorized => 401, InstantRecord::Forbidden => 403 }.each do |error_class, expected|
+      InstantRecord.config.authenticate_request = ->(_req) { raise error_class }
+      status, headers, = InstantRecord::RecordsController.action(:index).call(
+        Rack::MockRequest.env_for("/instant_record/records")
+      )
+      assert_equal expected, status
+      InstantRecord::CORS_HEADERS.each { |k, v| assert_equal v, headers[k] }
+    end
   end
 
   TIED_AT = Time.utc(2026, 11, 20, 12)

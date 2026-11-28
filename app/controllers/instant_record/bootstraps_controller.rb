@@ -1,3 +1,5 @@
+require "instant_record/sync_endpoint"
+
 module InstantRecord
   # First-sync hydration: current state (shaped via sync_shape or windowed via
   # sync_window) plus the change-log cursor, so a fresh client never replays
@@ -5,13 +7,7 @@ module InstantRecord
   # transaction: events committed between cursor and response re-apply
   # idempotently client-side, whereas the reverse order would skip them.
   class BootstrapsController < ActionController::API
-    before_action { headers.merge!(InstantRecord::CORS_HEADERS) }
-    rescue_from InstantRecord::Unauthorized, with: -> { head :unauthorized }
-    rescue_from InstantRecord::Forbidden, with: -> { head :forbidden }
-
-    def preflight
-      head :no_content
-    end
+    include SyncEndpoint
 
     def show
       SyncScope.authenticate!(request)
@@ -43,7 +39,7 @@ module InstantRecord
     # SyncScope.models_for selects unpartitioned models by default, or matching
     # partitioned models when a partition is requested.
     def bootstrap_models(partition)
-      Rails.application.eager_load! if defined?(Rails) && Rails.application && !Rails.application.config.eager_load
+      eager_load_models!
       SyncScope.models_for(partition)
     end
 

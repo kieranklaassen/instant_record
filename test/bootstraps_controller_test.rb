@@ -8,11 +8,13 @@ class BootstrapsControllerTest < Minitest::Test
   def setup
     reset_instant_record_tables!
     @previous_scope = InstantRecord.config.scope_from
+    @previous_auth = InstantRecord.config.authenticate_request
   end
 
   def teardown
     InstantRecord.sync
     InstantRecord.config.scope_from = @previous_scope
+    InstantRecord.config.authenticate_request = @previous_auth
   end
 
   def test_quiet_tenant_receives_limit_rows_when_another_tenant_writes_newer_rows_unpartitioned
@@ -54,6 +56,48 @@ class BootstrapsControllerTest < Minitest::Test
     assert_equal %w[ada-closed-1 ada-open-2 ada-open-3], bootstrapped_ids(scope: "ada")
     assert_equal %w[bob-open-2 bob-open-3], bootstrapped_ids(scope: "bob")
     assert_empty bootstrapped_ids
+  end
+
+  def test_preflight_and_auth_errors_include_cors_headers
+    status, headers, = InstantRecord::BootstrapsController.action(:preflight).call(
+      Rack::MockRequest.env_for("/instant_record/bootstrap", method: "OPTIONS")
+    )
+    assert_equal 204, status
+    InstantRecord::CORS_HEADERS.each { |k, v| assert_equal v, headers[k] }
+
+    { InstantRecord::Unauthorized => 401, InstantRecord::Forbidden => 403 }.each do |error_class, expected|
+      InstantRecord.config.authenticate_request = ->(_req) { raise error_class }
+      status, headers, = InstantRecord::BootstrapsController.action(:show).call(
+        Rack::MockRequest.env_for("/instant_record/bootstrap")
+      )
+      assert_equal expected, status
+      InstantRecord::CORS_HEADERS.each { |k, v| assert_equal v, headers[k] }
+    end
+  end
+
+  def test_eager_load_models_runs_only_when_eager_load_is_false
+    InstantRecord.sync(syncable_model("EagerItem"))
+    eager_loaded = 0
+    app_class = Struct.new(:config) do
+      define_method(:eager_load!) { eager_loaded += 1 }
+    end
+    config_class = Struct.new(:eager_load)
+
+    with_rails_application(app_class.new(config_class.new(false))) do
+      status, = InstantRecord::BootstrapsController.action(:show).call(
+        Rack::MockRequest.env_for("/instant_record/bootstrap")
+      )
+      assert_equal 200, status
+    end
+    assert_equal 1, eager_loaded
+
+    with_rails_application(app_class.new(config_class.new(true))) do
+      status, = InstantRecord::BootstrapsController.action(:show).call(
+        Rack::MockRequest.env_for("/instant_record/bootstrap")
+      )
+      assert_equal 200, status
+    end
+    assert_equal 1, eager_loaded
   end
 
   private

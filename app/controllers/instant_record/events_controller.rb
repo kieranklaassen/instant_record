@@ -1,5 +1,9 @@
+require "instant_record/sync_endpoint"
+
 module InstantRecord
   class EventsController < ActionController::Base
+    include SyncEndpoint
+
     # SSE change stream as a lazily-enumerated response body — not
     # ActionController::Live (which burns a thread per stream and bypasses the
     # fiber scheduler). An #each body is the portable Rack streaming
@@ -17,9 +21,6 @@ module InstantRecord
       "cache-control" => "no-store",
       "x-accel-buffering" => "no"
     }.freeze
-
-    rescue_from InstantRecord::Unauthorized, with: -> { head :unauthorized }
-    rescue_from InstantRecord::Forbidden, with: -> { head :forbidden }
 
     class EventStream
       # `identity` and `partition` are fixed when the stream opens.
@@ -61,19 +62,13 @@ module InstantRecord
       end
     end
 
-    def preflight
-      headers.merge!(InstantRecord::CORS_HEADERS)
-      head :no_content
-    end
-
     def index
-      headers.merge!(InstantRecord::CORS_HEADERS)
       cursor = (request.headers["Last-Event-ID"] || params[:after] || 0).to_i
 
       SyncScope.authenticate!(request)
       identity = SyncScope.identity(request)
       partition_spec = SyncScope.partition(request, identity)
-      Rails.application.eager_load! if defined?(Rails) && Rails.application && !Rails.application.config.eager_load
+      eager_load_models!
       models = SyncScope.models_for(partition_spec)
       SyncScope.authorize_models!(models, partition_spec, identity, request)
       change_partitions = SyncScope.change_partitions_for(models, partition_spec)

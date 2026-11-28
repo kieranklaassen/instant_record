@@ -37,6 +37,7 @@ class FilesControllerTest < Minitest::Test
     @root = Dir.mktmpdir("instant-record-files")
     @previous_store = InstantRecord.config.file_store
     @previous_scope = InstantRecord.config.scope_from
+    @previous_auth = InstantRecord.config.authenticate_request
     @previous_chunk_size = InstantRecord.config.file_chunk_size
     InstantRecord.config.file_store = InstantRecord::FileStore.new(@root)
     InstantRecord.config.file_chunk_size = nil
@@ -62,6 +63,7 @@ class FilesControllerTest < Minitest::Test
     InstantRecord.sync
     InstantRecord.config.file_store = @previous_store
     InstantRecord.config.scope_from = @previous_scope
+    InstantRecord.config.authenticate_request = @previous_auth
     InstantRecord.config.file_chunk_size = @previous_chunk_size
     FileUtils.remove_entry(@root) if @root && Dir.exist?(@root)
   end
@@ -256,6 +258,19 @@ class FilesControllerTest < Minitest::Test
     assert_equal "*", preflight.headers["access-control-allow-origin"]
     assert_includes preflight.headers["access-control-allow-methods"], "PUT"
     assert_includes preflight.headers["access-control-allow-headers"], "range"
+  end
+
+  def test_cors_headers_apply_before_find_model_and_on_auth_errors
+    missing = get(type: "Nothing")
+    assert_equal 404, missing.status
+    InstantRecord::FilesController::CORS.each { |k, v| assert_equal v, missing.headers[k] }
+
+    { InstantRecord::Unauthorized => 401, InstantRecord::Forbidden => 403 }.each do |error_class, expected|
+      InstantRecord.config.authenticate_request = ->(_req) { raise error_class }
+      reply = get(scope: "ada")
+      assert_equal expected, reply.status
+      InstantRecord::FilesController::CORS.each { |k, v| assert_equal v, reply.headers[k] }
+    end
   end
 
   def test_a_destroyed_record_takes_its_file_and_its_address_with_it

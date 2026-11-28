@@ -1,3 +1,5 @@
+require "instant_record/sync_endpoint"
+
 module InstantRecord
   # The bytes of records that declare `sync_file`. A browser writes a file to
   # its own disk first and sends it here in pieces when it has a connection;
@@ -9,6 +11,8 @@ module InstantRecord
   # through the mutations endpoint, so a file sent before its record has been
   # is 404 too, and the browser tries again.
   class FilesController < ActionController::API
+    include SyncEndpoint
+
     CORS = InstantRecord::CORS_HEADERS.merge(
       "access-control-allow-methods" => "GET, HEAD, PUT, OPTIONS",
       "access-control-allow-headers" => "content-type, range, authorization, x-instant-record-scope, x-instant-record-partition, x-instant-record-member",
@@ -24,14 +28,8 @@ module InstantRecord
       "cache-control" => "private, no-cache"
     }.freeze
 
-    before_action { headers.merge!(CORS) }
+    self.sync_headers = CORS
     before_action :find_model, except: :preflight
-    rescue_from InstantRecord::Unauthorized, with: -> { head :unauthorized }
-    rescue_from InstantRecord::Forbidden, with: -> { head :forbidden }
-
-    def preflight
-      head :no_content
-    end
 
     # The file, or the part of it a Range header names.
     def show

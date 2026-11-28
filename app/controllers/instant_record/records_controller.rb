@@ -1,25 +1,21 @@
+require "instant_record/sync_endpoint"
+
 module InstantRecord
   # Keyset-cursor history pages, search widening, and single-record lookups for
   # shaped (`sync_shape`) and windowed (`sync_window`) models. Never uses
   # OFFSET, so page cost stays flat at any depth.
   class RecordsController < ActionController::API
+    include SyncEndpoint
+
     # Independent of any model's window size: the ceiling a client can
     # request in one page.
     HARD_LIMIT = 200
-
-    before_action { headers.merge!(InstantRecord::CORS_HEADERS) }
-    rescue_from InstantRecord::Unauthorized, with: -> { head :unauthorized }
-    rescue_from InstantRecord::Forbidden, with: -> { head :forbidden }
-
-    def preflight
-      head :no_content
-    end
 
     def index
       SyncScope.authenticate!(request)
       identity = SyncScope.identity(request)
       partition = SyncScope.partition(request, identity)
-      Rails.application.eager_load! if defined?(Rails) && Rails.application && !Rails.application.config.eager_load
+      eager_load_models!
 
       model = resolve_model(partition)
       return head :not_found unless model

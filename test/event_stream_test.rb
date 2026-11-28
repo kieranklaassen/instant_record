@@ -1,5 +1,6 @@
 require "test_helper"
 require "action_controller"
+require "rack/mock"
 require File.expand_path("../app/controllers/instant_record/events_controller", __dir__)
 
 # The SSE stream's idle behaviour: heartbeats on a quiet stream, and a client
@@ -50,6 +51,45 @@ class EventStreamTest < Minitest::Test
     refute_match(/public|s-maxage/i, cache_control)
     assert_equal "text/event-stream", InstantRecord::EventsController::EVENT_STREAM_HEADERS["content-type"]
     assert_equal "no", InstantRecord::EventsController::EVENT_STREAM_HEADERS["x-accel-buffering"]
+  end
+
+  def test_events_controller_preserves_base_superclass_cors_and_auth_error_responses
+    assert_equal ActionController::Base, InstantRecord::EventsController.superclass
+
+    status, headers, = InstantRecord::EventsController.action(:preflight).call(
+      Rack::MockRequest.env_for("/instant_record/events", method: "OPTIONS")
+    )
+    assert_equal 204, status
+    InstantRecord::CORS_HEADERS.each { |k, v| assert_equal v, headers[k] }
+
+    previous_auth = InstantRecord.config.authenticate_request
+    previous_synced = InstantRecord.synced_models.dup
+    InstantRecord.sync(syncable_model("StreamItem"))
+    { InstantRecord::Unauthorized => 401, InstantRecord::Forbidden => 403 }.each do |error_class, expected|
+      InstantRecord.config.authenticate_request = ->(_req) { raise error_class }
+      status, headers, = InstantRecord::EventsController.action(:index).call(
+        Rack::MockRequest.env_for("/instant_record/events?window=0")
+      )
+      assert_equal expected, status
+      InstantRecord::CORS_HEADERS.each { |k, v| assert_equal v, headers[k] }
+      refute_equal "text/event-stream", headers["content-type"]
+    end
+
+    InstantRecord.config.authenticate_request = nil
+    ir_config = Struct.new(:sse_window_seconds, :sse_heartbeat_seconds).new(0.0, 0.0)
+    app = Struct.new(:config).new(Struct.new(:eager_load, :instant_record).new(true, ir_config))
+    with_rails_application(app) do
+      status, headers, = InstantRecord::EventsController.action(:index).call(
+        Rack::MockRequest.env_for("/instant_record/events?window=0")
+      )
+      assert_equal 200, status
+      InstantRecord::CORS_HEADERS.merge(InstantRecord::EventsController::EVENT_STREAM_HEADERS).each do |k, v|
+        assert_equal v, headers[k]
+      end
+    end
+  ensure
+    InstantRecord.config.authenticate_request = previous_auth
+    InstantRecord.sync(previous_synced) if previous_synced
   end
 
   def test_event_stream_isolates_per_user_scoped_changes
