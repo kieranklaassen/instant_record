@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **The compiler runs on Ruby 3.3 again.** The reachability tracer called `MatchData#bytebegin`, which is Ruby 3.4's; the gem supports 3.3.
 - **Hybrid iOS apps: Rails pages with native tabs, bars, buttons and menus, shipped by a deploy.** `bin/rails generate instant_record:ios Shop --hybrid` writes an app that reads the ruby_native gem's config and helpers (0.21.1), with no compiler toolchain. Ruby screens, SwiftUI views and Rails pages mix in one app: a tab takes `screen:` or `view:`, `routes:` opens a native place from an ordinary link, a Ruby screen links to `page:/path` and `swift:Name`, and `web "/path"` puts a page inside one. The guides are in `docs/ios`. `--screen` is now required only without `--hybrid`.
 
 - **A partitioned island compiles for iOS with current Roundhouse and Spinel.** The native host's two calls are declared for Roundhouse (`sig/instant_record/native_host.rbs`), a compiled `sync_partition` reads its column by Symbol, a request's dispatch is captured in a method of its own, and the native host tests an unset id without `blank?`.
