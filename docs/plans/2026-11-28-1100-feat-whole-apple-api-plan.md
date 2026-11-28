@@ -23,7 +23,7 @@ A draft to go through with Kieran. Questions marked **Blocking** stop the part t
 
 ### Summary
 
-Today there are 23 new Ruby elements and some 20 named capabilities, each written by hand. That is the right shape and the wrong way to reach 314 frameworks. A generator reads what Apple publishes about each framework and writes the typed bridge for the ones an app names.
+Today there are 24 new Ruby methods and some 20 named capabilities, each written by hand. That is the right shape and the wrong way to reach 314 frameworks. A generator reads what Apple publishes about each framework and writes the typed bridge for the ones an app names.
 
 ### Problem Frame
 
