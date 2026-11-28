@@ -15,15 +15,31 @@ module InstantRecord
       end
 
       def run(args, cwd: nil, env: {}, log: nil)
-        cmd = args.map(&:to_s)
+        cmd = Array(args).map(&:to_s)
+        raise ArgumentError, "command must not be empty" if cmd.empty?
+
         merged_env = env.transform_keys(&:to_s).transform_values { |v| v.nil? ? nil : v.to_s }
         opts = {}
-        opts[:chdir] = cwd.to_s if cwd
+        if cwd
+          cwd_path = cwd.to_s
+          unless File.directory?(cwd_path)
+            detail = File.exist?(cwd_path) ? "is not a directory" : "does not exist"
+            raise BuildError, "build step failed: working directory #{cwd_path.inspect} #{detail}"
+          end
+          opts[:chdir] = cwd_path
+        end
 
-        output, status = Open3.capture2e(merged_env, [cmd.first, cmd.first], *cmd[1..], **opts)
+        output, status = begin
+          Open3.capture2e(merged_env, [cmd.first, cmd.first], *cmd[1..], **opts)
+        rescue Errno::ENOENT => e
+          raise BuildError, "build step failed: executable #{cmd.first.inspect} not found (#{e.message})"
+        rescue Errno::EACCES => e
+          raise BuildError, "build step failed: executable #{cmd.first.inspect} is not executable (#{e.message})"
+        end
+
         if log
           FileUtils.mkdir_p(@build_dir)
-          File.write(File.join(@build_dir, log), output)
+          File.binwrite(File.join(@build_dir, log), output)
         end
 
         unless status.success?
@@ -34,8 +50,6 @@ module InstantRecord
         end
 
         output
-      rescue Errno::ENOENT => e
-        raise BuildError, "build step failed: executable #{cmd.first.inspect} not found (#{e.message})"
       end
     end
   end

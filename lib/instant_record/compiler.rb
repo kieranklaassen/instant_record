@@ -250,14 +250,36 @@ module InstantRecord
 
     def self.publish(root)
       workspace = Pathname(root).join("tmp/instant_record/compiled")
+      unless workspace.directory?
+        raise BuildError, "Compiled workspace does not exist at #{workspace}. Run a build before publishing."
+      end
+
       public_root = Pathname(root).join("public/instant_record_compiled")
-      FileUtils.mkdir_p(public_root)
       File.open(workspace.join(".lock"), "a") do |lock|
         lock.flock(File::LOCK_EX)
         dist = workspace.join("web/dist")
-        version = JSON.parse(dist.join("instant-record-release.json").read).fetch("version")
-        raise "Invalid compiled release version" unless version.match?(/\A[0-9a-f]{64}\z/)
+        unless dist.directory?
+          raise BuildError, "Compiled dist directory does not exist at #{dist}. Run a build before publishing."
+        end
 
+        release_file = dist.join("instant-record-release.json")
+        unless release_file.file?
+          raise BuildError, "Compiled release metadata is missing at #{release_file}. Run a build before publishing."
+        end
+
+        release =
+          begin
+            JSON.parse(release_file.read)
+          rescue JSON::ParserError => e
+            raise BuildError, "Invalid compiled release JSON in #{release_file}: #{e.message}"
+          end
+
+        version = release.is_a?(Hash) ? release["version"] : nil
+        unless version.is_a?(String) && version.match?(/\A[0-9a-f]{64}\z/)
+          raise BuildError, "Invalid compiled release version"
+        end
+
+        FileUtils.mkdir_p(public_root)
         destination = public_root.join(version)
         unless destination.directory?
           Dir.mktmpdir(".release-", public_root) do |temp|
