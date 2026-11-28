@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 require "json"
 require "yaml"
 require_relative "runner"
@@ -81,14 +83,19 @@ module InstantRecord
       end
 
       def self.deduplicate_routes(routes)
-        seen = {}
-        routes.each_with_object([]) do |route, acc|
-          key = [route["method"], route["path"]]
-          next if seen[key]
+        return [] if routes.is_a?(Array) && routes.empty?
 
-          seen[key] = true
+        seen_by_method = {}
+        acc = []
+        routes.each do |route|
+          method_seen = (seen_by_method[route["method"]] ||= {})
+          path = route["path"]
+          next if method_seen[path]
+
+          method_seen[path] = true
           acc << route
         end
+        acc
       end
 
       def self.parse_server_route_spec(spec)
@@ -127,9 +134,19 @@ module InstantRecord
       end
 
       def self.normalize_route_path(path)
+        if path.is_a?(String) && path.encoding.ascii_compatible?
+          len = path.bytesize
+          if len == 1 && path.getbyte(0) == 47
+            return "/"
+          elsif len > 1 && path.getbyte(0) == 47
+            last = path.getbyte(-1)
+            return path if last > 32 && last != 47 && !path.include?("//")
+          end
+        end
+
         cleaned = path.to_s.strip
         cleaned = "/#{cleaned}" unless cleaned.start_with?("/")
-        cleaned = cleaned.gsub(%r{/+}, "/")
+        cleaned = cleaned.squeeze("/") if cleaned.include?("//")
         cleaned.length > 1 ? cleaned.delete_suffix("/") : cleaned
       end
 
