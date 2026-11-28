@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 require "active_support/inflector"
 require "prism"
 require_relative "manifest"
@@ -24,6 +26,22 @@ module InstantRecord
       ].freeze
       PLURAL_ACTIONS = RESOURCE_ROUTES.map(&:first).uniq.freeze
       SINGULAR_ACTIONS = (PLURAL_ACTIONS - ["index"]).freeze
+      ROUTE_OPTION_KEYS = %i[to controller action via as on only except path module param constraints defaults format].freeze
+
+      EMPTY_ARRAY = [].freeze
+      EMPTY_HASH = {}.freeze
+      ROUTE_OPTION_KEYS_SET = ROUTE_OPTION_KEYS.to_h { |k| [k, true] }.freeze
+      SINGULAR_RESOURCE_ROUTES = RESOURCE_ROUTES.reject { |action, *| action == "index" }.freeze
+      ALL_HTTP_VERBS = %w[GET POST PATCH PUT DELETE OPTIONS].freeze
+      DEFAULT_MATCH_VERBS = %w[GET POST].freeze
+      INDENTS = Array.new(32) { |i| ("  " * i).freeze }.freeze
+      NL_INDENTS = Array.new(32) { |i| ("\n" + "  " * i).freeze }.freeze
+      NL_SPACES = Array.new(32) { |i| ("\n" + " " * i).freeze }.freeze
+      LESS_INDENT_RES = Array.new(32) { |k| k == 0 ? nil : /\n {0,#{k - 1}}[^ ]/ }.freeze
+      BLANK_LINE_RE = /\n[ \t\v\f\0]*(?:\n|\z)/
+      private_constant :EMPTY_ARRAY, :EMPTY_HASH, :ROUTE_OPTION_KEYS_SET, :SINGULAR_RESOURCE_ROUTES,
+                       :ALL_HTTP_VERBS, :DEFAULT_MATCH_VERBS, :INDENTS, :NL_INDENTS, :NL_SPACES,
+                       :LESS_INDENT_RES, :BLANK_LINE_RE
 
       Result = Struct.new(
         :has_local_first,
@@ -49,7 +67,9 @@ module InstantRecord
         keyword_init: true
       ) do
         def with(**changes)
-          self.class.new(**to_h, **changes)
+          copy = dup
+          changes.each { |key, value| copy[key] = value }
+          copy
         end
       end
 
@@ -59,24 +79,49 @@ module InstantRecord
 
       def initialize(source_root:, island: nil)
         @source_root = File.expand_path(source_root.to_s)
+        @routes_dir = File.expand_path(File.join(@source_root, "config/routes"))
+        @routes_dir_prefix = "#{@routes_dir}#{File::SEPARATOR}"
         @island = island.nil? || island.to_s.empty? ? nil : island.to_s
         @has_local_first = false
         @declared_islands = []
         @local_routes = []
         @server_routes = []
         @overrides = Manifest.normalize_overrides(nil)
-        @drawn_statements = {}
+        @drawn_files = {}
+        @resolved_draw_paths = {}
+        @singularize_cache = {}
+        @pluralize_cache = {}
+        @special_calls_cache = {}.compare_by_identity
+        @special_offsets_cache = {}.compare_by_identity
       end
 
       def analyze
-        body = routes_body
-        walk_statements(body, Context.new(path_prefix: "", in_local_first: false, active_draws: []))
+        body, root_source = routes_body
+
+        @path_prefix = ""
+        @nested_base = nil
+        @nested_name = nil
+        @nested_param = nil
+        @module_prefix = nil
+        @controller = nil
+        @in_local_first = false
+        @island_name = nil
+        @resource_member_prefix = nil
+        @resource_collection_prefix = nil
+        @resource_controller = nil
+        @active_draws = {}
+
+        walk_statements(body)
         check_island_declared!
 
         if @has_local_first
           local = @local_routes
-          server = @server_routes + @overrides[:server_routes]
-          local_source = "Rails.application.routes.draw do\n#{indent_lines(emit_statements(body, false, []), 2)}end\n"
+          override_server_routes = @overrides[:server_routes]
+          server = override_server_routes.empty? ? @server_routes : (@server_routes + override_server_routes)
+          out = +"Rails.application.routes.draw do\n"
+          emit_statements(body, root_source, false, out, 1)
+          out << "end\n"
+          local_source = out
         else
           # Whole-app fallback mode: all non-internal routes are local routes.
           local = @server_routes
@@ -101,12 +146,13 @@ module InstantRecord
         unless File.file?(routes_path)
           raise BuildError, "Missing config/routes.rb in #{@source_root}" if @island
 
-          return []
+          return [[], ""]
         end
 
-        statements = parse_ruby!(File.read(routes_path), routes_path)
+        source = File.read(routes_path)
+        statements = parse_ruby!(source, routes_path)
         draw_call = statements.find { |stmt| stmt.is_a?(Prism::CallNode) && stmt.name == :draw && literal_block?(stmt) }
-        draw_call ? statements_of(draw_call.block.body) : statements
+        [draw_call ? statements_of(draw_call.block.body) : statements, source]
       end
 
       def check_island_declared!
@@ -131,12 +177,12 @@ module InstantRecord
         node.is_a?(Prism::StatementsNode) ? node.body : [node]
       end
 
-      def walk_statements(stmts, ctx)
-        stmts.each { |stmt| walk_node(stmt, ctx) }
+      def walk_statements(stmts)
+        stmts.each { |stmt| walk_node(stmt) }
       end
 
-      def walk_block(node, ctx)
-        walk_statements(statements_of(node.block.body), ctx) if literal_block?(node)
+      def walk_block(node)
+        walk_statements(statements_of(node.block.body)) if literal_block?(node)
       end
 
       # A block passed as an argument (`&blk`) is only known at runtime.
@@ -144,370 +190,877 @@ module InstantRecord
         node.block.is_a?(Prism::BlockNode)
       end
 
-      def walk_node(node, ctx)
+      def walk_node(node)
         return unless node.is_a?(Prism::CallNode) && node.receiver.nil?
 
         # mount is left out: a server-side engine (e.g. InstantRecord::Engine) is not a local controller.
         case node.name
-        when :local_first then walk_local_first(node, ctx)
-        when :draw then walk_draw(node, ctx)
-        when :namespace then walk_namespace(node, ctx)
-        when :scope then walk_scope(node, ctx)
-        when :resources then walk_resources(node, ctx, singular: false)
-        when :resource then walk_resources(node, ctx, singular: true)
-        when :member, :collection then walk_block(node, resource_context(ctx, node.name))
-        when :constraints, :defaults then walk_block(node, ctx)
-        when :root then record_root(node, ctx)
-        when *HTTP_VERBS then record_http_verb(node, ctx, [node.name.to_s.upcase])
-        when :match then record_match(node, ctx)
+        when :local_first then walk_local_first(node)
+        when :draw then walk_draw(node)
+        when :namespace then walk_namespace(node)
+        when :scope then walk_scope(node)
+        when :resources then walk_resources(node, singular: false)
+        when :resource then walk_resources(node, singular: true)
+        when :member then walk_resource_scope(node, :member)
+        when :collection then walk_resource_scope(node, :collection)
+        when :constraints, :defaults then walk_block(node)
+        when :root then record_root(node)
+        when :get then record_http_verb(node, "GET")
+        when :post then record_http_verb(node, "POST")
+        when :put then record_http_verb(node, "PUT")
+        when :patch then record_http_verb(node, "PATCH")
+        when :delete then record_http_verb(node, "DELETE")
+        when :match then record_http_verb(node, nil)
         end
       end
 
-      def walk_local_first(node, ctx)
+      def walk_local_first(node)
         @has_local_first = true
-        _, opts = extract_args(node)
-        declared_name = declared_island(node)
+        first_pos, opts = extract_first_and_opts(node)
+        declared_name = first_pos ? first_pos.to_s : nil
         @declared_islands << declared_name if declared_name
 
         active = active_island?(declared_name)
-        @overrides = Manifest.merge_overrides(@overrides, Manifest.normalize_overrides(opts)) if active
+        if active && !opts.empty?
+          @overrides = Manifest.merge_overrides(@overrides, Manifest.normalize_overrides(opts))
+        end
 
-        walk_block(node, ctx.with(in_local_first: active, island_name: declared_name || ctx.island_name))
+        return unless literal_block?(node)
+
+        prev_in_local_first = @in_local_first
+        prev_island_name = @island_name
+        @in_local_first = active
+        @island_name = declared_name || prev_island_name
+        begin
+          walk_statements(statements_of(node.block.body))
+        ensure
+          @in_local_first = prev_in_local_first
+          @island_name = prev_island_name
+        end
       end
 
       def declared_island(node)
-        pos, = extract_args(node)
-        pos.first.to_s if pos.first
+        args = node.arguments&.arguments
+        return nil unless args
+
+        args.each do |arg|
+          next if arg.is_a?(Prism::KeywordHashNode) || arg.is_a?(Prism::HashNode)
+
+          val = literal_value(arg)
+          return val ? val.to_s : nil
+        end
+        nil
       end
 
       def active_island?(declared_name)
         @island.nil? || declared_name == @island
       end
 
-      def walk_draw(node, ctx)
+      def walk_draw(node)
         name = first_name(node)
         return unless name
 
-        sub_path = resolve_draw_path!(name, ctx.active_draws)
-        walk_statements(drawn_statements(sub_path), ctx.with(active_draws: ctx.active_draws + [sub_path]))
+        sub_path = resolve_draw_path!(name)
+        stmts, = drawn_file(sub_path)
+        @active_draws[sub_path] = true
+        begin
+          walk_statements(stmts)
+        ensure
+          @active_draws.delete(sub_path)
+        end
       end
 
-      def resolve_draw_path!(name, active_draws)
-        routes_dir = File.expand_path(File.join(@source_root, "config/routes"))
-        sub_path = File.expand_path("#{name}.rb", routes_dir)
-        unless sub_path.start_with?("#{routes_dir}#{File::SEPARATOR}")
-          raise BuildError, "Invalid route draw name #{name.inspect}: escapes config/routes/"
+      def resolve_draw_path!(name)
+        sub_path = @resolved_draw_paths[name]
+        unless sub_path
+          sub_path = File.expand_path("#{name}.rb", @routes_dir)
+          unless sub_path.start_with?(@routes_dir_prefix)
+            raise BuildError, "Invalid route draw name #{name.inspect}: escapes config/routes/"
+          end
+          unless File.file?(sub_path)
+            raise BuildError, "Route file config/routes/#{name}.rb referenced by draw(:#{name}) does not exist"
+          end
+          @resolved_draw_paths[name] = sub_path
         end
-        unless File.file?(sub_path)
-          raise BuildError, "Route file config/routes/#{name}.rb referenced by draw(:#{name}) does not exist"
-        end
-        raise BuildError, "Cyclic route draw detected for config/routes/#{name}.rb" if active_draws.include?(sub_path)
+
+        raise BuildError, "Cyclic route draw detected for config/routes/#{name}.rb" if @active_draws[sub_path]
 
         sub_path
       end
 
-      def drawn_statements(sub_path)
-        @drawn_statements[sub_path] ||= parse_ruby!(File.read(sub_path), sub_path)
-      end
-
-      def walk_namespace(node, ctx)
-        name = first_name(node)
-        return unless name && node.block
-
-        _, opts = extract_args(node)
-        walk_block(node, scoped_context(ctx, opts, path: opts.fetch(:path, name), mod: opts.fetch(:module, name)))
-      end
-
-      def walk_scope(node, ctx)
-        return unless node.block
-
-        pos, opts = extract_args(node)
-        walk_block(node, scoped_context(ctx, opts, path: opts.fetch(:path, pos.first), mod: opts[:module]))
-      end
-
-      def scoped_context(ctx, opts, path:, mod:)
-        module_prefix = join_module(ctx.module_prefix, mod)
-        controller = opts[:controller] ? qualify_controller(opts[:controller].to_s, module_prefix) : ctx.controller
-        ctx.with(path_prefix: join_path(ctx.path_prefix, path), module_prefix: module_prefix, controller: controller)
-      end
-
-      def walk_resources(node, ctx, singular:)
-        pos, opts = extract_args(node)
-        return if pos.empty?
-
-        actions = filter_actions(singular ? SINGULAR_ACTIONS : PLURAL_ACTIONS, only: opts[:only], except: opts[:except])
-        module_prefix = opts[:module] ? join_module(ctx.module_prefix, opts[:module]) : ctx.module_prefix
-
-        pos.map(&:to_s).each do |name|
-          base = join_path(ctx.path_prefix, opts.fetch(:path, name))
-          controller = opts[:controller] || (singular ? ActiveSupport::Inflector.pluralize(name) : name)
-          controller = qualify_controller(controller.to_s, module_prefix)
-
-          param = opts[:param] || "id"
-          member = singular ? base : "#{base}/:#{param}"
-          record_resource_routes(base, member, controller, actions, ctx)
-
-          nested = singular ? base : "#{base}/:#{ActiveSupport::Inflector.singularize(name)}_#{param}"
-          walk_block(node, ctx.with(
-            path_prefix: nested,
-            module_prefix: module_prefix,
-            controller: controller,
-            resource_member_prefix: member,
-            resource_collection_prefix: base,
-            resource_controller: controller
-          ))
+      def drawn_file(sub_path)
+        @drawn_files[sub_path] ||= begin
+          source = File.read(sub_path)
+          [parse_ruby!(source, sub_path), source]
         end
       end
 
-      def record_resource_routes(base, member, controller, actions, ctx)
-        RESOURCE_ROUTES.each do |action, verb, on, suffix|
-          next unless actions.include?(action)
+      def walk_namespace(node)
+        return unless literal_block?(node)
 
-          record_route(verb, "#{on == :member ? member : base}#{suffix}", controller, action, ctx)
+        first_pos, opts = extract_first_and_opts(node)
+        name = first_pos&.to_s
+        return unless name
+
+        walk_scoped_block(node, opts, path: opts.fetch(:path, name), mod: opts.fetch(:module, name))
+      end
+
+      def walk_scope(node)
+        return unless literal_block?(node)
+
+        first_pos, opts = extract_first_and_opts(node)
+        walk_scoped_block(node, opts, path: opts.fetch(:path, first_pos), mod: opts[:module])
+      end
+
+      def walk_scoped_block(node, opts, path:, mod:)
+        prev_path = @path_prefix
+        prev_nested_base = @nested_base
+        prev_nested_name = @nested_name
+        prev_nested_param = @nested_param
+        prev_mod = @module_prefix
+        prev_ctrl = @controller
+
+        base_path = current_path_prefix
+        module_prefix = join_module(prev_mod, mod)
+        opt_ctrl = opts[:controller]
+        @path_prefix = join_path(base_path, path)
+        @nested_base = nil
+        @nested_name = nil
+        @nested_param = nil
+        @module_prefix = module_prefix
+        @controller = opt_ctrl ? qualify_controller(opt_ctrl.to_s, module_prefix) : prev_ctrl
+        begin
+          walk_statements(statements_of(node.block.body))
+        ensure
+          @path_prefix = prev_path
+          @nested_base = prev_nested_base
+          @nested_name = prev_nested_name
+          @nested_param = prev_nested_param
+          @module_prefix = prev_mod
+          @controller = prev_ctrl
         end
       end
 
-      def resource_context(ctx, on)
-        prefix =
-          case on
-          when :member, "member" then ctx.resource_member_prefix
-          when :collection, "collection" then ctx.resource_collection_prefix
-          else return ctx
+      def walk_resource_scope(node, on)
+        return unless literal_block?(node)
+
+        prefix = on == :member ? @resource_member_prefix : @resource_collection_prefix
+        prev_path = @path_prefix
+        prev_nested_base = @nested_base
+        prev_nested_name = @nested_name
+        prev_nested_param = @nested_param
+        prev_ctrl = @controller
+        @path_prefix = prefix || current_path_prefix
+        @nested_base = nil
+        @nested_name = nil
+        @nested_param = nil
+        @controller = @resource_controller || prev_ctrl
+        begin
+          walk_statements(statements_of(node.block.body))
+        ensure
+          @path_prefix = prev_path
+          @nested_base = prev_nested_base
+          @nested_name = prev_nested_name
+          @nested_param = prev_nested_param
+          @controller = prev_ctrl
+        end
+      end
+
+      def walk_resources(node, singular:)
+        args = node.arguments&.arguments
+        return unless args && !args.empty?
+
+        first_pos = nil
+        has_pos = false
+        extra_pos = nil
+        opts = nil
+
+        args.each do |arg|
+          if arg.is_a?(Prism::KeywordHashNode) || arg.is_a?(Prism::HashNode)
+            opts = extract_hash_options(arg, opts)
+          elsif !has_pos
+            first_pos = arg
+            has_pos = true
+          else
+            (extra_pos ||= []) << arg
           end
+        end
+        return unless has_pos
 
-        ctx.with(path_prefix: prefix || ctx.path_prefix, controller: ctx.resource_controller || ctx.controller)
+        opts ||= EMPTY_HASH
+        only = opts[:only]
+        except = opts[:except]
+        if only.nil? && except.nil?
+          routes_table = singular ? SINGULAR_RESOURCE_ROUTES : RESOURCE_ROUTES
+          actions = nil
+        else
+          actions = filter_actions(singular ? SINGULAR_ACTIONS : PLURAL_ACTIONS, only: only, except: except)
+          routes_table = RESOURCE_ROUTES
+        end
+
+        opt_module = opts[:module]
+        module_prefix = opt_module ? join_module(@module_prefix, opt_module) : @module_prefix
+        has_block = literal_block?(node)
+
+        process_resource(first_pos, opts, routes_table, actions, module_prefix, singular, has_block, node)
+        return unless extra_pos
+
+        extra_pos.each do |pos_node|
+          process_resource(pos_node, opts, routes_table, actions, module_prefix, singular, has_block, node)
+        end
       end
 
-      def record_root(node, ctx)
-        pos, opts = extract_args(node)
-        target = (opts[:to] || pos.first)&.to_s
+      def process_resource(pos_node, opts, routes_table, actions, module_prefix, singular, has_block, node)
+        name = literal_string(pos_node)
+        path_opt = opts.key?(:path) ? opts[:path] : name
+        base = join_path(current_path_prefix, path_opt)
+        opt_ctrl = opts[:controller]
+        controller = opt_ctrl ? opt_ctrl.to_s : (singular ? pluralize_cached(name) : name)
+        controller = qualify_controller(controller, module_prefix)
+
+        param = opts[:param] || "id"
+        member = singular ? base : "#{base}/:#{param}"
+
+        unless (actions && actions.empty?) || controller.start_with?("rails/")
+          record_resource_routes(base, member, controller, routes_table, actions, singular)
+        end
+
+        return unless has_block
+
+        prev_path = @path_prefix
+        prev_nested_base = @nested_base
+        prev_nested_name = @nested_name
+        prev_nested_param = @nested_param
+        prev_mod = @module_prefix
+        prev_ctrl = @controller
+        prev_member = @resource_member_prefix
+        prev_collection = @resource_collection_prefix
+        prev_res_ctrl = @resource_controller
+
+        if singular
+          @path_prefix = base
+          @nested_base = nil
+          @nested_name = nil
+          @nested_param = nil
+        else
+          # Defer singularize(name) until a nested statement actually reads current_path_prefix.
+          @path_prefix = nil
+          @nested_base = base
+          @nested_name = name
+          @nested_param = param
+        end
+        @module_prefix = module_prefix
+        @controller = controller
+        @resource_member_prefix = member
+        @resource_collection_prefix = base
+        @resource_controller = controller
+        begin
+          walk_statements(statements_of(node.block.body))
+        ensure
+          @path_prefix = prev_path
+          @nested_base = prev_nested_base
+          @nested_name = prev_nested_name
+          @nested_param = prev_nested_param
+          @module_prefix = prev_mod
+          @controller = prev_ctrl
+          @resource_member_prefix = prev_member
+          @resource_collection_prefix = prev_collection
+          @resource_controller = prev_res_ctrl
+        end
+      end
+
+      def record_resource_routes(base, member, controller, routes_table, actions, singular)
+        norm_base = Manifest.normalize_route_path(base).freeze
+        norm_member = singular ? norm_base : Manifest.normalize_route_path(member).freeze
+        target_list = @in_local_first ? @local_routes : @server_routes
+        island = @in_local_first ? @island_name : nil
+
+        routes_table.each do |action, verb, on, suffix|
+          next if actions && !actions.include?(action)
+
+          prefix_path = on == :member ? norm_member : norm_base
+          route_path =
+            if suffix.empty?
+              prefix_path
+            elsif prefix_path == "/"
+              suffix
+            else
+              "#{prefix_path}#{suffix}".freeze
+            end
+
+          if island
+            target_list << {
+              "method" => verb,
+              "path" => route_path,
+              "controller" => controller,
+              "action" => action,
+              "island" => island
+            }
+          else
+            target_list << {
+              "method" => verb,
+              "path" => route_path,
+              "controller" => controller,
+              "action" => action
+            }
+          end
+        end
+      end
+
+      def record_root(node)
+        first_pos, opts = extract_first_and_opts(node)
+        target = (opts[:to] || first_pos)&.to_s
         return unless target
 
-        controller, action = split_target(target, ctx)
-        path = ctx.path_prefix.empty? ? "/" : ctx.path_prefix
-        record_route("GET", path, controller, action, ctx)
+        controller, action = split_target(target)
+        prefix = current_path_prefix
+        path = prefix.empty? ? "/" : prefix
+        record_route("GET", path, controller, action)
       end
 
-      def record_http_verb(node, ctx, verbs)
-        pos, opts, string_mapping = extract_args_and_mapping(node)
-        raw_path, raw_target = string_mapping || [pos.first&.to_s, opts[:to]&.to_s]
-        return unless raw_path
+      def record_http_verb(node, verbs)
+        args = node.arguments&.arguments
+        return unless args && !args.empty?
 
-        on_ctx = resource_context(ctx, opts[:on])
-        path = join_path(on_ctx.path_prefix, raw_path)
+        first_pos = nil
+        has_pos = false
+        opts = nil
+        map_path = nil
+        map_target = nil
+
+        args.each do |arg|
+          if arg.is_a?(Prism::KeywordHashNode) || arg.is_a?(Prism::HashNode)
+            arg.elements.each do |elem|
+              next unless elem.is_a?(Prism::AssocNode)
+
+              key_node = elem.key
+              if key_node.is_a?(Prism::SymbolNode)
+                key = key_node.unescaped.to_sym
+                val = literal_value(elem.value)
+                if map_path.nil? && !ROUTE_OPTION_KEYS_SET[key] && val.is_a?(String) && val.include?("#")
+                  map_path = key.to_s
+                  map_target = val
+                else
+                  (opts ||= {})[key] = val
+                end
+              elsif key_node.is_a?(Prism::StringNode)
+                key = key_node.unescaped
+                val = literal_value(elem.value)
+                if map_path.nil? && val.is_a?(String) && val.include?("#")
+                  map_path = key
+                  map_target = val
+                else
+                  (opts ||= {})[key.to_sym] = val
+                end
+              end
+            end
+          elsif !has_pos
+            first_pos = arg
+            has_pos = true
+          end
+        end
+
+        opts ||= EMPTY_HASH
+        if map_path
+          raw_path = map_path
+          raw_target = map_target
+        else
+          raw_path = has_pos ? literal_optional_string(first_pos) : nil
+          return unless raw_path
+
+          to_opt = opts[:to]
+          raw_target = to_opt&.to_s
+        end
+
+        if verbs.nil?
+          via = opts[:via]
+          verbs =
+            case via
+            when Array then via.map { |v| v.to_s.upcase }
+            when Symbol, String
+              via.to_s == "all" ? ALL_HTTP_VERBS : [via.to_s.upcase]
+            else
+              DEFAULT_MATCH_VERBS
+            end
+        end
+
+        on = opts[:on]
+        if on == :member || on == "member"
+          on_path_prefix = @resource_member_prefix || current_path_prefix
+          on_controller = @resource_controller || @controller
+        elsif on == :collection || on == "collection"
+          on_path_prefix = @resource_collection_prefix || current_path_prefix
+          on_controller = @resource_controller || @controller
+        else
+          on_path_prefix = current_path_prefix
+          on_controller = @controller
+        end
+
+        path = join_path(on_path_prefix, raw_path)
         controller, action =
-          raw_target ? split_target(raw_target, ctx) : infer_endpoint(raw_path, opts, on_ctx)
+          raw_target ? split_target(raw_target) : infer_endpoint(raw_path, opts, on_controller)
 
-        verbs.each { |verb| record_route(verb, path, controller, action, ctx) }
+        if verbs.is_a?(String)
+          record_route(verbs, path, controller, action)
+        else
+          verbs.each { |verb| record_route(verb, path, controller, action) }
+        end
       end
 
-      def infer_endpoint(raw_path, opts, ctx)
+      def infer_endpoint(raw_path, opts, on_controller)
         # Dynamic `to:` (e.g. redirect("/new") or Rack app): keep the route path without guessing a controller.
         return [nil, nil] if opts.key?(:to)
 
-        if opts[:controller] || opts[:action]
-          controller = opts[:controller] ? qualify_controller(opts[:controller].to_s, ctx.module_prefix) : ctx.controller
-          [controller, (opts[:action] || raw_path.split("/").last).to_s]
-        elsif ctx.controller
-          [ctx.controller, raw_path.delete_prefix("/").tr("-", "_")]
+        opt_ctrl = opts[:controller]
+        opt_act = opts[:action]
+        if opt_ctrl || opt_act
+          controller = opt_ctrl ? qualify_controller(opt_ctrl.to_s, @module_prefix) : on_controller
+          [controller, (opt_act || raw_path.split("/").last).to_s]
+        elsif on_controller
+          act = raw_path.getbyte(0) == 47 ? raw_path.delete_prefix("/") : raw_path
+          act = act.tr("-", "_") if act.include?("-")
+          [on_controller, act]
         elsif raw_path.include?("/")
-          *parts, action = raw_path.delete_prefix("/").split("/")
-          [qualify_controller(parts.join("/"), ctx.module_prefix), action]
+          trimmed = raw_path.getbyte(0) == 47 ? raw_path.delete_prefix("/") : raw_path
+          *parts, action = trimmed.split("/")
+          [qualify_controller(parts.join("/"), @module_prefix), action]
         else
           [nil, nil]
         end
       end
 
-      def record_match(node, ctx)
-        _, opts = extract_args(node)
-        via = opts[:via]
-        verbs =
-          case via
-          when Array then via.map { |v| v.to_s.upcase }
-          when Symbol, String
-            via.to_s == "all" ? %w[GET POST PATCH PUT DELETE OPTIONS] : [via.to_s.upcase]
-          else
-            %w[GET POST]
-          end
-        record_http_verb(node, ctx, verbs)
-      end
-
-      def record_route(method_name, path, controller, action, ctx)
+      def record_route(method_name, path, controller, action)
         # Skip Rails internal framework endpoints (e.g. rails/health, rails/pwa).
         return if controller&.start_with?("rails/")
 
-        entry = {
-          "method" => method_name,
-          "path" => Manifest.normalize_route_path(path),
-          "controller" => controller,
-          "action" => action
-        }
-        entry["island"] = ctx.island_name if ctx.in_local_first && ctx.island_name
-
-        (ctx.in_local_first ? @local_routes : @server_routes) << entry
+        norm_path = Manifest.normalize_route_path(path).freeze
+        if @in_local_first
+          entry =
+            if @island_name
+              {
+                "method" => method_name,
+                "path" => norm_path,
+                "controller" => controller,
+                "action" => action,
+                "island" => @island_name
+              }
+            else
+              {
+                "method" => method_name,
+                "path" => norm_path,
+                "controller" => controller,
+                "action" => action
+              }
+            end
+          @local_routes << entry
+        else
+          @server_routes << {
+            "method" => method_name,
+            "path" => norm_path,
+            "controller" => controller,
+            "action" => action
+          }
+        end
       end
 
       # --- AST-preserving local config/routes.rb emitter ---
 
-      def emit_statements(stmts, local, active_draws)
-        stmts.flat_map { |stmt| emit_node(stmt, local, active_draws) }
+      def emit_statements(stmts, source, local, out, depth)
+        stmts.each { |stmt| emit_node(stmt, source, local, out, depth) }
       end
 
-      def emit_node(node, local, active_draws)
-        return [] unless node.is_a?(Prism::CallNode) && node.receiver.nil?
+      def emit_node(node, source, local, out, depth)
+        return unless node.is_a?(Prism::CallNode) && node.receiver.nil?
 
         case node.name
         when :local_first
-          return [] unless active_island?(declared_island(node)) && literal_block?(node)
+          return unless active_island?(declared_island(node)) && literal_block?(node)
 
-          emit_statements(statements_of(node.block.body), true, active_draws)
+          emit_statements(statements_of(node.block.body), source, true, out, depth)
         when :draw
           name = first_name(node)
-          return [] unless name
+          return unless name
 
-          sub_path = resolve_draw_path!(name, active_draws)
-          emit_statements(drawn_statements(sub_path), local, active_draws + [sub_path])
-        when *CONTAINER_CALLS
-          literal_block?(node) ? emit_container(node, local, active_draws) : emit_call(node, local)
-        when :root, *HTTP_VERBS, :match
-          emit_call(node, local)
-        else
-          []
+          sub_path = resolve_draw_path!(name)
+          stmts, sub_source = drawn_file(sub_path)
+          @active_draws[sub_path] = true
+          begin
+            emit_statements(stmts, sub_source, local, out, depth)
+          ensure
+            @active_draws.delete(sub_path)
+          end
+        when :namespace, :scope, :resources, :resource, :member, :collection, :constraints, :defaults
+          if literal_block?(node)
+            emit_container(node, source, local, out, depth)
+          else
+            emit_call(node, source, local, out, depth)
+          end
+        when :root, :get, :post, :put, :patch, :delete, :match
+          emit_call(node, source, local, out, depth)
         end
       end
 
-      def emit_call(node, local)
-        local ? reindent_slice(node.location.slice) : []
+      def emit_call(node, source, local, out, depth)
+        return unless local
+
+        emit_reindented_loc(node.location, source, out, depth)
       end
 
-      def emit_container(node, local, active_draws)
-        inner = emit_statements(statements_of(node.block.body), local, active_draws)
-        return [] if inner.empty? && !local
-        return emit_call(node, local) if local && !subtree_has_special_calls?(node.block.body)
+      def emit_container(node, source, local, out, depth)
+        body = node.block.body
+        if local
+          unless subtree_has_special_calls?(body, source)
+            emit_reindented_loc(node.location, source, out, depth)
+            return
+          end
 
-        [container_header(node), *inner.map { |line| "  #{line}" }, node.block.closing_loc.slice]
+          indent = indent_for(depth)
+          out << indent << container_header(node, source) << "\n"
+          emit_statements(statements_of(body), source, true, out, depth + 1)
+          out << indent << node.block.closing_loc.slice << "\n"
+        else
+          return unless subtree_has_special_calls?(body, source)
+
+          saved_len = out.length
+          indent = indent_for(depth)
+          out << indent << container_header(node, source) << "\n"
+          after_header_bytes = out.bytesize
+          emit_statements(statements_of(body), source, false, out, depth + 1)
+          if out.bytesize == after_header_bytes
+            out.slice!(saved_len, out.length - saved_len)
+          else
+            out << indent << node.block.closing_loc.slice << "\n"
+          end
+        end
       end
 
-      def subtree_has_special_calls?(node)
+      def subtree_has_special_calls?(node, source)
         return false unless node
 
-        !node.breadth_first_search { |child|
-          child.is_a?(Prism::CallNode) && child.receiver.nil? && %i[local_first draw].include?(child.name)
-        }.nil?
+        cached = @special_calls_cache[node]
+        return cached unless cached.nil?
+
+        offsets = special_text_offsets(source)
+        return (@special_calls_cache[node] = false) if offsets.empty?
+
+        loc = node.location
+        start_off = loc.start_offset
+        next_off = offsets.bsearch { |off| off >= start_off }
+        return (@special_calls_cache[node] = false) unless next_off && next_off < loc.end_offset
+
+        @special_calls_cache[node] = ast_has_special_calls?(node, source)
       end
 
-      def container_header(node)
+      def special_text_offsets(source)
+        @special_offsets_cache[source] ||= begin
+          offsets = []
+          pos = 0
+          while (idx = source.byteindex("local_first", pos))
+            offsets << idx
+            pos = idx + 11
+          end
+          pos = 0
+          while (idx = source.byteindex("draw", pos))
+            offsets << idx
+            pos = idx + 4
+          end
+          offsets.sort! if offsets.length > 1
+          offsets
+        end
+      end
+
+      def ast_has_special_calls?(node, source)
+        if node.is_a?(Prism::StatementsNode)
+          node.body.each do |child|
+            return true if subtree_has_special_calls?(child, source)
+          end
+          return false
+        end
+
+        if node.is_a?(Prism::CallNode) && node.receiver.nil?
+          name = node.name
+          return true if name == :local_first || name == :draw
+        end
+
+        node.child_nodes.each do |child|
+          next unless child
+
+          return true if subtree_has_special_calls?(child, source)
+        end
+        false
+      end
+
+      def container_header(node, source)
         # The parameters of a block that uses _1 or it span the whole block.
         parameters = node.block.parameters
         header = parameters.is_a?(Prism::BlockParametersNode) ? parameters.location : node.block.opening_loc
-        node.location.slice.byteslice(0, header.end_offset - node.location.start_offset).strip
+        start_off = node.location.start_offset
+        source.byteslice(start_off, header.end_offset - start_off).strip
       end
 
-      def reindent_slice(slice)
-        lines = slice.lines(chomp: true)
-        return [] if lines.empty?
-
-        # First line starts at the AST node column; trim common indent of subsequent lines.
-        first = lines.first.lstrip
-        rest = lines[1..]
-        return [first] if rest.empty?
-
-        non_empty = rest.reject { |l| l.strip.empty? }
-        min_indent = non_empty.map { |l| l[/\A */].length }.min || 0
-        [first, *rest.map { |l| l.strip.empty? ? "" : l[min_indent..] }]
+      def indent_for(depth)
+        INDENTS[depth] || ("  " * depth)
       end
 
-      def indent_lines(lines, spaces)
-        prefix = " " * spaces
-        lines.map { |line| line.empty? ? "\n" : "#{prefix}#{line}\n" }.join
+      def emit_reindented_loc(loc, source, out, depth)
+        start_off = loc.start_offset
+        end_off = loc.end_offset
+        return if start_off >= end_off
+
+        indent = indent_for(depth)
+        nl = source.byteindex("\n", start_off)
+        if nl.nil? || nl >= end_off
+          line_end = (end_off > start_off && source.getbyte(end_off - 1) == 13) ? end_off - 1 : end_off
+          fs = skip_leading_ascii_whitespace(source, start_off, line_end)
+          if fs == line_end
+            out << (depth == 1 ? "\n" : "#{indent}\n")
+          else
+            out << indent << source.byteslice(fs, line_end - fs) << "\n"
+          end
+          return
+        end
+
+        slice = source.byteslice(start_off, end_off - start_off)
+        if slice.valid_encoding? && slice.getbyte(0) > 32 && !slice.include?("\r") && !BLANK_LINE_RE.match?(slice)
+          last_nl = slice.byterindex("\n")
+          k = 0
+          pos = last_nl + 1
+          len = slice.bytesize
+          k += 1 while pos + k < len && slice.getbyte(pos + k) == 32
+          if k < 32 && pos + k < len && slice.getbyte(pos + k) > 32 &&
+             (k == 0 || !LESS_INDENT_RES[k].match?(slice))
+            if k == indent.bytesize
+              out << indent << slice << "\n"
+            else
+              nl_indent = NL_INDENTS[depth] || "\n#{indent}"
+              out << indent << slice.gsub(NL_SPACES[k], nl_indent) << "\n"
+            end
+            return
+          end
+        end
+
+        emit_reindented_loc_slow(source, start_off, end_off, nl, out, indent, depth)
+      end
+
+      def emit_reindented_loc_slow(source, start_off, end_off, nl, out, indent, depth)
+        line0_end = (nl > start_off && source.getbyte(nl - 1) == 13) ? nl - 1 : nl
+        fs = skip_leading_ascii_whitespace(source, start_off, line0_end)
+
+        # Pass 1: find common leading space indent across non-blank subsequent lines.
+        min_indent = nil
+        pos = nl + 1
+        while pos < end_off
+          next_nl = source.byteindex("\n", pos)
+          has_nl = next_nl && next_nl < end_off
+          raw_end = has_nl ? next_nl : end_off
+          line_end = (raw_end > pos && source.getbyte(raw_end - 1) == 13) ? raw_end - 1 : raw_end
+
+          spaces = leading_spaces_in_range(source, pos, line_end)
+          if spaces && (min_indent.nil? || spaces < min_indent)
+            min_indent = spaces
+            break if min_indent == 0
+          end
+          break unless has_nl
+
+          pos = next_nl + 1
+        end
+        min_indent ||= 0
+
+        if fs == line0_end
+          out << (depth == 1 ? "\n" : "#{indent}\n")
+        else
+          out << indent << source.byteslice(fs, line0_end - fs) << "\n"
+        end
+
+        # Pass 2: emit subsequent lines directly from source without intermediate line arrays.
+        pos = nl + 1
+        while pos < end_off
+          next_nl = source.byteindex("\n", pos)
+          has_nl = next_nl && next_nl < end_off
+          raw_end = has_nl ? next_nl : end_off
+          line_end = (raw_end > pos && source.getbyte(raw_end - 1) == 13) ? raw_end - 1 : raw_end
+
+          if range_blank?(source, pos, line_end)
+            out << (depth == 1 ? "\n" : "#{indent}\n")
+          else
+            content_start = pos + min_indent
+            out << indent << source.byteslice(content_start, line_end - content_start) << "\n"
+          end
+          break unless has_nl
+
+          pos = next_nl + 1
+        end
+      end
+
+      def skip_leading_ascii_whitespace(source, pos, line_end)
+        while pos < line_end
+          b = source.getbyte(pos)
+          break unless b == 32 || (b >= 9 && b <= 13)
+
+          pos += 1
+        end
+        pos
+      end
+
+      def leading_spaces_in_range(source, pos, line_end)
+        return nil if pos >= line_end
+
+        i = pos
+        i += 1 while i < line_end && source.getbyte(i) == 32
+        return nil if i == line_end
+        return i - pos if source.getbyte(i) > 32
+
+        range_blank?(source, i, line_end) ? nil : (i - pos)
+      end
+
+      def range_blank?(source, pos, line_end)
+        i = pos
+        while i < line_end
+          b = source.getbyte(i)
+          return false unless b == 32 || (b >= 9 && b <= 13) || b == 0
+
+          i += 1
+        end
+        true
       end
 
       # --- Helpers ---
 
-      def split_target(target, ctx)
+      def current_path_prefix
+        @path_prefix ||= "#{@nested_base}/:#{singularize_cached(@nested_name)}_#{@nested_param}"
+      end
+
+      def singularize_cached(name)
+        @singularize_cache[name] ||= ActiveSupport::Inflector.singularize(name)
+      end
+
+      def pluralize_cached(name)
+        @pluralize_cache[name] ||= ActiveSupport::Inflector.pluralize(name)
+      end
+
+      def split_target(target)
         if target.include?("#")
           ctrl, action = target.split("#", 2)
-          [qualify_controller(ctrl, ctx.module_prefix), action]
+          [qualify_controller(ctrl, @module_prefix), action]
         else
-          [ctx.controller, target]
+          [@controller, target]
         end
       end
 
       def qualify_controller(controller, module_prefix)
-        return controller.delete_prefix("/") if controller.start_with?("/")
+        return controller.delete_prefix("/") if controller.getbyte(0) == 47
         return controller if module_prefix.nil? || module_prefix.empty?
-        return controller if controller.start_with?("#{module_prefix}/")
+        if controller.start_with?(module_prefix) && controller.getbyte(module_prefix.bytesize) == 47
+          return controller
+        end
 
         "#{module_prefix}/#{controller}"
       end
 
       def join_path(prefix, segment)
-        seg = segment.to_s.delete_prefix("/")
+        return prefix if segment.nil?
+
+        seg = segment.is_a?(String) ? segment : segment.to_s
+        seg = seg.delete_prefix("/") if seg.getbyte(0) == 47
         return prefix if seg.empty?
 
-        prefix.to_s.empty? ? "/#{seg}" : "#{prefix.delete_suffix("/")}/#{seg}"
+        if prefix.nil? || prefix.empty?
+          "/#{seg}"
+        elsif prefix.getbyte(-1) == 47
+          "#{prefix.delete_suffix("/")}/#{seg}"
+        else
+          "#{prefix}/#{seg}"
+        end
       end
 
       def join_module(prefix, segment)
-        seg = segment.to_s.delete_prefix("/").delete_suffix("/")
+        return prefix if segment.nil?
+
+        seg = segment.is_a?(String) ? segment : segment.to_s
+        seg = seg.delete_prefix("/") if seg.getbyte(0) == 47
+        seg = seg.delete_suffix("/") if seg.getbyte(-1) == 47
         return prefix if seg.empty?
 
-        prefix.to_s.empty? ? seg : "#{prefix}/#{seg}"
+        prefix.nil? || prefix.empty? ? seg : "#{prefix}/#{seg}"
       end
 
       def filter_actions(defaults, only:, except:)
-        list = defaults.dup
+        list = defaults
         if only
-          allowed = Array(only).map(&:to_s)
-          list &= allowed
+          if only.is_a?(Array)
+            return EMPTY_ARRAY if only.empty?
+
+            allowed = only.map(&:to_s)
+            list = list & allowed
+          else
+            name = only.to_s
+            list = list.include?(name) ? [name] : EMPTY_ARRAY
+          end
         end
-        if except
-          denied = Array(except).map(&:to_s)
-          list -= denied
+        if except && !list.empty?
+          denied = except.is_a?(Array) ? except.map(&:to_s) : [except.to_s]
+          list = list - denied
         end
         list
       end
 
-      ROUTE_OPTION_KEYS = %i[to controller action via as on only except path module param constraints defaults format].freeze
-
       def first_name(call)
-        pos, = extract_args(call)
-        pos.first&.to_s
+        args = call.arguments&.arguments
+        return nil unless args
+
+        args.each do |arg|
+          next if arg.is_a?(Prism::KeywordHashNode) || arg.is_a?(Prism::HashNode)
+
+          return literal_optional_string(arg)
+        end
+        nil
       end
 
-      def extract_args(call)
-        pos, pairs = split_args(call)
-        [pos, options_from(pairs)]
+      def extract_first_and_opts(call)
+        args = call.arguments&.arguments
+        return [nil, EMPTY_HASH] unless args && !args.empty?
+
+        first_pos = nil
+        has_pos = false
+        opts = nil
+        args.each do |arg|
+          if arg.is_a?(Prism::KeywordHashNode) || arg.is_a?(Prism::HashNode)
+            opts = extract_hash_options(arg, opts)
+          elsif !has_pos
+            first_pos = literal_value(arg)
+            has_pos = true
+          end
+        end
+        [first_pos, opts || EMPTY_HASH]
       end
 
-      def extract_args_and_mapping(call)
-        pos, pairs = split_args(call)
-        mapping = pairs.find { |key, value| string_mapping?(key, value) }
-        [pos, options_from(pairs.reject { |pair| pair.equal?(mapping) }), mapping && [mapping[0].to_s, mapping[1]]]
+      def extract_hash_options(hash_node, opts)
+        hash_node.elements.each do |elem|
+          next unless elem.is_a?(Prism::AssocNode)
+
+          key_node = elem.key
+          if key_node.is_a?(Prism::SymbolNode)
+            (opts ||= {})[key_node.unescaped.to_sym] = literal_value(elem.value)
+          elsif key_node.is_a?(Prism::StringNode)
+            (opts ||= {})[key_node.unescaped.to_sym] = literal_value(elem.value)
+          end
+        end
+        opts
       end
 
-      def string_mapping?(key, value)
-        return false unless value.is_a?(String) && value.include?("#")
-
-        key.is_a?(String) || (key.is_a?(Symbol) && !ROUTE_OPTION_KEYS.include?(key))
+      def literal_string(node)
+        case node
+        when Prism::SymbolNode, Prism::StringNode then node.unescaped
+        else literal_value(node).to_s
+        end
       end
 
-      def split_args(call)
-        hashes, positional = Array(call.arguments&.arguments).partition { |arg| hash_node?(arg) }
-        [positional.map { |arg| literal_value(arg) }, hashes.flat_map { |hash| literal_pairs(hash) }]
-      end
-
-      def hash_node?(node)
-        node.is_a?(Prism::KeywordHashNode) || node.is_a?(Prism::HashNode)
-      end
-
-      def literal_pairs(hash_node)
-        hash_node.elements.grep(Prism::AssocNode).map { |assoc| [literal_value(assoc.key), literal_value(assoc.value)] }
-      end
-
-      def options_from(pairs)
-        pairs.each_with_object({}) do |(key, value), opts|
-          opts[key.to_sym] = value if key.is_a?(Symbol) || key.is_a?(String)
+      def literal_optional_string(node)
+        case node
+        when Prism::SymbolNode, Prism::StringNode then node.unescaped
+        else
+          val = literal_value(node)
+          val.nil? ? nil : val.to_s
         end
       end
 
@@ -522,10 +1075,14 @@ module InstantRecord
         when Prism::ArrayNode then node.elements.map { |el| literal_value(el) }
         when Prism::HashNode, Prism::KeywordHashNode
           # A value is read only under a literal key.
-          node.elements.grep(Prism::AssocNode).each_with_object({}) do |assoc, hash|
+          hash = {}
+          node.elements.each do |assoc|
+            next unless assoc.is_a?(Prism::AssocNode)
+
             key = literal_value(assoc.key)
             hash[key] = literal_value(assoc.value) unless key.nil?
           end
+          hash
         end
       end
     end

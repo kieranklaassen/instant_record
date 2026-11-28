@@ -556,6 +556,202 @@ class RouteAnalyzerTest < ActiveSupport::TestCase
     assert_local_routes 'get "kept", note: "plain", "other" => "words"', "GET /kept #\n"
   end
 
+  test "nested local_first inside local_first preserves islands, routes, and emitted indentation" do
+    source = <<~RUBY
+      local_first(:alpha) do
+        resources :boards, only: [:index] do
+          local_first(:alpha) do
+            resources :cards, only: [:index, :create]
+          end
+          local_first(:beta) do
+            resources :secrets, only: [:index]
+          end
+        end
+        local_first do
+          get :overview, to: "boards#overview"
+        end
+      end
+    RUBY
+
+    all = analyze_draw(source)
+    assert_equal %w[alpha beta], all.declared_islands
+    assert_equal [
+      "GET /boards boards#index",
+      "GET /boards/:board_id/cards cards#index",
+      "POST /boards/:board_id/cards cards#create",
+      "GET /boards/:board_id/secrets secrets#index",
+      "GET /overview boards#overview"
+    ], routes(all.local_routes)
+    assert_equal %w[alpha alpha alpha beta alpha], all.local_routes.map { |r| r["island"] }
+    assert_empty all.server_routes
+    assert_equal <<~RUBY, all.local_routes_source
+      Rails.application.routes.draw do
+        resources :boards, only: [:index] do
+          resources :cards, only: [:index, :create]
+          resources :secrets, only: [:index]
+        end
+        get :overview, to: "boards#overview"
+      end
+    RUBY
+
+    alpha = analyze_draw(source, island: :alpha)
+    assert_equal [
+      "GET /boards boards#index",
+      "GET /boards/:board_id/cards cards#index",
+      "POST /boards/:board_id/cards cards#create"
+    ], routes(alpha.local_routes)
+    assert_equal [
+      "GET /boards/:board_id/secrets secrets#index",
+      "GET /overview boards#overview"
+    ], routes(alpha.server_routes)
+    assert_equal <<~RUBY, alpha.local_routes_source
+      Rails.application.routes.draw do
+        resources :boards, only: [:index] do
+          resources :cards, only: [:index, :create]
+        end
+      end
+    RUBY
+  end
+
+  test "draw inside local_first expands routes and source cleanly with cycle detection" do
+    drawn = {
+      "tasks" => <<~DRAWN,
+        resources :tasks, only: [:index, :show] do
+          member { post :archive }
+        end
+        draw("nested/comments")
+      DRAWN
+      "nested/comments" => <<~DRAWN
+        resources :comments, only: [:create, :destroy]
+      DRAWN
+    }
+    result = analyze_draw(<<~RUBY, drawn: drawn)
+      local_first(:work) do
+        namespace :work do
+          draw(:tasks)
+        end
+      end
+    RUBY
+
+    assert_equal [
+      "GET /work/tasks work/tasks#index",
+      "GET /work/tasks/:id work/tasks#show",
+      "POST /work/tasks/:id/archive work/tasks#archive",
+      "POST /work/comments work/comments#create",
+      "DELETE /work/comments/:id work/comments#destroy"
+    ], routes(result.local_routes)
+    assert_equal <<~RUBY, result.local_routes_source
+      Rails.application.routes.draw do
+        namespace :work do
+          resources :tasks, only: [:index, :show] do
+            member { post :archive }
+          end
+          resources :comments, only: [:create, :destroy]
+        end
+      end
+    RUBY
+
+    cycle = assert_raises(Compiler::BuildError) do
+      analyze_draw("local_first { draw(:loop_a) }", drawn: {
+        "loop_a" => "draw(:loop_b)",
+        "loop_b" => "local_first { draw(:loop_a) }"
+      })
+    end
+    assert_equal "Cyclic route draw detected for config/routes/loop_a.rb", cycle.message
+  end
+
+  test "multi-line containers, blank lines inside reindented slices, and block parameters preserve exact formatting" do
+    result = analyze_draw(<<~RUBY, drawn: { "leaf" => "get :leaf, to: \"leaves#show\"" })
+      scope "/outer",
+            module: "outer" do |r|
+        local_first do
+          resources :items, only: [:index] do |item_routes|
+            member do
+
+              post :pin
+            end
+            collection { get :recent }
+          end
+          scope("/with_draw") { |s|
+            draw(:leaf)
+          }
+          scope("/utf8/größe/行") do
+            get :hello, to: "greetings#hello"
+          end
+          resources :bin, path: "bin", only: [:index] do
+            resource "\\xff", path: "raw", controller: "bytes", only: [:show]
+          end
+        end
+      end
+    RUBY
+
+    assert_equal [
+      "GET /outer/items outer/items#index",
+      "POST /outer/items/:id/pin outer/items#pin",
+      "GET /outer/items/recent outer/items#recent",
+      "GET /outer/with_draw/leaf outer/leaves#show",
+      "GET /outer/utf8/größe/行/hello outer/greetings#hello",
+      "GET /outer/bin outer/bin#index",
+      "GET /outer/bin/:bin_id/raw outer/bytes#show"
+    ], routes(result.local_routes)
+
+    expected_source = "Rails.application.routes.draw do\n" \
+      "  scope \"/outer\",\n" \
+      "      module: \"outer\" do |r|\n" \
+      "    resources :items, only: [:index] do |item_routes|\n" \
+      "      member do\n" \
+      "    \n" \
+      "        post :pin\n" \
+      "      end\n" \
+      "      collection { get :recent }\n" \
+      "    end\n" \
+      "    scope(\"/with_draw\") { |s|\n" \
+      "      get :leaf, to: \"leaves#show\"\n" \
+      "    }\n" \
+      "    scope(\"/utf8/größe/行\") do\n" \
+      "      get :hello, to: \"greetings#hello\"\n" \
+      "    end\n" \
+      "    resources :bin, path: \"bin\", only: [:index] do\n" \
+      "      resource \"\\xff\", path: \"raw\", controller: \"bytes\", only: [:show]\n" \
+      "    end\n" \
+      "  end\n" \
+      "end\n"
+    assert_equal expected_source, result.local_routes_source
+  end
+
+  test "Context#with returns an updated copy without mutating the original" do
+    ctx = Compiler::RouteAnalyzer::Context.new(path_prefix: "/a", in_local_first: false, active_draws: [])
+    updated = ctx.with(path_prefix: "/a/b", in_local_first: true)
+
+    assert_equal "/a", ctx.path_prefix
+    assert_equal false, ctx.in_local_first
+    assert_equal "/a/b", updated.path_prefix
+    assert_equal true, updated.in_local_first
+  end
+
+  test "Manifest.normalize_route_path and deduplicate_routes handle edge cases cleanly" do
+    assert_equal "/", Compiler::Manifest.normalize_route_path(nil)
+    assert_equal "/", Compiler::Manifest.normalize_route_path("")
+    assert_equal "/", Compiler::Manifest.normalize_route_path("   ")
+    assert_equal "/", Compiler::Manifest.normalize_route_path("/")
+    assert_equal "/", Compiler::Manifest.normalize_route_path("///")
+    assert_equal "/posts", Compiler::Manifest.normalize_route_path("posts")
+    assert_equal "/posts", Compiler::Manifest.normalize_route_path(:posts)
+    assert_equal "/posts/1", Compiler::Manifest.normalize_route_path("  //posts///1/  ")
+    assert_equal "/posts/1", Compiler::Manifest.normalize_route_path("/posts/1\x00")
+    assert_equal "/größe/行", Compiler::Manifest.normalize_route_path("/größe/行")
+    assert_equal "/größe/行", Compiler::Manifest.normalize_route_path("größe//行/")
+
+    assert_equal [], Compiler::Manifest.deduplicate_routes([])
+    r1 = { "method" => "GET", "path" => "/a", "controller" => "first", "action" => "index" }
+    r2 = { "method" => "GET", "path" => "/a", "controller" => "second", "action" => "index" }
+    r3 = { "method" => "POST", "path" => "/a", "controller" => "first", "action" => "create" }
+    r4 = { "method" => "GET", "path" => "/b", "controller" => "first", "action" => "show" }
+    r5 = { "method" => nil, "path" => nil, "controller" => "nil", "action" => "one" }
+    r6 = { "method" => nil, "path" => nil, "controller" => "nil", "action" => "two" }
+    assert_equal [r1, r3, r4, r5], Compiler::Manifest.deduplicate_routes([r1, r2, r3, r4, r5, r6])
+  end
+
   private
 
   def assert_local_routes(source, expected)
