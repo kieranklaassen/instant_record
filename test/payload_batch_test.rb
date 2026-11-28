@@ -586,6 +586,35 @@ class PayloadBatchTest < Minitest::Test
     assert_equal({}, InstantRecord::PayloadBatch.stamps([bad_utf8]))
   end
 
+  def test_change_stamps_handles_slices_non_integer_ids_relations_and_nil_values
+    assert_equal({}, InstantRecord::PayloadBatch.change_stamps([]))
+
+    slice = InstantRecord::PayloadBatch::SLICE
+    last_id = slice + 2
+    InstantRecord::SyncMetadata.set("#{HLC::CHANGE_PREFIX}1", "s-1")
+    InstantRecord::SyncMetadata.set("#{HLC::CHANGE_PREFIX}#{last_id}", "s-last")
+    InstantRecord::SyncMetadata.create!(key: "#{HLC::CHANGE_PREFIX}2", value: nil)
+
+    stub = Struct.new(:id)
+    int_changes = (1..last_id).map { |i| stub.new(i) }
+    stamps = nil
+    assert_equal 2, sql { stamps = InstantRecord::PayloadBatch.change_stamps(int_changes) }.size
+    assert_equal({ 1 => "s-1", last_id => "s-last" }, stamps)
+
+    # Single integer id and duplicate integer ids
+    assert_equal({ 1 => "s-1" }, InstantRecord::PayloadBatch.change_stamps([stub.new(1)]))
+    assert_equal({ 1 => "s-1" }, InstantRecord::PayloadBatch.change_stamps([stub.new(1), stub.new(1)]))
+
+    # Non-integer IDs fall back cleanly to PayloadBatch.stamps
+    InstantRecord::SyncMetadata.set("#{HLC::CHANGE_PREFIX}abc", "s-abc")
+    assert_equal({ "abc" => "s-abc", 1 => "s-1" }, InstantRecord::PayloadBatch.change_stamps([stub.new("abc"), stub.new(1), stub.new(2)]))
+
+    # ActiveRecord::Relation input
+    seed(@open, 2)
+    rel = InstantRecord::Change.order(:id)
+    assert_equal rel.to_a.to_h { |c| [c.id, c.hlc] }, InstantRecord::PayloadBatch.change_stamps(rel)
+  end
+
   private
 
   def assert_exact_payload_parity(records, label = nil)

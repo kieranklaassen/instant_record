@@ -96,4 +96,156 @@ class SyncScopeTest < Minitest::Test
     assert_equal %w[create destroy], InstantRecord::Change.poll(0, scope: "ada").map(&:operation)
     assert_empty InstantRecord::Change.poll(0, scope: "bob")
   end
+
+  def test_events_for_returns_distinct_mutable_hashes_for_duplicate_changes_of_same_record
+    ruled = scoped_model("DupItem")
+    InstantRecord.sync(ruled)
+    ada = Person.new("ada")
+
+    on_server do
+      row = ruled.create!(id: "d-1", title: "v1", state: "ada")
+      row.update!(title: "v2")
+      row.update!(title: "v3")
+    end
+
+    changes = InstantRecord::Change.order(:id).to_a
+    events = InstantRecord::SyncScope.events_for(changes, ada)
+
+    assert_equal %w[create update update], events.map { |_, ev| ev[:operation] }
+    assert_equal 3, events.map { |_, ev| ev.object_id }.uniq.size
+    expected_keys = InstantRecord.record_payload(ruled.find("d-1")).merge(operation: "create").keys
+
+    events.each_with_index do |(_, ev), idx|
+      refute ev.frozen?
+      assert_equal expected_keys, ev.keys
+      assert_equal "v3", ev[:attributes]["title"]
+      assert_equal 3, ev[:version]
+      ev[:server_time] = "t-#{idx}"
+    end
+    assert_equal %w[t-0 t-1 t-2], events.map { |_, ev| ev[:server_time] }
+  end
+
+  def test_events_for_handles_mixed_ruled_plain_destroy_revoked_and_hlc_stamps
+    ruled = scoped_model("MixedRuled")
+    plain = syncable_model("MixedPlain")
+    InstantRecord.sync(ruled, plain)
+    ada = Person.new("ada")
+
+    on_server do
+      vis = ruled.create!(id: "r-vis", title: "visible", state: "ada")
+      vis.update!(title: "visible-2")
+      ruled.create!(id: "r-hid", title: "secret", state: "bob")
+      revoked = ruled.create!(id: "r-rev", title: "was-public", state: "public")
+      revoked.update!(state: "bob")
+      gone = ruled.create!(id: "r-gone", title: "deleted", state: "ada")
+      gone.destroy!
+
+      p1 = plain.create!(id: "p-1", title: "open-1")
+      p1.update!(title: "open-2")
+      p2 = plain.create!(id: "p-2", title: "open-gone")
+      p2.destroy!
+    end
+
+    changes = InstantRecord::Change.order(:id).to_a
+    # Clear one change stamp and one record stamp to verify absent :hlc parity.
+    plain_create = changes.find { |c| c.record_type == "MixedPlain" && c.operation == "create" && c.record_id == "p-1" }
+    InstantRecord::SyncMetadata.delete("#{InstantRecord::HLC::CHANGE_PREFIX}#{plain_create.id}")
+    InstantRecord::HLC.delete_record_hlc("MixedRuled", "r-vis")
+
+    events = InstantRecord::SyncScope.events_for(changes, ada)
+    assert_equal changes.map(&:id), events.map(&:first)
+
+    expected = changes.map do |change|
+      if change.operation == "destroy" || change.record_type == "MixedPlain"
+        [change.id, change.as_event]
+      else
+        record = InstantRecord::SyncScope.visible(ruled, ada).find_by(id: change.record_id)
+        ev =
+          if record
+            InstantRecord.record_payload(record).merge(operation: change.operation)
+          else
+            { type: change.record_type, id: change.record_id, operation: "destroy", version: 0, attributes: {} }
+          end
+        [change.id, ev]
+      end
+    end
+
+    assert_equal expected, events
+    assert_equal expected.to_json, events.to_json
+    events.zip(expected).each do |(_, actual_ev), (_, expected_ev)|
+      assert_equal expected_ev.keys, actual_ev.keys
+    end
+
+    plain_ev = events.find { |id, _| id == plain_create.id }.last
+    refute plain_ev.key?(:hlc)
+    vis_ev = events.find { |_, ev| ev[:type] == "MixedRuled" && ev[:id] == "r-vis" }.last
+    refute vis_ev.key?(:hlc)
+  end
+
+  def test_events_for_handles_empty_batches_and_active_record_relations
+    ruled = scoped_model("RelRuled")
+    plain = syncable_model("RelPlain")
+    InstantRecord.sync(ruled, plain)
+    ada = Person.new("ada")
+
+    assert_equal [], InstantRecord::SyncScope.events_for([], ada)
+    assert_equal [], InstantRecord::SyncScope.events_for(InstantRecord::Change.none, ada)
+
+    on_server do
+      ruled.create!(id: "rr-1", title: "mine", state: "ada")
+      plain.create!(id: "rp-1", title: "open")
+    end
+
+    relation = InstantRecord::Change.order(:id)
+    refute relation.loaded?
+    from_relation = InstantRecord::SyncScope.events_for(relation, ada)
+    from_array = InstantRecord::SyncScope.events_for(InstantRecord::Change.order(:id).to_a, ada)
+
+    assert_equal from_array, from_relation
+    assert_equal 2, from_relation.size
+  end
+
+  def test_events_for_combines_syncable_to_sync_scope_sync_partition_and_custom_models
+    combined = syncable_model("CombinedItem") do
+      sync_scope :owner
+      sync_partition :state
+      syncable_to { |_who| where(title: "allowed") }
+    end
+    custom = syncable_model("CustomRuled") do
+      syncable_to { |who| where(owner: who).select(:id, :title, :owner, :server_version) }
+
+      def attributes
+        super.merge("extra" => "custom")
+      end
+    end
+    InstantRecord.sync(combined, custom)
+
+    on_server do
+      combined.create!(id: "c-ok", owner: "ada", state: "acme", title: "allowed")
+      combined.create!(id: "c-wrong-owner", owner: "bob", state: "acme", title: "allowed")
+      combined.create!(id: "c-wrong-part", owner: "ada", state: "beta", title: "allowed")
+      combined.create!(id: "c-wrong-rule", owner: "ada", state: "acme", title: "denied")
+      custom.create!(id: "x-vis", owner: "ada", title: "custom-vis")
+      custom.create!(id: "x-hid", owner: "bob", title: "custom-hid")
+    end
+
+    changes = InstantRecord::Change.order(:id).to_a
+
+    # Partition "state:acme" for identity "ada"
+    by_id = InstantRecord::SyncScope.events_for(changes, "ada", partition: "state:acme").to_h { |_, ev| [ev[:id], ev] }
+    assert_equal "create", by_id["c-ok"][:operation]
+    assert_equal "allowed", by_id["c-ok"][:attributes]["title"]
+    %w[c-wrong-owner c-wrong-part c-wrong-rule x-hid].each do |hidden_id|
+      assert_equal "destroy", by_id[hidden_id][:operation], hidden_id
+      assert_equal 0, by_id[hidden_id][:version], hidden_id
+      assert_equal({}, by_id[hidden_id][:attributes], hidden_id)
+    end
+    assert_equal "create", by_id["x-vis"][:operation]
+    assert_equal "custom", by_id["x-vis"][:attributes]["extra"]
+
+    # Nil partition hides all partitioned CombinedItem records
+    no_part = InstantRecord::SyncScope.events_for(changes, "ada", partition: nil).to_h { |_, ev| [ev[:id], ev] }
+    assert_equal "destroy", no_part["c-ok"][:operation]
+    assert_equal "create", no_part["x-vis"][:operation]
+  end
 end
