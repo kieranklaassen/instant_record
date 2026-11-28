@@ -7,6 +7,6 @@ let package = Package(
     products: [.library(name: "InstantRecordNative", targets: ["InstantRecordNative"])],
     targets: [
         .target(name: "InstantRecordNative"),
-        .testTarget(name: "InstantRecordNativeTests", dependencies: ["InstantRecordNative"]),
+        .testTarget(name: "InstantRecordNativeTests", dependencies: ["InstantRecordNative"], resources: [.copy("Fixtures")]),
     ]
 )
