@@ -188,6 +188,13 @@ module InstantRecord
         linter.scan_constant_definitions(files)
       end
 
+      # Collects server-only constants directly from pre-loaded `[rel, source]`
+      # pairs (in sorted relative-path order) without re-walking or re-reading disk.
+      def self.collect_server_only_constants_from_sources(sources)
+        linter = new(root: ".", staged: true)
+        linter.scan_constant_definitions_from_sources(sources)
+      end
+
       def initialize(root:, staged: false, server_only_constants: nil, exclude: [], only_files: nil)
         @root = File.expand_path(root.to_s)
         @root_prefix = @root == "/" ? "/" : "#{@root}/"
@@ -284,15 +291,26 @@ module InstantRecord
       end
 
       def scan_constant_definitions(files)
-        entries = load_entries(files)
+        scan_constant_definitions_entries(load_entries(files))
+      end
+
+      def scan_constant_definitions_from_sources(sources)
+        entries = sources.map do |rel, raw|
+          bytes = raw.encoding == Encoding::BINARY ? raw : raw.b
+          SourceEntry.new(rel, rel, bytes, ascii_compatible_source?(bytes))
+        end
+        scan_constant_definitions_entries(entries)
+      end
+
+      private
+
+      def scan_constant_definitions_entries(entries)
         server_only_defs = collect_server_only_defs(entries)
         return server_only_defs if server_only_defs.empty?
 
         client_defs = collect_client_defs(entries, server_only_defs.keys)
         server_only_defs.reject { |name, _| client_defs.include?(name) }
       end
-
-      private
 
       def load_entries(files)
         files.map do |path|
