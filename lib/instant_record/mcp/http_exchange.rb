@@ -14,6 +14,15 @@ module InstantRecord
     class HttpExchange
       OFFLINE_REPLY = "0\n".freeze
       DEFAULT_TIMEOUT = 10
+      HTTP_REQUEST_CLASSES = {
+        "GET" => Net::HTTP::Get,
+        "POST" => Net::HTTP::Post,
+        "PUT" => Net::HTTP::Put,
+        "PATCH" => Net::HTTP::Patch,
+        "DELETE" => Net::HTTP::Delete,
+        "HEAD" => Net::HTTP::Head
+      }.freeze
+      BODYLESS_VERBS = %w[GET HEAD].freeze
 
       attr_reader :token, :cookie, :headers, :scope, :timeout, :trace
       attr_accessor :offline
@@ -33,7 +42,7 @@ module InstantRecord
         @headers = normalize_headers(headers)
         @scope = blank_to_nil(scope)
         @offline = !!offline
-        @timeout = (timeout || DEFAULT_TIMEOUT).to_f
+        @timeout = normalize_timeout(timeout)
         @persist_cookies = !!persist_cookies
         @adapter = adapter
         @cookie_jar = parse_cookie_header(@cookie)
@@ -64,18 +73,21 @@ module InstantRecord
         return record_offline(nil, nil, "offline mode") if offline?
 
         head, body = raw_request.to_s.split("\n", 2)
-        verb, raw_url = head.to_s.split(" ", 2)
+        raw_verb, raw_url = head.to_s.chomp("\r").strip.split(" ", 2)
+        verb = raw_verb&.upcase
         return record_offline(verb, raw_url, "invalid exchange request") if verb.nil? || raw_url.nil? || raw_url.empty?
+        return record_offline(verb, raw_url, "unsupported HTTP verb: #{verb}") unless HTTP_REQUEST_CLASSES.key?(verb)
 
         uri = prepare_uri(raw_url)
-        return record_offline(verb, raw_url, "invalid URL") unless uri && uri.scheme
+        return record_offline(verb, raw_url, "invalid URL") unless uri
 
-        req_headers = build_headers(verb, body.to_s)
+        body_str = body.to_s
+        req_headers = build_headers(verb)
         status, response_body, response_headers =
           if @adapter
-            perform_adapter(verb, uri, req_headers, body.to_s)
+            perform_adapter(verb, uri, req_headers, body_str)
           else
-            perform_http(verb, uri, req_headers, body.to_s)
+            perform_http(verb, uri, req_headers, body_str)
           end
 
         absorb_cookies(response_headers) if @persist_cookies && response_headers
@@ -98,10 +110,15 @@ module InstantRecord
 
       def prepare_uri(raw_url)
         uri = URI.parse(raw_url.to_s.strip)
-        return nil unless uri.is_a?(URI::HTTP) || uri.is_a?(URI::HTTPS)
+        return nil unless (uri.is_a?(URI::HTTP) || uri.is_a?(URI::HTTPS)) && uri.host && !uri.host.empty?
 
         if @scope
-          params = URI.decode_www_form(uri.query.to_s)
+          params =
+            begin
+              URI.decode_www_form(uri.query.to_s)
+            rescue ArgumentError => e
+              raise URI::InvalidURIError, e.message
+            end
           unless params.any? { |key, _| key == "scope" }
             params << ["scope", @scope]
             uri.query = URI.encode_www_form(params)
@@ -110,9 +127,8 @@ module InstantRecord
         uri
       end
 
-      def build_headers(verb, _body)
-        built = {}
-        @headers.each { |key, value| built[key] = value }
+      def build_headers(verb)
+        built = @headers.dup
 
         if @token && !header_present?(built, "authorization")
           built["Authorization"] = "Bearer #{@token}"
@@ -123,7 +139,7 @@ module InstantRecord
           built["Cookie"] = cookie_str
         end
 
-        if verb.upcase != "GET" && verb.upcase != "HEAD" && !header_present?(built, "content-type")
+        if !BODYLESS_VERBS.include?(verb) && !header_present?(built, "content-type")
           built["Content-Type"] = "application/json"
         end
 
@@ -131,7 +147,7 @@ module InstantRecord
       end
 
       def perform_adapter(verb, uri, req_headers, body)
-        result = @adapter.call(verb.upcase, uri, req_headers, body)
+        result = @adapter.call(verb, uri, req_headers, body)
         if result.is_a?(String)
           status_line, res_body = result.split("\n", 2)
           [status_line.to_i, res_body.to_s, nil]
@@ -147,20 +163,10 @@ module InstantRecord
         http.open_timeout = @timeout
         http.read_timeout = @timeout
 
-        request_class =
-          case verb.upcase
-          when "GET" then Net::HTTP::Get
-          when "POST" then Net::HTTP::Post
-          when "PUT" then Net::HTTP::Put
-          when "PATCH" then Net::HTTP::Patch
-          when "DELETE" then Net::HTTP::Delete
-          when "HEAD" then Net::HTTP::Head
-          else raise ArgumentError, "Unsupported HTTP verb: #{verb}"
-          end
-
+        request_class = HTTP_REQUEST_CLASSES.fetch(verb)
         req = request_class.new(uri.request_uri)
         req_headers.each { |key, value| req[key] = value }
-        req.body = body unless verb.upcase == "GET" || verb.upcase == "HEAD"
+        req.body = body unless BODYLESS_VERBS.include?(verb)
 
         res = http.request(req)
         set_cookies = res.get_fields("set-cookie")
@@ -168,28 +174,43 @@ module InstantRecord
       end
 
       def absorb_cookies(response_headers)
-        raw = response_headers.each_with_object([]) do |(key, value), acc|
+        return unless response_headers.is_a?(Hash)
+
+        response_headers.each do |key, value|
           next unless key.to_s.casecmp?("set-cookie")
 
           Array(value).each do |entry|
-            entry.to_s.split("\n").each { |line| acc << line }
+            entry.to_s.split(/\r?\n/).each do |line|
+              pair, attrs = line.split(";", 2)
+              pair = pair.to_s.strip
+              next unless pair.include?("=")
+
+              name, cookie_value = pair.split("=", 2)
+              name = name.strip
+              next if name.empty?
+
+              if cookie_expired?(attrs)
+                @cookie_jar.delete(name)
+              else
+                @cookie_jar[name] = cookie_value.to_s.strip
+              end
+            end
           end
         end
+      end
 
-        raw.each do |line|
-          pair, attrs = line.split(";", 2)
-          pair = pair.to_s.strip
-          next unless pair.include?("=")
+      def cookie_expired?(attrs)
+        return false if attrs.nil? || attrs.empty?
 
-          name, value = pair.split("=", 2)
-          next if name.empty?
+        max_age = nil
+        attrs.split(";").each do |attr|
+          attr_name, attr_value = attr.split("=", 2)
+          next unless attr_name && attr_name.strip.casecmp?("max-age") && attr_value
 
-          if attrs.to_s.match?(/\bmax-age\s*=\s*0\b/i)
-            @cookie_jar.delete(name)
-          else
-            @cookie_jar[name] = value
-          end
+          val = attr_value.strip
+          max_age = val.to_i if val.match?(/\A-?\d+\z/)
         end
+        !max_age.nil? && max_age <= 0
       end
 
       def parse_cookie_header(header)
@@ -201,7 +222,10 @@ module InstantRecord
           next unless pair.include?("=")
 
           name, value = pair.split("=", 2)
-          jar[name.strip] = value.to_s.strip unless name.strip.empty?
+          name = name.strip
+          next if name.empty?
+
+          jar[name] = value.to_s.strip
         end
         jar
       end
@@ -217,8 +241,15 @@ module InstantRecord
         end
       end
 
-      def header_present?(hash, downcased_name)
-        hash.keys.any? { |key| key.to_s.downcase == downcased_name }
+      def normalize_timeout(value)
+        parsed = Float(value)
+        parsed.finite? && parsed.positive? ? parsed : DEFAULT_TIMEOUT.to_f
+      rescue ArgumentError, TypeError
+        DEFAULT_TIMEOUT.to_f
+      end
+
+      def header_present?(hash, name)
+        hash.each_key.any? { |key| key.to_s.casecmp?(name) }
       end
 
       def blank_to_nil(value)
