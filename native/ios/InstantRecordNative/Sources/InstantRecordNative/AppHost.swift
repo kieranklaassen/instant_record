@@ -196,6 +196,7 @@ public final class AppHost: ObservableObject {
     /// soon after.
     public func perform(_ action: String, args: [String: String] = [:], values: [String: String] = [:], on route: Route) {
         guard route.isScreen else { return }
+        if action.hasPrefix("native:") { return performNative(action, args: args, on: route) }
         let fieldValues = typed[route] ?? [:]
         let mergedValues = values.isEmpty ? fieldValues : fieldValues.merging(values) { _, explicit in explicit }
         thread.run {
@@ -208,6 +209,28 @@ public final class AppHost: ObservableObject {
             }
         }
         schedule.request()
+    }
+
+    /// What the device can do, for this app's screens and pages.
+    public var capabilities: Capabilities?
+
+    // A tap on something the device does. The screen hears how it went under
+    // the same action: what came of it in `values`, or an "error" there.
+    private func performNative(_ action: String, args: [String: String], on route: Route) {
+        Task { @MainActor in
+            var values: [String: String]
+            do {
+                guard let capabilities else { throw Capabilities.Failure("This app was given no capabilities") }
+                values = Capabilities.strings(try await capabilities.call(String(action.dropFirst("native:".count)), args))
+            } catch {
+                values = ["error": error.localizedDescription]
+            }
+            self.thread.run {
+                self.act(action, args, values, on: route)
+                self.draw()
+            }
+            self.schedule.request()
+        }
     }
 
     /// Put another screen in the first one's place, as choosing another

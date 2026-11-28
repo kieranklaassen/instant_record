@@ -68,9 +68,9 @@ Pages are signed in with cookies, in the web view. A Ruby screen syncs with its 
 ```swift
 let app = AppHost(engine: engine, root: Route("catalog"), views: views, store: store)
 app.start()
-let host = HybridHost(server: server, app: app, screens: ["catalog", "product"]) { UIApplication.shared.open($0) }
+let host = HybridHost(server: server, app: app, screens: ["catalog", "product"])
 // ...
 WindowGroup { HybridView(host: host) }
 ```
 
-Without Ruby screens: `HybridHost(server: server, views: views) { ... }`.
+Without Ruby screens: `HybridHost(server: server, views: views)`.

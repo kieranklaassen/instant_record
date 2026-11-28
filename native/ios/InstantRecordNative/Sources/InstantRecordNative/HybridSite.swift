@@ -6,8 +6,10 @@ import WebKit
 @MainActor
 public final class HybridSite {
     public let server: URL
+    /// What pages may ask of the device.
+    public var capabilities: Capabilities?
     let data: WKWebsiteDataStore
-    let outside: (URL) -> Void
+    let outside: @MainActor (URL) -> Void
     /// The native place an address opens, if it opens one.
     private(set) var routes: [HybridConfig.Place] = [] {
         didSet { if routes != oldValue { changed.values.forEach { $0() } } }
@@ -15,11 +17,11 @@ public final class HybridSite {
     private var changed: [ObjectIdentifier: () -> Void] = [:]
 
     /// `outside` opens what is another server's, or mail's, or the phone's.
-    public convenience init(server: URL, outside: @escaping (URL) -> Void) {
+    public convenience init(server: URL, outside: @escaping @MainActor (URL) -> Void) {
         self.init(server: server, data: .default(), outside: outside)
     }
 
-    init(server: URL, data: WKWebsiteDataStore, outside: @escaping (URL) -> Void) {
+    init(server: URL, data: WKWebsiteDataStore, outside: @escaping @MainActor (URL) -> Void) {
         self.server = server
         self.data = data
         self.outside = outside

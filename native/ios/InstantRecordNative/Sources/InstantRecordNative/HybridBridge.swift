@@ -5,6 +5,7 @@ import Foundation
 /// and is the `window.RubyNative` the ruby_native gem's helpers call. It runs
 /// in the page's own world, because those helpers call it from `onclick`.
 enum HybridBridge {
+    static let caller = "instantRecordCall"
     static let handler = "instantRecordHybrid"
 
     static let script = #"""
@@ -113,6 +114,10 @@ enum HybridBridge {
         share(options) { post({ type: "share", url: String(options?.url || location.href) }) }
       }
       window.RubyNative = new Proxy(known, { get: (target, name) => target[name] ?? (name === "then" ? undefined : () => {}) })
+
+      window.InstantRecord = Object.freeze({
+        call: (name, args = {}) => window.webkit.messageHandlers.instantRecordCall.postMessage({ name, arguments: args })
+      })
 
       document.addEventListener("click", event => {
         const el = event.target?.closest?.("[data-native-haptic]")

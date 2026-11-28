@@ -52,7 +52,7 @@ class IosGeneratorTest < Rails::Generators::TestCase
     assert_no_file "native/ios/Shop/Shop/LibraryEngine.swift"
     assert_no_file "native/ios/Shop/Shop/Shop-Bridging-Header.h"
     assert_file "native/ios/Shop/Shop.xcodeproj/project.pbxproj" do |project|
-      assert_no_match(/Bridging|linstant_record_app|SEARCH_PATHS/, project)
+      assert_no_match(/Bridging|linstant_record_app|HEADER_SEARCH|LIBRARY_SEARCH/, project)
       assert_match "/* ShopApp.swift in Sources */", project
     end
   end

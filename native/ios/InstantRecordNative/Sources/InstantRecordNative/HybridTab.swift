@@ -2,6 +2,8 @@ import Foundation
 import WebKit
 #if canImport(UIKit)
 import UIKit
+#elseif canImport(AppKit)
+import AppKit
 #endif
 
 /// One tab of a hybrid app: a web view with its own history, the native
@@ -43,6 +45,7 @@ public final class HybridTab: NSObject, ObservableObject {
         web = WKWebView(frame: CGRect(x: 0, y: 0, width: 390, height: 800), configuration: configuration)
         super.init()
         configuration.userContentController.add(Ears(self), contentWorld: .page, name: HybridBridge.handler)
+        configuration.userContentController.addScriptMessageHandler(Answers(self), contentWorld: .page, name: HybridBridge.caller)
         web.navigationDelegate = self
         web.uiDelegate = self
         // The edge swipe would stop at forms, which Back passes over.
@@ -154,11 +157,20 @@ public final class HybridTab: NSObject, ObservableObject {
         web.callAsyncJavaScript(script, arguments: arguments, in: nil, in: .page) { _ in }
     }
 
-    fileprivate func hear(_ message: WKScriptMessage) {
+    // Only the main frame of the app's own server is listened to.
+    private func trusts(_ message: WKScriptMessage) -> Bool {
         let from = message.frameInfo.securityOrigin
-        guard message.frameInfo.isMainFrame,
-              Origin(scheme: from.protocol, host: from.host, port: from.port) == Origin(server),
-              let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
+        return message.frameInfo.isMainFrame && Origin(scheme: from.protocol, host: from.host, port: from.port) == Origin(server)
+    }
+
+    fileprivate func answer(_ message: WKScriptMessage) async -> (Any?, String?) {
+        guard trusts(message), let body = message.body as? [String: Any], let name = body["name"] as? String else { return (nil, "Not allowed") }
+        guard let capabilities = site.capabilities else { return (nil, "This app was given no capabilities") }
+        do { return (try await capabilities.call(name, Capabilities.arguments(body["arguments"])), nil) } catch { return (nil, error.localizedDescription) }
+    }
+
+    fileprivate func hear(_ message: WKScriptMessage) {
+        guard trusts(message), let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
         switch type {
         case "signals": receive(body["signals"] as? String ?? "")
         case "back": back()
@@ -187,17 +199,7 @@ public final class HybridTab: NSObject, ObservableObject {
     }
 
     private func feel(_ feedback: String) {
-        #if os(iOS)
-        switch feedback {
-        case "warning": UINotificationFeedbackGenerator().notificationOccurred(.warning)
-        case "error": UINotificationFeedbackGenerator().notificationOccurred(.error)
-        case "selection": UISelectionFeedbackGenerator().selectionChanged()
-        case "light": UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        case "medium": UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        case "heavy": UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
-        default: UINotificationFeedbackGenerator().notificationOccurred(.success)
-        }
-        #endif
+        Haptics.play(feedback)
     }
 }
 
@@ -208,6 +210,15 @@ private final class Ears: NSObject, WKScriptMessageHandler {
     init(_ tab: HybridTab) { self.tab = tab }
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
         MainActor.assumeIsolated { tab?.hear(message) }
+    }
+}
+
+private final class Answers: NSObject, WKScriptMessageHandlerWithReply {
+    weak var tab: HybridTab?
+    init(_ tab: HybridTab) { self.tab = tab }
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) async -> (Any?, String?) {
+        guard let tab else { return (nil, "Closed") }
+        return await tab.answer(message)
     }
 }
 
@@ -288,6 +299,21 @@ extension HybridTab: WKNavigationDelegate, WKUIDelegate {
             panel.addAction(UIAlertAction(title: title, style: style) { [unowned panel] _ in answer(panel) })
         }
         top.present(panel, animated: true)
+    }
+    #elseif os(macOS)
+    public func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor @Sendable () -> Void) {
+        let panel = NSAlert()
+        panel.messageText = message
+        panel.runModal()
+        completionHandler()
+    }
+
+    public func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor @Sendable (Bool) -> Void) {
+        let panel = NSAlert()
+        panel.messageText = message
+        panel.addButton(withTitle: "OK")
+        panel.addButton(withTitle: "Cancel")
+        completionHandler(panel.runModal() == .alertFirstButtonReturn)
     }
     #endif
 }

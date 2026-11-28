@@ -19,6 +19,9 @@ Start with Rails pages when you want to ship often. Write a Ruby screen where a 
 3. [SwiftUI views](swiftui-views.md): props and actions, typed
 4. [Rails pages](rails-pages.md): native tabs, bars, buttons and menus from HTML
 5. [Mixing the three](mixing.md): tabs, links and embedding
-6. [Ruby Native compatibility](ruby-native.md): what is supported, and what is not
+6. [The device](capabilities.md): sound, haptics, location and any other API
+7. [iPhone, iPad and Mac](platforms.md)
+8. [Audit](audit.md): all of iOS, and how you reach each part
+9. [Ruby Native compatibility](ruby-native.md): what is supported, and what is not
 
 [native/ios/README.md](../../native/ios/README.md) is the reference for the renderer, themes, sync and the Inbox demo.

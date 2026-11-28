@@ -23,6 +23,10 @@ struct <%= app_name %>App: App {
         let defaults = UserDefaults.standard
         let address = defaults.string(forKey: "server") ?? "<%= options[:server] %>"
         guard let server = URL(string: address), server.host != nil else { fatalError("Not a server's address: \(address)") }
+        // What Ruby, pages and views may ask of the device. Those that ask the
+        // person are added by group: capabilities.allow(.location). Say why in
+        // Info.plist.
+        let capabilities = Capabilities()
 <% if compiled? -%>
         let folder = URL.applicationSupportDirectory
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -31,9 +35,9 @@ struct <%= app_name %>App: App {
             AppHost.Store(database: folder.appending(path: "app.sqlite3").path, endpoint: address + "<%= mount_path %>")
         })
         app.start()
-        _host = StateObject(wrappedValue: HybridHost(server: server, app: app, screens: rubyScreens) { UIApplication.shared.open($0) })
+        _host = StateObject(wrappedValue: HybridHost(server: server, app: app, screens: rubyScreens, capabilities: capabilities))
 <% else -%>
-        _host = StateObject(wrappedValue: HybridHost(server: server, views: views) { UIApplication.shared.open($0) })
+        _host = StateObject(wrappedValue: HybridHost(server: server, views: views, capabilities: capabilities))
 <% end -%>
     }
 

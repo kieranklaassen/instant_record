@@ -1,5 +1,10 @@
 import Foundation
 import WebKit
+#if canImport(UIKit)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
 
 /// A hybrid app: the tabs and routes the server's config names, each drawn
 /// by a web page, a Ruby screen or a SwiftUI view, whichever this app has.
@@ -30,8 +35,13 @@ public final class HybridHost: ObservableObject {
     /// - screens: the Ruby screens a route may open, by name.
     /// - views: SwiftUI views for an app with no compiled Ruby. With `app`,
     ///   its own are used.
-    public convenience init(server: URL, app: AppHost? = nil, screens: Set<String> = [], views: Screens = Screens(), outside: @escaping (URL) -> Void) {
-        self.init(site: HybridSite(server: server, outside: outside), app: app, screens: screens, views: views, defaults: .standard, exchange: Transport().exchange)
+    public convenience init(server: URL, app: AppHost? = nil, screens: Set<String> = [], views: Screens = Screens(), capabilities: Capabilities? = nil, outside: @escaping @MainActor (URL) -> Void = HybridHost.open) {
+        let site = HybridSite(server: server, outside: outside)
+        // Given none, the standard ones. An empty one allows none.
+        let capabilities = capabilities ?? Capabilities()
+        site.capabilities = capabilities
+        if app?.capabilities == nil { app?.capabilities = capabilities }
+        self.init(site: site, app: app, screens: screens, views: views, defaults: .standard, exchange: Transport().exchange)
     }
 
     init(site: HybridSite, app: AppHost?, screens: Set<String>, views: Screens, defaults: UserDefaults, exchange: @escaping (String) -> String) {
@@ -43,6 +53,15 @@ public final class HybridHost: ObservableObject {
         config = store.kept() ?? .bare
         app?.site = site
         show(config)
+    }
+
+    /// In the browser, or whichever app an address is.
+    public static func open(_ url: URL) {
+        #if os(iOS)
+        UIApplication.shared.open(url)
+        #elseif os(macOS)
+        NSWorkspace.shared.open(url)
+        #endif
     }
 
     /// The app came to the front: read the config again.

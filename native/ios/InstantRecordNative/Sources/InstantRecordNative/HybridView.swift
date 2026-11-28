@@ -1,4 +1,3 @@
-#if os(iOS)
 import SwiftUI
 import WebKit
 
@@ -28,6 +27,7 @@ public struct HybridView: View {
                     .tag(shown.id)
             }
         }
+        .modifier(Roomy())
         .tint(tint)
         .environment(\.theme, theme)
         .onChange(of: phase, initial: true) { _, now in
@@ -77,7 +77,7 @@ private struct PageStack: View {
                     .navigationDestination(for: Route.self) { PlaceView(route: $0, host: host, site: site, views: views) }
             }
         }
-        .toolbar(bar ? .visible : .hidden, for: .tabBar)
+        .modifier(Bars(tabs: bar))
         .modifier(PageSheet(page: page, host: host, site: site, views: views, theme: theme))
         .environment(\.opens, Opens(push: { page.path.append($0) }, sheet: { page.sheet = $0 }, replace: { if !page.path.isEmpty { page.path[page.path.count - 1] = $0 } }))
         .onAppear { changed(page.signals) }
@@ -157,10 +157,9 @@ private struct HybridPage: View {
             } else {
                 content
                     .navigationTitle(navbar?.title ?? page.web.title ?? "")
-                    .navigationBarTitleDisplayMode(.inline)
                     .navigationBarBackButtonHidden(page.canGoBack)
                     .toolbar { if let navbar { items(navbar) } else if bar == .always { back } }
-                    .toolbar(navbar == nil && bar == .asked ? .hidden : .visible, for: .navigationBar)
+                    .modifier(Bars(navigation: navbar != nil || bar == .always))
                     .modifier(TitleMenu(items: navbar?.buttons.first(where: \.inTitle)?.items ?? [], page: page))
             }
         }
@@ -198,7 +197,7 @@ private struct HybridPage: View {
     }
 
     @ToolbarContentBuilder private var back: some ToolbarContent {
-        ToolbarItem(placement: .topBarLeading) {
+        ToolbarItem(placement: .start) {
             if page.canGoBack { Button { page.back() } label: { Label("Back", systemImage: "chevron.backward") } }
         }
     }
@@ -233,7 +232,7 @@ private struct HybridPage: View {
 
     @ToolbarContentBuilder private func items(_ navbar: PageSignals.Navbar) -> some ToolbarContent {
         back
-        ToolbarItemGroup(placement: .topBarLeading) { buttons(navbar.buttons.filter(\.leading)) }
+        ToolbarItemGroup(placement: .start) { buttons(navbar.buttons.filter(\.leading)) }
         if !navbar.segments.isEmpty {
             ToolbarItem(placement: .principal) {
                 Picker(navbar.title, selection: segment(navbar.segments)) {
@@ -243,7 +242,7 @@ private struct HybridPage: View {
                 .fixedSize()
             }
         }
-        ToolbarItemGroup(placement: .topBarTrailing) {
+        ToolbarItemGroup(placement: .primaryAction) {
             buttons(navbar.buttons.filter { !$0.leading && !$0.inTitle })
             if let submit = navbar.submit {
                 Button(submit.title.isEmpty ? "Save" : submit.title) { page.tap(submit) }.fontWeight(.semibold)
@@ -305,6 +304,52 @@ private struct TitleMenu: ViewModifier {
     }
 }
 
+/// Which of iOS's bars show. The Mac has a toolbar and its own tabs.
+private struct Bars: ViewModifier {
+    var tabs: Bool?
+    var navigation: Bool?
+
+    func body(content: Content) -> some View {
+        #if os(iOS)
+        if let tabs {
+            content.toolbar(tabs ? .visible : .hidden, for: .tabBar)
+        } else {
+            content.navigationBarTitleDisplayMode(.inline).toolbar(navigation == false ? .hidden : .visible, for: .navigationBar)
+        }
+        #else
+        content
+        #endif
+    }
+}
+
+/// Tabs that become a sidebar where there is room for one, on iPad.
+private struct Roomy: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 18, macOS 15, *) { content.tabViewStyle(.sidebarAdaptable) } else { content }
+    }
+}
+
+private extension ToolbarItemPlacement {
+    #if os(iOS)
+    static let start = ToolbarItemPlacement.topBarLeading
+    #else
+    static let start = ToolbarItemPlacement.navigation
+    #endif
+}
+
+#if os(macOS)
+private struct WebPage: NSViewRepresentable {
+    let page: HybridTab
+    let pulls: Bool
+    func makeNSView(context: Context) -> WKWebView { page.web }
+    func updateNSView(_ web: WKWebView, context: Context) {}
+}
+
+private struct ShareSheet: View {
+    let url: URL
+    var body: some View { ShareLink(item: url).padding(40) }
+}
+#else
 /// The web view itself, with a pull that reloads it.
 private struct WebPage: UIViewRepresentable {
     let page: HybridTab

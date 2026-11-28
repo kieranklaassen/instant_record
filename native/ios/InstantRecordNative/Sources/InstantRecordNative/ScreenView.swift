@@ -249,6 +249,7 @@ struct NodeView: View {
         case "more": more
         case "swift": swift
         case "web": web
+        case let kind where ElementView.kinds.contains(kind): ElementView(node: node, route: route, host: host)
         default: EmptyView()
         }
     }
@@ -277,7 +278,7 @@ struct NodeView: View {
         let fields = under.filter { $0.kind == "field" }
         let blank = !fields.isEmpty && fields.allSatisfy { shown($0).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         return Group {
-            if content.allSatisfy({ ["list", "navigation", "swift", "web"].contains($0.node.kind) }) {
+            if content.allSatisfy({ ["list", "navigation", "swift", "web", "scroll"].contains($0.node.kind) }) {
                 each(content)
             } else {
                 VStack(alignment: .leading, spacing: 8) { each(content) }

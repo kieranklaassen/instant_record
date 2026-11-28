@@ -80,13 +80,3 @@ struct PlaceView: View {
         Label(why, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
     }
 }
-
-#if !os(iOS)
-/// Pages are drawn on iOS. The Mac builds this package for its tests.
-struct PagePlace: View {
-    let site: HybridSite
-    let path: String
-    var pushed = true
-    var body: some View { EmptyView() }
-}
-#endif
