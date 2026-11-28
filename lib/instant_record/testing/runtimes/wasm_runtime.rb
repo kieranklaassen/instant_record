@@ -1,10 +1,10 @@
 require "base64"
 require "fileutils"
-require "json"
-require "open3"
 require "tmpdir"
 require_relative "base"
+require_relative "client_handle"
 require_relative "compiled_local_writes"
+require_relative "stdio_bridge"
 
 module InstantRecord
   module Testing
@@ -15,55 +15,13 @@ module InstantRecord
       class WasmRuntime
         include Base
         include CompiledLocalWrites
+        include StdioBridge
 
         BRIDGE_SCRIPT = File.expand_path("../wasm_host_bridge.mjs", __dir__)
 
-        class ClientHandle
-          attr_reader :id, :runtime
-
-          def initialize(id:, runtime:)
-            @id = id.to_s
-            @runtime = runtime
-          end
-
-          def runtime_name = :wasm
-
-          def request(method, path, body: "", content_type: "application/x-www-form-urlencoded")
-            @runtime.execute_request(self, method, path, body: body, content_type: content_type)
-          end
-
-          # Mirrors compiled/web/src/worker.js:
-          # 1. Run wasm_sync (drains outbox and bootstraps if not yet bootstrapped).
-          # 2. If bootstrapped, poll GET /events?after=<cursor>&window=0[&identity=<id>]
-          #    through FaultNetwork and feed the SSE response into wasm_stream.
-          # 3. If an identity reset arrived on the stream, run one follow-up wasm_sync
-          #    so the client re-bootstraps under the new identity.
-          def sync(endpoint = InstantRecord::DEFAULT_MOUNT_PATH)
-            @runtime.execute_sync(self, endpoint)
-          end
-
+        class ClientHandle < Runtimes::ClientHandle
           def sync_pass_only(endpoint = InstantRecord::DEFAULT_MOUNT_PATH)
             @runtime.execute_sync_pass_only(self, endpoint)
-          end
-
-          def sync_plan
-            @runtime.execute_sync_plan(self)
-          end
-
-          def consume_stream(chunk)
-            @runtime.execute_consume_stream(self, chunk)
-          end
-
-          def sync_state
-            @runtime.execute_sync_state(self)
-          end
-
-          def history(key, response = "")
-            @runtime.execute_history(self, key, response)
-          end
-
-          def local_write(model:, operation:, id: nil, attributes: {})
-            @runtime.execute_local_write(self, model: model, operation: operation, id: id, attributes: attributes)
           end
 
           def verify_frontend_http
@@ -83,11 +41,12 @@ module InstantRecord
           @web_node_modules = File.expand_path(web_node_modules.to_s)
           @network = network
           @stage_dir = nil
-          @stdin = nil
-          @stdout = nil
-          @stderr = nil
-          @wait_thr = nil
-          start_bridge!
+          app_host_js = prepare_app_host_path
+          frontend_http = File.join(InstantRecord::Testing.gem_root.to_s, "frontend/http.js")
+          start_bridge!("node", BRIDGE_SCRIPT, app_host_js, @wasm_path, frontend_http, label: "Wasm")
+        rescue StandardError
+          close
+          raise
         end
 
         def name = :wasm
@@ -98,21 +57,7 @@ module InstantRecord
         end
 
         def close
-          if @stdin && !@stdin.closed?
-            begin
-              rpc({ op: "shutdown" })
-            rescue StandardError
-              nil
-            end
-          end
-        ensure
-          [@stdin, @stdout, @stderr].each do |io|
-            io.close if io && !io.closed?
-          rescue StandardError
-            nil
-          end
-          @wait_thr&.join(2)
-          FileUtils.remove_entry(@stage_dir) if @stage_dir && Dir.exist?(@stage_dir)
+          close_bridge(cleanup_dir: @stage_dir)
         end
 
         def execute_request(client, method, path, body:, content_type:)
@@ -225,12 +170,6 @@ module InstantRecord
 
         def local_write_kind = "compiled"
 
-        def clean_rpc(op, client_id, context: "#{op}(#{client_id})", **params)
-          rpc({ op: op, client: client_id, **params }).tap do |res|
-            assert_clean_stderr!(res["errors"], context: "wasm #{context}")
-          end
-        end
-
         def assert_exit_zero!(res, function, detail = "(errors=#{res['errors'].inspect})")
           return if res["exit"] == 0
 
@@ -258,64 +197,6 @@ module InstantRecord
           FileUtils.cp(File.join(gem_root, "compiled/web/src/app-host.js"), File.join(@stage_dir, "app-host.js"))
           FileUtils.cp(File.join(gem_root, "compiled/web/src/changes.js"), File.join(@stage_dir, "changes.js"))
           File.join(@stage_dir, "app-host.js")
-        end
-
-        def start_bridge!
-          app_host_js = prepare_app_host_path
-          frontend_http = File.join(InstantRecord::Testing.gem_root.to_s, "frontend/http.js")
-          @stdin, @stdout, @stderr, @wait_thr = Open3.popen3("node", BRIDGE_SCRIPT, app_host_js, @wasm_path, frontend_http)
-          @stdin.sync = true
-
-          ready = read_message
-          unless ready && ready["type"] == "ready"
-            err_out = read_bridge_stderr
-            raise InstantRecord::Testing::Error, "Wasm bridge failed to start: #{ready.inspect} #{err_out}"
-          end
-        end
-
-        def rpc(payload)
-          @stdin.puts(JSON.generate(payload))
-          @stdin.flush
-
-          loop do
-            msg = read_message
-            unless msg
-              err_out = read_bridge_stderr
-              raise InstantRecord::Testing::Error, "Wasm bridge exited unexpectedly during #{payload[:op]}: #{err_out}"
-            end
-
-            case msg["type"]
-            when "exchange"
-              reply = @network.exchange(msg["client"], msg["method"], msg["url"], msg["body"].to_s)
-              @stdin.puts(JSON.generate({ status: reply[:status], body: reply[:body].to_s }))
-              @stdin.flush
-            when "result"
-              return msg
-            when "error"
-              raise InstantRecord::Testing::Error, "Wasm bridge error during #{payload[:op]}: #{msg['message']}"
-            else
-              raise InstantRecord::Testing::Error, "Unexpected Wasm bridge message: #{msg.inspect}"
-            end
-          end
-        end
-
-        def read_message
-          line = @stdout.gets
-          return nil unless line
-
-          JSON.parse(line)
-        end
-
-        def read_bridge_stderr
-          return "" unless @stderr && !@stderr.closed?
-
-          out = +""
-          loop do
-            chunk = @stderr.read_nonblock(4096)
-            out << chunk
-          end
-        rescue IO::WaitReadable, EOFError
-          out
         end
       end
     end

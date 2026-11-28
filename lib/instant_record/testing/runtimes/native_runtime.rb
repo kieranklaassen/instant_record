@@ -2,6 +2,7 @@ require "fileutils"
 require "json"
 require "tmpdir"
 require_relative "base"
+require_relative "client_handle"
 require_relative "compiled_local_writes"
 
 module InstantRecord
@@ -140,44 +141,13 @@ module InstantRecord
           end
         end
 
-        class ClientHandle
-          attr_reader :id, :runtime, :db_path, :cookies
+        class ClientHandle < Runtimes::ClientHandle
+          attr_reader :db_path, :cookies
 
           def initialize(id:, runtime:, db_path:)
-            @id = id.to_s
-            @runtime = runtime
+            super(id: id, runtime: runtime)
             @db_path = db_path
             @cookies = {}
-          end
-
-          def runtime_name = :native
-
-          def request(method, path, body: "", content_type: "application/x-www-form-urlencoded")
-            @runtime.execute_request(self, method, path, body: body, content_type: content_type)
-          end
-
-          def sync(endpoint = InstantRecord::DEFAULT_MOUNT_PATH)
-            @runtime.execute_sync(self, endpoint)
-          end
-
-          def sync_plan
-            @runtime.execute_sync_plan(self)
-          end
-
-          def consume_stream(chunk)
-            @runtime.execute_consume_stream(self, chunk)
-          end
-
-          def sync_state
-            @runtime.execute_sync_state(self)
-          end
-
-          def history(key, response = "")
-            @runtime.execute_history(self, key, response)
-          end
-
-          def local_write(model:, operation:, id: nil, attributes: {})
-            @runtime.execute_local_write(self, model: model, operation: operation, id: id, attributes: attributes)
           end
 
           def snapshot_state(model_names:)
