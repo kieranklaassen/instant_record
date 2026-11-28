@@ -636,4 +636,339 @@ class BranchTest < Minitest::Test
       assert_raises(InstantRecord::Branch::Error) { branch.staged_mutations }
     end
   end
+
+  def with_stubbed_method(target, method_name, replacement)
+    singleton = target.singleton_class
+    had_own = singleton.method_defined?(method_name, false)
+    original = target.method(method_name) if had_own
+    singleton.define_method(method_name, &replacement)
+    yield
+  ensure
+    if had_own
+      singleton.define_method(method_name, original)
+    elsif singleton.method_defined?(method_name, false)
+      singleton.remove_method(method_name)
+    end
+  end
+
+  def with_stubbed_instance_method(klass, method_name, replacement)
+    original = klass.instance_method(method_name)
+    klass.define_method(method_name, &replacement)
+    yield
+  ensure
+    klass.define_method(method_name, original)
+  end
+
+  def test_sqlite_store_fork_rejects_non_sqlite_adapter
+    fake_db_config = Struct.new(:configuration_hash).new({ adapter: "postgresql", database: "app_development" })
+
+    with_stubbed_method(ActiveRecord::Base, :connection_db_config, -> { fake_db_config }) do
+      error = assert_raises(InstantRecord::Branch::Error) do
+        InstantRecord::Branch::SqliteStore.fork!(name: "pg")
+      end
+      assert_match(/local SQLite database.*"postgresql"/, error.message)
+    end
+  end
+
+  def test_sqlite_store_fork_cleans_up_on_backup_database_failure
+    seed_synced_record(id: "mem-keep", title: "Intact on backup failure")
+    created_dir = nil
+    orig_mktmpdir = Dir.method(:mktmpdir)
+
+    with_stubbed_method(Dir, :mktmpdir, ->(*args, **kwargs, &blk) {
+      dir = orig_mktmpdir.call(*args, **kwargs, &blk)
+      created_dir = dir unless blk
+      dir
+    }) do
+      with_stubbed_method(InstantRecord::Branch::SqliteStore, :backup_database, ->(_src, dest) {
+        ["", "-wal", "-shm", "-journal"].each { |suffix| File.write("#{dest}#{suffix}", "partial") }
+        raise "backup failed"
+      }) do
+        error = assert_raises(RuntimeError) { InstantRecord::Branch::SqliteStore.fork!(name: "broken-mem") }
+        assert_equal "backup failed", error.message
+      end
+    end
+
+    assert created_dir, "expected Dir.mktmpdir to have been called"
+    refute Dir.exist?(created_dir), "owned temp dir must be cleaned up on backup_database failure"
+    assert_equal "Intact on backup failure", @model.find("mem-keep").title
+
+    with_file_sqlite do |db_path, dir|
+      seed_synced_record(id: "file-keep", title: "File intact on backup failure")
+
+      with_stubbed_method(InstantRecord::Branch::SqliteStore, :backup_database, ->(_src, dest) {
+        ["", "-wal", "-shm", "-journal"].each { |suffix| File.write("#{dest}#{suffix}", "partial") }
+        raise "file backup failed"
+      }) do
+        error = assert_raises(RuntimeError) { InstantRecord::Branch::SqliteStore.fork!(name: "broken-file") }
+        assert_equal "file backup failed", error.message
+      end
+
+      assert File.exist?(db_path)
+      assert_empty Dir.glob(File.join(dir, ".ir-branch-*")), "branch files and sidecars must be removed on failure"
+      assert_equal "File intact on backup failure", @model.find("file-keep").title
+    end
+  end
+
+  def test_sqlite_store_fork_cleans_up_on_file_copy_failure
+    seed_synced_record(id: "mem-copy", title: "Intact on copy failure")
+    created_dir = nil
+    orig_mktmpdir = Dir.method(:mktmpdir)
+
+    with_stubbed_method(Dir, :mktmpdir, ->(*args, **kwargs, &blk) {
+      dir = orig_mktmpdir.call(*args, **kwargs, &blk)
+      created_dir = dir unless blk
+      dir
+    }) do
+      with_stubbed_method(FileUtils, :cp, ->(_src, dest, **_opts) {
+        File.write(dest, "partial")
+        raise "copy failed"
+      }) do
+        error = assert_raises(RuntimeError) { InstantRecord::Branch::SqliteStore.fork!(name: "broken-cp") }
+        assert_equal "copy failed", error.message
+      end
+    end
+
+    assert created_dir
+    refute Dir.exist?(created_dir), "owned temp dir and backups must be removed on FileUtils.cp failure"
+    assert_equal "Intact on copy failure", @model.find("mem-copy").title
+  end
+
+  def test_sqlite_store_fork_cleans_up_and_restores_main_on_activate_branch_failure
+    seed_synced_record(id: "mem-activate", title: "Recovered in memory")
+    created_dir = nil
+    orig_mktmpdir = Dir.method(:mktmpdir)
+
+    with_stubbed_method(Dir, :mktmpdir, ->(*args, **kwargs, &blk) {
+      dir = orig_mktmpdir.call(*args, **kwargs, &blk)
+      created_dir = dir unless blk
+      dir
+    }) do
+      with_stubbed_instance_method(InstantRecord::Branch::SqliteStore, :activate_branch!, -> {
+        ActiveRecord::Base.connection_handler.clear_all_connections!
+        raise "activate failed"
+      }) do
+        error = assert_raises(RuntimeError) { InstantRecord::Branch::SqliteStore.fork!(name: "broken-activate") }
+        assert_equal "activate failed", error.message
+      end
+    end
+
+    assert created_dir
+    refute Dir.exist?(created_dir), "owned temp dir must be cleaned up when activate_branch! fails"
+    assert_equal "Recovered in memory", @model.find("mem-activate").title
+
+    with_file_sqlite do |db_path, dir|
+      seed_synced_record(id: "file-activate", title: "Recovered on disk")
+
+      with_stubbed_instance_method(InstantRecord::Branch::SqliteStore, :activate_branch!, -> {
+        ActiveRecord::Base.connection_handler.clear_all_connections!
+        raise "file activate failed"
+      }) do
+        error = assert_raises(RuntimeError) { InstantRecord::Branch::SqliteStore.fork!(name: "broken-file-activate") }
+        assert_equal "file activate failed", error.message
+      end
+
+      assert File.exist?(db_path)
+      assert_empty Dir.glob(File.join(dir, ".ir-branch-*"))
+      assert_equal "Recovered on disk", @model.find("file-activate").title
+    end
+  end
+
+  def test_sqlite_store_file_backed_lifecycle_and_sidecar_cleanup
+    with_file_sqlite do |db_path, dir|
+      seed_synced_record(id: "f-1", title: "Main seed")
+
+      store = InstantRecord::Branch::SqliteStore.fork!(name: "file-lifecycle")
+      branch_path = store.branch_path
+      assert File.exist?(branch_path)
+      assert_equal dir, File.dirname(branch_path)
+      refute_equal db_path, branch_path
+
+      seed_synced_record(id: "f-branch", title: "Branch only")
+      assert @model.exists?("f-branch")
+
+      store.with_main do
+        assert @model.exists?("f-1")
+        refute @model.exists?("f-branch")
+        seed_synced_record(id: "f-main-only", title: "Main concurrent")
+      end
+
+      assert @model.exists?("f-branch")
+      refute @model.exists?("f-main-only")
+
+      ["-wal", "-shm", "-journal"].each { |suffix| File.write("#{branch_path}#{suffix}", "sidecar") }
+
+      store.restore_main!
+      store.cleanup!
+
+      assert_equal %w[f-1 f-main-only], @model.order(:id).pluck(:id)
+      ["", "-wal", "-shm", "-journal"].each do |suffix|
+        refute File.exist?("#{branch_path}#{suffix}"), "expected #{branch_path}#{suffix} to be removed"
+      end
+      assert File.exist?(db_path)
+      assert Dir.exist?(dir)
+    end
+  end
+
+  def test_sqlite_store_memory_lifecycle_and_owned_dir_cleanup
+    seed_synced_record(id: "m-1", title: "Memory seed")
+
+    store = InstantRecord::Branch::SqliteStore.fork!(name: "mem-lifecycle")
+    restored = false
+    begin
+      branch_path = store.branch_path
+      main_backup_path = store.instance_variable_get(:@main_backup_path)
+      owned_dir = File.dirname(branch_path)
+
+      assert Dir.exist?(owned_dir)
+      assert File.exist?(branch_path)
+      assert File.exist?(main_backup_path)
+
+      seed_synced_record(id: "m-branch", title: "Memory branch only")
+      assert @model.exists?("m-branch")
+
+      store.with_main do
+        assert @model.exists?("m-1")
+        refute @model.exists?("m-branch")
+        seed_synced_record(id: "m-main-only", title: "Memory main concurrent")
+      end
+
+      assert @model.exists?("m-branch")
+      refute @model.exists?("m-main-only")
+
+      [branch_path, main_backup_path].each do |base|
+        ["-wal", "-shm", "-journal"].each { |suffix| File.write("#{base}#{suffix}", "sidecar") }
+      end
+
+      store.restore_main!
+      restored = true
+      store.cleanup!
+
+      assert_equal %w[m-1 m-main-only], @model.order(:id).pluck(:id)
+      [branch_path, main_backup_path].each do |base|
+        ["", "-wal", "-shm", "-journal"].each do |suffix|
+          refute File.exist?("#{base}#{suffix}"), "expected #{base}#{suffix} to be removed"
+        end
+      end
+      refute Dir.exist?(owned_dir), "expected owned temp dir to be removed"
+    ensure
+      store.restore_main! unless restored
+      store.cleanup!
+    end
+  end
+
+  def test_sqlite_store_copy_database_raises_and_cleans_up_on_non_done_backup_status
+    with_file_sqlite do |db_path, dir|
+      seed_synced_record(id: "lock-1", title: "Locked main")
+
+      require "sqlite3"
+      finished = false
+      fake_backup = Object.new
+      fake_backup.define_singleton_method(:step) { |_pages| SQLite3::Constants::ErrorCode::BUSY }
+      fake_backup.define_singleton_method(:finish) { finished = true; nil }
+
+      closed_dest = nil
+      orig_db_new = SQLite3::Database.method(:new)
+      with_stubbed_method(SQLite3::Database, :new, ->(*args, **kwargs) {
+        db = orig_db_new.call(*args, **kwargs)
+        closed_dest = db
+        db
+      }) do
+        with_stubbed_method(SQLite3::Backup, :new, ->(*_args) { fake_backup }) do
+          error = assert_raises(InstantRecord::Branch::Error) do
+            InstantRecord::Branch::SqliteStore.fork!(name: "locked-source")
+          end
+          assert_match(/SQLite backup failed with status #{SQLite3::Constants::ErrorCode::BUSY}/, error.message)
+        end
+      end
+
+      assert finished, "expected SQLite3::Backup#finish to be called"
+      assert closed_dest&.closed?, "expected destination SQLite3::Database to be closed"
+      assert_empty Dir.glob(File.join(dir, ".ir-branch-*"))
+      assert File.exist?(db_path)
+      assert_equal "Locked main", @model.find("lock-1").title
+    end
+  end
+
+  def test_sqlite_store_memory_fork_failure_preserves_caller_owned_directory
+    seed_synced_record(id: "dir-1", title: "Preserve dir")
+
+    Dir.mktmpdir("ir_caller_dir_") do |caller_dir|
+      sentinel = File.join(caller_dir, "keep.txt")
+      File.write(sentinel, "keep")
+
+      with_stubbed_method(FileUtils, :cp, ->(_src, _dst) { raise "cp boom" }) do
+        error = assert_raises(RuntimeError) do
+          InstantRecord::Branch::SqliteStore.fork!(name: "caller-dir", directory: caller_dir)
+        end
+        assert_equal "cp boom", error.message
+      end
+
+      assert Dir.exist?(caller_dir)
+      assert File.exist?(sentinel)
+      assert_empty Dir.glob(File.join(caller_dir, ".ir-*"))
+      assert_equal "Preserve dir", @model.find("dir-1").title
+    end
+  end
+
+  def test_sqlite_store_cleanup_removes_owned_dir_even_if_file_removal_raises
+    dir = Dir.mktmpdir("ir_cleanup_test_")
+    branch_path = File.join(dir, ".ir-branch-test.sqlite3")
+    main_backup_path = File.join(dir, ".ir-main-test.sqlite3")
+    File.write(branch_path, "branch")
+    File.write(main_backup_path, "main")
+
+    store = InstantRecord::Branch::SqliteStore.new(
+      main_config: {},
+      branch_path: branch_path,
+      main_backup_path: main_backup_path,
+      owns_dir: dir
+    )
+
+    orig_rm_f = FileUtils.method(:rm_f)
+    with_stubbed_method(FileUtils, :rm_f, ->(path, **opts) {
+      raise "rm_f boom" if path == branch_path
+
+      orig_rm_f.call(path, **opts)
+    }) do
+      error = assert_raises(RuntimeError) { store.cleanup! }
+      assert_equal "rm_f boom", error.message
+    end
+
+    refute File.exist?(main_backup_path)
+    refute Dir.exist?(dir)
+  ensure
+    FileUtils.rm_rf(dir) if dir && Dir.exist?(dir)
+  end
+
+  def test_sqlite_store_sanitize_name_edge_cases
+    store_class = InstantRecord::Branch::SqliteStore
+
+    assert_equal "staging", store_class.send(:sanitize_name, nil)
+    assert_equal "staging", store_class.send(:sanitize_name, "")
+    assert_equal "staging", store_class.send(:sanitize_name, "   ")
+    assert_equal "staging", store_class.send(:sanitize_name, "!!!")
+    assert_equal "staging", store_class.send(:sanitize_name, "---")
+    assert_equal "staging", store_class.send(:sanitize_name, "///...")
+    assert_equal "my-branch-name", store_class.send(:sanitize_name, "  my branch/name! ")
+    assert_equal "valid_name-123", store_class.send(:sanitize_name, "valid_name-123")
+    assert_equal "a" * 32, store_class.send(:sanitize_name, "a" * 50)
+    assert_equal "a" * 31, store_class.send(:sanitize_name, "#{'a' * 31}!b")
+
+    fallback_store = store_class.fork!(name: "!!!")
+    begin
+      assert_match(/\A\.ir-branch-staging-[0-9a-f]{16}\.sqlite3\z/, File.basename(fallback_store.branch_path))
+    ensure
+      fallback_store.restore_main!
+      fallback_store.cleanup!
+    end
+
+    long_store = store_class.fork!(name: "x" * 50)
+    begin
+      assert_match(/\A\.ir-branch-#{'x' * 32}-[0-9a-f]{16}\.sqlite3\z/, File.basename(long_store.branch_path))
+    ensure
+      long_store.restore_main!
+      long_store.cleanup!
+    end
+  end
 end
