@@ -353,9 +353,7 @@ module InstantRecord
         patch_message_digest
         patch_sqlite_shims
         patch_read_tracking
-        patch_model_datetime_casts
-        patch_model_remote_timestamps
-        patch_model_update_keys
+        patch_models
         patch_active_record_changed
         patch_connection_quoting
         patch_emitted_views
@@ -368,8 +366,12 @@ module InstantRecord
 
       private
 
+      def target_path(rel)
+        File.join(@target, rel)
+      end
+
       def ruby_files(folder)
-        dir = File.join(@target, folder)
+        dir = target_path(folder)
         Dir.glob("**/*.rb", base: dir).sort.map { |rel| File.join(dir, rel) }
       end
 
@@ -380,7 +382,7 @@ module InstantRecord
       end
 
       def adapt_threading_and_timeout
-        entries = %w[boot.rb main_wasm.rb].map { |name| File.join(@target, name) }
+        entries = %w[boot.rb main_wasm.rb].map { |name| target_path(name) }
         touched = 0
         (entries + ruby_files("runtime") + ruby_files("config")).each do |path|
           rewrite(path) do |text|
@@ -389,31 +391,29 @@ module InstantRecord
             renamed.gsub('require "timeout"', '# require "timeout"  (wasm: see runtime/wasm_threads.rb)')
           end
         end
-        File.write(File.join(@target, "runtime/wasm_threads.rb"), WASM_THREADS_RB)
+        File.write(target_path("runtime/wasm_threads.rb"), WASM_THREADS_RB)
         touched
       end
 
       def patch_message_digest
-        path = File.join(@target, "runtime/message_digest.rb")
-        text = File.read(path)
-        start = text.index("  def self.aes_256_gcm_encrypt")
-        raise BuildError, "Expected aes_256_gcm_encrypt in #{path}" unless start
+        path = target_path("runtime/message_digest.rb")
+        rewrite(path) do |text|
+          start = text.index("  def self.aes_256_gcm_encrypt")
+          raise BuildError, "Expected aes_256_gcm_encrypt in #{path}" unless start
 
-        head = text[0...start].gsub('require "openssl"', '# require "openssl"  (wasm: no OpenSSL build)')
-        File.write(path, head + AES_STUB)
+          head = text[0...start].gsub('require "openssl"', '# require "openssl"  (wasm: no OpenSSL build)')
+          head + AES_STUB
+        end
       end
 
       def patch_sqlite_shims
-        path = File.join(@target, "runtime/db.rb")
-        text = File.read(path)
-        %w[sqlite3_bind_int64 sqlite3_last_insert_rowid].each do |name|
-          text = text.gsub(name, "rh_#{name}")
+        rewrite(target_path("runtime/db.rb")) do |text|
+          text.gsub(/sqlite3_(?:bind_int64|last_insert_rowid)/, 'rh_\0')
         end
-        File.write(path, text)
       end
 
       def patch_read_tracking
-        path = File.join(@target, "runtime/sqlite_adapter.rb")
+        path = target_path("runtime/sqlite_adapter.rb")
         return unless File.file?(path)
 
         hook = "InstantRecord::ReadTracker.record_sql(sql)"
@@ -427,55 +427,54 @@ module InstantRecord
         end
       end
 
-      def patch_model_datetime_casts
+      def patch_models
         ruby_files("app/models").each do |path|
           rewrite(path) do |text|
-            text.gsub(
-              /(if name == "(\w+_at)"\n\s+if respond_to\?\(:\2=\)\n\s+self\.\2 = )value\n/,
-              '\1ActiveSupport.cast_datetime(value)' + "\n"
-            )
+            text = patch_model_datetime_casts(text)
+            text = patch_model_remote_timestamps(text)
+            patch_model_update_keys(text)
           end
         end
+      end
+
+      def patch_model_datetime_casts(text)
+        text.gsub(
+          /(if name == "(\w+_at)"\n\s+if respond_to\?\(:\2=\)\n\s+self\.\2 = )value\n/,
+          '\1ActiveSupport.cast_datetime(value)' + "\n"
+        )
       end
 
       # Roundhouse's generated fill_timestamps unconditionally stamps
       # updated_at = db_now on every UPDATE, clobbering the server's
       # authoritative timestamp during upsert_from_server. Preserve the
       # incoming server timestamp while applying_remote? is active.
-      def patch_model_remote_timestamps
-        ruby_files("app/models").each do |path|
-          rewrite(path) do |text|
-            text.gsub(
-              "if !(creating) || @updated_at_raw.nil? || @updated_at_raw.empty?",
-              "if (!(creating) && !InstantRecord::Client.applying_remote?) || @updated_at_raw.nil? || @updated_at_raw.empty?"
-            )
-          end
-        end
+      def patch_model_remote_timestamps(text)
+        text.gsub(
+          "if !(creating) || @updated_at_raw.nil? || @updated_at_raw.empty?",
+          "if (!(creating) && !InstantRecord::Client.applying_remote?) || @updated_at_raw.nil? || @updated_at_raw.empty?"
+        )
       end
 
       # A generated update and initialize turn String keys into Symbols; the
       # generated update! does not, so it saves without the fields and succeeds.
-      def patch_model_update_keys
-        ruby_files("app/models").each do |path|
-          rewrite(path) do |text|
-            text.gsub(/^( *)def update!\(attrs\)\n(?! *attrs = attrs\.to_h )/) { "#{$&}#{$1}  #{SYMBOLIZE_ATTRS}\n" }
-          end
-        end
+      def patch_model_update_keys(text)
+        text.gsub(/^( *)def update!\(attrs\)\n(?! *attrs = attrs\.to_h )/) { "#{$&}#{$1}  #{SYMBOLIZE_ATTRS}\n" }
       end
 
       def patch_active_record_changed
-        path = File.join(@target, "runtime/active_record/base.rb")
-        text = File.read(path)
+        path = target_path("runtime/active_record/base.rb")
         anchor = "    def has_changes_to_save?\n"
-        raise BuildError, "Expected #{anchor.strip} in #{path}" unless text.include?(anchor)
+        rewrite(path) do |text|
+          raise BuildError, "Expected #{anchor.strip} in #{path}" unless text.include?(anchor)
 
-        File.write(path, text.sub(anchor) { CHANGED_METHOD + anchor })
+          text.sub(anchor) { CHANGED_METHOD + anchor }
+        end
       end
 
       # The emitted Connection has no identifier quoting, which SyncWindow's SQL
       # is built with. These quote as Rails does for SQLite.
       def patch_connection_quoting
-        path = File.join(@target, "runtime/active_record/connection.rb")
+        path = target_path("runtime/active_record/connection.rb")
         raise BuildError, "Expected #{path}" unless File.file?(path)
 
         anchor = "    def quote_string(str)\n"
@@ -508,34 +507,38 @@ module InstantRecord
       end
 
       def patch_slack_sidebar
-        sidebar = File.join(@target, "app/views/slack/channels/_sidebar.rb")
-        text = File.read(sidebar)
-        start = text.index("channels.each do |channel|")
-        stop = start && text.index("dms.each do", start)
-        raise BuildError, "Expected channel loop in #{sidebar}" unless start && stop
+        sidebar = target_path("app/views/slack/channels/_sidebar.rb")
+        rewrite(sidebar) do |text|
+          start = text.index("channels.each do |channel|")
+          stop = start && text.index("dms.each do", start)
+          raise BuildError, "Expected channel loop in #{sidebar}" unless start && stop
 
-        loop_body = text[start...stop].gsub(/\bchannel\b/, "channel_row").gsub("channel_row == channel_row", "channel_row == channel")
-        File.write(sidebar, text[0...start] + loop_body + text[stop..])
+          loop_body = text[start...stop].gsub(/\bchannel\b/, "channel_row").gsub("channel_row == channel_row", "channel_row == channel")
+          text[0...start] + loop_body + text[stop..]
+        end
       end
 
       def prepend_wasm_threads_require
-        boot = File.join(@target, "boot.rb")
-        text = File.read(boot)
-        match = text.match(/^require(?:_relative)? /)
-        raise BuildError, "Expected require line in #{boot}" unless match
+        boot = target_path("boot.rb")
+        rewrite(boot) do |text|
+          match = text.match(/^require(?:_relative)? /)
+          raise BuildError, "Expected require line in #{boot}" unless match
 
-        first = match.begin(0)
-        File.write(boot, text[0...first] + "require_relative \"runtime/wasm_threads\"\n" + text[first..])
+          first = match.begin(0)
+          text[0...first] + "require_relative \"runtime/wasm_threads\"\n" + text[first..]
+        end
       end
 
       def prune_dead_subsystems
         pruned_lines = 0
         PRUNED_STUBS.each do |rel, stub|
-          path = File.join(@target, rel)
+          path = target_path(rel)
           next unless File.file?(path)
 
-          pruned_lines += File.read(path).count("\n")
-          File.write(path, "# Pruned for browser wasm (see WasmTree)\n#{stub}")
+          rewrite(path) do |text|
+            pruned_lines += text.count("\n")
+            "# Pruned for browser wasm (see WasmTree)\n#{stub}"
+          end
         end
         pruned_lines
       end
