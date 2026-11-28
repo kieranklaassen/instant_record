@@ -1,5 +1,4 @@
 require "json"
-require "securerandom"
 require "uri"
 
 module InstantRecord
@@ -9,8 +8,16 @@ module InstantRecord
     # across all active runtimes (CRuby, Wasm AppHost, Native C ABI Fiddle) and
     # asserts empty WASI/native stderr plus bit-for-bit convergence.
     class ParitySuite
-      MODELS = %w[Issue AuthNote].freeze
-      ENDPOINT = InstantRecord::DEFAULT_MOUNT_PATH
+      MODELS = Testing::DEFAULT_MODELS
+      ENDPOINT = Testing::DEFAULT_ENDPOINT
+      HTTP_SUCCESS_STATUSES = [200, 302, 303].freeze
+      IDENTITY_SEED_NOTES = [
+        ["n-everyone", "Public note", "all", "everyone", "ada"],
+        ["n-members", "Members note", "team", "members", "ben"],
+        ["n-admins", "Payroll", "secret", "admins", "ada"],
+        ["n-ada", "Ada private", "mine", "owner", "ada"],
+        ["n-ben", "Ben private", "mine", "owner", "ben"]
+      ].freeze
 
       ScenarioResult = Struct.new(:name, :runtimes, :elapsed_ms, :status, keyword_init: true)
 
@@ -24,36 +31,37 @@ module InstantRecord
 
       def run
         started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        @server = AuthoritativeServer.build(rails_app: @rails_app, database_url: @database_url, models: MODELS)
-        @network = FaultNetwork.new(@server)
-        @drivers = build_drivers
+        Testing.with_runtime_harness(
+          runtime_names: @runtime_names,
+          artifacts: @artifacts,
+          rails_app: @rails_app,
+          database_url: @database_url,
+          models: MODELS
+        ) do |server, network, drivers|
+          @server = server
+          @network = network
+          @drivers = drivers
 
-        @out.puts "InstantRecord dual-runtime parity (#{@server.backend_label}; runtimes: #{@runtime_names.join(', ')})"
+          @out.puts "InstantRecord dual-runtime parity (#{@server.backend_label}; runtimes: #{@runtime_names.join(', ')})"
+          results = scenarios.map { |scenario_name| run_scenario(scenario_name) }
 
-        results = []
-        scenarios.each do |scenario_name|
-          t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-          @server.reset_data!
-          @network.heal_all!
-          send(:"scenario_#{scenario_name}")
-          ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0) * 1000).round(1)
-          results << ScenarioResult.new(name: scenario_name, runtimes: @runtime_names, elapsed_ms: ms, status: :passed)
-          @out.puts "  [PASS] #{scenario_name} (#{ms}ms)"
+          total_ms = Testing.elapsed_ms(started)
+          @out.puts "All #{results.size} parity scenarios passed across [#{@runtime_names.join(', ')}] in #{total_ms}ms."
+          { ok: true, backend: @server.backend_label, runtimes: @runtime_names, scenarios: results, elapsed_ms: total_ms }
         end
-
-        total_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000).round(1)
-        @out.puts "All #{results.size} parity scenarios passed across [#{@runtime_names.join(', ')}] in #{total_ms}ms."
-        { ok: true, backend: @server.backend_label, runtimes: @runtime_names, scenarios: results, elapsed_ms: total_ms }
-      ensure
-        @drivers&.each_value do |driver|
-          driver.close
-        rescue StandardError
-          nil
-        end
-        @server&.close
       end
 
       private
+
+      def run_scenario(scenario_name)
+        t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        @server.reset_data!
+        @network.heal_all!
+        send(:"scenario_#{scenario_name}")
+        ms = Testing.elapsed_ms(t0)
+        @out.puts "  [PASS] #{scenario_name} (#{ms}ms)"
+        ScenarioResult.new(name: scenario_name, runtimes: @runtime_names, elapsed_ms: ms, status: :passed)
+      end
 
       def scenarios
         list = %i[
@@ -67,27 +75,6 @@ module InstantRecord
         ]
         list << :frontend_http_compiled_fetch_path if @runtime_names.include?(:wasm)
         list
-      end
-
-      def build_drivers
-        @runtime_names.each_with_object({}) do |rt, acc|
-          acc[rt] =
-            case rt
-            when :cruby
-              Runtimes::CRubyRuntime.new(network: @network, server: @server, model_names: MODELS)
-            when :wasm
-              Runtimes::WasmRuntime.new(
-                wasm_path: @artifacts.wasm_path,
-                web_node_modules: @artifacts.web_node_modules,
-                network: @network
-              )
-            when :native
-              Runtimes::NativeRuntime.new(
-                lib_path: @artifacts.native_lib_path,
-                network: @network
-              )
-            end
-        end
       end
 
       def spawn_clients(prefix, identity: nil)
@@ -108,13 +95,32 @@ module InstantRecord
         raise ParityMismatch, message unless cond
       end
 
+      def assert_http_success!(response, label)
+        assert_true!(HTTP_SUCCESS_STATUSES.include?(response[:status]), "#{label} returned #{response[:status]}")
+      end
+
+      def change_event_payload(record, type: "Issue", operation: "create", version: record.server_version)
+        JSON.generate(
+          "type" => type,
+          "id" => record.id,
+          "operation" => operation,
+          "version" => version,
+          "attributes" => InstantRecord.wire_attributes(record.attributes)
+        )
+      end
+
+      def sse_change_frame(cursor, payload)
+        "id: #{cursor}\nevent: change\ndata: #{payload}\n\n"
+      end
+
       # Assert all clients match the authoritative server's visible state AND
       # match each other bit-for-bit in canonical JSON.
       def assert_converged!(clients, identity: nil, label:)
         expected_tables = @server.visible_state(identity: identity)
-        expected_json = InstantRecord::Testing.canonical_json(expected_tables)
+        expected_json = Testing.canonical_json(expected_tables)
 
         snapshots = {}
+        canonical_by_rt = {}
         clients.each do |rt, client|
           snap = client.snapshot_state(model_names: MODELS)
           snapshots[rt] = snap
@@ -125,25 +131,23 @@ module InstantRecord
             assert_true!(unsynced.empty?, "#{label} [#{rt}]: unsynced #{model} rows remain: #{unsynced.inspect}")
           end
 
-          actual_json = InstantRecord::Testing.canonical_json(snap[:tables])
+          actual_json = Testing.canonical_json(snap[:tables])
           unless actual_json == expected_json
             raise ConvergenceError,
               "#{label} [#{rt}] diverged from authoritative server (#{@server.backend_label}):\n" \
               "--- server ---\n#{expected_json}\n--- #{rt} ---\n#{actual_json}"
           end
+          canonical_by_rt[rt] = actual_json
         end
 
         # Cross-runtime bit-for-bit comparison.
-        ref_rt = clients.keys.first
-        ref_json = InstantRecord::Testing.canonical_json(snapshots[ref_rt][:tables])
-        snapshots.each do |rt, snap|
+        ref_rt, ref_json = canonical_by_rt.first
+        canonical_by_rt.each do |rt, other_json|
           next if rt == ref_rt
+          next if other_json == ref_json
 
-          other_json = InstantRecord::Testing.canonical_json(snap[:tables])
-          unless other_json == ref_json
-            raise ParityMismatch,
-              "#{label}: #{rt} diverged from #{ref_rt}:\n--- #{ref_rt} ---\n#{ref_json}\n--- #{rt} ---\n#{other_json}"
-          end
+          raise ParityMismatch,
+            "#{label}: #{rt} diverged from #{ref_rt}:\n--- #{ref_rt} ---\n#{ref_json}\n--- #{rt} ---\n#{other_json}"
         end
 
         snapshots
@@ -182,31 +186,8 @@ module InstantRecord
         clients = spawn_clients("crud")
         converge_all!(clients, rounds: 1)
 
-        created_ids = {}
-        clients.each do |rt, client|
-          title = "Parity issue from #{rt}"
-          post_res = client.request("POST", "/todo/issues", body: URI.encode_www_form("issue[title]" => title))
-          assert_true!([200, 302, 303].include?(post_res[:status]), "crud [#{rt}]: POST /todo/issues returned #{post_res[:status]}")
-
-          index_res = client.request("GET", "/todo")
-          assert_equal!(200, index_res[:status], "crud [#{rt}]: GET /todo status")
-          assert_true!(index_res[:body].include?(title), "crud [#{rt}]: GET /todo body missing #{title.inspect}")
-
-          plan = client.sync_plan
-          refute_empty = !plan["push"].to_s.empty?
-          assert_true!(refute_empty, "crud [#{rt}]: sync_plan must carry queued create mutation")
-          assert_equal!(1, client.sync_state[:pending], "crud [#{rt}]: pending must be 1 before sync")
-
-          snap = client.snapshot_state(model_names: MODELS)
-          created = snap[:tables]["Issue"].find { |r| r["title"] == title }
-          assert_true!(!created.nil?, "crud [#{rt}]: created Issue missing from local SQLite")
-          created_ids[rt] = created["id"]
-
-          # PATCH via Rails form _method=patch.
-          patch_res = client.request("POST", "/todo/issues/#{created['id']}", body: URI.encode_www_form("_method" => "patch", "done" => "1"))
-          assert_true!([200, 302, 303].include?(patch_res[:status]), "crud [#{rt}]: PATCH returned #{patch_res[:status]}")
-
-          client.sync(ENDPOINT)
+        created_ids = clients.each_with_object({}) do |(rt, client), acc|
+          acc[rt] = create_and_patch_issue(rt, client)
         end
 
         # All runtimes now pull each other's issues and converge.
@@ -221,11 +202,36 @@ module InstantRecord
         first_rt = clients.keys.first
         victim_id = created_ids[first_rt]
         del_res = clients[first_rt].request("POST", "/todo/issues/#{victim_id}", body: URI.encode_www_form("_method" => "delete"))
-        assert_true!([200, 302, 303].include?(del_res[:status]), "crud [#{first_rt}]: DELETE returned #{del_res[:status]}")
+        assert_http_success!(del_res, "crud [#{first_rt}]: DELETE")
 
         converge_all!(clients, rounds: 2)
         snaps_after = assert_converged!(clients, label: "crud_after_delete")
         assert_equal!(clients.size - 1, snaps_after.values.first[:tables]["Issue"].size, "crud: deleted issue must be gone everywhere")
+      end
+
+      def create_and_patch_issue(rt, client)
+        title = "Parity issue from #{rt}"
+        post_res = client.request("POST", "/todo/issues", body: URI.encode_www_form("issue[title]" => title))
+        assert_http_success!(post_res, "crud [#{rt}]: POST /todo/issues")
+
+        index_res = client.request("GET", "/todo")
+        assert_equal!(200, index_res[:status], "crud [#{rt}]: GET /todo status")
+        assert_true!(index_res[:body].include?(title), "crud [#{rt}]: GET /todo body missing #{title.inspect}")
+
+        plan = client.sync_plan
+        assert_true!(!plan["push"].to_s.empty?, "crud [#{rt}]: sync_plan must carry queued create mutation")
+        assert_equal!(1, client.sync_state[:pending], "crud [#{rt}]: pending must be 1 before sync")
+
+        snap = client.snapshot_state(model_names: MODELS)
+        created = snap[:tables]["Issue"].find { |r| r["title"] == title }
+        assert_true!(!created.nil?, "crud [#{rt}]: created Issue missing from local SQLite")
+
+        # PATCH via Rails form _method=patch.
+        patch_res = client.request("POST", "/todo/issues/#{created['id']}", body: URI.encode_www_form("_method" => "patch", "done" => "1"))
+        assert_http_success!(patch_res, "crud [#{rt}]: PATCH")
+
+        client.sync(ENDPOINT)
+        created["id"]
       end
 
       # 3. Server-only validation rejection ("reject me") & rollback alongside a valid write.
@@ -281,14 +287,7 @@ module InstantRecord
           cursor_id: INT32_MAX,
           updated_at: Time.parse(updated_stamp)
         )
-        sse_payload = JSON.generate(
-          "type" => "Issue",
-          "id" => max_row[:record].id,
-          "operation" => "create",
-          "version" => INT32_MAX,
-          "attributes" => InstantRecord.wire_attributes(max_row[:record].attributes)
-        )
-        frame = "id: #{INT32_MAX}\nevent: change\ndata: #{sse_payload}\n\n"
+        frame = sse_change_frame(INT32_MAX, change_event_payload(max_row[:record], version: INT32_MAX))
 
         clients.each do |rt, client|
           res = client.consume_stream(frame)
@@ -304,11 +303,14 @@ module InstantRecord
 
       # 5. Identity scoping, switch (ada -> ben), event: reset, scoped purge vs unscoped survival.
       def scenario_identity_scoping_switch_and_reset
-        @server.server_write(model_name: "AuthNote", operation: "create", id: "n-everyone", attributes: { title: "Public note", body: "all", audience: "everyone", owner_id: "ada" })
-        @server.server_write(model_name: "AuthNote", operation: "create", id: "n-members", attributes: { title: "Members note", body: "team", audience: "members", owner_id: "ben" })
-        @server.server_write(model_name: "AuthNote", operation: "create", id: "n-admins", attributes: { title: "Payroll", body: "secret", audience: "admins", owner_id: "ada" })
-        @server.server_write(model_name: "AuthNote", operation: "create", id: "n-ada", attributes: { title: "Ada private", body: "mine", audience: "owner", owner_id: "ada" })
-        @server.server_write(model_name: "AuthNote", operation: "create", id: "n-ben", attributes: { title: "Ben private", body: "mine", audience: "owner", owner_id: "ben" })
+        IDENTITY_SEED_NOTES.each do |id, title, body, audience, owner_id|
+          @server.server_write(
+            model_name: "AuthNote",
+            operation: "create",
+            id: id,
+            attributes: { title: title, body: body, audience: audience, owner_id: owner_id }
+          )
+        end
         @server.server_write(model_name: "Issue", operation: "create", id: "i-shared", attributes: { title: "Shared unscoped issue", state: "open" })
 
         clients = spawn_clients("ident", identity: "ada")
@@ -347,7 +349,7 @@ module InstantRecord
         @server.server_write(model_name: "Issue", operation: "create", id: "boot-1", attributes: { title: "Server row 1" })
         @server.server_write(model_name: "Issue", operation: "create", id: "boot-2", attributes: { title: "Server row 2" })
 
-        %i[network_drop server_503 truncated_body].each do |abort_mode|
+        Testing::BOOTSTRAP_ABORT_MODES.each do |abort_mode|
           clients = spawn_clients("abort_#{abort_mode}")
           clients.each do |rt, client|
             # Queue a local write before bootstrap has ever succeeded.
@@ -378,14 +380,8 @@ module InstantRecord
           attributes: { title: "café — split frame", state: "open", created_at: Time.parse(stamp), updated_at: Time.parse(stamp) }
         )
         cursor = @server.current_cursor
-        payload = JSON.generate(
-          "type" => "Issue",
-          "id" => seeded.id,
-          "operation" => "create",
-          "version" => seeded.server_version,
-          "attributes" => InstantRecord.wire_attributes(seeded.attributes)
-        )
-        frame = "id: #{cursor}\nevent: change\ndata: #{payload}\n\n"
+        payload = change_event_payload(seeded)
+        frame = sse_change_frame(cursor, payload)
         part1 = frame[0, 17]
         part2 = frame[17, 29]
         part3 = frame[46..]
@@ -402,7 +398,7 @@ module InstantRecord
           assert_equal!([{ type: "Issue", id: "sse-split-1" }], r3[:changes], "sse [#{rt}]: notice must list Issue:sse-split-1")
 
           # Echo suppression: re-applying the exact same row with equal updated_at changes nothing.
-          echo_frame = "id: #{cursor + 1}\nevent: change\ndata: #{payload}\n\n"
+          echo_frame = sse_change_frame(cursor + 1, payload)
           echo = client.consume_stream(echo_frame)
           assert_equal!(0, echo[:applied], "sse [#{rt}]: identical echo must apply 0")
           assert_equal!(false, echo[:notified], "sse [#{rt}]: identical echo must stay quiet")

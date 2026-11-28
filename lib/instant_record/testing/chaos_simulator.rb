@@ -1,5 +1,3 @@
-require "json"
-
 module InstantRecord
   module Testing
     # Deterministic seeded multi-client chaos simulator.
@@ -17,11 +15,19 @@ module InstantRecord
     # then heals all partitions and asserts bit-for-bit convergence against the
     # authoritative server and across runtimes.
     class ChaosSimulator
-      MODELS = %w[Issue AuthNote].freeze
-      ENDPOINT = InstantRecord::DEFAULT_MOUNT_PATH
+      MODELS = Testing::DEFAULT_MODELS
+      ENDPOINT = Testing::DEFAULT_ENDPOINT
       IDENTITIES = [nil, "ada", "ben", "cleo"].freeze
+      OWNERS = %w[ada ben cleo].freeze
       AUDIENCES = %w[everyone members admins owner].freeze
       CLOCK_SKEWS = [-120.0, -5.0, 0.0, 0.0, 5.0, 120.0].freeze
+      SEED_NOTES = [
+        ["seed-note-public", "ada", "everyone"],
+        ["seed-note-members", "ben", "members"],
+        ["seed-note-admins", "ada", "admins"],
+        ["seed-note-ada", "ada", "owner"],
+        ["seed-note-ben", "ben", "owner"]
+      ].freeze
 
       Report = Struct.new(:seed, :steps, :clients, :runtimes, :backend, :elapsed_ms, :stats, :trace, keyword_init: true)
 
@@ -44,71 +50,55 @@ module InstantRecord
 
       def run
         started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        @server = AuthoritativeServer.build(rails_app: @rails_app, database_url: @database_url, models: MODELS)
-        @server.reset_data!
-        @network = FaultNetwork.new(@server)
-        @drivers = build_drivers
-        @clients = spawn_clients
+        Testing.with_runtime_harness(
+          runtime_names: @runtime_names,
+          artifacts: @artifacts,
+          rails_app: @rails_app,
+          database_url: @database_url,
+          models: MODELS
+        ) do |server, network, drivers|
+          @server = server
+          @network = network
+          @drivers = drivers
+          @server.reset_data!
+          @clients = spawn_clients
 
-        @out.puts "InstantRecord chaos simulation (seed=#{@seed}, steps=#{@steps}, clients=#{@clients.size}, backend=#{@server.backend_label}, runtimes=[#{@clients.map(&:runtime_name).join(',')}])"
+          @out.puts "InstantRecord chaos simulation (seed=#{@seed}, steps=#{@steps}, clients=#{@clients.size}, backend=#{@server.backend_label}, runtimes=[#{@clients.map(&:runtime_name).join(',')}])"
 
-        seed_initial_records!
-        run_chaos_steps!
-        heal_and_verify_convergence!
+          seed_initial_records!
+          run_chaos_steps!
+          heal_and_verify_convergence!
 
-        elapsed_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000).round(1)
-        @out.puts "  [PASS] seed=#{@seed} converged bit-for-bit (#{@steps} steps, #{elapsed_ms}ms, ops=#{@stats.sort.to_h})"
+          elapsed_ms = Testing.elapsed_ms(started)
+          @out.puts "  [PASS] seed=#{@seed} converged bit-for-bit (#{@steps} steps, #{elapsed_ms}ms, ops=#{@stats.sort.to_h})"
 
-        Report.new(
-          seed: @seed,
-          steps: @steps,
-          clients: @clients.size,
-          runtimes: @clients.map(&:runtime_name),
-          backend: @server.backend_label,
-          elapsed_ms: elapsed_ms,
-          stats: @stats.dup,
-          trace: @trace.dup
-        )
+          Report.new(
+            seed: @seed,
+            steps: @steps,
+            clients: @clients.size,
+            runtimes: @clients.map(&:runtime_name),
+            backend: @server.backend_label,
+            elapsed_ms: elapsed_ms,
+            stats: @stats.dup,
+            trace: @trace.dup
+          )
+        end
       rescue StandardError => e
         raise e.class, format_failure(e)
-      ensure
-        @drivers&.each_value do |driver|
-          driver.close
-        rescue StandardError
-          nil
-        end
-        @server&.close
       end
 
       private
 
-      def build_drivers
-        @runtime_names.each_with_object({}) do |rt, acc|
-          acc[rt] =
-            case rt
-            when :cruby
-              Runtimes::CRubyRuntime.new(network: @network, server: @server, model_names: MODELS)
-            when :wasm
-              Runtimes::WasmRuntime.new(
-                wasm_path: @artifacts.wasm_path,
-                web_node_modules: @artifacts.web_node_modules,
-                network: @network
-              )
-            when :native
-              Runtimes::NativeRuntime.new(
-                lib_path: @artifacts.native_lib_path,
-                network: @network
-              )
-            end
-        end
+      def sample(list)
+        list[@rng.rand(list.size)]
       end
 
       def spawn_clients
         Array.new(@client_count) do |i|
           rt = @runtime_names[i % @runtime_names.size]
           cid = "c#{i}_#{rt}"
-          identity = IDENTITIES[@rng.rand(IDENTITIES.size)]
-          skew = CLOCK_SKEWS[@rng.rand(CLOCK_SKEWS.size)]
+          identity = sample(IDENTITIES)
+          skew = sample(CLOCK_SKEWS)
           @network.register_client(cid, identity: identity, clock_skew: skew)
           record_trace("init #{cid} rt=#{rt} identity=#{identity.inspect} skew=#{skew}s")
           @drivers[rt].create_client(cid)
@@ -121,13 +111,7 @@ module InstantRecord
           @server.server_write(model_name: "Issue", operation: "create", id: id, attributes: { title: "Seed issue #{i}", state: "open" })
           @known_issue_ids << id
         end
-        [
-          ["seed-note-public", "ada", "everyone"],
-          ["seed-note-members", "ben", "members"],
-          ["seed-note-admins", "ada", "admins"],
-          ["seed-note-ada", "ada", "owner"],
-          ["seed-note-ben", "ben", "owner"]
-        ].each do |id, owner, audience|
+        SEED_NOTES.each do |id, owner, audience|
           @server.server_write(
             model_name: "AuthNote",
             operation: "create",
@@ -139,7 +123,7 @@ module InstantRecord
 
         # Guarantee at least one mid-bootstrap abort on step 0 for client 0.
         first = @clients.first
-        abort_mode = %i[network_drop server_503 truncated_body][@rng.rand(3)]
+        abort_mode = sample(Testing::BOOTSTRAP_ABORT_MODES)
         @network.arm_bootstrap_abort(first.id, abort_mode)
         record_trace("arm_bootstrap_abort #{first.id} mode=#{abort_mode}")
         @stats[:bootstrap_aborts] += 1
@@ -151,27 +135,17 @@ module InstantRecord
 
       def run_chaos_steps!
         @steps.times do |step_idx|
-          client = @clients[@rng.rand(@clients.size)]
-          roll = @rng.rand(100)
-
-          if roll < 22
-            step_local_issue_write(step_idx, client)
-          elsif roll < 34
-            step_local_auth_note_write(step_idx, client)
-          elsif roll < 44
-            step_server_write(step_idx)
-          elsif roll < 56
-            step_toggle_partition_or_skew(step_idx, client)
-          elsif roll < 74
-            step_sync_pass(step_idx, client)
-          elsif roll < 84
-            step_split_sse_stream(step_idx, client)
-          elsif roll < 92
-            step_switch_identity(step_idx, client)
-          elsif roll < 96
-            step_arm_bootstrap_abort(step_idx, client)
-          else
-            step_int32_boundary_event(step_idx)
+          client = sample(@clients)
+          case @rng.rand(100)
+          when 0...22 then step_local_issue_write(step_idx, client)
+          when 22...34 then step_local_auth_note_write(step_idx, client)
+          when 34...44 then step_server_write(step_idx)
+          when 44...56 then step_toggle_partition_or_skew(step_idx, client)
+          when 56...74 then step_sync_pass(step_idx, client)
+          when 74...84 then step_split_sse_stream(step_idx, client)
+          when 84...92 then step_switch_identity(step_idx, client)
+          when 92...96 then step_arm_bootstrap_abort(step_idx, client)
+          else step_int32_boundary_event(step_idx)
           end
 
           verify_step_invariants!(step_idx, client)
@@ -191,13 +165,13 @@ module InstantRecord
           @stats[:local_issue_create] += 1
           record_trace("step=#{step_idx} #{client.id} create Issue title=#{title.inspect} id=#{id}")
         elsif op_roll < 8
-          target = local_issues[@rng.rand(local_issues.size)]
+          target = sample(local_issues)
           new_state = target["state"] == "done" ? "open" : "done"
           client.local_write(model: "Issue", operation: "update", id: target["id"], attributes: { "state" => new_state })
           @stats[:local_issue_update] += 1
           record_trace("step=#{step_idx} #{client.id} update Issue id=#{target['id']} state=#{new_state}")
         else
-          target = local_issues[@rng.rand(local_issues.size)]
+          target = sample(local_issues)
           client.local_write(model: "Issue", operation: "destroy", id: target["id"])
           @stats[:local_issue_destroy] += 1
           record_trace("step=#{step_idx} #{client.id} destroy Issue id=#{target['id']}")
@@ -211,8 +185,8 @@ module InstantRecord
 
         if local_notes.empty? || @rng.rand(3) < 2
           # Mix authorized owner writes with occasional unauthorized owner writes (rejected by server).
-          owner = (@rng.rand(4) == 0 || policy.identity.nil?) ? %w[ada ben cleo][@rng.rand(3)] : policy.identity
-          audience = AUDIENCES[@rng.rand(AUDIENCES.size)]
+          owner = (@rng.rand(4) == 0 || policy.identity.nil?) ? sample(OWNERS) : policy.identity
+          audience = sample(AUDIENCES)
           title = "note-#{@seed}-s#{step_idx}-#{client.id}"
           id = client.local_write(
             model: "AuthNote",
@@ -223,7 +197,7 @@ module InstantRecord
           @stats[:local_note_create] += 1
           record_trace("step=#{step_idx} #{client.id} create AuthNote owner=#{owner} audience=#{audience} id=#{id}")
         else
-          target = local_notes[@rng.rand(local_notes.size)]
+          target = sample(local_notes)
           client.local_write(model: "AuthNote", operation: "destroy", id: target["id"])
           @stats[:local_note_destroy] += 1
           record_trace("step=#{step_idx} #{client.id} destroy AuthNote id=#{target['id']}")
@@ -231,7 +205,7 @@ module InstantRecord
       end
 
       def step_server_write(step_idx)
-        skew = CLOCK_SKEWS[@rng.rand(CLOCK_SKEWS.size)]
+        skew = sample(CLOCK_SKEWS)
         if @rng.rand(2) == 0
           id = "srv-issue-#{@seed}-#{step_idx}"
           @server.server_write(
@@ -244,27 +218,28 @@ module InstantRecord
           @known_issue_ids << id
           @stats[:server_write] += 1
           record_trace("step=#{step_idx} server create Issue id=#{id} clock_offset=#{skew}s")
-        else
-          mutable = @known_issue_ids.reject { |i| @boundary_ids[i] }
-          return if mutable.empty?
+          return
+        end
 
-          victim = mutable[@rng.rand(mutable.size)]
-          if @rng.rand(3) == 0
-            @server.server_write(model_name: "Issue", operation: "destroy", id: victim)
-            @stats[:server_destroy] += 1
-            record_trace("step=#{step_idx} server destroy Issue id=#{victim}")
-          else
-            state = @rng.rand(2) == 0 ? "done" : "open"
-            @server.server_write(model_name: "Issue", operation: "update", id: victim, attributes: { state: state }, clock_offset: skew)
-            @stats[:server_update] += 1
-            record_trace("step=#{step_idx} server update Issue id=#{victim} state=#{state} clock_offset=#{skew}s")
-          end
+        mutable = @known_issue_ids.reject { |i| @boundary_ids[i] }
+        return if mutable.empty?
+
+        victim = sample(mutable)
+        if @rng.rand(3) == 0
+          @server.server_write(model_name: "Issue", operation: "destroy", id: victim)
+          @stats[:server_destroy] += 1
+          record_trace("step=#{step_idx} server destroy Issue id=#{victim}")
+        else
+          state = @rng.rand(2) == 0 ? "done" : "open"
+          @server.server_write(model_name: "Issue", operation: "update", id: victim, attributes: { state: state }, clock_offset: skew)
+          @stats[:server_update] += 1
+          record_trace("step=#{step_idx} server update Issue id=#{victim} state=#{state} clock_offset=#{skew}s")
         end
       end
 
       def step_toggle_partition_or_skew(step_idx, client)
-        mode = FaultNetwork::PARTITION_MODES[@rng.rand(FaultNetwork::PARTITION_MODES.size)]
-        skew = CLOCK_SKEWS[@rng.rand(CLOCK_SKEWS.size)]
+        mode = sample(FaultNetwork::PARTITION_MODES)
+        skew = sample(CLOCK_SKEWS)
         @network.set_partition(client.id, mode)
         @network.set_clock_skew(client.id, skew)
         @stats[:partition_changes] += 1
@@ -304,14 +279,14 @@ module InstantRecord
       def step_switch_identity(step_idx, client)
         current = @network.policy(client.id).identity
         choices = IDENTITIES - [current]
-        next_id = choices[@rng.rand(choices.size)]
+        next_id = sample(choices)
         @network.set_identity(client.id, next_id)
         @stats[:identity_switches] += 1
         record_trace("step=#{step_idx} #{client.id} switch_identity #{current.inspect} -> #{next_id.inspect}")
       end
 
       def step_arm_bootstrap_abort(step_idx, client)
-        mode = %i[network_drop server_503 truncated_body][@rng.rand(3)]
+        mode = sample(Testing::BOOTSTRAP_ABORT_MODES)
         @network.arm_bootstrap_abort(client.id, mode)
         @stats[:bootstrap_aborts] += 1
         record_trace("step=#{step_idx} #{client.id} arm_bootstrap_abort mode=#{mode}")
@@ -341,6 +316,19 @@ module InstantRecord
       end
 
       def heal_and_verify_convergence!
+        drain_until_quiescent!
+
+        expected_by_identity = {}
+        snapshots_by_identity = Hash.new { |h, k| h[k] = [] }
+        @clients.each do |client|
+          identity, actual_json = verify_client_convergence!(client, expected_by_identity)
+          snapshots_by_identity[identity] << [client, actual_json]
+        end
+
+        verify_peer_agreement!(snapshots_by_identity)
+      end
+
+      def drain_until_quiescent!
         @network.heal_all!
         @clients.each { |c| @network.set_clock_skew(c.id, 0.0) }
         record_trace("heal_all: all partitions online, clock_skew=0")
@@ -359,50 +347,52 @@ module InstantRecord
             break
           end
         end
+      end
 
-        snapshots_by_identity = Hash.new { |h, k| h[k] = [] }
+      def verify_client_convergence!(client, expected_by_identity)
+        identity = @network.policy(client.id).identity
+        snap = client.snapshot_state(model_names: MODELS)
 
-        @clients.each do |client|
-          identity = @network.policy(client.id).identity
-          snap = client.snapshot_state(model_names: MODELS)
-
-          unless snap[:bootstrapped]
-            raise ConvergenceError, "#{client.id} failed to bootstrap during heal phase"
-          end
-          unless snap[:pending] == 0
-            raise ConvergenceError, "#{client.id} still has pending=#{snap[:pending]} after heal phase"
-          end
-
-          snap[:sync_states].each do |model, rows|
-            unsynced = rows.reject { |r| r["sync_state"] == "synced" }
-            unless unsynced.empty?
-              raise ConvergenceError, "#{client.id} still has unsynced #{model} rows after heal: #{unsynced.inspect}"
-            end
-          end
-
-          # Under extreme forward clock skew (> HLC::DEFAULT_MAX_DRIFT), the server
-          # intentionally clamps updated_at to server UTC while keeping HLC-anchored
-          # ordering, so chaos convergence compares every domain column, created_at,
-          # and server_version bit-for-bit across all clients and the server.
-          expected = @server.visible_state(identity: identity).transform_values do |rows|
-            InstantRecord::Testing.canonical_rows(rows, exclude_columns: %w[sync_state updated_at])
-          end
-          actual = snap[:tables].transform_values do |rows|
-            InstantRecord::Testing.canonical_rows(rows, exclude_columns: %w[sync_state updated_at])
-          end
-          expected_json = InstantRecord::Testing.canonical_json(expected)
-          actual_json = InstantRecord::Testing.canonical_json(actual)
-
-          unless actual_json == expected_json
-            raise ConvergenceError,
-              "#{client.id} (#{client.runtime_name}, identity=#{identity.inspect}) diverged from server (#{@server.backend_label}):\n" \
-              "--- server ---\n#{expected_json}\n--- #{client.id} ---\n#{actual_json}"
-          end
-
-          snapshots_by_identity[identity] << [client, actual_json]
+        unless snap[:bootstrapped]
+          raise ConvergenceError, "#{client.id} failed to bootstrap during heal phase"
+        end
+        unless snap[:pending] == 0
+          raise ConvergenceError, "#{client.id} still has pending=#{snap[:pending]} after heal phase"
         end
 
-        # Verify bit-for-bit agreement among peer clients sharing an identity.
+        snap[:sync_states].each do |model, rows|
+          unsynced = rows.reject { |r| r["sync_state"] == "synced" }
+          unless unsynced.empty?
+            raise ConvergenceError, "#{client.id} still has unsynced #{model} rows after heal: #{unsynced.inspect}"
+          end
+        end
+
+        # Under extreme forward clock skew (> HLC::DEFAULT_MAX_DRIFT), the server
+        # intentionally clamps updated_at to server UTC while keeping HLC-anchored
+        # ordering, so chaos convergence compares every domain column, created_at,
+        # and server_version bit-for-bit across all clients and the server.
+        expected_json = expected_by_identity.fetch(identity) do
+          expected_by_identity[identity] = canonical_chaos_tables(@server.visible_state(identity: identity))
+        end
+        actual_json = canonical_chaos_tables(snap[:tables])
+
+        unless actual_json == expected_json
+          raise ConvergenceError,
+            "#{client.id} (#{client.runtime_name}, identity=#{identity.inspect}) diverged from server (#{@server.backend_label}):\n" \
+            "--- server ---\n#{expected_json}\n--- #{client.id} ---\n#{actual_json}"
+        end
+
+        [identity, actual_json]
+      end
+
+      def canonical_chaos_tables(tables)
+        normalized = tables.transform_values do |rows|
+          Testing.canonical_rows(rows, exclude_columns: %w[sync_state updated_at])
+        end
+        Testing.canonical_json(normalized)
+      end
+
+      def verify_peer_agreement!(snapshots_by_identity)
         snapshots_by_identity.each do |identity, list|
           next if list.size < 2
 

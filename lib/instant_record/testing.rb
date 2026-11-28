@@ -3,14 +3,6 @@ require "pathname"
 require "rbconfig"
 require "time"
 require_relative "compiler"
-require_relative "testing/authoritative_server"
-require_relative "testing/fault_network"
-require_relative "testing/runtimes/base"
-require_relative "testing/runtimes/cruby_runtime"
-require_relative "testing/runtimes/wasm_runtime"
-require_relative "testing/runtimes/native_runtime"
-require_relative "testing/parity_suite"
-require_relative "testing/chaos_simulator"
 
 module InstantRecord
   # CI-ready headless dual-runtime parity and seeded chaos simulation harness.
@@ -20,6 +12,10 @@ module InstantRecord
   module Testing
     INT32_MAX = 2_147_483_647
     INT32_MIN = -2_147_483_648
+
+    DEFAULT_MODELS = %w[Issue AuthNote].freeze
+    DEFAULT_ENDPOINT = InstantRecord::DEFAULT_MOUNT_PATH
+    BOOTSTRAP_ABORT_MODES = %i[network_drop server_503 truncated_body].freeze
 
     Error = Class.new(StandardError)
     ParityMismatch = Class.new(Error)
@@ -156,6 +152,62 @@ module InstantRecord
         JSON.pretty_generate(deep_sort(object))
       end
 
+      def elapsed_ms(started)
+        ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - started) * 1000).round(1)
+      end
+
+      def build_drivers(runtime_names:, artifacts:, network:, server:, models: DEFAULT_MODELS)
+        drivers = {}
+        Array(runtime_names).map(&:to_sym).uniq.each do |sym|
+          drivers[sym] =
+            case sym
+            when :cruby
+              Runtimes::CRubyRuntime.new(network: network, server: server, model_names: models)
+            when :wasm
+              Runtimes::WasmRuntime.new(
+                wasm_path: artifacts.wasm_path,
+                web_node_modules: artifacts.web_node_modules,
+                network: network
+              )
+            when :native
+              Runtimes::NativeRuntime.new(
+                lib_path: artifacts.native_lib_path,
+                network: network
+              )
+            else
+              raise ArgumentError, "Unknown runtime: #{sym.inspect}. Expected cruby, wasm, or native."
+            end
+        end
+        drivers
+      rescue StandardError
+        close_drivers(drivers)
+        raise
+      end
+
+      def close_drivers(drivers, server: nil)
+        drivers&.each_value do |driver|
+          driver&.close
+        rescue StandardError
+          nil
+        end
+        server&.close
+      end
+
+      def with_runtime_harness(runtime_names:, artifacts:, rails_app: nil, database_url: nil, models: DEFAULT_MODELS)
+        server = AuthoritativeServer.build(rails_app: rails_app, database_url: database_url, models: models)
+        network = FaultNetwork.new(server)
+        drivers = build_drivers(
+          runtime_names: runtime_names,
+          artifacts: artifacts,
+          network: network,
+          server: server,
+          models: models
+        )
+        yield server, network, drivers
+      ensure
+        close_drivers(drivers, server: server)
+      end
+
       def verify_parity(
         rails_app: nil,
         root: nil,
@@ -168,14 +220,15 @@ module InstantRecord
         require_compiled: ENV["REQUIRE_COMPILED"] == "1",
         out: $stdout
       )
-        artifacts = resolve_artifacts(
+        artifacts, selected = prepare_runtimes(
           root: root,
+          runtimes: runtimes,
           wasm_path: wasm_path,
           native_lib_path: native_lib_path,
           toolchain: toolchain,
-          build: build
+          build: build,
+          require_compiled: require_compiled
         )
-        selected = select_runtimes(requested: runtimes, artifacts: artifacts, require_compiled: require_compiled)
 
         suite = ParitySuite.new(
           runtimes: selected,
@@ -202,17 +255,18 @@ module InstantRecord
         require_compiled: ENV["REQUIRE_COMPILED"] == "1",
         out: $stdout
       )
-        artifacts = resolve_artifacts(
+        artifacts, selected = prepare_runtimes(
           root: root,
+          runtimes: runtimes,
           wasm_path: wasm_path,
           native_lib_path: native_lib_path,
           toolchain: toolchain,
-          build: build
+          build: build,
+          require_compiled: require_compiled
         )
-        selected = select_runtimes(requested: runtimes, artifacts: artifacts, require_compiled: require_compiled)
         seed_list = resolve_seeds(seeds)
 
-        reports = seed_list.map do |seed|
+        seed_list.map do |seed|
           sim = ChaosSimulator.new(
             seed: seed,
             steps: steps,
@@ -225,10 +279,21 @@ module InstantRecord
           )
           sim.run
         end
-        reports
       end
 
       private
+
+      def prepare_runtimes(root:, runtimes:, wasm_path:, native_lib_path:, toolchain:, build:, require_compiled:)
+        artifacts = resolve_artifacts(
+          root: root,
+          wasm_path: wasm_path,
+          native_lib_path: native_lib_path,
+          toolchain: toolchain,
+          build: build
+        )
+        selected = select_runtimes(requested: runtimes, artifacts: artifacts, require_compiled: require_compiled)
+        [artifacts, selected]
+      end
 
       def resolve_seeds(seeds)
         if seeds
@@ -331,3 +396,12 @@ module InstantRecord
     end
   end
 end
+
+require_relative "testing/authoritative_server"
+require_relative "testing/fault_network"
+require_relative "testing/runtimes/base"
+require_relative "testing/runtimes/cruby_runtime"
+require_relative "testing/runtimes/wasm_runtime"
+require_relative "testing/runtimes/native_runtime"
+require_relative "testing/parity_suite"
+require_relative "testing/chaos_simulator"
