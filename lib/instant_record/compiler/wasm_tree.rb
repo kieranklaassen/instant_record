@@ -335,6 +335,56 @@ module InstantRecord
         RUBY
       }.freeze
 
+      IGNORE_SET = IGNORE_PATTERNS.to_h { |name| [name, true] }.freeze
+      THREAD_REPLACEMENT = 'Wasm\0'.freeze
+      TIMEOUT_REQUIRE = 'require "timeout"'.freeze
+      TIMEOUT_COMMENT = '# require "timeout"  (wasm: see runtime/wasm_threads.rb)'.freeze
+      OPENSSL_REQUIRE = 'require "openssl"'.freeze
+      OPENSSL_COMMENT = '# require "openssl"  (wasm: no OpenSSL build)'.freeze
+      AES_ANCHOR = "  def self.aes_256_gcm_encrypt".freeze
+      SQLITE_PREFIX = "sqlite3_".freeze
+      SQLITE_SHIM_RE = /sqlite3_(?:bind_int64|last_insert_rowid)/
+      SQLITE_SHIM_REPLACEMENT = 'rh_\0'.freeze
+      READ_TRACKER_HOOK = "InstantRecord::ReadTracker.record_sql(sql)".freeze
+      READ_TRACKER_MARKER = "(sql".freeze
+      READ_TRACKER_RE = /^(\s*)def (?:self\.)?(?:each_row|select_all|select_rows|select_value|select_values|query|exec_query)\(sql\b[^\n]*\)\n/
+      READ_TRACKER_REPLACEMENT = "\\0\\1  #{READ_TRACKER_HOOK}\n".freeze
+      DATETIME_CAST_RE = /(if name == "(\w+_at)"\n\s+if respond_to\?\(:\2=\)\n\s+self\.\2 = )value\n/
+      DATETIME_CAST_REPLACEMENT = ('\1ActiveSupport.cast_datetime(value)' + "\n").freeze
+      REMOTE_TIMESTAMP_TARGET = "if !(creating) || @updated_at_raw.nil? || @updated_at_raw.empty?".freeze
+      REMOTE_TIMESTAMP_REPLACEMENT = "if (!(creating) && !InstantRecord::Client.applying_remote?) || @updated_at_raw.nil? || @updated_at_raw.empty?".freeze
+      UPDATE_BANG_MARKER = "def update!(attrs)\n".freeze
+      UPDATE_BANG_RE = /^( *)def update!\(attrs\)\n(?! *attrs = attrs\.to_h )/
+      UPDATE_BANG_REPLACEMENT = "\\0\\1  #{SYMBOLIZE_ATTRS}\n".freeze
+      CHANGED_ANCHOR = "    def has_changes_to_save?\n".freeze
+      QUOTING_ANCHOR = "    def quote_string(str)\n".freeze
+      QUOTE_COL_DEF = "def quote_column_name(".freeze
+      QUOTE_TABLE_DEF = "def quote_table_name(".freeze
+      EACH_WITH_INDEX = "each_with_index".freeze
+      RAW_CAP_CALL = "ActionView::ViewHelpers.raw(_cap)".freeze
+      RAW_CAP_REPLACEMENT = "io << _cap".freeze
+      BOGUS_FORM_ATTR = '#{ActionView::ViewHelpers.tag_attr("form", { data: { turbo: false, action: "submit->issues#submit" } })}'.freeze
+      BUTTON_TO_CLASS = 'class=\"#{"button_to"}\">'.freeze
+      BUTTON_TO_PATCHED = 'class=\"#{"button_to"}\" data-turbo=\"false\" data-action=\"submit-&gt;issues#submit\">'.freeze
+      EMPTY_STR = "".freeze
+      RB_EXT = ".rb".freeze
+      DOT_PREFIX = ".".freeze
+      NEWLINE = "\n".freeze
+      REQUIRE_LINE_RE = /^require(?:_relative)? /
+      WASM_THREADS_REQUIRE = "require_relative \"runtime/wasm_threads\"\n".freeze
+      CREATE_EXCL_TEXT_MODE = File::WRONLY | File::CREAT | File::EXCL
+      CREATE_TRUNC_TEXT_MODE = File::WRONLY | File::CREAT | File::TRUNC
+      CREATE_EXCL_BIN_MODE = FileCopy::CREATE_EXCL_MODE
+      CREATE_TRUNC_BIN_MODE = FileCopy::CREATE_TRUNC_MODE
+      SMALL_FILE_THRESHOLD = FileCopy::SMALL_FILE_THRESHOLD
+
+      PRUNED_HEADERS = PRUNED_STUBS.each_with_object({}) do |(rel, stub), by_dir|
+        runtime_rel = rel.delete_prefix("runtime/")
+        dir = File.dirname(runtime_rel)
+        dir = nil if dir == "."
+        (by_dir[dir] ||= {})[File.basename(runtime_rel)] = "# Pruned for browser wasm (see WasmTree)\n#{stub}".freeze
+      end.each_value(&:freeze).freeze
+
       def self.build(source:, target:, demo: false)
         new(source: source, target: target, demo: demo).run
       end
@@ -346,22 +396,23 @@ module InstantRecord
       end
 
       def run
-        FileUtils.rm_rf(@target)
-        FileCopy.copy_tree(@source, @target, ignore: IGNORE_PATTERNS)
+        remove_if_present(@target)
 
-        touched = adapt_threading_and_timeout
-        patch_message_digest
-        patch_sqlite_shims
-        patch_read_tracking
-        patch_models
-        patch_active_record_changed
-        patch_connection_quoting
-        patch_emitted_views
-        patch_slack_sidebar if @demo
-        prepend_wasm_threads_require
-        pruned_lines = @demo ? prune_dead_subsystems : 0
+        @touched = 0
+        @pruned_lines = 0
+        @wrote_wasm_threads = false
+        @seen_required = {}
+        @deferred_errors = {}
 
-        { touched: touched, pruned_lines: pruned_lines }
+        source_str = strip_trailing_separators(@source)
+        target_str = strip_trailing_separators(@target)
+        root_stat = File.stat(source_str)
+        seen = {}
+
+        walk_dir(source_str, target_str, root_stat, seen, :root, nil, top: true)
+        finalize_and_validate!
+
+        { touched: @touched, pruned_lines: @pruned_lines }
       end
 
       private
@@ -370,177 +421,363 @@ module InstantRecord
         File.join(@target, rel)
       end
 
-      def ruby_files(folder)
-        dir = target_path(folder)
-        Dir.glob("**/*.rb", base: dir).sort.map { |rel| File.join(dir, rel) }
+      def strip_trailing_separators(path)
+        str = File.path(path)
+        str = str.chomp(File::SEPARATOR) while str.length > 1 && str.end_with?(File::SEPARATOR)
+        str
       end
 
-      def rewrite(path)
-        text = File.read(path)
-        updated = yield text
-        File.write(path, updated) if updated != text
+      def remove_if_present(path)
+        File.lstat(path)
+        FileUtils.rm_rf(path)
+      rescue Errno::ENOENT, Errno::ENOTDIR
+        nil
       end
 
-      def adapt_threading_and_timeout
-        entries = %w[boot.rb main_wasm.rb].map { |name| target_path(name) }
-        touched = 0
-        (entries + ruby_files("runtime") + ruby_files("config")).each do |path|
-          rewrite(path) do |text|
-            renamed = text.gsub(THREAD_CONSTANT_RE, 'Wasm\0')
-            touched += 1 if renamed != text
-            renamed.gsub('require "timeout"', '# require "timeout"  (wasm: see runtime/wasm_threads.rb)')
+      def walk_dir(src_dir, dst_dir, dir_stat, seen, zone, sub_rel, top:)
+        dev_seen = (seen[dir_stat.dev] ||= {})
+        ino = dir_stat.ino
+        return if dev_seen.key?(ino)
+
+        dev_seen[ino] = true
+        begin
+          begin
+            Dir.mkdir(dst_dir)
+          rescue Errno::ENOENT
+            raise unless top
+
+            FileUtils.mkdir_p(dst_dir)
+          rescue Errno::EEXIST
+            raise unless File.directory?(dst_dir)
+          end
+
+          if top
+            target_stat = File.stat(dst_dir)
+            (seen[target_stat.dev] ||= {})[target_stat.ino] = true
+          end
+
+          pruned_dir_map = (zone == :runtime && @demo) ? PRUNED_HEADERS[sub_rel] : nil
+
+          Dir.each_child(src_dir) do |name|
+            next if IGNORE_SET.key?(name)
+
+            src = "#{src_dir}/#{name}"
+            dest = "#{dst_dir}/#{name}"
+            stat = File.stat(src)
+
+            if stat.directory?
+              child_zone, child_sub_rel = next_dir_zone(zone, sub_rel, name)
+              walk_dir(src, dest, stat, seen, child_zone, child_sub_rel, top: false)
+            else
+              process_file(src, dest, stat, zone, sub_rel, name, pruned_dir_map)
+            end
+          end
+        ensure
+          dev_seen.delete(ino)
+        end
+      end
+
+      def next_dir_zone(zone, sub_rel, name)
+        case zone
+        when :root
+          case name
+          when "runtime" then [:runtime, nil]
+          when "config" then [:config, nil]
+          when "app" then [:app, nil]
+          else [nil, nil]
+          end
+        when :app
+          case name
+          when "models" then [:models, nil]
+          when "views" then [:views, nil]
+          else [nil, nil]
+          end
+        when :runtime
+          return [nil, nil] if name.start_with?(DOT_PREFIX)
+
+          [:runtime, sub_rel ? "#{sub_rel}/#{name}" : name]
+        when :config, :models
+          return [nil, nil] if name.start_with?(DOT_PREFIX)
+
+          [zone, nil]
+        when :views
+          return [nil, nil] if name.start_with?(DOT_PREFIX)
+          return [:views_slack, nil] if @demo && name == "slack"
+
+          [:views, nil]
+        when :views_slack
+          return [nil, nil] if name.start_with?(DOT_PREFIX)
+          return [:views_slack_channels, nil] if name == "channels"
+
+          [:views, nil]
+        when :views_slack_channels
+          return [nil, nil] if name.start_with?(DOT_PREFIX)
+
+          [:views, nil]
+        else
+          [nil, nil]
+        end
+      end
+
+      def process_file(src, dest, stat, zone, sub_rel, name, pruned_dir_map)
+        case zone
+        when :root
+          if name == "boot.rb"
+            @seen_required[:boot] = true
+            text = File.read(src)
+            transform_threading_and_timeout!(text)
+            transform_boot!(text)
+            write_file(dest, text, stat, src, binary: false)
+            return
+          elsif name == "main_wasm.rb"
+            @seen_required[:main_wasm] = true
+            text = File.read(src)
+            transform_threading_and_timeout!(text)
+            write_file(dest, text, stat, src, binary: false)
+            return
+          end
+        when :runtime
+          if name.end_with?(RB_EXT) && !name.start_with?(DOT_PREFIX)
+            process_runtime_file(src, dest, stat, sub_rel, name, pruned_dir_map)
+            return
+          end
+        when :config
+          if name.end_with?(RB_EXT) && !name.start_with?(DOT_PREFIX)
+            text = File.read(src)
+            transform_threading_and_timeout!(text)
+            write_file(dest, text, stat, src, binary: false)
+            return
+          end
+        when :models
+          if name.end_with?(RB_EXT) && !name.start_with?(DOT_PREFIX)
+            text = File.read(src)
+            transform_model!(text)
+            write_file(dest, text, stat, src, binary: false)
+            return
+          end
+        when :views, :views_slack, :views_slack_channels
+          if name.end_with?(RB_EXT) && !name.start_with?(DOT_PREFIX)
+            text = File.read(src)
+            transform_emitted_view!(text)
+            if zone == :views_slack_channels && name == "_sidebar.rb"
+              @seen_required[:slack_sidebar] = true
+              text = transform_slack_sidebar(text)
+            end
+            write_file(dest, text, stat, src, binary: false)
+            return
           end
         end
-        File.write(target_path("runtime/wasm_threads.rb"), WASM_THREADS_RB)
-        touched
+
+        copy_verbatim_file(src, dest, stat)
       end
 
-      def patch_message_digest
-        path = target_path("runtime/message_digest.rb")
-        rewrite(path) do |text|
-          start = text.index("  def self.aes_256_gcm_encrypt")
-          raise BuildError, "Expected aes_256_gcm_encrypt in #{path}" unless start
-
-          head = text[0...start].gsub('require "openssl"', '# require "openssl"  (wasm: no OpenSSL build)')
-          head + AES_STUB
+      def process_runtime_file(src, dest, stat, sub_rel, name, pruned_dir_map)
+        if sub_rel.nil? && name == "wasm_threads.rb"
+          text = File.read(src)
+          @touched += 1 if text.match?(THREAD_CONSTANT_RE)
+          write_file(dest, WASM_THREADS_RB, stat, src, binary: false)
+          @wrote_wasm_threads = true
+          return
         end
-      end
 
-      def patch_sqlite_shims
-        rewrite(target_path("runtime/db.rb")) do |text|
-          text.gsub(/sqlite3_(?:bind_int64|last_insert_rowid)/, 'rh_\0')
+        if pruned_dir_map && (stub = pruned_dir_map[name]) && stat.file?
+          text = File.read(src)
+          @touched += 1 if text.match?(THREAD_CONSTANT_RE)
+          @pruned_lines += text.count(NEWLINE)
+          write_file(dest, stub, stat, src, binary: false)
+          return
         end
-      end
 
-      def patch_read_tracking
-        path = target_path("runtime/sqlite_adapter.rb")
-        return unless File.file?(path)
+        text = File.read(src)
+        transform_threading_and_timeout!(text)
 
-        hook = "InstantRecord::ReadTracker.record_sql(sql)"
-        rewrite(path) do |text|
-          next text if text.include?(hook)
-
-          text.gsub(
-            /^(\s*)def (?:self\.)?(?:each_row|select_all|select_rows|select_value|select_values|query|exec_query)\(sql\b[^\n]*\)\n/,
-            "\\0\\1  #{hook}\n"
-          )
-        end
-      end
-
-      def patch_models
-        ruby_files("app/models").each do |path|
-          rewrite(path) do |text|
-            text = patch_model_datetime_casts(text)
-            text = patch_model_remote_timestamps(text)
-            patch_model_update_keys(text)
+        if sub_rel.nil?
+          case name
+          when "message_digest.rb"
+            @seen_required[:message_digest] = true
+            text = transform_message_digest(text)
+          when "db.rb"
+            @seen_required[:db] = true
+            text.gsub!(SQLITE_SHIM_RE, SQLITE_SHIM_REPLACEMENT) if text.include?(SQLITE_PREFIX)
+          when "sqlite_adapter.rb"
+            transform_read_tracking!(text) if stat.file?
+          end
+        elsif sub_rel == "active_record"
+          case name
+          when "base.rb"
+            @seen_required[:active_record_base] = true
+            transform_active_record_changed!(text)
+          when "connection.rb"
+            if stat.file?
+              @seen_required[:connection] = true
+              transform_connection_quoting!(text)
+            end
           end
         end
+
+        write_file(dest, text, stat, src, binary: false)
       end
 
-      def patch_model_datetime_casts(text)
-        text.gsub(
-          /(if name == "(\w+_at)"\n\s+if respond_to\?\(:\2=\)\n\s+self\.\2 = )value\n/,
-          '\1ActiveSupport.cast_datetime(value)' + "\n"
-        )
-      end
-
-      # Roundhouse's generated fill_timestamps unconditionally stamps
-      # updated_at = db_now on every UPDATE, clobbering the server's
-      # authoritative timestamp during upsert_from_server. Preserve the
-      # incoming server timestamp while applying_remote? is active.
-      def patch_model_remote_timestamps(text)
-        text.gsub(
-          "if !(creating) || @updated_at_raw.nil? || @updated_at_raw.empty?",
-          "if (!(creating) && !InstantRecord::Client.applying_remote?) || @updated_at_raw.nil? || @updated_at_raw.empty?"
-        )
-      end
-
-      # A generated update and initialize turn String keys into Symbols; the
-      # generated update! does not, so it saves without the fields and succeeds.
-      def patch_model_update_keys(text)
-        text.gsub(/^( *)def update!\(attrs\)\n(?! *attrs = attrs\.to_h )/) { "#{$&}#{$1}  #{SYMBOLIZE_ATTRS}\n" }
-      end
-
-      def patch_active_record_changed
-        path = target_path("runtime/active_record/base.rb")
-        anchor = "    def has_changes_to_save?\n"
-        rewrite(path) do |text|
-          raise BuildError, "Expected #{anchor.strip} in #{path}" unless text.include?(anchor)
-
-          text.sub(anchor) { CHANGED_METHOD + anchor }
+      def copy_verbatim_file(src, dest, stat)
+        if stat.file? && stat.size <= SMALL_FILE_THRESHOLD
+          write_file(dest, File.binread(src), stat, src, binary: true)
+        else
+          FileCopy.copy_file(src, dest, stat)
         end
+      end
+
+      def write_file(dest, data, stat, src, binary:)
+        mode = stat.mode & 0o777
+        excl = binary ? CREATE_EXCL_BIN_MODE : CREATE_EXCL_TEXT_MODE
+        f = File.open(dest, excl, mode)
+        begin
+          f.binmode if binary
+          f.write(data)
+        ensure
+          f.close
+        end
+      rescue Errno::EEXIST
+        dest_stat = begin
+          File.stat(dest)
+        rescue SystemCallError
+          nil
+        end
+        if dest_stat && dest_stat.dev == stat.dev && dest_stat.ino == stat.ino
+          raise ArgumentError, "same file: #{src} and #{dest}"
+        end
+
+        trunc = binary ? CREATE_TRUNC_BIN_MODE : CREATE_TRUNC_TEXT_MODE
+        f = File.open(dest, trunc, mode)
+        begin
+          f.binmode if binary
+          f.write(data)
+        ensure
+          f.close
+        end
+      end
+
+      def transform_threading_and_timeout!(text)
+        if text.match?(THREAD_CONSTANT_RE)
+          text.gsub!(THREAD_CONSTANT_RE, THREAD_REPLACEMENT)
+          @touched += 1
+        end
+        text.gsub!(TIMEOUT_REQUIRE, TIMEOUT_COMMENT) if text.include?(TIMEOUT_REQUIRE)
+        text
+      end
+
+      def transform_message_digest(text)
+        start = text.index(AES_ANCHOR)
+        unless start
+          @deferred_errors[:message_digest] = "Expected aes_256_gcm_encrypt in #{target_path('runtime/message_digest.rb')}"
+          return text
+        end
+
+        head = text[0...start]
+        head.gsub!(OPENSSL_REQUIRE, OPENSSL_COMMENT) if head.include?(OPENSSL_REQUIRE)
+        head << AES_STUB
+      end
+
+      def transform_read_tracking!(text)
+        return text if text.include?(READ_TRACKER_HOOK) || !text.include?(READ_TRACKER_MARKER)
+
+        text.gsub!(READ_TRACKER_RE, READ_TRACKER_REPLACEMENT) if text.match?(READ_TRACKER_RE)
+        text
+      end
+
+      def transform_model!(text)
+        text.gsub!(DATETIME_CAST_RE, DATETIME_CAST_REPLACEMENT) if text.match?(DATETIME_CAST_RE)
+        # Roundhouse's generated fill_timestamps unconditionally stamps
+        # updated_at = db_now on every UPDATE, clobbering the server's
+        # authoritative timestamp during upsert_from_server. Preserve the
+        # incoming server timestamp while applying_remote? is active.
+        text.gsub!(REMOTE_TIMESTAMP_TARGET, REMOTE_TIMESTAMP_REPLACEMENT) if text.include?(REMOTE_TIMESTAMP_TARGET)
+        # A generated update and initialize turn String keys into Symbols; the
+        # generated update! does not, so it saves without the fields and succeeds.
+        if text.include?(UPDATE_BANG_MARKER) && text.match?(UPDATE_BANG_RE)
+          text.gsub!(UPDATE_BANG_RE, UPDATE_BANG_REPLACEMENT)
+        end
+        text
+      end
+
+      def transform_active_record_changed!(text)
+        idx = text.index(CHANGED_ANCHOR)
+        unless idx
+          @deferred_errors[:active_record_base] = "Expected #{CHANGED_ANCHOR.strip} in #{target_path('runtime/active_record/base.rb')}"
+          return text
+        end
+
+        text.insert(idx, CHANGED_METHOD)
       end
 
       # The emitted Connection has no identifier quoting, which SyncWindow's SQL
       # is built with. These quote as Rails does for SQLite.
-      def patch_connection_quoting
-        path = target_path("runtime/active_record/connection.rb")
-        raise BuildError, "Expected #{path}" unless File.file?(path)
+      def transform_connection_quoting!(text)
+        given = (text.include?(QUOTE_COL_DEF) ? 1 : 0) + (text.include?(QUOTE_TABLE_DEF) ? 1 : 0)
+        return text if given == 2
 
-        anchor = "    def quote_string(str)\n"
-        rewrite(path) do |text|
-          given = %w[quote_column_name quote_table_name].count { |name| text.include?("def #{name}(") }
-          next text if given == 2
-          raise BuildError, "Expected #{anchor.strip} and both or neither quoting method in #{path}" unless given.zero? && text.include?(anchor)
-
-          text.sub(anchor) { QUOTING_METHODS + anchor }
+        idx = given.zero? ? text.index(QUOTING_ANCHOR) : nil
+        unless idx
+          @deferred_errors[:connection] = "Expected #{QUOTING_ANCHOR.strip} and both or neither quoting method in #{target_path('runtime/active_record/connection.rb')}"
+          return text
         end
+
+        text.insert(idx, QUOTING_METHODS)
       end
 
-      def patch_emitted_views
-        bogus = '#{ActionView::ViewHelpers.tag_attr("form", { data: { turbo: false, action: "submit->issues#submit" } })}'
-        ruby_files("app/views").each do |path|
-          rewrite(path) do |text|
-            if text.include?("each_with_index") && text.include?("ActionView::ViewHelpers.raw(_cap)")
-              text = text.gsub("ActionView::ViewHelpers.raw(_cap)", "io << _cap")
-            end
-            if text.include?(bogus)
-              text = text.gsub(bogus, "")
-              text = text.gsub(
-                'class=\"#{"button_to"}\">',
-                'class=\"#{"button_to"}\" data-turbo=\"false\" data-action=\"submit-&gt;issues#submit\">'
-              )
-            end
-            text
-          end
+      def transform_emitted_view!(text)
+        if text.include?(EACH_WITH_INDEX) && text.include?(RAW_CAP_CALL)
+          text.gsub!(RAW_CAP_CALL, RAW_CAP_REPLACEMENT)
         end
+        if text.include?(BOGUS_FORM_ATTR)
+          text.gsub!(BOGUS_FORM_ATTR, EMPTY_STR)
+          text.gsub!(BUTTON_TO_CLASS, BUTTON_TO_PATCHED) if text.include?(BUTTON_TO_CLASS)
+        end
+        text
       end
 
-      def patch_slack_sidebar
-        sidebar = target_path("app/views/slack/channels/_sidebar.rb")
-        rewrite(sidebar) do |text|
-          start = text.index("channels.each do |channel|")
-          stop = start && text.index("dms.each do", start)
-          raise BuildError, "Expected channel loop in #{sidebar}" unless start && stop
-
-          loop_body = text[start...stop].gsub(/\bchannel\b/, "channel_row").gsub("channel_row == channel_row", "channel_row == channel")
-          text[0...start] + loop_body + text[stop..]
+      def transform_slack_sidebar(text)
+        start = text.index("channels.each do |channel|")
+        stop = start && text.index("dms.each do", start)
+        unless start && stop
+          @deferred_errors[:slack_sidebar] = "Expected channel loop in #{target_path('app/views/slack/channels/_sidebar.rb')}"
+          return text
         end
+
+        loop_body = text[start...stop]
+        loop_body.gsub!(/\bchannel\b/, "channel_row")
+        loop_body.gsub!("channel_row == channel_row", "channel_row == channel")
+        text[0...start] << loop_body << text[stop..]
       end
 
-      def prepend_wasm_threads_require
-        boot = target_path("boot.rb")
-        rewrite(boot) do |text|
-          match = text.match(/^require(?:_relative)? /)
-          raise BuildError, "Expected require line in #{boot}" unless match
-
-          first = match.begin(0)
-          text[0...first] + "require_relative \"runtime/wasm_threads\"\n" + text[first..]
+      def transform_boot!(text)
+        match = text.match(REQUIRE_LINE_RE)
+        unless match
+          @deferred_errors[:boot] = "Expected require line in #{target_path('boot.rb')}"
+          return text
         end
+
+        text.insert(match.begin(0), WASM_THREADS_REQUIRE)
       end
 
-      def prune_dead_subsystems
-        pruned_lines = 0
-        PRUNED_STUBS.each do |rel, stub|
-          path = target_path(rel)
-          next unless File.file?(path)
-
-          rewrite(path) do |text|
-            pruned_lines += text.count("\n")
-            "# Pruned for browser wasm (see WasmTree)\n#{stub}"
-          end
+      def finalize_and_validate!
+        File.read(target_path("boot.rb")) unless @seen_required[:boot]
+        File.read(target_path("main_wasm.rb")) unless @seen_required[:main_wasm]
+        File.write(target_path("runtime/wasm_threads.rb"), WASM_THREADS_RB) unless @wrote_wasm_threads
+        validate_required_file!(:message_digest, "runtime/message_digest.rb")
+        File.read(target_path("runtime/db.rb")) unless @seen_required[:db]
+        validate_required_file!(:active_record_base, "runtime/active_record/base.rb")
+        unless @seen_required[:connection]
+          raise BuildError, "Expected #{target_path('runtime/active_record/connection.rb')}"
         end
-        pruned_lines
+        raise BuildError, @deferred_errors[:connection] if @deferred_errors[:connection]
+
+        validate_required_file!(:slack_sidebar, "app/views/slack/channels/_sidebar.rb") if @demo
+        raise BuildError, @deferred_errors[:boot] if @deferred_errors[:boot]
+      end
+
+      def validate_required_file!(key, rel)
+        File.read(target_path(rel)) unless @seen_required[key]
+        raise BuildError, @deferred_errors[key] if @deferred_errors[key]
       end
     end
   end
