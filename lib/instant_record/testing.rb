@@ -17,6 +17,21 @@ module InstantRecord
     DEFAULT_ENDPOINT = InstantRecord::DEFAULT_MOUNT_PATH
     BOOTSTRAP_ABORT_MODES = %i[network_drop server_503 truncated_body].freeze
 
+    DEFAULT_EXCLUDE_COLUMNS = %w[sync_state].freeze
+    DEFAULT_EXCLUDED_SET = { "sync_state" => true }.freeze
+    ROW_KEY_MISSING = Object.new.freeze
+    UTC_SUFFIX_Z = "Z".freeze
+    ZERO_FRAC_SUFFIX = ".#{'0' * InstantRecord::TIME_PRECISION}Z".freeze
+    ZERO_FRAC_PADS = Array.new(InstantRecord::TIME_PRECISION) { |n| "#{'0' * n}Z".freeze }.freeze
+    SQLITE_UTC_FALLBACK_RE = /\A\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?\z/
+    FAST_UTC_FIXED_RE = /\A\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\d|30)|02-(?:0[1-9]|1\d|2[0-8]))[ T](?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d\.\d{#{InstantRecord::TIME_PRECISION}}Z?\z/
+    FAST_UTC_GENERAL_RE = /\A\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\d|30)|02-(?:0[1-9]|1\d|2[0-9]))[ Tt](?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:[Zz]|[+-]00(?::?00)?)?\z/
+    FAST_OFFSET_RE = /\A\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\d|30)|02-(?:0[1-9]|1\d|2[0-9]))[ Tt](?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?[+-](?:[01]\d|2[0-3]):?[0-5]\d\z/
+    private_constant :DEFAULT_EXCLUDE_COLUMNS, :DEFAULT_EXCLUDED_SET, :ROW_KEY_MISSING,
+                     :UTC_SUFFIX_Z, :ZERO_FRAC_SUFFIX, :ZERO_FRAC_PADS,
+                     :SQLITE_UTC_FALLBACK_RE, :FAST_UTC_FIXED_RE, :FAST_UTC_GENERAL_RE,
+                     :FAST_OFFSET_RE
+
     Error = Class.new(StandardError)
     ParityMismatch = Class.new(Error)
     StderrError = Class.new(Error)
@@ -103,49 +118,199 @@ module InstantRecord
       def canonical_value(column, value)
         return nil if value.nil?
 
-        col = column.to_s
+        col = column.instance_of?(String) ? column : column.to_s
         if col.end_with?("_at")
           canonical_timestamp(value)
         elsif col == "server_version" || col == "word_count" || col == "revision"
-          value.to_i
-        elsif value == true || value == false
-          value
-        elsif value.is_a?(Integer)
+          value.is_a?(Integer) ? value : value.to_i
+        elsif value.instance_of?(String)
+          value.encoding == Encoding::UTF_8 ? value : value.encode(Encoding::UTF_8)
+        elsif value == true || value == false || value.is_a?(Integer)
           value
         else
-          value.to_s.encode(Encoding::UTF_8)
+          str = value.to_s
+          str.encoding == Encoding::UTF_8 ? str : str.encode(Encoding::UTF_8)
         end
       end
 
       def canonical_timestamp(value)
-        time =
-          if value.is_a?(Time)
-            value.utc
-          else
-            str = value.to_s.strip
-            return nil if str.empty?
+        if value.is_a?(Time)
+          time = value.instance_of?(Time) ? (value.utc? ? value : value.getutc) : value.utc
+          return time.iso8601(InstantRecord::TIME_PRECISION)
+        end
 
-            # SQLite stores UTC timestamps without zone suffix ("YYYY-MM-DD HH:MM:SS.ffffff").
-            if str.match?(/\A\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?\z/)
-              Time.parse("#{str.tr(' ', 'T')}Z").utc
-            else
-              Time.parse(str).utc
+        str = value.instance_of?(String) ? value : value.to_s
+        b0 = str.getbyte(0)
+        return nil unless b0
+
+        if b0 <= 32 || str.getbyte(-1) <= 32
+          str = str.strip
+          return nil if str.empty?
+        end
+
+        precision = InstantRecord::TIME_PRECISION
+        fixed_len = 20 + precision
+
+        # Ultra-fast path for valid non-Feb-29 SQLite and ISO-8601 UTC strings
+        # already carrying TIME_PRECISION fractional digits.
+        if FAST_UTC_FIXED_RE.match?(str)
+          len = str.bytesize
+          sep = str.getbyte(10)
+          if len == fixed_len + 1 && sep == 84
+            if str.encoding == Encoding::UTF_8 || str.encoding == Encoding::US_ASCII
+              return str
             end
+            out = str.dup
+            out.force_encoding(Encoding::UTF_8)
+            return out
           end
-        time.iso8601(InstantRecord::TIME_PRECISION)
+
+          out = str.dup
+          out.force_encoding(Encoding::UTF_8) unless out.encoding == Encoding::UTF_8 || out.encoding == Encoding::US_ASCII
+          out.setbyte(10, 84) unless sep == 84
+          out << UTC_SUFFIX_Z if len == fixed_len
+          return out
+        end
+
+        # General fast path for other valid UTC timestamps (varying fraction
+        # lengths, Feb 29 leap years, lowercase t/z, and zero offsets).
+        if FAST_UTC_GENERAL_RE.match?(str)
+          formatted = format_fast_utc_timestamp(str, precision)
+          return formatted if formatted
+        elsif precision == 6 && FAST_OFFSET_RE.match?(str)
+          formatted = format_fast_offset_timestamp(str, precision)
+          return formatted if formatted
+        end
+
+        # SQLite stores UTC timestamps without zone suffix ("YYYY-MM-DD HH:MM:SS.ffffff").
+        time =
+          if SQLITE_UTC_FALLBACK_RE.match?(str)
+            Time.parse("#{str.tr(' ', 'T')}Z").utc
+          else
+            Time.parse(str).utc
+          end
+        time.iso8601(precision)
       end
 
-      def canonical_rows(rows, exclude_columns: %w[sync_state])
-        excluded = Array(exclude_columns).map(&:to_s)
-        Array(rows).map do |row|
-          pairs = row.each_with_object({}) do |(key, val), acc|
-            col = key.to_s
-            next if excluded.include?(col)
+      def canonical_rows(rows, exclude_columns: DEFAULT_EXCLUDE_COLUMNS)
+        row_list = rows.is_a?(Array) ? rows : Array(rows)
+        return [] if row_list.empty?
 
-            acc[col] = canonical_value(col, val)
+        excluded_set =
+          if exclude_columns.equal?(DEFAULT_EXCLUDE_COLUMNS)
+            DEFAULT_EXCLUDED_SET
+          else
+            build_excluded_set(exclude_columns)
           end
-          pairs.sort.to_h
-        end.sort_by { |row| row["id"].to_s }
+
+        first_row = row_list[0]
+        plan_raw_keys = nil
+        plan_cols = nil
+        plan_kinds = nil
+        excluded_raw_keys = nil
+        expected_size = 0
+
+        if first_row.is_a?(Hash)
+          plan = build_row_plan(first_row, excluded_set)
+          if plan
+            plan_raw_keys, plan_cols, plan_kinds, excluded_raw_keys = plan
+            expected_size = first_row.size
+          end
+        end
+
+        result = Array.new(row_list.size)
+        sorted_by_id = true
+        prev_id = nil
+        idx = 0
+        row_count = row_list.size
+
+        if plan_raw_keys
+          plan_len = plan_raw_keys.size
+          excl_len = excluded_raw_keys.size
+          single_excl_key = excl_len == 1 ? excluded_raw_keys[0] : nil
+
+          while idx < row_count
+            row = row_list[idx]
+            out = nil
+
+            if row.is_a?(Hash) && row.size == expected_size
+              excl_ok =
+                if excl_len == 0
+                  true
+                elsif single_excl_key
+                  row.key?(single_excl_key)
+                else
+                  ok = true
+                  ei = 0
+                  while ei < excl_len
+                    unless row.key?(excluded_raw_keys[ei])
+                      ok = false
+                      break
+                    end
+                    ei += 1
+                  end
+                  ok
+                end
+
+              if excl_ok
+                out = {}
+                j = 0
+                while j < plan_len
+                  val = row.fetch(plan_raw_keys[j], ROW_KEY_MISSING)
+                  if val.equal?(ROW_KEY_MISSING)
+                    out = nil
+                    break
+                  end
+
+                  if val.nil?
+                    out[plan_cols[j]] = nil
+                  else
+                    kind = plan_kinds[j]
+                    if kind == 0
+                      out[plan_cols[j]] =
+                        if val.instance_of?(String)
+                          val.encoding == Encoding::UTF_8 ? val : val.encode(Encoding::UTF_8)
+                        elsif val == true || val == false || val.is_a?(Integer)
+                          val
+                        else
+                          s = val.to_s
+                          s.encoding == Encoding::UTF_8 ? s : s.encode(Encoding::UTF_8)
+                        end
+                    elsif kind == 1
+                      out[plan_cols[j]] = canonical_timestamp(val)
+                    else
+                      out[plan_cols[j]] = val.is_a?(Integer) ? val : val.to_i
+                    end
+                  end
+                  j += 1
+                end
+              end
+            end
+
+            out ||= canonicalize_row_general(row, excluded_set)
+            result[idx] = out
+
+            id_val = out["id"]
+            id_str = id_val.instance_of?(String) ? id_val : id_val.to_s
+            sorted_by_id = false if prev_id && prev_id > id_str
+            prev_id = id_str
+            idx += 1
+          end
+        else
+          while idx < row_count
+            out = canonicalize_row_general(row_list[idx], excluded_set)
+            result[idx] = out
+
+            id_val = out["id"]
+            id_str = id_val.instance_of?(String) ? id_val : id_val.to_s
+            sorted_by_id = false if prev_id && prev_id > id_str
+            prev_id = id_str
+            idx += 1
+          end
+        end
+
+        result.sort_by! { |row| (id = row["id"]).instance_of?(String) ? id : id.to_s } unless sorted_by_id
+        result
       end
 
       def canonical_json(object)
@@ -307,15 +472,231 @@ module InstantRecord
         end
       end
 
-      def deep_sort(obj)
-        case obj
-        when Hash
-          obj.keys.map(&:to_s).sort.each_with_object({}) do |key, acc|
-            raw_key = obj.key?(key) ? key : key.to_sym
-            acc[key] = deep_sort(obj[raw_key])
+      def format_fast_utc_timestamp(str, precision)
+        # Validate Feb 29 leap year; non-leap Feb 29 falls back to Time.parse.
+        if str.getbyte(5) == 48 && str.getbyte(6) == 50 && str.getbyte(8) == 50 && str.getbyte(9) == 57
+          year = (str.getbyte(0) - 48) * 1000 + (str.getbyte(1) - 48) * 100 +
+                 (str.getbyte(2) - 48) * 10 + (str.getbyte(3) - 48)
+          return nil unless year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+        end
+
+        len = str.bytesize
+        sep = str.getbyte(10)
+        pos = 19
+        frac_len = 0
+
+        if pos < len && str.getbyte(pos) == 46
+          pos = 20
+          while pos < len
+            b = str.getbyte(pos)
+            break if b < 48 || b > 57
+            pos += 1
           end
-        when Array
-          obj.map { |v| deep_sort(v) }
+          frac_len = pos - 20
+        end
+
+        # Lowercase 't' without a zone suffix is parsed in local time by Time.parse.
+        return nil if pos == len && sep == 116
+
+        if frac_len == 0
+          out = str.byteslice(0, 19)
+          out.force_encoding(Encoding::UTF_8) unless out.encoding == Encoding::UTF_8 || out.encoding == Encoding::US_ASCII
+          out.setbyte(10, 84) unless sep == 84
+          out << ZERO_FRAC_SUFFIX
+        elsif frac_len >= precision
+          out = str.byteslice(0, 20 + precision)
+          out.force_encoding(Encoding::UTF_8) unless out.encoding == Encoding::UTF_8 || out.encoding == Encoding::US_ASCII
+          out.setbyte(10, 84) unless sep == 84
+          out << UTC_SUFFIX_Z
+        else
+          out = str.byteslice(0, 20 + frac_len)
+          out.force_encoding(Encoding::UTF_8) unless out.encoding == Encoding::UTF_8 || out.encoding == Encoding::US_ASCII
+          out.setbyte(10, 84) unless sep == 84
+          out << ZERO_FRAC_PADS[precision - frac_len]
+        end
+      end
+
+      def format_fast_offset_timestamp(str, precision)
+        year = (str.getbyte(0) - 48) * 1000 + (str.getbyte(1) - 48) * 100 +
+               (str.getbyte(2) - 48) * 10 + (str.getbyte(3) - 48)
+        month = (str.getbyte(5) - 48) * 10 + (str.getbyte(6) - 48)
+        day = (str.getbyte(8) - 48) * 10 + (str.getbyte(9) - 48)
+        if month == 2 && day == 29
+          return nil unless year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+        end
+
+        hour = (str.getbyte(11) - 48) * 10 + (str.getbyte(12) - 48)
+        min = (str.getbyte(14) - 48) * 10 + (str.getbyte(15) - 48)
+        sec = (str.getbyte(17) - 48) * 10 + (str.getbyte(18) - 48)
+
+        len = str.bytesize
+        pos = 19
+        usec = 0
+        if str.getbyte(pos) == 46
+          pos = 20
+          scale = 100_000
+          while pos < len
+            b = str.getbyte(pos)
+            break if b < 48 || b > 57
+            if scale > 0
+              usec += (b - 48) * scale
+              scale /= 10
+            end
+            pos += 1
+          end
+        end
+
+        sign = str.getbyte(pos) == 43 ? 1 : -1
+        off_h = (str.getbyte(pos + 1) - 48) * 10 + (str.getbyte(pos + 2) - 48)
+        m_pos = str.getbyte(pos + 3) == 58 ? pos + 4 : pos + 3
+        off_m = (str.getbyte(m_pos) - 48) * 10 + (str.getbyte(m_pos + 1) - 48)
+        offset_sec = sign * (off_h * 3600 + off_m * 60)
+
+        (Time.utc(year, month, day, hour, min, sec, usec) - offset_sec).iso8601(precision)
+      end
+
+      def build_excluded_set(exclude_columns)
+        set = {}
+        Array(exclude_columns).each { |col| set[col.instance_of?(String) ? col : col.to_s] = true }
+        set
+      end
+
+      def build_row_plan(row, excluded_set)
+        seen = {}
+        included = []
+        excluded_raw_keys = []
+
+        row.each_key do |raw_key|
+          col = raw_key.instance_of?(String) ? raw_key : raw_key.to_s
+          return nil if seen.key?(col)
+
+          seen[col] = true
+          if excluded_set.key?(col)
+            excluded_raw_keys << raw_key
+          else
+            kind =
+              if col.end_with?("_at")
+                1
+              elsif col == "server_version" || col == "word_count" || col == "revision"
+                2
+              else
+                0
+              end
+            included << [col, raw_key, kind]
+          end
+        end
+
+        included.sort_by! { |entry| entry[0] }
+        plan_cols = []
+        plan_raw_keys = []
+        plan_kinds = []
+        included.each do |col, raw_key, kind|
+          plan_cols << col
+          plan_raw_keys << raw_key
+          plan_kinds << kind
+        end
+        [plan_raw_keys, plan_cols, plan_kinds, excluded_raw_keys]
+      end
+
+      def canonicalize_row_general(row, excluded_set)
+        pairs = {}
+        sorted = true
+        prev = nil
+
+        row.each do |key, val|
+          col = key.instance_of?(String) ? key : key.to_s
+          next if excluded_set.key?(col)
+
+          sorted = false if prev && prev >= col
+          prev = col
+          pairs[col] = canonical_value(col, val)
+        end
+
+        return pairs if sorted
+
+        keys = pairs.keys
+        keys.sort!
+        out = {}
+        i = 0
+        len = keys.length
+        while i < len
+          k = keys[i]
+          out[k] = pairs[k]
+          i += 1
+        end
+        out
+      end
+
+      def deep_sort(obj)
+        if obj.is_a?(Hash)
+          return {} if obj.empty?
+
+          keys = obj.keys
+          if keys.all?(String)
+            keys.sort!
+            out = {}
+            i = 0
+            len = keys.size
+            while i < len
+              k = keys[i]
+              v = obj[k]
+              out[k] = (v.is_a?(Hash) || v.is_a?(Array)) ? deep_sort(v) : v
+              i += 1
+            end
+            return out
+          end
+
+          keys = keys.map(&:to_s)
+          keys.sort!
+          out = {}
+          i = 0
+          len = keys.size
+          while i < len
+            key = keys[i]
+            raw_key = obj.key?(key) ? key : key.to_sym
+            v = obj[raw_key]
+            out[key] = (v.is_a?(Hash) || v.is_a?(Array)) ? deep_sort(v) : v
+            i += 1
+          end
+          out
+        elsif obj.is_a?(Array)
+          len = obj.size
+          return [] if len == 0
+
+          first = obj[0]
+          if len > 1 && first.is_a?(Hash) && !first.empty?
+            plan_keys = first.keys
+            if plan_keys.all?(String)
+              plan_keys.sort!
+              klen = plan_keys.size
+              out_arr = Array.new(len)
+              idx = 0
+              while idx < len
+                el = obj[idx]
+                if el.is_a?(Hash) && el.size == klen
+                  h = {}
+                  j = 0
+                  while j < klen
+                    k = plan_keys[j]
+                    v = el.fetch(k, ROW_KEY_MISSING)
+                    if v.equal?(ROW_KEY_MISSING)
+                      h = nil
+                      break
+                    end
+                    h[k] = (v.is_a?(Hash) || v.is_a?(Array)) ? deep_sort(v) : v
+                    j += 1
+                  end
+                  out_arr[idx] = h || deep_sort(el)
+                else
+                  out_arr[idx] = (el.is_a?(Hash) || el.is_a?(Array)) ? deep_sort(el) : el
+                end
+                idx += 1
+              end
+              return out_arr
+            end
+          end
+
+          obj.map { |v| (v.is_a?(Hash) || v.is_a?(Array)) ? deep_sort(v) : v }
         else
           obj
         end
