@@ -31,7 +31,7 @@ class EntryBuilderTest < ActiveSupport::TestCase
         [kind, %w[wasm native].map { |target| Digest::SHA256.hexdigest(read(emit, "main_#{target}.rb"))[0, 16] }]
       end
 
-      assert_equal({ "full" => %w[6e5f919ff62ceecb ba58daf1575e38c6], "demo" => %w[adbd1c7f253ec073 7c950a58f10cabe4] }, rendered)
+      assert_equal({ "full" => %w[6e5f919ff62ceecb 615bb98f0aecc0f7], "demo" => %w[adbd1c7f253ec073 2fd2158b837f9496] }, rendered)
       assert_equal "class Release; end\n", read(emit, "app/models/release.rb")
     end
   end
@@ -349,4 +349,23 @@ class EntryBuilderTest < ActiveSupport::TestCase
   end
 
   def read(dir, name) = File.read(File.join(dir, name))
+
+  test "the native entry names the routes that were compiled in" do
+    Dir.mktmpdir do |tree|
+      assert_equal "", InstantRecord::Compiler::EntryBuilder.send(:compiled_routes, tree)
+      FileUtils.mkdir_p(File.join(tree, "config"))
+      File.write(File.join(tree, "config/routes.rb"), <<~RUBY)
+        module RouteTable
+          def self.table
+            [ActionDispatch::Router::Route.new("GET", "/todo", :a, :b), ActionDispatch::Router::Route.new("PATCH", "/todo/:id", :a, :c)]
+          end
+
+          def self.root
+            ActionDispatch::Router::Route.new("GET", "/", :home, :index)
+          end
+        end
+      RUBY
+      assert_equal 'GET /todo\nPATCH /todo/:id\nGET /', InstantRecord::Compiler::EntryBuilder.send(:compiled_routes, tree)
+    end
+  end
 end
