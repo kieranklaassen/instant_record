@@ -69,6 +69,161 @@ class WasmBuildTest < ActiveSupport::TestCase
     end
   end
 
+  test "input_digest matches reference glob and pathname digest across dotfiles, symlinks, overlapping paths, and chunk boundaries" do
+    Dir.mktmpdir do |dir|
+      env = create_app_fixture(dir)
+      app_root = env[:app_root]
+      outside = File.join(dir, "outside")
+      extra_mig = File.join(dir, "extra_migrations")
+      FileUtils.mkdir_p(File.join(app_root, "app/models/.hidden/deep"))
+      FileUtils.mkdir_p(File.join(app_root, "app/models/dir.pyc"))
+      FileUtils.mkdir_p(File.join(app_root, "db/migrate/nested"))
+      FileUtils.mkdir_p(File.join(app_root, "lib"))
+      FileUtils.mkdir_p(File.join(outside, "sub"))
+      FileUtils.mkdir_p(extra_mig)
+
+      # Dotfiles, nested hidden dirs, .pyc files and .pyc directories
+      File.write(File.join(app_root, "app/.root_dot"), "dot\n")
+      File.write(File.join(app_root, "app/models/.hidden/.secret"), "secret\n")
+      File.write(File.join(app_root, "app/models/.hidden/deep/nested.rb"), "class Nested; end\n")
+      File.write(File.join(app_root, "app/models/ignored.pyc"), "bytecode")
+      File.write(File.join(app_root, "app/models/dir.pyc/kept.rb"), "class Kept; end\n")
+      File.write(File.join(app_root, "app/models/dir.pyc/ignored.pyc"), "bytecode2")
+
+      # Boundary file sizes: 0 bytes, exact 64 KiB chunk, and multi-chunk binary
+      File.binwrite(File.join(app_root, "app/models/empty.rb"), "")
+      File.binwrite(File.join(app_root, "app/models/exact_chunk.bin"), ("A" * 65_536).b)
+      File.binwrite(File.join(app_root, "app/models/multi_chunk.bin"), (0..255).map(&:chr).join.b * 400)
+
+      # Symlinks: valid file, symlink to .pyc named .rb, symlink named .pyc, dir symlink, cyclic symlink, broken symlink
+      target_rb = File.join(outside, "target.rb")
+      target_pyc = File.join(outside, "target.pyc")
+      symdir_file = File.join(outside, "sub/not_descended.rb")
+      File.write(target_rb, "TARGET = 1\n")
+      File.write(target_pyc, "TARGET_PYC")
+      File.write(symdir_file, "IGNORED = 1\n")
+      File.symlink(target_rb, File.join(app_root, "app/models/sym_file.rb"))
+      File.symlink(target_pyc, File.join(app_root, "app/models/sym_to_pyc.rb"))
+      File.symlink(target_rb, File.join(app_root, "app/models/sym_named.pyc"))
+      File.symlink(File.join(outside, "sub"), File.join(app_root, "app/models/sym_dir"))
+      File.symlink(File.join(app_root, "app"), File.join(app_root, "app/models/sym_loop"))
+      File.symlink(File.join(outside, "missing.rb"), File.join(app_root, "app/models/broken_sym.rb"))
+
+      # Overlapping, duplicate, relative-with-parent, missing, and symlinked migration dirs
+      File.write(File.join(app_root, "db/migrate/nested/20261120000002_nested.rb"), "class NestedMig; end\n")
+      File.write(File.join(extra_mig, "20261120000003_extra.rb"), "class ExtraMig; end\n")
+      sym_mig = File.join(dir, "sym_migrations")
+      File.symlink(extra_mig, sym_mig)
+
+      # Config overrides (base + island + out-of-root)
+      File.write(File.join(app_root, "lib/from_config.rb"), "CFG = 1\n")
+      File.write(File.join(app_root, "lib/from_island.rb"), "ISL = 1\n")
+      File.write(File.join(outside, "escape.rb"), "ESC = 1\n")
+      File.write(File.join(app_root, "config/instant_record.yml"), <<~YAML)
+        include:
+          files:
+            - lib/from_config.rb
+            - ../outside/escape.rb
+        islands:
+          inbox:
+            include:
+              files:
+                - lib/from_island.rb
+      YAML
+
+      build = build_for(
+        env,
+        island: "inbox",
+        migration_paths: [
+          File.join(app_root, "db/migrate"),
+          File.join(app_root, "db/migrate"),
+          File.join(app_root, "db"),
+          File.join(app_root, "db/migrate/nested"),
+          File.join(app_root, "db/migrate/../migrate"),
+          File.join(app_root, "db/does_not_exist"),
+          sym_mig,
+          extra_mig
+        ]
+      )
+
+      initial = build.input_digest
+      assert_equal reference_input_digest(build), initial
+
+      # Mutating symlinked regular file target changes digest and stays equal to reference
+      File.write(target_rb, "TARGET = 2\n")
+      after_sym_mutation = build.input_digest
+      refute_equal initial, after_sym_mutation
+      assert_equal reference_input_digest(build), after_sym_mutation
+
+      # Mutating a file inside a symlinked directory does NOT change digest
+      File.write(symdir_file, "IGNORED = 2\n")
+      assert_equal after_sym_mutation, build.input_digest
+
+      # Mutating a file inside a .pyc directory DOES change digest
+      File.write(File.join(app_root, "app/models/dir.pyc/kept.rb"), "class Kept; VERSION = 2; end\n")
+      after_pyc_dir_mutation = build.input_digest
+      refute_equal after_sym_mutation, after_pyc_dir_mutation
+      assert_equal reference_input_digest(build), after_pyc_dir_mutation
+
+      # Sibling directory sharing gem_root string prefix computes exact relative path
+      fake_gem = File.join(dir, "gem")
+      sibling_app = File.join(dir, "gem_sibling")
+      FileUtils.mkdir_p(File.join(fake_gem, "lib/instant_record"))
+      FileUtils.mkdir_p(File.join(sibling_app, "app/models"))
+      File.write(File.join(fake_gem, "lib/instant_record/a.rb"), "A = 1\n")
+      File.write(File.join(sibling_app, "app/models/s.rb"), "S = 1\n")
+      sibling_build = build_for(env, gem_root: fake_gem, app_source: sibling_app, migration_paths: [])
+      assert_equal reference_input_digest(sibling_build), sibling_build.input_digest
+
+      # gem_root == "/" matches Pathname#relative_path_from
+      root_build = build_for(env, gem_root: "/", app_source: sibling_app, migration_paths: [])
+      sample_paths = [File.join(sibling_app, "app/models/s.rb"), env[:toolchain]].sort
+      actual_root_digest = Digest::SHA256.new
+      expected_root_digest = Digest::SHA256.new
+      root_build.send(:update_files_digest, actual_root_digest, sample_paths)
+      sample_paths.each do |path|
+        expected_root_digest.update(Pathname(path).relative_path_from(Pathname("/")).to_s)
+        expected_root_digest.update(File.binread(path))
+      end
+      assert_equal expected_root_digest.hexdigest, actual_root_digest.hexdigest
+
+      # Input under a shallower ancestor sorting before paths under a deeper ancestor of gem_root
+      nested_gem = File.join(dir, "a/b/gem_root")
+      nested_app = File.join(dir, "a/b/app_é")
+      nested_ws = File.join(dir, "a/b/ws")
+      shallow_tc = write_toolchain(dir, name: "0_toolchain.env")
+      FileUtils.mkdir_p(File.join(nested_gem, "lib/instant_record"))
+      FileUtils.mkdir_p(File.join(nested_app, "app/models"))
+      FileUtils.mkdir_p(File.join(nested_ws, "web/src"))
+      File.write(File.join(nested_gem, "lib/instant_record/g.rb"), "G = 1\n")
+      File.write(File.join(nested_app, "app/models/n.rb"), "N = 1\n")
+      File.write(File.join(nested_ws, "web/index.html"), "<html></html>\n")
+      File.write(File.join(nested_ws, "web/src/m.js"), "console.log(1);\n")
+      nested_build = build_for(
+        env,
+        gem_root: nested_gem,
+        app_source: nested_app,
+        workspace: nested_ws,
+        toolchain: shallow_tc,
+        migration_paths: []
+      )
+      assert_equal reference_input_digest(nested_build), nested_build.input_digest
+
+      # Exact ancestor paths (including "/") after a cached shallower ancestor match Pathname#relative_path_from
+      stubbed_build = build_for(env, gem_root: nested_gem, app_source: nested_app, workspace: nested_ws, toolchain: shallow_tc, migration_paths: [])
+      stubbed_build.define_singleton_method(:update_file_content_digest) { |d, p, _| d.update("|#{p}\n") }
+      ancestor_paths = ["/", File.join(dir, "0_a"), File.join(dir, "a"), File.join(dir, "a/b"), nested_gem, File.join(nested_app, "app/models/n.rb")].sort
+      actual_anc = Digest::SHA256.new
+      expected_anc = Digest::SHA256.new
+      stubbed_build.send(:update_files_digest, actual_anc, ancestor_paths)
+      ancestor_paths.each do |path|
+        expected_anc.update(Pathname(path).relative_path_from(Pathname(nested_gem)).to_s)
+        expected_anc.update("|#{path}\n")
+      end
+      assert_equal expected_anc.hexdigest, actual_anc.hexdigest
+    end
+  end
+
   test "outside_stylesheets extracts unique preconnects and non-crossorigin https stylesheet preloads" do
     Dir.mktmpdir do |dir|
       env = create_app_fixture(dir)
@@ -451,5 +606,59 @@ class WasmBuildTest < ActiveSupport::TestCase
       out: StringIO.new
     }.merge(overrides)
     InstantRecord::Compiler::WasmBuild.new(**options)
+  end
+
+  def reference_input_digest(build)
+    digest = Digest::SHA256.new
+    build.send(:update_config_digest, digest)
+
+    demo = build.instance_variable_get(:@demo)
+    source_root = build.instance_variable_get(:@source_root)
+    island = build.instance_variable_get(:@island)
+    overrides = build.instance_variable_get(:@overrides)
+
+    explicit = [
+      build.toolchain.path,
+      File.join(build.workspace, "web/index.html"),
+      File.join(build.workspace, "web/vite.config.js"),
+      File.join(build.workspace, "web/package.json"),
+      File.join(build.workspace, "web/package-lock.json"),
+      File.join(build.gem_root, "lib/instant_record.rb"),
+      File.join(build.gem_root, "sig/instant_record/native.rbs"),
+      File.join(build.gem_root, "sig/instant_record/native_host.rbs"),
+      File.join(build.gem_root, "sig/instant_record/inertia.rbs")
+    ]
+    explicit << InstantRecord::Compiler::SchemaLock.path(source_root) unless demo
+    (InstantRecord::Compiler::AppStage::FILES + [InstantRecord::Compiler::Manifest::CONFIG_FILE]).each do |name|
+      explicit << File.join(source_root, name)
+    end
+    explicit.select! { |p| File.file?(p) }
+
+    merged = InstantRecord::Compiler::Manifest.merge_overrides(
+      InstantRecord::Compiler::Manifest.load_config(source_root, island: island),
+      overrides
+    )
+    override_files = merged[:include]["files"].filter_map do |rel|
+      candidate = File.expand_path(rel.delete_prefix("/"), source_root)
+      candidate if candidate.start_with?("#{source_root}#{File::SEPARATOR}") && File.file?(candidate)
+    end
+
+    dir_files = build.send(:input_directories).flat_map do |dir|
+      next [] unless File.directory?(dir)
+
+      Dir.glob("**/*", File::FNM_DOTMATCH, base: dir).filter_map do |rel|
+        entry = File.join(dir, rel)
+        entry if File.file?(entry) && !entry.end_with?(".pyc")
+      end
+    end
+
+    gem_pathname = Pathname(build.gem_root)
+    (explicit + override_files + dir_files).map { |p| File.expand_path(p) }.uniq.sort.each do |path|
+      digest.update(Pathname(path).relative_path_from(gem_pathname).to_s)
+      digest.update(File.binread(path))
+    end
+
+    digest.update(build.instance_variable_get(:@endpoint))
+    digest.hexdigest
   end
 end
