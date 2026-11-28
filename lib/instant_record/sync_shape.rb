@@ -88,7 +88,6 @@ module InstantRecord
       end
 
       fetched = relation.order(created_at: :desc, pk => :desc).limit(size + 1).to_a
-      has_more = fetched.size > size
       roots = fetched.first(size)
       last = roots.last
       next_before =
@@ -98,6 +97,7 @@ module InstantRecord
             id: last.id
           }
         end
+      has_more = fetched.size > size && !next_before.nil?
       { records: expand(base, roots), has_more: has_more, next_before: next_before }
     end
 

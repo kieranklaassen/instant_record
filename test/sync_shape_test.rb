@@ -170,4 +170,47 @@ class SyncShapeTest < Minitest::Test
   ensure
     ActiveRecord::Base.connection.drop_table(:nullable_items, if_exists: true)
   end
+
+  def test_page_clears_has_more_when_overflow_page_ends_on_nil_created_at
+    ActiveRecord::Migration.suppress_messages do
+      ActiveRecord::Schema.define do
+        create_table :nullable_items, id: :string, force: true do |t|
+          t.string :title
+          t.integer :server_version, null: false, default: 0
+          t.string :sync_state, null: false, default: "synced"
+          t.timestamps null: true
+        end
+      end
+    end
+
+    model = Class.new(ActiveRecord::Base) do
+      self.table_name = "nullable_items"
+      define_singleton_method(:name) { "NullableOverflowItem" }
+      include InstantRecord::Syncable
+      sync_shape limit: 2
+    end
+
+    conn = ActiveRecord::Base.connection
+    stamped = Time.utc(2026, 11, 20, 12, 0, 0).iso8601(6)
+    conn.execute(
+      "INSERT INTO nullable_items (id, title, server_version, sync_state, created_at, updated_at) " \
+      "VALUES ('stamped-1', 'with timestamp', 1, 'synced', '#{stamped}', '#{stamped}')"
+    )
+    conn.execute(
+      "INSERT INTO nullable_items (id, title, server_version, sync_state, created_at, updated_at) " \
+      "VALUES ('nil-1', 'first null', 1, 'synced', NULL, NULL)"
+    )
+    conn.execute(
+      "INSERT INTO nullable_items (id, title, server_version, sync_state, created_at, updated_at) " \
+      "VALUES ('nil-2', 'second null', 1, 'synced', NULL, NULL)"
+    )
+
+    page = model.instant_record_sync_shape.page(model.all, limit: 2)
+    assert_equal %w[stamped-1 nil-2], page[:records].map(&:id)
+    assert_nil page[:records].last.created_at
+    assert_equal false, page[:has_more]
+    assert_nil page[:next_before]
+  ensure
+    ActiveRecord::Base.connection.drop_table(:nullable_items, if_exists: true)
+  end
 end
