@@ -68,18 +68,281 @@ module InstantRecord
         defer_active_job? install_active_job_guard! invoke_callable
       ].freeze
 
+      CRUBY_SYNC_ACTION_METHODS_MAP = CRUBY_SYNC_ACTION_METHODS.each_with_object({}) { |m, h| h[m] = true }.freeze
+      private_constant :CRUBY_SYNC_ACTION_METHODS_MAP
+
+      # Fast Prism::Visitor base with leaf no-ops and direct container dispatch
+      # to avoid per-node `compact_child_nodes` array allocations.
+      class FastVisitor < Prism::Visitor
+        def visit_string_node(_); end
+        def visit_symbol_node(_); end
+        def visit_integer_node(_); end
+        def visit_float_node(_); end
+        def visit_true_node(_); end
+        def visit_false_node(_); end
+        def visit_nil_node(_); end
+        def visit_self_node(_); end
+        def visit_local_variable_read_node(_); end
+        def visit_instance_variable_read_node(_); end
+        def visit_class_variable_read_node(_); end
+        def visit_global_variable_read_node(_); end
+        def visit_constant_read_node(_); end
+        def visit_required_parameter_node(_); end
+        def visit_local_variable_target_node(_); end
+        def visit_instance_variable_target_node(_); end
+        def visit_constant_target_node(_); end
+        def visit_regular_expression_node(_); end
+
+        def visit_program_node(node)
+          node.statements.accept(self)
+        end
+
+        def visit_statements_node(node)
+          node.body.each { |s| s.accept(self) }
+        end
+
+        def visit_arguments_node(node)
+          node.arguments.each { |a| a.accept(self) }
+        end
+
+        def visit_assoc_node(node)
+          node.key.accept(self)
+          node.value.accept(self)
+        end
+
+        def visit_keyword_hash_node(node)
+          node.elements.each { |e| e.accept(self) }
+        end
+
+        def visit_hash_node(node)
+          node.elements.each { |e| e.accept(self) }
+        end
+
+        def visit_array_node(node)
+          node.elements.each { |e| e.accept(self) }
+        end
+
+        def visit_local_variable_write_node(node)
+          node.value.accept(self)
+        end
+
+        def visit_instance_variable_write_node(node)
+          node.value.accept(self)
+        end
+
+        def visit_constant_path_node(node)
+          node.parent&.accept(self)
+        end
+
+        def visit_interpolated_string_node(node)
+          node.parts.each { |p| p.accept(self) }
+        end
+
+        def visit_embedded_statements_node(node)
+          node.statements&.accept(self)
+        end
+
+        def visit_parentheses_node(node)
+          node.body&.accept(self)
+        end
+
+        def visit_return_node(node)
+          node.arguments&.accept(self)
+        end
+
+        def visit_and_node(node)
+          node.left.accept(self)
+          node.right.accept(self)
+        end
+
+        def visit_or_node(node)
+          node.left.accept(self)
+          node.right.accept(self)
+        end
+
+        def visit_begin_node(node)
+          node.statements&.accept(self)
+          node.rescue_clause&.accept(self)
+          node.else_clause&.accept(self)
+          node.ensure_clause&.accept(self)
+        end
+
+        def visit_rescue_node(node)
+          node.exceptions.each { |e| e.accept(self) }
+          node.reference&.accept(self)
+          node.statements&.accept(self)
+          node.subsequent&.accept(self)
+        end
+
+        def visit_else_node(node)
+          node.statements&.accept(self)
+        end
+
+        def visit_ensure_node(node)
+          node.statements&.accept(self)
+        end
+
+        def visit_block_node(node)
+          node.parameters&.accept(self)
+          node.body&.accept(self)
+        end
+
+        def visit_parameters_node(node)
+          node.optionals.each { |o| o.accept(self) }
+          node.keywords.each { |k| k.accept(self) }
+        end
+
+        def visit_optional_parameter_node(node)
+          node.value.accept(self)
+        end
+
+        def visit_optional_keyword_parameter_node(node)
+          node.value.accept(self)
+        end
+
+        def visit_block_parameters_node(node)
+          node.parameters&.accept(self)
+        end
+      end
+      private_constant :FastVisitor
+
+      class MutateDefVisitor < FastVisitor
+        def initialize(adapter, source, edits)
+          @adapter = adapter
+          @source = source
+          @edits = edits
+        end
+
+        def visit_def_node(node)
+          if node.name == :mutate && node.parameters&.keyword_rest
+            @edits << @adapter.send(
+              :replace_def_edit,
+              @source, node,
+              signature: "mutate(mutator_name, args = {}, mutation_id: nil)",
+              body: "SyncActions.mutate(mutator_name, args, mutation_id: mutation_id)"
+            )
+          end
+          node.receiver&.accept(self)
+          node.parameters&.accept(self)
+          node.body&.accept(self)
+        end
+
+        def visit_class_node(node)
+          node.constant_path.accept(self)
+          node.superclass&.accept(self)
+          node.body&.accept(self)
+        end
+
+        def visit_module_node(node)
+          node.constant_path.accept(self)
+          node.body&.accept(self)
+        end
+
+        def visit_call_node(node)
+          node.receiver&.accept(self)
+          node.arguments&.accept(self)
+          node.block&.accept(self)
+        end
+
+        def visit_if_node(node)
+          node.predicate.accept(self)
+          node.statements&.accept(self)
+          node.subsequent&.accept(self)
+        end
+
+        def visit_unless_node(node)
+          node.predicate.accept(self)
+          node.statements&.accept(self)
+          node.else_clause&.accept(self)
+        end
+      end
+      private_constant :MutateDefVisitor
+
+      class SyncActionsVisitor < FastVisitor
+        def initialize(adapter, source, edits)
+          @adapter = adapter
+          @source = source
+          @edits = edits
+          @stub_inserted = false
+        end
+
+        def visit_class_node(node)
+          if AstLowerer.constant_name(node.constant_path) == "ServerFrame"
+            @edits << @adapter.send(:delete_lines_edit, @source, node)
+            return
+          end
+          node.constant_path.accept(self)
+          node.superclass&.accept(self)
+          node.body&.accept(self)
+        end
+
+        def visit_module_node(node)
+          if AstLowerer.constant_name(node.constant_path) == "ActiveJobCommitGuard"
+            @edits << @adapter.send(:delete_lines_edit, @source, node)
+            return
+          end
+          node.constant_path.accept(self)
+          node.body&.accept(self)
+        end
+
+        def visit_def_node(node)
+          name = node.name
+          if name == :perform_sync_action && node.parameters&.keyword_rest
+            @edits << @adapter.send(
+              :replace_def_edit,
+              @source, node,
+              signature: "perform_sync_action(action_name, args = {}, mutation_id: nil)",
+              body: 'InstantRecord::SyncActions.mutate("#{name}.#{action_name}", args, mutation_id: mutation_id)'
+            )
+            return
+          elsif name == :mutate && node.parameters&.keyword_rest
+            @edits.concat(@adapter.send(:sync_mutate_edits, @source, node))
+            return
+          elsif CRUBY_SYNC_ACTION_METHODS_MAP[name]
+            @edits << (@stub_inserted ? @adapter.send(:delete_lines_edit, @source, node) : @adapter.send(:sync_actions_stub_edit, @source, node))
+            @stub_inserted = true
+            return
+          end
+
+          node.receiver&.accept(self)
+          node.parameters&.accept(self)
+          node.body&.accept(self)
+        end
+
+        def visit_call_node(node)
+          node.receiver&.accept(self)
+          node.arguments&.accept(self)
+          node.block&.accept(self)
+        end
+
+        def visit_if_node(node)
+          node.predicate.accept(self)
+          node.statements&.accept(self)
+          node.subsequent&.accept(self)
+        end
+
+        def visit_unless_node(node)
+          node.predicate.accept(self)
+          node.statements&.accept(self)
+          node.else_clause&.accept(self)
+        end
+      end
+      private_constant :SyncActionsVisitor
+
       # Shared installation logic for compiled host adapters.
       module Base
         def install(gem_src:, app_dir:)
-          File.write(File.join(app_dir, "lib/instant_record/host.rb"), host_source)
-          File.write(File.join(app_dir, "lib/instant_record/runtime_scoped.rb"), RUNTIME_SCOPED_SEAM)
-          File.write(File.join(app_dir, "lib/instant_record/native.rb"), NATIVE_SEAM)
+          ir_dir = File.join(app_dir, "lib/instant_record")
+          File.binwrite(File.join(ir_dir, "host.rb"), host_source)
+          File.binwrite(File.join(ir_dir, "runtime_scoped.rb"), RUNTIME_SCOPED_SEAM)
+          File.binwrite(File.join(ir_dir, "native.rb"), NATIVE_SEAM)
 
-          FileUtils.mkdir_p(File.join(app_dir, "sig/instant_record"))
+          sig_dir = File.join(app_dir, "sig/instant_record")
+          FileUtils.mkdir_p(sig_dir) unless File.directory?(sig_dir)
           signatures.each do |rbs|
-            FileUtils.cp(
-              File.join(gem_src, "sig/instant_record", rbs),
-              File.join(app_dir, "sig/instant_record", rbs)
+            File.binwrite(
+              File.join(sig_dir, rbs),
+              File.binread(File.join(gem_src, "sig/instant_record", rbs))
             )
           end
 
@@ -89,22 +352,44 @@ module InstantRecord
 
         def signatures = %w[native.rbs inertia.rbs]
 
+        def adapt_compiled_mutate_source(source)
+          return source if source.encoding.ascii_compatible? && !source.include?("mutate")
+
+          parsed = Prism.parse(source)
+          return source unless parsed.success?
+
+          edits = []
+          MutateDefVisitor.new(self, source, edits).visit(parsed.value)
+          return source if edits.empty?
+
+          AstLowerer.apply_edits(source, edits)
+        end
+
+        def adapt_sync_actions_source(source, rel: "lib/instant_record/sync_actions.rb")
+          parsed = Prism.parse(source)
+          raise BuildError, "Cannot parse #{rel}" unless parsed.success?
+
+          edits = []
+          SyncActionsVisitor.new(self, source, edits).visit(parsed.value)
+          return source if edits.empty?
+
+          adapted = AstLowerer.apply_edits(source, edits)
+          raise BuildError, "Invalid Ruby after adapting sync_actions.rb" unless Prism.parse_success?(adapted)
+
+          adapted
+        end
+
         private
 
         # Spinel does not support `**kwargs` splats; rewrite `InstantRecord.mutate`
         # via Prism AST to accept a plain `args = {}` hash.
         def adapt_compiled_mutate_signatures(app_dir)
-          rewrite_ruby_file(app_dir, "lib/instant_record.rb") do |root, source, edits|
-            HostAdapters.walk_ast(root) do |node|
-              next unless keyword_rest_def?(node, :mutate)
+          path = File.join(app_dir, "lib/instant_record.rb")
+          return unless File.file?(path)
 
-              edits << replace_def_edit(
-                source, node,
-                signature: "mutate(mutator_name, args = {}, mutation_id: nil)",
-                body: "SyncActions.mutate(mutator_name, args, mutation_id: mutation_id)"
-              )
-            end
-          end
+          source = File.read(path, encoding: Encoding::UTF_8)
+          adapted = adapt_compiled_mutate_source(source)
+          File.binwrite(path, adapted) unless adapted.equal?(source)
         end
 
         # Strip CRuby-only server frame, ActiveJob guard, and dynamic dispatch from
@@ -112,64 +397,12 @@ module InstantRecord
         # the static `case` dispatcher in `main_*.rb`.
         def adapt_sync_actions(app_dir)
           rel = "lib/instant_record/sync_actions.rb"
-          rewrite_ruby_file(
-            app_dir, rel,
-            parse_error: "Cannot parse #{rel}",
-            validate_error: "Invalid Ruby after adapting sync_actions.rb"
-          ) do |root, source, edits|
-            stub_inserted = false
-            HostAdapters.walk_ast(root) do |node|
-              if cruby_only_constant?(node)
-                edits << delete_lines_edit(source, node)
-              elsif keyword_rest_def?(node, :perform_sync_action)
-                edits << replace_def_edit(
-                  source, node,
-                  signature: "perform_sync_action(action_name, args = {}, mutation_id: nil)",
-                  body: 'InstantRecord::SyncActions.mutate("#{name}.#{action_name}", args, mutation_id: mutation_id)'
-                )
-              elsif keyword_rest_def?(node, :mutate)
-                edits.concat(sync_mutate_edits(source, node))
-              elsif node.is_a?(Prism::DefNode) && CRUBY_SYNC_ACTION_METHODS.include?(node.name)
-                edits << (stub_inserted ? delete_lines_edit(source, node) : sync_actions_stub_edit(source, node))
-                stub_inserted = true
-              else
-                next
-              end
-              :skip
-            end
-          end
-        end
-
-        def rewrite_ruby_file(app_dir, rel, parse_error: nil, validate_error: nil)
           path = File.join(app_dir, rel)
           return unless File.file?(path)
 
           source = File.read(path, encoding: Encoding::UTF_8)
-          parsed = Prism.parse(source)
-          unless parsed.success?
-            raise BuildError, parse_error if parse_error
-            return
-          end
-
-          edits = []
-          yield parsed.value, source, edits
-          return if edits.empty?
-
-          adapted = AstLowerer.apply_edits(source, edits)
-          raise BuildError, validate_error if validate_error && !Prism.parse(adapted).success?
-
-          File.write(path, adapted)
-        end
-
-        def cruby_only_constant?(node)
-          case node
-          when Prism::ClassNode then AstLowerer.constant_name(node.constant_path) == "ServerFrame"
-          when Prism::ModuleNode then AstLowerer.constant_name(node.constant_path) == "ActiveJobCommitGuard"
-          end
-        end
-
-        def keyword_rest_def?(node, name)
-          node.is_a?(Prism::DefNode) && node.name == name && node.parameters&.keyword_rest
+          adapted = adapt_sync_actions_source(source, rel: rel)
+          File.binwrite(path, adapted) unless adapted.equal?(source)
         end
 
         def sync_mutate_edits(source, node)
@@ -328,26 +561,151 @@ module InstantRecord
           auth_session_sign_out_path: "/auth/session/sign_out"
         }.freeze
 
+        class ServerUrlVisitor < FastVisitor
+          def initialize(edits)
+            @edits = edits
+          end
+
+          def visit_call_node(node)
+            if node.name == :server_url &&
+               SERVER_URL_RECEIVERS.include?(AstLowerer.constant_name(node.receiver))
+              args = node.arguments&.arguments
+              if args&.length == 1
+                resolved = Demo.resolve_demo_route(args.first)
+                if resolved
+                  @edits << AstLowerer::Edit.new(
+                    start_offset: node.location.start_offset,
+                    end_offset: node.location.end_offset,
+                    replacement: %("#{resolved}?#{InstantRecord::NETWORK_MARKER}")
+                  )
+                end
+              end
+            end
+
+            node.receiver&.accept(self)
+            node.arguments&.accept(self)
+            node.block&.accept(self)
+          end
+
+          def visit_def_node(node)
+            node.receiver&.accept(self)
+            node.parameters&.accept(self)
+            node.body&.accept(self)
+          end
+
+          def visit_class_node(node)
+            node.constant_path.accept(self)
+            node.superclass&.accept(self)
+            node.body&.accept(self)
+          end
+
+          def visit_module_node(node)
+            node.constant_path.accept(self)
+            node.body&.accept(self)
+          end
+
+          def visit_if_node(node)
+            node.predicate.accept(self)
+            node.statements&.accept(self)
+            node.subsequent&.accept(self)
+          end
+
+          def visit_unless_node(node)
+            node.predicate.accept(self)
+            node.statements&.accept(self)
+            node.else_clause&.accept(self)
+          end
+        end
+        private_constant :ServerUrlVisitor
+
+        class ThreadParentTernaryVisitor < FastVisitor
+          def initialize(edits)
+            @edits = edits
+          end
+
+          def visit_if_node(node)
+            if Demo.thread_parent_ternary?(node)
+              replies = node.statements&.body&.first
+              fallback = node.subsequent&.statements&.body&.first
+              if replies.is_a?(Prism::CallNode) && replies.name != :to_a &&
+                 fallback.is_a?(Prism::ArrayNode) && fallback.elements.empty?
+                end_off = replies.location.end_offset
+                @edits << AstLowerer::Edit.new(start_offset: end_off, end_offset: end_off, replacement: ".to_a")
+              end
+            end
+
+            node.predicate.accept(self)
+            node.statements&.accept(self)
+            node.subsequent&.accept(self)
+          end
+
+          def visit_def_node(node)
+            node.receiver&.accept(self)
+            node.parameters&.accept(self)
+            node.body&.accept(self)
+          end
+
+          def visit_class_node(node)
+            node.constant_path.accept(self)
+            node.superclass&.accept(self)
+            node.body&.accept(self)
+          end
+
+          def visit_module_node(node)
+            node.constant_path.accept(self)
+            node.body&.accept(self)
+          end
+
+          def visit_call_node(node)
+            node.receiver&.accept(self)
+            node.arguments&.accept(self)
+            node.block&.accept(self)
+          end
+
+          def visit_unless_node(node)
+            node.predicate.accept(self)
+            node.statements&.accept(self)
+            node.else_clause&.accept(self)
+          end
+        end
+        private_constant :ThreadParentTernaryVisitor
+
         module_function
 
         def apply(app_dir:)
+          apply_staged(app_dir: app_dir, defer_ruby_writes: false)
+          nil
+        end
+
+        # Internal hook for GemVendor to run demo seams while keeping rewritten
+        # Ruby files in memory (avoiding write -> re-read -> rewrite round-trips)
+        # and returning any `.rb` files seen while walking `app/views`.
+        def apply_staged(app_dir:, defer_ruby_writes: true)
           fingerprint_stylesheets(app_dir)
           version_inbox_bundle(app_dir)
-          adapt_demo_views(app_dir)
-          rewrite_server_url_helpers(app_dir)
-          coerce_slack_thread_replies(app_dir)
+          view_rb_files = adapt_demo_views(app_dir, collect_rb_files: defer_ruby_writes)
+          modified_ruby = defer_ruby_writes ? {} : nil
+          rewrite_server_url_helpers(app_dir, modified_ruby: modified_ruby)
+          coerce_slack_thread_replies(app_dir, modified_ruby: modified_ruby)
+          [modified_ruby, view_rb_files]
         end
 
         def fingerprint_stylesheets(app_dir)
           stylesheets_dir = File.join(app_dir, "app/assets/stylesheets")
           return unless File.directory?(stylesheets_dir)
 
-          Dir.glob("*.css", base: stylesheets_dir).sort.each do |name|
-            sheet = File.join(stylesheets_dir, name)
-            digest = Digest::SHA256.file(sheet).hexdigest[0, 10]
-            ext = File.extname(sheet)
-            stem = File.basename(sheet, ext)
-            File.rename(sheet, File.join(stylesheets_dir, "#{stem}-#{digest}#{ext}"))
+          names = []
+          Dir.each_child(stylesheets_dir) do |name|
+            next if name.start_with?(".") || !name.end_with?(".css")
+
+            names << name
+          end
+          names.sort!
+          names.each do |name|
+            sheet = "#{stylesheets_dir}/#{name}"
+            digest = Digest::SHA256.hexdigest(File.binread(sheet))[0, 10]
+            stem = name.byteslice(0, name.bytesize - 4)
+            File.rename(sheet, "#{stylesheets_dir}/#{stem}-#{digest}.css")
           end
         end
 
@@ -356,83 +714,79 @@ module InstantRecord
           view = File.join(app_dir, "app/views/email/mailboxes/index.html.erb")
           return unless File.file?(bundle) && File.file?(view)
 
-          digest = Digest::SHA256.file(bundle).hexdigest[0, 10]
+          digest = Digest::SHA256.hexdigest(File.binread(bundle))[0, 10]
           source = File.read(view)
           target = '<%= asset_path("inbox.js") %>'
           replacement = "/assets/inbox.js?v=#{digest}"
           if source.include?(target)
-            File.write(view, source.sub(target) { replacement })
+            File.binwrite(view, source.sub(target) { replacement })
           elsif !source.include?(replacement)
             raise BuildError, "demo seam did not apply: app/views/email/mailboxes/index.html.erb"
           end
         end
 
-        def adapt_demo_views(app_dir)
+        def adapt_demo_views(app_dir, collect_rb_files: false)
           layout_path = File.join(app_dir, "app/views/layouts/application.html.erb")
           if File.file?(layout_path)
             source = File.read(layout_path)
-            source = source.gsub('<span class="micro-label">Local-first Rails demos —', '<span class="micro-label"><a href="/">All demos</a> ·')
-            source = source.gsub('<%= source_path(page: controller_path, view: action_name) %>', "/source")
-            source = source.gsub("Read live out of app.wasm — not a snippet", "View the source for this build")
-            source = source.gsub('demo-<%= controller_path.split("/").first %>', "demo-<%= content_for(:demo_scope) %>")
-            source = source.gsub('<% demo = controller_path.split("/").first %>', "<% demo = content_for(:demo_scope).to_s %>")
-            File.write(layout_path, source)
+            source.gsub!('<span class="micro-label">Local-first Rails demos —', '<span class="micro-label"><a href="/">All demos</a> ·')
+            source.gsub!('<%= source_path(page: controller_path, view: action_name) %>', "/source")
+            source.gsub!("Read live out of app.wasm — not a snippet", "View the source for this build")
+            source.gsub!('demo-<%= controller_path.split("/").first %>', "demo-<%= content_for(:demo_scope) %>")
+            source.gsub!('<% demo = controller_path.split("/").first %>', "<% demo = content_for(:demo_scope).to_s %>")
+            File.binwrite(layout_path, source)
           end
 
           views_dir = File.join(app_dir, "app/views")
-          views_root = Pathname(views_dir)
-          Dir.glob("**/*.html.erb", base: views_dir).sort.each do |rel|
-            view = views_root.join(rel)
-            next if view.basename.to_s.start_with?("_") || view.parent.basename.to_s == "layouts"
+          return nil unless File.directory?(views_dir)
 
-            scope = Pathname(rel).each_filename.first
-            view.write("<% content_for(:demo_scope, \"#{scope}\") %>\n" + view.read)
+          rb_files = collect_rb_files && !File.symlink?(views_dir) ? {} : nil
+          walk_demo_views(views_dir, nil, nil, "app/views/", rb_files)
+          rb_files
+        end
+
+        def walk_demo_views(dir, top_scope, parent_name, rel_prefix, rb_files)
+          Dir.each_child(dir) do |entry|
+            next if entry.start_with?(".")
+
+            full = "#{dir}/#{entry}"
+            st = File.lstat(full)
+            if st.directory?
+              walk_demo_views(full, top_scope || entry, entry, "#{rel_prefix}#{entry}/", rb_files)
+            elsif entry.end_with?(".html.erb") && !entry.start_with?("_") && parent_name != "layouts" && (st.file? || (st.symlink? && !File.directory?(full)))
+              scope = top_scope || entry
+              File.binwrite(full, "<% content_for(:demo_scope, \"#{scope}\") %>\n#{File.binread(full)}")
+            elsif rb_files && entry.end_with?(".rb") && (st.file? || (st.symlink? && !File.directory?(full)))
+              rb_files["#{rel_prefix}#{entry}"] = File.binread(full)
+            end
           end
         end
+        private_class_method :walk_demo_views
 
         # Rewrites `InstantRecord.server_url(...)` calls in demo helpers into static
         # network-marked path literals using Prism's AST.
-        def rewrite_server_url_helpers(app_dir)
+        def rewrite_server_url_helpers(app_dir, modified_ruby: nil)
           %w[app/helpers/slack_helper.rb app/helpers/auth_helper.rb].each do |rel|
-            rewrite_demo_ast(app_dir, rel, missing_reason: "no InstantRecord.server_url calls rewritten") do |node, edits|
-              next unless node.is_a?(Prism::CallNode) && node.name == :server_url
-              next unless SERVER_URL_RECEIVERS.include?(AstLowerer.constant_name(node.receiver))
-
-              args = node.arguments&.arguments
-              next unless args&.length == 1
-
-              resolved = resolve_demo_route(args.first)
-              next unless resolved
-
-              edits << AstLowerer::Edit.new(
-                start_offset: node.location.start_offset,
-                end_offset: node.location.end_offset,
-                replacement: %("#{resolved}?#{InstantRecord::NETWORK_MARKER}")
-              )
-            end
+            rewrite_demo_ast_with_visitor(
+              app_dir, rel, ServerUrlVisitor,
+              missing_reason: "no InstantRecord.server_url calls rewritten",
+              modified_ruby: modified_ruby
+            )
           end
         end
 
         # Compiled code needs a single array type across both branches of the
         # `@thread_parent ? <relation> : []` ternary.
-        def coerce_slack_thread_replies(app_dir)
-          rewrite_demo_ast(
+        def coerce_slack_thread_replies(app_dir, modified_ruby: nil)
+          rewrite_demo_ast_with_visitor(
             app_dir, "app/controllers/slack/channels_controller.rb",
-            missing_reason: "@thread_parent ternary not found"
-          ) do |node, edits|
-            next unless thread_parent_ternary?(node)
-
-            replies = node.statements.body.first
-            fallback = node.subsequent.statements.body.first
-            next unless replies.is_a?(Prism::CallNode) && replies.name != :to_a
-            next unless fallback.is_a?(Prism::ArrayNode) && fallback.elements.empty?
-
-            end_off = replies.location.end_offset
-            edits << AstLowerer::Edit.new(start_offset: end_off, end_offset: end_off, replacement: ".to_a")
-          end
+            ThreadParentTernaryVisitor,
+            missing_reason: "@thread_parent ternary not found",
+            modified_ruby: modified_ruby
+          )
         end
 
-        def rewrite_demo_ast(app_dir, rel, missing_reason:)
+        def rewrite_demo_ast_with_visitor(app_dir, rel, visitor_class, missing_reason:, modified_ruby: nil)
           path = File.join(app_dir, rel)
           return unless File.file?(path)
 
@@ -441,12 +795,17 @@ module InstantRecord
           raise BuildError, "Cannot parse #{rel}" unless parsed.success?
 
           edits = []
-          HostAdapters.walk_ast(parsed.value) { |node| yield node, edits }
+          visitor_class.new(edits).visit(parsed.value)
           raise BuildError, "demo seam did not apply: #{rel}: #{missing_reason}" if edits.empty?
 
-          File.write(path, AstLowerer.apply_edits(source, edits))
+          rewritten = AstLowerer.apply_edits(source, edits)
+          if modified_ruby
+            modified_ruby[rel] = rewritten
+          else
+            File.binwrite(path, rewritten)
+          end
         end
-        private_class_method :rewrite_demo_ast
+        private_class_method :rewrite_demo_ast_with_visitor
 
         # A ternary is an IfNode without a keyword; each branch is one statement.
         def thread_parent_ternary?(node)
