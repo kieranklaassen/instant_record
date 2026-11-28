@@ -59,8 +59,7 @@ module InstantRecord
       end
 
       def status
-        @mutex.synchronize do
-          started = monotonic_now
+        timed_synchronize do
           position = replica_position
           models_summary = @replica.models["models"]
           {
@@ -69,57 +68,21 @@ module InstantRecord
             "offline" => offline?,
             **position,
             "screens" => @screens,
-            "models" => models_summary,
-            "elapsed_ms" => elapsed_ms(started)
+            "models" => models_summary
           }
         end
       end
 
       def sync(endpoint: nil)
-        @mutex.synchronize do
-          started = monotonic_now
-          target = normalize_endpoint(endpoint) || @endpoint
+        timed_synchronize do
+          target = resolve_endpoint(endpoint)
           raise MissingEndpoint, "No sync endpoint configured. Pass endpoint or set INSTANT_RECORD_ENDPOINT." if target.nil?
 
           if offline?
-            return {
-              "ok" => false,
-              "offline" => true,
-              "endpoint" => target,
-              "error" => "Client is in offline mode",
-              **replica_position,
-              "elapsed_ms" => elapsed_ms(started)
-            }
+            offline_sync_payload(target)
+          else
+            perform_sync(target)
           end
-
-          @exchange.reset_trace! if @exchange.respond_to?(:reset_trace!)
-          result = @host.call("sync", target)
-          position = replica_position
-          @replica.refresh_schema!
-
-          went_offline = @exchange.respond_to?(:any_offline?) && @exchange.any_offline?
-          http_err = @exchange.respond_to?(:last_error_status) ? @exchange.last_error_status : nil
-          last_http = @exchange.respond_to?(:last_status) ? @exchange.last_status : nil
-          changed = result.out.start_with?("changed")
-          ok = !went_offline && http_err.nil?
-
-          payload = {
-            "ok" => ok,
-            "offline" => went_offline,
-            "endpoint" => target,
-            "changed" => changed,
-            "summary" => result.out,
-            "notice" => result.notice,
-            **position,
-            "http_status" => last_http,
-            "elapsed_ms" => elapsed_ms(started)
-          }
-          if went_offline
-            payload["error"] = "Sync server unreachable (offline)"
-          elsif http_err
-            payload["error"] = "Sync server returned HTTP #{http_err}"
-          end
-          payload
         end
       end
 
@@ -146,51 +109,44 @@ module InstantRecord
       end
 
       def render_screen(screen:, params: {})
-        @mutex.synchronize do
-          started = monotonic_now
-          input = JSON.generate("screen" => screen.to_s, "params" => stringify_map(params))
-          result = @host.call("render", input)
+        timed_synchronize do
+          screen_name = screen.to_s
+          str_params = stringify_map(params)
+          result = @host.call("render", JSON.generate("screen" => screen_name, "params" => str_params))
           {
-            "screen" => screen.to_s,
-            "params" => stringify_map(params),
-            "tree" => JSON.parse(result.out),
-            "elapsed_ms" => elapsed_ms(started)
+            "screen" => screen_name,
+            "params" => str_params,
+            "tree" => JSON.parse(result.out)
           }
         end
       end
 
       def perform_action(screen:, action:, params: {}, args: {}, values: {}, render: false, sync: false)
-        payload = @mutex.synchronize do
-          started = monotonic_now
+        payload = timed_synchronize do
+          screen_name = screen.to_s
+          action_name = action.to_s
           str_params = stringify_map(params)
-          str_args = stringify_map(args)
-          str_values = stringify_map(values)
           input = JSON.generate(
-            "screen" => screen.to_s,
+            "screen" => screen_name,
             "params" => str_params,
-            "action" => action.to_s,
-            "args" => str_args,
-            "values" => str_values
+            "action" => action_name,
+            "args" => stringify_map(args),
+            "values" => stringify_map(values)
           )
           result = @host.call("action", input)
           errors = {}
           pending = after_write(errors, "pending") { pending_count }
-          rendered =
-            if render
-              after_write(errors, "rendered") do
-                parse_writable_json(@host.call("render", JSON.generate("screen" => screen.to_s, "params" => str_params)).out)
-              end
-            end
+          rendered = render ? render_after_action(errors, screen_name, str_params) : nil
 
           {
             "ok" => true,
-            "screen" => screen.to_s,
-            "action" => action.to_s,
+            "screen" => screen_name,
+            "action" => action_name,
             "pending" => pending,
             "notice" => result.notice,
             "rendered" => rendered,
-            "elapsed_ms" => elapsed_ms(started)
-          }.merge(errors)
+            **errors
+          }
         end
 
         payload["sync"] = sync_after_write if sync
@@ -198,41 +154,23 @@ module InstantRecord
       end
 
       def app_request(method:, path:, params: nil, body: nil, headers: {}, content_type: nil, sync: false)
-        payload = @mutex.synchronize do
-          started = monotonic_now
-          verb = method.to_s.upcase
-          raise ArgumentError, "HTTP method is required" if verb.empty?
-
-          request_path = path.to_s
-          request_path = "/#{request_path}" unless request_path.start_with?("/")
-
-          raw_body, resolved_content_type = encode_request_body(verb, params, body, content_type)
-          if verb == "GET" && params.is_a?(Hash) && !params.empty?
-            sep = request_path.include?("?") ? "&" : "?"
-            request_path = "#{request_path}#{sep}#{encode_form_params(params)}"
-          end
-
-          raw_http = build_raw_http_request(verb, request_path, raw_body, resolved_content_type, headers)
+        payload = timed_synchronize do
+          raw_http = prepare_app_request(method, path, params, body, headers, content_type)
           result = @host.call("request", raw_http)
           parsed = parse_raw_http_response(result.out)
           errors = {}
           pending = after_write(errors, "pending") { pending_count }
-
-          parsed_json = nil
-          if parsed[:headers]["content-type"].to_s.include?("json") && !parsed[:body].empty?
-            parsed_json = parse_writable_json(parsed[:body]) rescue nil
-          end
 
           {
             "ok" => parsed[:status] >= 200 && parsed[:status] < 400,
             "status" => parsed[:status],
             "headers" => parsed[:headers],
             "body" => parsed[:body],
-            "json" => parsed_json,
+            "json" => decode_response_json(parsed),
             "pending" => pending,
             "notice" => result.notice,
-            "elapsed_ms" => elapsed_ms(started)
-          }.merge(errors)
+            **errors
+          }
         end
 
         payload["sync"] = sync_after_write if sync && payload["ok"]
@@ -240,51 +178,18 @@ module InstantRecord
       end
 
       def fetch_history(key:, query: nil, endpoint: nil)
-        @mutex.synchronize do
-          started = monotonic_now
+        timed_synchronize do
+          history_key = key.to_s
           if query.nil? || query.to_s.strip.empty?
-            result = @host.call("history", JSON.generate("key" => key.to_s))
-            parsed = JSON.parse(result.out)
-            return parsed.merge("key" => key.to_s, "elapsed_ms" => elapsed_ms(started))
+            inspect_history(history_key)
+          else
+            fetch_remote_history(history_key, query, endpoint)
           end
-
-          target = normalize_endpoint(endpoint) || @endpoint
-          raise ArgumentError, "No sync endpoint configured for history fetch." if target.nil?
-          raise Error, "Client is in offline mode" if offline?
-
-          # HTTP bodies come tagged as binary.
-          raw_reply = @exchange.call("GET #{target}/records?#{query}\n").to_s.b
-          status_line, body = raw_reply.split("\n", 2)
-          status = status_line.to_i
-          body = String.new(body.to_s, encoding: Encoding::UTF_8)
-          error =
-            if status == 0
-              "History server unreachable (offline)"
-            elsif status < 200 || status >= 300
-              "History request returned HTTP #{status}"
-            elsif !body.valid_encoding?
-              "History response is not valid UTF-8"
-            end
-          if error
-            return {
-              "ok" => false,
-              "key" => key.to_s,
-              "offline" => status == 0,
-              "http_status" => status,
-              "error" => error,
-              "elapsed_ms" => elapsed_ms(started)
-            }
-          end
-
-          result = @host.call("history", JSON.generate("key" => key.to_s, "response" => body))
-          parsed = JSON.parse(result.out)
-          parsed.merge("key" => key.to_s, "http_status" => status, "elapsed_ms" => elapsed_ms(started))
         end
       end
 
       def open_database(path:, endpoint: nil)
-        @mutex.synchronize do
-          started = monotonic_now
+        timed_synchronize do
           expanded = File.expand_path(path.to_s)
           @host.open(expanded)
           @database_path = expanded
@@ -294,8 +199,7 @@ module InstantRecord
             "ok" => true,
             "database" => @database_path,
             "endpoint" => @endpoint,
-            **replica_position,
-            "elapsed_ms" => elapsed_ms(started)
+            **replica_position
           }
         end
       end
@@ -308,6 +212,140 @@ module InstantRecord
       end
 
       private
+
+      def timed_synchronize
+        @mutex.synchronize do
+          started = monotonic_now
+          payload = yield
+          payload["elapsed_ms"] = elapsed_ms(started)
+          payload
+        end
+      end
+
+      def offline_sync_payload(target)
+        {
+          "ok" => false,
+          "offline" => true,
+          "endpoint" => target,
+          "error" => "Client is in offline mode",
+          **replica_position
+        }
+      end
+
+      def perform_sync(target)
+        @exchange.reset_trace! if @exchange.respond_to?(:reset_trace!)
+        result = @host.call("sync", target)
+        position = replica_position
+        @replica.refresh_schema!
+
+        outcome = sync_exchange_outcome
+        payload = {
+          "ok" => outcome[:ok],
+          "offline" => outcome[:offline],
+          "endpoint" => target,
+          "changed" => result.out.start_with?("changed"),
+          "summary" => result.out,
+          "notice" => result.notice,
+          **position,
+          "http_status" => outcome[:http_status]
+        }
+        payload["error"] = outcome[:error] if outcome[:error]
+        payload
+      end
+
+      def sync_exchange_outcome
+        went_offline = @exchange.respond_to?(:any_offline?) && @exchange.any_offline?
+        http_err = @exchange.respond_to?(:last_error_status) ? @exchange.last_error_status : nil
+        last_http = @exchange.respond_to?(:last_status) ? @exchange.last_status : nil
+        error =
+          if went_offline
+            "Sync server unreachable (offline)"
+          elsif http_err
+            "Sync server returned HTTP #{http_err}"
+          end
+
+        {
+          ok: !went_offline && http_err.nil?,
+          offline: went_offline,
+          http_status: last_http,
+          error: error
+        }
+      end
+
+      def render_after_action(errors, screen_name, str_params)
+        after_write(errors, "rendered") do
+          parse_writable_json(@host.call("render", JSON.generate("screen" => screen_name, "params" => str_params)).out)
+        end
+      end
+
+      def prepare_app_request(method, path, params, body, headers, content_type)
+        verb = method.to_s.upcase
+        raise ArgumentError, "HTTP method is required" if verb.empty?
+
+        raw_body, resolved_content_type = encode_request_body(verb, params, body, content_type)
+        request_path = normalize_request_path(path, verb, params)
+        build_raw_http_request(verb, request_path, raw_body, resolved_content_type, headers)
+      end
+
+      def normalize_request_path(path, verb, params)
+        request_path = path.to_s
+        request_path = "/#{request_path}" unless request_path.start_with?("/")
+        return request_path unless verb == "GET" && params.is_a?(Hash) && !params.empty?
+
+        sep = request_path.include?("?") ? "&" : "?"
+        "#{request_path}#{sep}#{encode_form_params(params)}"
+      end
+
+      def decode_response_json(parsed)
+        return nil unless parsed[:headers]["content-type"].to_s.include?("json") && !parsed[:body].empty?
+
+        parse_writable_json(parsed[:body])
+      rescue StandardError
+        nil
+      end
+
+      def inspect_history(history_key)
+        result = @host.call("history", JSON.generate("key" => history_key))
+        JSON.parse(result.out).merge("key" => history_key)
+      end
+
+      def fetch_remote_history(history_key, query, endpoint)
+        target = resolve_endpoint(endpoint)
+        raise ArgumentError, "No sync endpoint configured for history fetch." if target.nil?
+        raise Error, "Client is in offline mode" if offline?
+
+        status, body, error = decode_history_response(@exchange.call("GET #{target}/records?#{query}\n"))
+        if error
+          return {
+            "ok" => false,
+            "key" => history_key,
+            "offline" => status == 0,
+            "http_status" => status,
+            "error" => error
+          }
+        end
+
+        result = @host.call("history", JSON.generate("key" => history_key, "response" => body))
+        JSON.parse(result.out).merge("key" => history_key, "http_status" => status)
+      end
+
+      def decode_history_response(raw_reply)
+        # HTTP bodies come tagged as binary.
+        status_line, raw_body = raw_reply.to_s.b.split("\n", 2)
+        status = status_line.to_i
+        body = String.new(raw_body.to_s, encoding: Encoding::UTF_8)
+        [status, body, history_response_error(status, body)]
+      end
+
+      def history_response_error(status, body)
+        if status == 0
+          "History server unreachable (offline)"
+        elsif status < 200 || status >= 300
+          "History request returned HTTP #{status}"
+        elsif !body.valid_encoding?
+          "History response is not valid UTF-8"
+        end
+      end
 
       # The write is queued by now, so a failed sync must not hide its result:
       # the caller would write again. Rescued is what a sync may raise: no
@@ -357,6 +395,10 @@ module InstantRecord
         return {} unless hash.is_a?(Hash)
 
         hash.each_with_object({}) { |(k, v), acc| acc[k.to_s] = v.to_s }
+      end
+
+      def resolve_endpoint(endpoint)
+        normalize_endpoint(endpoint) || @endpoint
       end
 
       def normalize_endpoint(endpoint)
