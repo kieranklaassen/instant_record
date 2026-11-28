@@ -63,19 +63,11 @@ module InstantRecord
       end
 
       def boot(path)
-        expanded = File.expand_path(path.to_s)
-        FileUtils.mkdir_p(File.dirname(expanded))
-        result = send_path("boot", expanded)
-        @database_path = expanded
-        result
+        switch_database("boot", path)
       end
 
       def open(path)
-        expanded = File.expand_path(path.to_s)
-        FileUtils.mkdir_p(File.dirname(expanded))
-        result = send_path("open", expanded)
-        @database_path = expanded
-        result
+        switch_database("open", path)
       end
 
       def close
@@ -84,27 +76,15 @@ module InstantRecord
 
           @closed = true
           begin
-            @stdin.close unless @stdin.closed?
-          rescue IOError
-            nil
-          end
-
-          if @wait_thread&.alive?
-            unless @wait_thread.join(2)
-              begin
-                Process.kill("TERM", @wait_thread.pid)
-              rescue Errno::ESRCH
-                nil
-              end
-              @wait_thread.join(1)
+            close_io(@stdin)
+            reap_process
+          ensure
+            begin
+              @stderr_thread&.join(1)
+            ensure
+              close_io(@stdout)
+              close_io(@stderr)
             end
-          end
-
-          @stderr_thread&.join(1)
-          [@stdout, @stderr].each do |io|
-            io.close unless io.nil? || io.closed?
-          rescue IOError
-            nil
           end
         end
       end
@@ -139,13 +119,45 @@ module InstantRecord
         end
       end
 
-      def send_path(verb, path)
+      def switch_database(verb, path)
+        expanded = File.expand_path(path.to_s)
+        FileUtils.mkdir_p(File.dirname(expanded))
         @mutex.synchronize do
-          ensure_open!
-          bytes = path.b
-          write_frame("#{verb} #{bytes.bytesize}\n", bytes)
-          read_reply
+          result = send_path(verb, expanded)
+          @database_path = expanded
+          result
         end
+      end
+
+      def send_path(verb, path)
+        ensure_open!
+        bytes = path.b
+        write_frame("#{verb} #{bytes.bytesize}\n", bytes)
+        read_reply
+      end
+
+      def reap_process
+        return unless @wait_thread&.alive?
+        return if @wait_thread.join(2)
+
+        signal_process("TERM")
+        return if @wait_thread.join(1)
+
+        signal_process("KILL")
+        @wait_thread.join(1)
+      end
+
+      def signal_process(signal)
+        pid = @wait_thread.pid
+        Process.kill(signal, pid) if pid
+      rescue Errno::ESRCH, Errno::EPERM
+        nil
+      end
+
+      def close_io(io)
+        io.close unless io.nil? || io.closed?
+      rescue IOError, Errno::EPIPE
+        nil
       end
 
       def ensure_open!
@@ -155,46 +167,16 @@ module InstantRecord
       def read_reply
         failed_exchange = nil
         loop do
-          line = @stdout.gets
-          if line.nil?
-            tail = stderr_tail.strip
-            detail = tail.empty? ? "unexpected EOF" : "unexpected EOF (#{tail})"
-            raise HostCrashedError, "Native host exited: #{detail}"
-          end
-
+          line = read_header_line
           parts = line.strip.split
           case parts[0]
           when "ok"
-            raise HostCrashedError, "Malformed ok frame from native host: #{line.inspect}" unless parts.size >= 3
-
-            out_len = Integer(parts[1])
-            notice_len = Integer(parts[2])
-            out = read_text(out_len)
-            notice = read_text(notice_len)
-            raise failed_exchange if failed_exchange
-
-            return Result.new(out: out, notice: notice)
+            return read_ok_frame(parts, line, failed_exchange)
           when "exchange"
-            raise HostCrashedError, "Malformed exchange frame from native host: #{line.inspect}" unless parts.size >= 2
-
-            req_len = Integer(parts[1])
-            request = read_exact(@stdout, req_len).force_encoding(Encoding::UTF_8)
-            begin
-              answer = (@exchange ? @exchange.call(request) : HttpExchange::OFFLINE_REPLY).to_s.b
-            rescue StandardError => e
-              # The host waits for an answer, and its reply is read before this
-              # is raised, so the next call finds it ready.
-              failed_exchange ||= exchange_error(e)
-              answer = HttpExchange::OFFLINE_REPLY
-            end
-            write_frame("#{answer.bytesize}\n", answer)
+            exchange_failure = read_exchange_frame(parts, line)
+            failed_exchange ||= exchange_failure
           when "error"
-            raise HostCrashedError, "Malformed error frame from native host: #{line.inspect}" unless parts.size >= 2
-
-            err_len = Integer(parts[1])
-            # The host cuts a long message by bytes, perhaps inside a character.
-            message = read_text(err_len)
-            raise failed_exchange || HostError.new(message)
+            read_error_frame(parts, line, failed_exchange)
           else
             raise HostCrashedError, "Unexpected response from native host: #{line.inspect}"
           end
@@ -203,6 +185,61 @@ module InstantRecord
         raise HostCrashedError, "Invalid frame header from native host: #{e.message}"
       rescue Errno::EPIPE, IOError => e
         raise HostCrashedError, "Native host pipe error: #{e.message}"
+      end
+
+      def read_header_line
+        line = @stdout.gets
+        return line unless line.nil?
+
+        tail = stderr_tail.strip
+        detail = tail.empty? ? "unexpected EOF" : "unexpected EOF (#{tail})"
+        raise HostCrashedError, "Native host exited: #{detail}"
+      end
+
+      def read_ok_frame(parts, line, failed_exchange)
+        raise HostCrashedError, "Malformed ok frame from native host: #{line.inspect}" unless parts.size >= 3
+
+        out_len = parse_frame_length(parts[1])
+        notice_len = parse_frame_length(parts[2])
+        out = read_text(out_len)
+        notice = read_text(notice_len)
+        raise failed_exchange if failed_exchange
+
+        Result.new(out: out, notice: notice)
+      end
+
+      def read_exchange_frame(parts, line)
+        raise HostCrashedError, "Malformed exchange frame from native host: #{line.inspect}" unless parts.size >= 2
+
+        req_len = parse_frame_length(parts[1])
+        request = read_exact(@stdout, req_len).force_encoding(Encoding::UTF_8)
+        failure = nil
+        begin
+          answer = (@exchange ? @exchange.call(request) : HttpExchange::OFFLINE_REPLY).to_s.b
+        rescue StandardError => e
+          # The host waits for an answer, and its reply is read before this
+          # is raised, so the next call finds it ready.
+          failure = exchange_error(e)
+          answer = HttpExchange::OFFLINE_REPLY
+        end
+        write_frame("#{answer.bytesize}\n", answer)
+        failure
+      end
+
+      def read_error_frame(parts, line, failed_exchange)
+        raise HostCrashedError, "Malformed error frame from native host: #{line.inspect}" unless parts.size >= 2
+
+        err_len = parse_frame_length(parts[1])
+        # The host cuts a long message by bytes, perhaps inside a character.
+        message = read_text(err_len)
+        raise failed_exchange || HostError.new(message)
+      end
+
+      def parse_frame_length(raw)
+        length = Integer(raw, 10)
+        raise ArgumentError, "negative frame length: #{raw.inspect}" if length.negative?
+
+        length
       end
 
       def exchange_error(error)
