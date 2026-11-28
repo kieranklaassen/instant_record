@@ -114,7 +114,17 @@ module InstantRecord
 
       HOTWIRE_GEMS = %w[turbo-rails stimulus-rails].freeze
       CONTROLLER_CONFIG_FILES = %w[config/importmap.rb config/application.rb].freeze
-      private_constant :HOTWIRE_GEMS, :CONTROLLER_CONFIG_FILES
+      DIGEST_READ_CHUNK = 65_536
+      DIGEST_READ_MODE = "rb".freeze
+      PYC_SUFFIX = ".pyc".freeze
+      ROOT_SLASH = "/".freeze
+      DOT_REL = ".".freeze
+      PARENT_DIR = "..".freeze
+      PARENT_PREFIX = "../".freeze
+      NULL_BYTE = "\0".freeze
+      private_constant :HOTWIRE_GEMS, :CONTROLLER_CONFIG_FILES, :DIGEST_READ_CHUNK,
+                       :DIGEST_READ_MODE, :PYC_SUFFIX, :ROOT_SLASH, :DOT_REL,
+                       :PARENT_DIR, :PARENT_PREFIX, :NULL_BYTE
 
       attr_reader :workspace, :gem_root, :pipeline_dir, :build_dir, :toolchain, :runner
 
@@ -404,20 +414,25 @@ module InstantRecord
           @shell_snapshot
         ].each do |part|
           digest.update(part)
-          digest.update("\0")
+          digest.update(NULL_BYTE)
         end
       end
 
       def collect_input_files
-        (explicit_input_files + override_input_files + directory_input_files)
-          .map { |p| File.expand_path(p) }
-          .uniq
-          .sort
+        paths = []
+        config_present = collect_explicit_input_files(paths)
+        collect_override_input_files(paths, config_present: config_present)
+        collect_directory_input_files(paths)
+        paths.sort!
+        paths.uniq!
+        paths
       end
 
-      def explicit_input_files
-        candidates = [
-          @toolchain.path,
+      def collect_explicit_input_files(paths)
+        toolchain_path = File.expand_path(@toolchain.path)
+        paths << toolchain_path if File.file?(toolchain_path)
+
+        [
           File.join(@workspace, "web/index.html"),
           File.join(@workspace, "web/vite.config.js"),
           File.join(@workspace, "web/package.json"),
@@ -426,22 +441,36 @@ module InstantRecord
           File.join(@gem_root, "sig/instant_record/native.rbs"),
           File.join(@gem_root, "sig/instant_record/native_host.rbs"),
           File.join(@gem_root, "sig/instant_record/inertia.rbs")
-        ]
-        candidates << SchemaLock.path(@source_root) unless @demo
-        (AppStage::FILES + [Manifest::CONFIG_FILE]).each do |name|
-          candidates << File.join(@source_root, name)
+        ].each do |path|
+          paths << path if File.file?(path)
         end
-        candidates.select { |p| File.file?(p) }
+
+        unless @demo
+          lock_path = SchemaLock.path(@source_root)
+          paths << lock_path if File.file?(lock_path)
+        end
+
+        AppStage::FILES.each do |name|
+          path = File.join(@source_root, name)
+          paths << path if File.file?(path)
+        end
+
+        config_path = File.join(@source_root, Manifest::CONFIG_FILE)
+        config_present = File.file?(config_path)
+        paths << config_path if config_present
+        config_present
       end
 
-      def override_input_files
+      def collect_override_input_files(paths, config_present:)
+        return if !config_present && (@overrides.nil? || (@overrides.is_a?(Hash) && @overrides.empty?))
+
         config_overrides = Manifest.merge_overrides(
-          Manifest.load_config(@source_root, island: @island),
+          config_present ? Manifest.load_config(@source_root, island: @island) : nil,
           @overrides
         )
-        config_overrides[:include]["files"].filter_map do |rel|
-          candidate = File.expand_path(rel.delete_prefix("/"), @source_root)
-          candidate if path_within?(candidate, @source_root) && File.file?(candidate)
+        config_overrides[:include]["files"].each do |rel|
+          candidate = File.expand_path(rel.delete_prefix(ROOT_SLASH), @source_root)
+          paths << candidate if path_within?(candidate, @source_root) && File.file?(candidate)
         end
       end
 
@@ -462,23 +491,156 @@ module InstantRecord
         dirs
       end
 
-      def directory_input_files
-        input_directories.flat_map do |dir|
-          next [] unless File.directory?(dir)
+      def collect_directory_input_files(paths)
+        visited_dirs = {}
+        stack = []
+        input_directories.each do |dir|
+          raw = dir.to_s
+          next unless File.directory?(raw)
 
-          Dir.glob("**/*", File::FNM_DOTMATCH, base: dir).filter_map do |rel|
-            entry = File.join(dir, rel)
-            entry if File.file?(entry) && !entry.end_with?(".pyc")
+          if raw.include?(PARENT_DIR) || raw.start_with?("~")
+            walk_directory_expanding(raw, paths)
+            next
+          end
+
+          root = File.expand_path(raw)
+          next if visited_dirs[root]
+
+          visited_dirs[root] = true
+          stack << root
+          while (cur = stack.pop)
+            prefix = cur == ROOT_SLASH ? ROOT_SLASH : "#{cur}/"
+            begin
+              Dir.each_child(cur) do |name|
+                path = "#{prefix}#{name}"
+                begin
+                  stat = File.lstat(path)
+                rescue SystemCallError
+                  next
+                end
+
+                if stat.file?
+                  paths << path unless name.end_with?(PYC_SUFFIX)
+                elsif stat.directory?
+                  unless visited_dirs[path]
+                    visited_dirs[path] = true
+                    stack << path
+                  end
+                elsif stat.symlink?
+                  paths << path if !name.end_with?(PYC_SUFFIX) && File.file?(path)
+                end
+              end
+            rescue SystemCallError
+              next
+            end
           end
         end
       end
 
+      def walk_directory_expanding(root, paths)
+        stack = [root]
+        while (cur = stack.pop)
+          prefix = cur.end_with?(ROOT_SLASH) ? cur : "#{cur}/"
+          begin
+            Dir.each_child(cur) do |name|
+              path = "#{prefix}#{name}"
+              begin
+                stat = File.lstat(path)
+              rescue SystemCallError
+                next
+              end
+
+              if stat.file?
+                paths << File.expand_path(path) unless name.end_with?(PYC_SUFFIX)
+              elsif stat.directory?
+                stack << path
+              elsif stat.symlink?
+                paths << File.expand_path(path) if !name.end_with?(PYC_SUFFIX) && File.file?(path)
+              end
+            end
+          rescue SystemCallError
+            next
+          end
+        end
+      end
+
+      def gem_root_ancestors
+        @gem_root_ancestors ||= begin
+          ancestors = []
+          cur = @gem_root
+          depth = 0
+          until cur == ROOT_SLASH
+            parent = File.dirname(cur)
+            break if parent == cur
+
+            depth += 1
+            prefix = parent == ROOT_SLASH ? ROOT_SLASH : "#{parent}/"
+            ups = PARENT_PREFIX * depth
+            ups_exact = depth == 1 ? PARENT_DIR : "#{PARENT_PREFIX * (depth - 1)}#{PARENT_DIR}"
+            ancestors << [prefix, prefix.bytesize, ups, parent, ups_exact, "#{cur}/", cur]
+            cur = parent
+          end
+          ancestors
+        end
+      end
+
       def update_files_digest(digest, paths)
-        gem_pathname = Pathname(@gem_root)
+        buf = String.new(capacity: DIGEST_READ_CHUNK, encoding: Encoding::BINARY)
+
+        if @gem_root == ROOT_SLASH
+          paths.each do |path|
+            if path == ROOT_SLASH
+              digest.update(DOT_REL)
+            else
+              digest.update(path.byteslice(1, path.bytesize - 1))
+            end
+            update_file_content_digest(digest, path, buf)
+          end
+          return
+        end
+
+        gem_prefix = "#{@gem_root}/"
+        gem_prefix_len = gem_prefix.bytesize
+        ancestors = nil
+        cached_anc = nil
+
         paths.each do |path|
-          rel = Pathname(path).relative_path_from(gem_pathname).to_s
-          digest.update(rel)
-          digest.update(File.binread(path))
+          if path.start_with?(gem_prefix)
+            digest.update(path.byteslice(gem_prefix_len, path.bytesize - gem_prefix_len))
+          elsif path == @gem_root
+            digest.update(DOT_REL)
+          elsif cached_anc && path.start_with?(cached_anc[0]) && !path.start_with?(cached_anc[5]) && path != cached_anc[6] && path != cached_anc[3]
+            digest.update(cached_anc[2])
+            digest.update(path.byteslice(cached_anc[1], path.bytesize - cached_anc[1]))
+          else
+            ancestors ||= gem_root_ancestors
+            matched = false
+            ancestors.each do |anc|
+              if path == anc[3]
+                digest.update(anc[4])
+                matched = true
+                break
+              elsif path.start_with?(anc[0])
+                cached_anc = anc
+                digest.update(anc[2])
+                digest.update(path.byteslice(anc[1], path.bytesize - anc[1]))
+                matched = true
+                break
+              end
+            end
+            digest.update(Pathname(path).relative_path_from(Pathname(@gem_root)).to_s) unless matched
+          end
+
+          update_file_content_digest(digest, path, buf)
+        end
+      end
+
+      def update_file_content_digest(digest, path, buf)
+        File.open(path, DIGEST_READ_MODE) do |file|
+          while file.read(DIGEST_READ_CHUNK, buf)
+            digest.update(buf)
+            break if buf.bytesize < DIGEST_READ_CHUNK
+          end
         end
       end
 
