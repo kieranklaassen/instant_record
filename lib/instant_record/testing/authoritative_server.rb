@@ -199,8 +199,11 @@ module InstantRecord
           )
           status, headers, response_body = @app.call(env)
           chunks = +""
-          response_body.each { |part| chunks << part.to_s }
-          response_body.close if response_body.respond_to?(:close)
+          begin
+            response_body.each { |part| chunks << part.to_s }
+          ensure
+            response_body.close if response_body.respond_to?(:close)
+          end
 
           { status: status.to_i, headers: headers, body: chunks }
         end
@@ -220,12 +223,15 @@ module InstantRecord
             "HTTP_HOST" => "localhost"
           )
           status, headers, body = @app.call(env)
-          body.close if body.respond_to?(:close)
-          raise InstantRecord::Testing::Error, "POST /auth/session failed for #{person_id.inspect}: status=#{status}" unless status.to_i == 200
+          begin
+            raise InstantRecord::Testing::Error, "POST /auth/session failed for #{person_id.inspect}: status=#{status}" unless status.to_i == 200
 
-          set_cookie = headers["set-cookie"] || headers["Set-Cookie"]
-          pair = Array(set_cookie).flat_map { |line| line.to_s.split("\n") }.map { |c| c.split(";").first }.join("; ")
-          @cookies_by_identity[person_id] = pair
+            set_cookie = headers["set-cookie"] || headers["Set-Cookie"]
+            pair = Array(set_cookie).flat_map { |line| line.to_s.split("\n") }.map { |c| c.split(";").first }.join("; ")
+            @cookies_by_identity[person_id] = pair
+          ensure
+            body.close if body.respond_to?(:close)
+          end
         end
       end
 
@@ -253,23 +259,48 @@ module InstantRecord
           @shard = :"ir_standalone_server_#{object_id}"
           @previous_synced = InstantRecord.synced_models.dup
           @previous_scope_from = InstantRecord.config.scope_from
+          @closed = false
 
-          setup_database!
-          ensure_models!
-          InstantRecord.sync(*models)
+          completed = false
+          begin
+            setup_database!
+            ensure_models!
+            InstantRecord.sync(*models)
+            completed = true
+          ensure
+            unless completed
+              begin
+                close
+              rescue StandardError
+                nil
+              end
+            end
+          end
         end
 
         def close
-          InstantRecord.sync(*@previous_synced)
-          InstantRecord.config.scope_from = @previous_scope_from
-          ActiveRecord::Base.connection_handler.remove_connection_pool(
-            ActiveRecord::Base.name,
-            role: :writing,
-            shard: @shard
-          )
-          FileUtils.remove_entry(@tmpdir) if @tmpdir && Dir.exist?(@tmpdir)
-        rescue StandardError
-          FileUtils.remove_entry(@tmpdir) if @tmpdir && Dir.exist?(@tmpdir)
+          return if @closed
+
+          @closed = true
+          begin
+            InstantRecord.sync(*@previous_synced)
+          ensure
+            begin
+              InstantRecord.config.scope_from = @previous_scope_from
+            ensure
+              begin
+                if defined?(ActiveRecord::Base)
+                  ActiveRecord::Base.connection_handler.remove_connection_pool(
+                    ActiveRecord::Base.name,
+                    role: :writing,
+                    shard: @shard
+                  )
+                end
+              ensure
+                FileUtils.remove_entry(@tmpdir) if @tmpdir && Dir.exist?(@tmpdir)
+              end
+            end
+          end
         end
 
         def backend_label = with_server_shard { super }

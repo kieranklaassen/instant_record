@@ -664,7 +664,7 @@ module InstantRecord
           return [] if len == 0
 
           first = obj[0]
-          if len > 1 && first.is_a?(Hash) && !first.empty?
+          if len > 1 && first.is_a?(Hash) && !first.empty? && !first.compare_by_identity?
             plan_keys = first.keys
             if plan_keys.all?(String)
               plan_keys.sort!
