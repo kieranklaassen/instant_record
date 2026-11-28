@@ -292,4 +292,95 @@ class TestingCanonicalTest < Minitest::Test
     # Mixed string and symbol colliding key matches String-key preference
     assert_equal "{\n  \"a\": 1,\n  \"b\": 3\n}", InstantRecord::Testing.canonical_json({ "a" => 1, a: 2, b: 3 })
   end
+
+  def test_canonical_json_preserves_subsequent_hash_keys_after_compare_by_identity_duplicate_keys
+    identity_hash = {}.compare_by_identity
+    identity_hash[+"a"] = 1
+    identity_hash[+"a"] = 2
+    normal_hash = { "a" => 10, "b" => 20 }
+
+    parsed = JSON.parse(InstantRecord::Testing.canonical_json([identity_hash, normal_hash]))
+    assert_equal 2, parsed.size
+    assert_equal({ "a" => 10, "b" => 20 }, parsed[1])
+  end
+
+  def test_canonical_rows_and_json_handle_custom_default_hashes_without_invoking_defaults
+    proc_hits = 0
+    row_with_default = Hash.new("fallback")
+    row_with_default["id"] = "2"
+    row_with_default["other"] = "val"
+    row_with_default["sync_state"] = "synced"
+
+    row_with_proc = Hash.new { |h, k| proc_hits += 1; h[k] = "generated" }
+    row_with_proc["id"] = "1"
+    row_with_proc["extra"] = "ok"
+    row_with_proc["sync_state"] = "synced"
+
+    first = { "id" => "3", "title" => "First", "sync_state" => "synced" }
+    rows = InstantRecord::Testing.canonical_rows([first, row_with_default, row_with_proc])
+
+    assert_equal 0, proc_hits
+    assert_equal %w[1 2 3], rows.map { |r| r["id"] }
+    assert_equal({ "extra" => "ok", "id" => "1" }, rows[0])
+    assert_equal({ "id" => "2", "other" => "val" }, rows[1])
+    assert_equal({ "id" => "3", "title" => "First" }, rows[2])
+    assert_equal %w[id extra sync_state], row_with_proc.keys
+
+    json_hits = 0
+    json_default = Hash.new("fallback")
+    json_default["a"] = 1
+    json_default["c"] = 3
+
+    json_proc = Hash.new { |h, k| json_hits += 1; h[k] = "generated" }
+    json_proc["a"] = 2
+    json_proc["d"] = 4
+
+    parsed = JSON.parse(InstantRecord::Testing.canonical_json([{ "a" => 0, "b" => 1 }, json_default, json_proc]))
+    assert_equal 0, json_hits
+    assert_equal [{ "a" => 0, "b" => 1 }, { "a" => 1, "c" => 3 }, { "a" => 2, "d" => 4 }], parsed
+    assert_equal %w[a d], json_proc.keys
+  end
+
+  def test_canonical_rows_supports_excluding_id_column
+    input = [
+      { "id" => "2", "title" => "Second", "sync_state" => "synced" },
+      { "id" => "1", "title" => "First", "sync_state" => "pending" }
+    ]
+
+    rows = InstantRecord::Testing.canonical_rows(input, exclude_columns: ["id"])
+    assert_equal(
+      [
+        { "sync_state" => "synced", "title" => "Second" },
+        { "sync_state" => "pending", "title" => "First" }
+      ],
+      rows
+    )
+    assert_equal [%w[sync_state title], %w[sync_state title]], rows.map(&:keys)
+  end
+
+  def test_canonical_rows_and_json_do_not_mutate_caller_inputs
+    offset_time = Time.new(2026, 11, 21, 15, 30, 0, "+05:30")
+    ts_str = +"2026-11-21 10:00:00"
+    exclude = %w[sync_state]
+    row1 = { "title" => +"Beta", "id" => "2", "updated_at" => ts_str, "sync_state" => "pending" }
+    row2 = { "updated_at" => offset_time, "id" => "1", "title" => +"Alpha", "sync_state" => "synced" }
+    rows_input = [row1, row2]
+
+    InstantRecord::Testing.canonical_rows(rows_input, exclude_columns: exclude)
+
+    assert_equal [row1, row2], rows_input
+    assert_equal %w[title id updated_at sync_state], row1.keys
+    assert_equal %w[updated_at id title sync_state], row2.keys
+    assert_equal "2026-11-21 10:00:00", ts_str
+    refute offset_time.utc?
+    assert_equal %w[sync_state], exclude
+
+    nested = { "z" => [{ "b" => 1, "a" => 2 }, { "d" => 4, "c" => 3 }], "a" => { y: 2, x: 1 } }
+    InstantRecord::Testing.canonical_json(nested)
+
+    assert_equal %w[z a], nested.keys
+    assert_equal %w[b a], nested["z"][0].keys
+    assert_equal %w[d c], nested["z"][1].keys
+    assert_equal %i[y x], nested["a"].keys
+  end
 end
