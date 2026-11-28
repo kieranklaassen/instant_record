@@ -203,9 +203,11 @@ module InstantRecord
         sources["app/models/instant_record/change.rb"] =
           File.binread("#{@gem}/app/models/instant_record/change.rb")
 
-        helper_rel = "app/helpers/instant_record/sync_notices_helper.rb"
-        helper_src = "#{@gem}/#{helper_rel}"
-        if File.file?(helper_src)
+        %w[sync_notices_helper native_helper].each do |helper|
+          helper_rel = "app/helpers/instant_record/#{helper}.rb"
+          helper_src = "#{@gem}/#{helper_rel}"
+          next unless File.file?(helper_src)
+
           ensure_dir("#{@app}/app/helpers/instant_record")
           sources[helper_rel] = File.binread(helper_src)
         end
@@ -241,6 +243,7 @@ module InstantRecord
           File.binread("#{@gem}/app/models/instant_record/change.rb")
         )
         copy_optional_gem_file("app/helpers/instant_record/sync_notices_helper.rb")
+        copy_optional_gem_file("app/helpers/instant_record/native_helper.rb")
         copy_optional_gem_file("app/views/instant_record/sync_notices/_notices.html.erb")
       end
 
