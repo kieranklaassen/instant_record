@@ -44,8 +44,26 @@ module InstantRecord
       def ui_tests = swift_files("#{@name}UITests")
 
       def pbxproj
-        app, tests = sources, ui_tests
+        app = sources
+        tests = ui_tests
         others = ["#{@name}-Bridging-Header.h", "Info.plist"]
+
+        sections = [
+          build_files_section(app, tests),
+          container_item_proxy_section,
+          file_references_section(app, others, tests),
+          frameworks_build_phase_section,
+          groups_section(app, others, tests),
+          native_targets_section,
+          project_section,
+          sources_build_phases_section(app, tests),
+          target_dependency_section,
+          build_configurations_section,
+          configuration_lists_section,
+          local_swift_package_reference_section,
+          swift_package_product_dependency_section
+        ].join("\n\n")
+
         <<~PBXPROJ
           // !$*UTF8*$!
           {
@@ -55,194 +73,7 @@ module InstantRecord
           	objectVersion = 60;
           	objects = {
 
-          /* Begin PBXBuildFile section */
-          #{app.each_with_index.map { |file, n| "\t\t#{id(:build, n)} /* #{file} in Sources */ = {isa = PBXBuildFile; fileRef = #{id(:file, n)} /* #{file} */; };" }.join("\n")}
-          #{tests.each_with_index.map { |file, n| "\t\t#{id(:test_build, n)} /* #{file} in Sources */ = {isa = PBXBuildFile; fileRef = #{id(:test_file, n)} /* #{file} */; };" }.join("\n")}
-          #{each_package { |product, _, n| "\t\t#{id(:package_build, n)} /* #{product} in Frameworks */ = {isa = PBXBuildFile; productRef = #{id(:package_product, n)} /* #{product} */; };" }}
-          /* End PBXBuildFile section */
-
-          /* Begin PBXContainerItemProxy section */
-          		#{id(:proxy)} /* PBXContainerItemProxy */ = {
-          			isa = PBXContainerItemProxy;
-          			containerPortal = #{id(:project)} /* Project object */;
-          			proxyType = 1;
-          			remoteGlobalIDString = #{id(:app_target)};
-          			remoteInfo = #{@name};
-          		};
-          /* End PBXContainerItemProxy section */
-
-          /* Begin PBXFileReference section */
-          #{app.each_with_index.map { |file, n| file_reference(id(:file, n), file, "sourcecode.swift") }.join("\n")}
-          #{others.each_with_index.map { |file, n| file_reference(id(:other, n), file, file.end_with?(".h") ? "sourcecode.c.h" : "text.plist.xml") }.join("\n")}
-          #{tests.each_with_index.map { |file, n| file_reference(id(:test_file, n), file, "sourcecode.swift") }.join("\n")}
-          		#{id(:app_product)} /* #{@name}.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = #{@name}.app; sourceTree = BUILT_PRODUCTS_DIR; };
-          		#{id(:test_product)} /* #{@name}UITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = #{@name}UITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-          /* End PBXFileReference section */
-
-          /* Begin PBXFrameworksBuildPhase section */
-          		#{id(:frameworks)} /* Frameworks */ = {
-          			isa = PBXFrameworksBuildPhase;
-          			buildActionMask = 2147483647;
-          			files = (
-          #{each_package { |product, _, n| "\t\t\t\t#{id(:package_build, n)} /* #{product} in Frameworks */," }}
-          			);
-          			runOnlyForDeploymentPostprocessing = 0;
-          		};
-          /* End PBXFrameworksBuildPhase section */
-
-          /* Begin PBXGroup section */
-          		#{id(:root_group)} = {
-          			isa = PBXGroup;
-          			children = (
-          				#{id(:app_group)} /* #{@name} */,
-          				#{id(:test_group)} /* #{@name}UITests */,
-          				#{id(:products_group)} /* Products */,
-          			);
-          			sourceTree = "<group>";
-          		};
-          		#{id(:app_group)} /* #{@name} */ = {
-          			isa = PBXGroup;
-          			children = (
-          #{(app.each_index.map { |n| "\t\t\t\t#{id(:file, n)} /* #{app[n]} */," } + others.each_index.map { |n| "\t\t\t\t#{id(:other, n)} /* #{others[n]} */," }).join("\n")}
-          			);
-          			path = #{@name};
-          			sourceTree = "<group>";
-          		};
-          		#{id(:test_group)} /* #{@name}UITests */ = {
-          			isa = PBXGroup;
-          			children = (
-          #{tests.each_index.map { |n| "\t\t\t\t#{id(:test_file, n)} /* #{tests[n]} */," }.join("\n")}
-          			);
-          			path = #{@name}UITests;
-          			sourceTree = "<group>";
-          		};
-          		#{id(:products_group)} /* Products */ = {
-          			isa = PBXGroup;
-          			children = (
-          				#{id(:app_product)} /* #{@name}.app */,
-          				#{id(:test_product)} /* #{@name}UITests.xctest */,
-          			);
-          			name = Products;
-          			sourceTree = "<group>";
-          		};
-          /* End PBXGroup section */
-
-          /* Begin PBXNativeTarget section */
-          		#{id(:app_target)} /* #{@name} */ = {
-          			isa = PBXNativeTarget;
-          			buildConfigurationList = #{id(:app_configurations)} /* Build configuration list for PBXNativeTarget "#{@name}" */;
-          			buildPhases = (
-          				#{id(:app_sources)} /* Sources */,
-          				#{id(:frameworks)} /* Frameworks */,
-          			);
-          			buildRules = (
-          			);
-          			dependencies = (
-          			);
-          			name = #{@name};
-          			packageProductDependencies = (
-          #{each_package { |product, _, n| "\t\t\t\t#{id(:package_product, n)} /* #{product} */," }}
-          			);
-          			productName = #{@name};
-          			productReference = #{id(:app_product)} /* #{@name}.app */;
-          			productType = "com.apple.product-type.application";
-          		};
-          		#{id(:test_target)} /* #{@name}UITests */ = {
-          			isa = PBXNativeTarget;
-          			buildConfigurationList = #{id(:test_configurations)} /* Build configuration list for PBXNativeTarget "#{@name}UITests" */;
-          			buildPhases = (
-          				#{id(:test_sources)} /* Sources */,
-          			);
-          			buildRules = (
-          			);
-          			dependencies = (
-          				#{id(:dependency)} /* PBXTargetDependency */,
-          			);
-          			name = #{@name}UITests;
-          			productName = #{@name}UITests;
-          			productReference = #{id(:test_product)} /* #{@name}UITests.xctest */;
-          			productType = "com.apple.product-type.bundle.ui-testing";
-          		};
-          /* End PBXNativeTarget section */
-
-          /* Begin PBXProject section */
-          		#{id(:project)} /* Project object */ = {
-          			isa = PBXProject;
-          			attributes = {
-          				BuildIndependentTargetsInParallel = 1;
-          				LastUpgradeCheck = 2720;
-          			};
-          			buildConfigurationList = #{id(:project_configurations)} /* Build configuration list for PBXProject "#{@name}" */;
-          			compatibilityVersion = "Xcode 15.0";
-          			developmentRegion = en;
-          			hasScannedForEncodings = 0;
-          			knownRegions = (
-          				en,
-          				Base,
-          			);
-          			mainGroup = #{id(:root_group)};
-          			packageReferences = (
-          #{each_package { |_, path, n| %(\t\t\t\t#{id(:package, n)} /* XCLocalSwiftPackageReference "#{path}" */,) }}
-          			);
-          			productRefGroup = #{id(:products_group)} /* Products */;
-          			projectDirPath = "";
-          			projectRoot = "";
-          			targets = (
-          				#{id(:app_target)} /* #{@name} */,
-          				#{id(:test_target)} /* #{@name}UITests */,
-          			);
-          		};
-          /* End PBXProject section */
-
-          /* Begin PBXSourcesBuildPhase section */
-          		#{id(:app_sources)} /* Sources */ = {
-          			isa = PBXSourcesBuildPhase;
-          			buildActionMask = 2147483647;
-          			files = (
-          #{app.each_index.map { |n| "\t\t\t\t#{id(:build, n)} /* #{app[n]} in Sources */," }.join("\n")}
-          			);
-          			runOnlyForDeploymentPostprocessing = 0;
-          		};
-          		#{id(:test_sources)} /* Sources */ = {
-          			isa = PBXSourcesBuildPhase;
-          			buildActionMask = 2147483647;
-          			files = (
-          #{tests.each_index.map { |n| "\t\t\t\t#{id(:test_build, n)} /* #{tests[n]} in Sources */," }.join("\n")}
-          			);
-          			runOnlyForDeploymentPostprocessing = 0;
-          		};
-          /* End PBXSourcesBuildPhase section */
-
-          /* Begin PBXTargetDependency section */
-          		#{id(:dependency)} /* PBXTargetDependency */ = {
-          			isa = PBXTargetDependency;
-          			target = #{id(:app_target)} /* #{@name} */;
-          			targetProxy = #{id(:proxy)} /* PBXContainerItemProxy */;
-          		};
-          /* End PBXTargetDependency section */
-
-          /* Begin XCBuildConfiguration section */
-          #{configuration(:project_debug, "Debug", project_settings + ['DEBUG_INFORMATION_FORMAT = dwarf', 'ENABLE_TESTABILITY = YES', 'GCC_OPTIMIZATION_LEVEL = 0', 'ONLY_ACTIVE_ARCH = YES', 'SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG', 'SWIFT_OPTIMIZATION_LEVEL = "-Onone"'])}
-          #{configuration(:project_release, "Release", project_settings + ['DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"', 'SWIFT_COMPILATION_MODE = wholemodule'])}
-          #{configuration(:app_debug, "Debug", app_settings)}
-          #{configuration(:app_release, "Release", app_settings)}
-          #{configuration(:test_debug, "Debug", test_settings)}
-          #{configuration(:test_release, "Release", test_settings)}
-          /* End XCBuildConfiguration section */
-
-          /* Begin XCConfigurationList section */
-          #{configuration_list(:project_configurations, %(PBXProject "#{@name}"), :project_debug, :project_release)}
-          #{configuration_list(:app_configurations, %(PBXNativeTarget "#{@name}"), :app_debug, :app_release)}
-          #{configuration_list(:test_configurations, %(PBXNativeTarget "#{@name}UITests"), :test_debug, :test_release)}
-          /* End XCConfigurationList section */
-
-          /* Begin XCLocalSwiftPackageReference section */
-          #{each_package { |_, path, n| %(\t\t#{id(:package, n)} /* XCLocalSwiftPackageReference "#{path}" */ = {\n\t\t\tisa = XCLocalSwiftPackageReference;\n\t\t\trelativePath = #{path};\n\t\t};) }}
-          /* End XCLocalSwiftPackageReference section */
-
-          /* Begin XCSwiftPackageProductDependency section */
-          #{each_package { |product, _, n| "\t\t#{id(:package_product, n)} /* #{product} */ = {\n\t\t\tisa = XCSwiftPackageProductDependency;\n\t\t\tproductName = #{product};\n\t\t};" }}
-          /* End XCSwiftPackageProductDependency section */
+          #{sections}
           	};
           	rootObject = #{id(:project)} /* Project object */;
           }
@@ -284,10 +115,26 @@ module InstantRecord
         project_configurations app_configurations test_configurations
         project_debug project_release app_debug app_release test_debug test_release
         file other build test_file test_build].freeze
+      KIND_INDEX = KINDS.each_with_index.to_h.freeze
+
+      PROJECT_DEBUG_SETTINGS = [
+        "DEBUG_INFORMATION_FORMAT = dwarf",
+        "ENABLE_TESTABILITY = YES",
+        "GCC_OPTIMIZATION_LEVEL = 0",
+        "ONLY_ACTIVE_ARCH = YES",
+        "SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG",
+        'SWIFT_OPTIMIZATION_LEVEL = "-Onone"'
+      ].freeze
+
+      PROJECT_RELEASE_SETTINGS = [
+        'DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"',
+        "SWIFT_COMPILATION_MODE = wholemodule"
+      ].freeze
 
       # An object's id: 24 hex digits that say what it is and which one.
       def id(kind, index = 0)
-        format("1D%02X%020X", KINDS.index(kind), index)
+        kind_index = KIND_INDEX.fetch(kind) { raise KeyError, "unknown XcodeProject object kind: #{kind.inspect}" }
+        format("1D%02X%020X", kind_index, index)
       end
 
       # A line, or a few, for every package the app links.
@@ -296,14 +143,284 @@ module InstantRecord
       end
 
       def swift_files(subfolder)
-        Dir.children(@folder.join(subfolder)).select { |file| file.end_with?(".swift") }.sort
-      rescue Errno::ENOENT
+        dir = @folder.join(subfolder)
+        Dir.children(dir).select { |file| file.end_with?(".swift") && dir.join(file).file? }.sort
+      rescue Errno::ENOENT, Errno::ENOTDIR
         []
       end
 
-      def file_reference(id, file, type)
+      def pbxproj_section(name, body)
+        "/* Begin #{name} section */\n#{body}\n/* End #{name} section */"
+      end
+
+      def pbx_object(body)
+        body.chomp.gsub(/^(?=.)/, "\t\t")
+      end
+
+      def build_files_section(app, tests)
+        pbxproj_section("PBXBuildFile", [
+          build_file_entries(app, :build, :file),
+          build_file_entries(tests, :test_build, :test_file),
+          each_package { |product, _, n| package_build_file_entry(product, n) }
+        ].join("\n"))
+      end
+
+      def build_file_entries(files, build_kind, file_kind)
+        files.each_with_index.map do |file, n|
+          "\t\t#{id(build_kind, n)} /* #{file} in Sources */ = {isa = PBXBuildFile; fileRef = #{id(file_kind, n)} /* #{file} */; };"
+        end.join("\n")
+      end
+
+      def package_build_file_entry(product, index)
+        "\t\t#{id(:package_build, index)} /* #{product} in Frameworks */ = {isa = PBXBuildFile; productRef = #{id(:package_product, index)} /* #{product} */; };"
+      end
+
+      def container_item_proxy_section
+        pbxproj_section("PBXContainerItemProxy", pbx_object(<<~PBX))
+          #{id(:proxy)} /* PBXContainerItemProxy */ = {
+          	isa = PBXContainerItemProxy;
+          	containerPortal = #{id(:project)} /* Project object */;
+          	proxyType = 1;
+          	remoteGlobalIDString = #{id(:app_target)};
+          	remoteInfo = #{@name};
+          };
+        PBX
+      end
+
+      def file_references_section(app, others, tests)
+        pbxproj_section("PBXFileReference", [
+          file_reference_entries(app, :file) { "sourcecode.swift" },
+          file_reference_entries(others, :other) { |file| file.end_with?(".h") ? "sourcecode.c.h" : "text.plist.xml" },
+          file_reference_entries(tests, :test_file) { "sourcecode.swift" },
+          product_reference(:app_product, "#{@name}.app", "wrapper.application"),
+          product_reference(:test_product, "#{@name}UITests.xctest", "wrapper.cfbundle")
+        ].join("\n"))
+      end
+
+      def file_reference_entries(files, kind)
+        files.each_with_index.map { |file, n| file_reference(id(kind, n), file, yield(file)) }.join("\n")
+      end
+
+      def file_reference(object_id, file, type)
         quoted = file.match?(/\A[\w.]+\z/) ? file : %("#{file}")
-        "\t\t#{id} /* #{file} */ = {isa = PBXFileReference; lastKnownFileType = #{type}; path = #{quoted}; sourceTree = \"<group>\"; };"
+        "\t\t#{object_id} /* #{file} */ = {isa = PBXFileReference; lastKnownFileType = #{type}; path = #{quoted}; sourceTree = \"<group>\"; };"
+      end
+
+      def product_reference(kind, product, file_type)
+        "\t\t#{id(kind)} /* #{product} */ = {isa = PBXFileReference; explicitFileType = #{file_type}; includeInIndex = 0; path = #{product}; sourceTree = BUILT_PRODUCTS_DIR; };"
+      end
+
+      def frameworks_build_phase_section
+        files = each_package { |product, _, n| "\t\t#{id(:package_build, n)} /* #{product} in Frameworks */," }
+        pbxproj_section("PBXFrameworksBuildPhase", pbx_object(<<~PBX))
+          #{id(:frameworks)} /* Frameworks */ = {
+          	isa = PBXFrameworksBuildPhase;
+          	buildActionMask = 2147483647;
+          	files = (
+          #{files}
+          	);
+          	runOnlyForDeploymentPostprocessing = 0;
+          };
+        PBX
+      end
+
+      def groups_section(app, others, tests)
+        pbxproj_section("PBXGroup", [
+          group(:root_group, children: [
+            group_child(id(:app_group), @name),
+            group_child(id(:test_group), "#{@name}UITests"),
+            group_child(id(:products_group), "Products")
+          ]),
+          group(:app_group, comment: @name, path: @name, children: group_children(app, :file) + group_children(others, :other)),
+          group(:test_group, comment: "#{@name}UITests", path: "#{@name}UITests", children: group_children(tests, :test_file)),
+          group(:products_group, comment: "Products", name: "Products", children: [
+            group_child(id(:app_product), "#{@name}.app"),
+            group_child(id(:test_product), "#{@name}UITests.xctest")
+          ])
+        ].join("\n"))
+      end
+
+      def group(kind, children:, comment: nil, path: nil, name: nil)
+        header = comment ? "#{id(kind)} /* #{comment} */" : id(kind)
+        attrs = []
+        attrs << "\tpath = #{path};" if path
+        attrs << "\tname = #{name};" if name
+        attrs << %(\tsourceTree = "<group>";)
+
+        pbx_object(<<~PBX)
+          #{header} = {
+          	isa = PBXGroup;
+          	children = (
+          #{children.join("\n")}
+          	);
+          #{attrs.join("\n")}
+          };
+        PBX
+      end
+
+      def group_children(files, kind)
+        files.each_with_index.map { |file, n| group_child(id(kind, n), file) }
+      end
+
+      def group_child(object_id, label)
+        "\t\t#{object_id} /* #{label} */,"
+      end
+
+      def native_targets_section
+        pbxproj_section("PBXNativeTarget", [
+          app_native_target,
+          test_native_target
+        ].join("\n"))
+      end
+
+      def app_native_target
+        package_deps = each_package { |product, _, n| "\t\t#{id(:package_product, n)} /* #{product} */," }
+        pbx_object(<<~PBX)
+          #{id(:app_target)} /* #{@name} */ = {
+          	isa = PBXNativeTarget;
+          	buildConfigurationList = #{id(:app_configurations)} /* Build configuration list for PBXNativeTarget "#{@name}" */;
+          	buildPhases = (
+          		#{id(:app_sources)} /* Sources */,
+          		#{id(:frameworks)} /* Frameworks */,
+          	);
+          	buildRules = (
+          	);
+          	dependencies = (
+          	);
+          	name = #{@name};
+          	packageProductDependencies = (
+          #{package_deps}
+          	);
+          	productName = #{@name};
+          	productReference = #{id(:app_product)} /* #{@name}.app */;
+          	productType = "com.apple.product-type.application";
+          };
+        PBX
+      end
+
+      def test_native_target
+        pbx_object(<<~PBX)
+          #{id(:test_target)} /* #{@name}UITests */ = {
+          	isa = PBXNativeTarget;
+          	buildConfigurationList = #{id(:test_configurations)} /* Build configuration list for PBXNativeTarget "#{@name}UITests" */;
+          	buildPhases = (
+          		#{id(:test_sources)} /* Sources */,
+          	);
+          	buildRules = (
+          	);
+          	dependencies = (
+          		#{id(:dependency)} /* PBXTargetDependency */,
+          	);
+          	name = #{@name}UITests;
+          	productName = #{@name}UITests;
+          	productReference = #{id(:test_product)} /* #{@name}UITests.xctest */;
+          	productType = "com.apple.product-type.bundle.ui-testing";
+          };
+        PBX
+      end
+
+      def project_section
+        package_refs = each_package { |_, path, n| %(\t\t#{id(:package, n)} /* XCLocalSwiftPackageReference "#{path}" */,) }
+        pbxproj_section("PBXProject", pbx_object(<<~PBX))
+          #{id(:project)} /* Project object */ = {
+          	isa = PBXProject;
+          	attributes = {
+          		BuildIndependentTargetsInParallel = 1;
+          		LastUpgradeCheck = 2720;
+          	};
+          	buildConfigurationList = #{id(:project_configurations)} /* Build configuration list for PBXProject "#{@name}" */;
+          	compatibilityVersion = "Xcode 15.0";
+          	developmentRegion = en;
+          	hasScannedForEncodings = 0;
+          	knownRegions = (
+          		en,
+          		Base,
+          	);
+          	mainGroup = #{id(:root_group)};
+          	packageReferences = (
+          #{package_refs}
+          	);
+          	productRefGroup = #{id(:products_group)} /* Products */;
+          	projectDirPath = "";
+          	projectRoot = "";
+          	targets = (
+          		#{id(:app_target)} /* #{@name} */,
+          		#{id(:test_target)} /* #{@name}UITests */,
+          	);
+          };
+        PBX
+      end
+
+      def sources_build_phases_section(app, tests)
+        pbxproj_section("PBXSourcesBuildPhase", [
+          sources_phase(:app_sources, :build, app),
+          sources_phase(:test_sources, :test_build, tests)
+        ].join("\n"))
+      end
+
+      def sources_phase(phase_kind, build_kind, files)
+        entries = files.each_with_index.map { |file, n| "\t\t#{id(build_kind, n)} /* #{file} in Sources */," }.join("\n")
+        pbx_object(<<~PBX)
+          #{id(phase_kind)} /* Sources */ = {
+          	isa = PBXSourcesBuildPhase;
+          	buildActionMask = 2147483647;
+          	files = (
+          #{entries}
+          	);
+          	runOnlyForDeploymentPostprocessing = 0;
+          };
+        PBX
+      end
+
+      def target_dependency_section
+        pbxproj_section("PBXTargetDependency", pbx_object(<<~PBX))
+          #{id(:dependency)} /* PBXTargetDependency */ = {
+          	isa = PBXTargetDependency;
+          	target = #{id(:app_target)} /* #{@name} */;
+          	targetProxy = #{id(:proxy)} /* PBXContainerItemProxy */;
+          };
+        PBX
+      end
+
+      def build_configurations_section
+        pbxproj_section("XCBuildConfiguration", [
+          configuration(:project_debug, "Debug", project_settings + PROJECT_DEBUG_SETTINGS),
+          configuration(:project_release, "Release", project_settings + PROJECT_RELEASE_SETTINGS),
+          configuration(:app_debug, "Debug", app_settings),
+          configuration(:app_release, "Release", app_settings),
+          configuration(:test_debug, "Debug", test_settings),
+          configuration(:test_release, "Release", test_settings)
+        ].join("\n"))
+      end
+
+      def configuration_lists_section
+        pbxproj_section("XCConfigurationList", [
+          configuration_list(:project_configurations, %(PBXProject "#{@name}"), :project_debug, :project_release),
+          configuration_list(:app_configurations, %(PBXNativeTarget "#{@name}"), :app_debug, :app_release),
+          configuration_list(:test_configurations, %(PBXNativeTarget "#{@name}UITests"), :test_debug, :test_release)
+        ].join("\n"))
+      end
+
+      def local_swift_package_reference_section
+        pbxproj_section("XCLocalSwiftPackageReference", each_package do |_, path, n|
+          pbx_object(<<~PBX)
+            #{id(:package, n)} /* XCLocalSwiftPackageReference "#{path}" */ = {
+            	isa = XCLocalSwiftPackageReference;
+            	relativePath = #{path};
+            };
+          PBX
+        end)
+      end
+
+      def swift_package_product_dependency_section
+        pbxproj_section("XCSwiftPackageProductDependency", each_package do |product, _, n|
+          pbx_object(<<~PBX)
+            #{id(:package_product, n)} /* #{product} */ = {
+            	isa = XCSwiftPackageProductDependency;
+            	productName = #{product};
+            };
+          PBX
+        end)
       end
 
       def project_settings
@@ -316,7 +433,7 @@ module InstantRecord
           "INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES", "INFOPLIST_KEY_UILaunchScreen_Generation = YES",
           "INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait",
           %(LIBRARY_SEARCH_PATHS = "$(SRCROOT)/#{@libraries}/$(PLATFORM_NAME)"), "MARKETING_VERSION = 0.1",
-          %(OTHER_LDFLAGS = (\n\t\t\t\t\t"-linstant_record_app",\n\t\t\t\t\t"-lspinel_rt",\n\t\t\t\t)),
+          %(OTHER_LDFLAGS = (\n\t"-linstant_record_app",\n\t"-lspinel_rt",\n)),
           %(PRODUCT_BUNDLE_IDENTIFIER = "#{@bundle_id}"), %(PRODUCT_NAME = "$(TARGET_NAME)"),
           %(SWIFT_OBJC_BRIDGING_HEADER = "#{@name}/#{@name}-Bridging-Header.h"), "TARGETED_DEVICE_FAMILY = 1"]
       end
@@ -327,13 +444,30 @@ module InstantRecord
       end
 
       def configuration(kind, name, settings)
-        lines = settings.sort.map { |setting| "\t\t\t\t#{setting};" }.join("\n")
-        "\t\t#{id(kind)} /* #{name} */ = {\n\t\t\tisa = XCBuildConfiguration;\n\t\t\tbuildSettings = {\n#{lines}\n\t\t\t};\n\t\t\tname = #{name};\n\t\t};"
+        lines = settings.sort.map { |setting| "#{setting};".gsub(/^/, "\t\t") }.join("\n")
+        pbx_object(<<~PBX)
+          #{id(kind)} /* #{name} */ = {
+          	isa = XCBuildConfiguration;
+          	buildSettings = {
+          #{lines}
+          	};
+          	name = #{name};
+          };
+        PBX
       end
 
       def configuration_list(kind, owner, debug, release)
-        "\t\t#{id(kind)} /* Build configuration list for #{owner} */ = {\n\t\t\tisa = XCConfigurationList;\n\t\t\tbuildConfigurations = (\n" \
-          "\t\t\t\t#{id(debug)} /* Debug */,\n\t\t\t\t#{id(release)} /* Release */,\n\t\t\t);\n\t\t\tdefaultConfigurationIsVisible = 0;\n\t\t\tdefaultConfigurationName = Debug;\n\t\t};"
+        pbx_object(<<~PBX)
+          #{id(kind)} /* Build configuration list for #{owner} */ = {
+          	isa = XCConfigurationList;
+          	buildConfigurations = (
+          		#{id(debug)} /* Debug */,
+          		#{id(release)} /* Release */,
+          	);
+          	defaultConfigurationIsVisible = 0;
+          	defaultConfigurationName = Debug;
+          };
+        PBX
       end
 
       def buildable(kind, product, target)
