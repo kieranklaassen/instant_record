@@ -4,9 +4,18 @@ require_relative "runner"
 
 module InstantRecord
   class Compiler
-    # Reads a toolchain.env file (KEY=VALUE lines with $VAR expansion) and
-    # validates that the required external tools are present before a build.
+    # Reads a toolchain.env file (KEY=VALUE lines with $VAR/${VAR} expansion)
+    # and validates that the required external tools are present before a build.
     class Toolchain
+      VAR_REF = /\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))/
+      STATUS_BADGES = {
+        ok: "OK",
+        optional: "OPTIONAL",
+        error: "ERROR",
+        fail: "FAIL"
+      }.freeze
+      private_constant :VAR_REF, :STATUS_BADGES
+
       Check = Struct.new(:name, :status, :detail, keyword_init: true) do
         def ok? = status == :ok || status == :optional
       end
@@ -27,18 +36,15 @@ module InstantRecord
         def to_s
           lines = ["InstantRecord toolchain check (#{target}) — #{path}"]
           checks.each do |check|
-            badge = case check.status
-            when :ok then "OK"
-            when :optional then "OPTIONAL"
-            when :error then "ERROR"
-            when :fail then "FAIL"
-            else "MISSING"
-            end
+            badge = STATUS_BADGES.fetch(check.status, "MISSING")
             lines << format("  [%-8s] %-18s %s", badge, check.name, check.detail)
           end
           if lint && !lint.ok?
-            lines << ""
-            lines << lint.to_s
+            lint_text = lint.to_s
+            unless lint_text.empty?
+              lines << ""
+              lines << lint_text
+            end
           end
           lines.join("\n")
         end
@@ -58,26 +64,39 @@ module InstantRecord
           next if line.empty? || line.start_with?("#") || !line.include?("=")
 
           key, value = line.split("=", 2)
-          value = value.gsub(/\$([A-Za-z_]\w*)/) { |match| values.fetch(Regexp.last_match(1), match) }
+          key = key.strip
+          next if key.empty?
+
+          value = value.gsub(VAR_REF) { |match| values.fetch(Regexp.last_match(1) || Regexp.last_match(2), match) }
           values[key] = value
         end
         new(path: expanded.to_s, values: values)
       end
 
       def self.which(command, extra_paths: [])
-        if command.include?(File::SEPARATOR)
-          return (File.file?(command) && File.executable?(command)) ? command : nil
+        return nil if command.nil?
+
+        cmd = command.to_s
+        return nil if cmd.empty?
+
+        if cmd.include?(File::SEPARATOR)
+          return executable_file?(cmd) ? cmd : nil
         end
 
         search = Array(extra_paths) + ENV.fetch("PATH", "").split(File::PATH_SEPARATOR)
         search.each do |dir|
           next if dir.nil? || dir.empty?
 
-          candidate = File.join(dir, command)
-          return candidate if File.file?(candidate) && File.executable?(candidate)
+          candidate = File.join(dir, cmd)
+          return candidate if executable_file?(candidate)
         end
         nil
       end
+
+      def self.executable_file?(path)
+        File.file?(path) && File.executable?(path)
+      end
+      private_class_method :executable_file?
 
       def initialize(path:, values:)
         @path = path
@@ -101,42 +120,62 @@ module InstantRecord
 
       def doctor(target: :wasm, web_dir: nil)
         mode = target.nil? || target.to_s.empty? ? :wasm : target.to_sym
-        checks = [
+        target_specific = target_checks(mode, target: target, web_dir: web_dir)
+        Report.new(target: mode, path: @path, checks: common_checks + target_specific)
+      end
+
+      private
+
+      def common_checks
+        [
           check_exec("spinel", optional_path("SPINEL_HOME", "bin/spinel"), "SPINEL_HOME/bin/spinel"),
           check_exec("spin", optional_path("SPINEL_HOME", "bin/spin"), "SPINEL_HOME/bin/spin"),
           check_exec("roundhouse", optional_path("ROUNDHOUSE_BIN"), "ROUNDHOUSE_BIN"),
           check_file("sqlite3.c", optional_path("SQLITE_SRC", "sqlite3.c"), "SQLITE_SRC/sqlite3.c"),
           check_writable_dir("CACHE", self["CACHE"])
         ]
+      end
 
+      def target_checks(mode, target:, web_dir:)
         case mode
-        when :wasm
-          checks << check_file("spinel wasm-rt", optional_path("SPINEL_HOME", "lib/wasm32-wasi/libspinel_rt.a"), "SPINEL_HOME/lib/wasm32-wasi/libspinel_rt.a (run `make wasm-rt`)")
-          checks << check_exec("wasi clang", optional_path("WASI_SDK", "bin/clang"), "WASI_SDK/bin/clang")
-          checks << check_exec("wasi llvm-ar", optional_path("WASI_SDK", "bin/llvm-ar"), "WASI_SDK/bin/llvm-ar")
-          checks << check_exec("wasi llvm-strip", optional_path("WASI_SDK", "bin/llvm-strip"), "WASI_SDK/bin/llvm-strip")
-          checks << check_command("npx", "Node/npm on PATH")
-          checks << check_web_modules(web_dir)
-          checks << check_rails_gems
-          wasm_opt = self.class.which("wasm-opt")
-          checks << Check.new(name: "wasm-opt", status: wasm_opt ? :ok : :optional, detail: wasm_opt || "not on PATH (optional binaryen pass)")
-        when :native
-          checks << check_file("spinel rt", optional_path("SPINEL_HOME", "lib/libspinel_rt.a"), "SPINEL_HOME/lib/libspinel_rt.a (run `make`)")
-          cc = ENV.fetch("CC", "cc")
-          checks << check_command(cc, "C compiler (#{cc})")
-          checks << check_command("ar", "archiver (ar)")
-        when :iphonesimulator, :iphoneos
-          checks << check_file("spinel Makefile", optional_path("SPINEL_HOME", "Makefile"), "SPINEL_HOME/Makefile")
-          checks << check_xcode_sdk(mode.to_s)
-          checks << check_command("ar", "archiver (ar)")
+        when :wasm then wasm_checks(web_dir)
+        when :native then native_checks
+        when :iphonesimulator, :iphoneos then ios_checks(mode)
         else
           raise ArgumentError, "Unknown doctor target: #{target}"
         end
-
-        Report.new(target: mode, path: @path, checks: checks)
       end
 
-      private
+      def wasm_checks(web_dir)
+        wasm_opt = self.class.which("wasm-opt")
+        [
+          check_file("spinel wasm-rt", optional_path("SPINEL_HOME", "lib/wasm32-wasi/libspinel_rt.a"), "SPINEL_HOME/lib/wasm32-wasi/libspinel_rt.a (run `make wasm-rt`)"),
+          check_exec("wasi clang", optional_path("WASI_SDK", "bin/clang"), "WASI_SDK/bin/clang"),
+          check_exec("wasi llvm-ar", optional_path("WASI_SDK", "bin/llvm-ar"), "WASI_SDK/bin/llvm-ar"),
+          check_exec("wasi llvm-strip", optional_path("WASI_SDK", "bin/llvm-strip"), "WASI_SDK/bin/llvm-strip"),
+          check_command("npx", "Node/npm on PATH"),
+          check_web_modules(web_dir),
+          check_rails_gems,
+          Check.new(name: "wasm-opt", status: wasm_opt ? :ok : :optional, detail: wasm_opt || "not on PATH (optional binaryen pass)")
+        ]
+      end
+
+      def native_checks
+        cc = ENV.fetch("CC", "cc")
+        [
+          check_file("spinel rt", optional_path("SPINEL_HOME", "lib/libspinel_rt.a"), "SPINEL_HOME/lib/libspinel_rt.a (run `make`)"),
+          check_command(cc, "C compiler (#{cc})"),
+          check_command("ar", "archiver (ar)")
+        ]
+      end
+
+      def ios_checks(mode)
+        [
+          check_file("spinel Makefile", optional_path("SPINEL_HOME", "Makefile"), "SPINEL_HOME/Makefile"),
+          check_xcode_sdk(mode.to_s),
+          check_command("ar", "archiver (ar)")
+        ]
+      end
 
       def optional_path(key, *parts)
         base = self[key]
@@ -172,12 +211,24 @@ module InstantRecord
 
       def check_writable_dir(name, dir)
         if dir && !dir.empty?
-          parent = File.directory?(dir) ? dir : File.dirname(dir)
-          if File.directory?(parent) && File.writable?(parent)
+          ancestor = nearest_existing_ancestor(dir)
+          if File.directory?(ancestor) && File.writable?(ancestor)
             return Check.new(name: name, status: :ok, detail: dir)
           end
         end
-        Check.new(name: name, status: :missing, detail: "not writable: #{dir || name}")
+        detail = (dir && !dir.empty?) ? dir : name
+        Check.new(name: name, status: :missing, detail: "not writable: #{detail}")
+      end
+
+      def nearest_existing_ancestor(path)
+        probe = File.expand_path(path)
+        until File.exist?(probe) || File.symlink?(probe)
+          parent = File.dirname(probe)
+          break if parent == probe
+
+          probe = parent
+        end
+        probe
       end
 
       def check_web_modules(web_dir)

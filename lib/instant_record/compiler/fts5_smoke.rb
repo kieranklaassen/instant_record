@@ -1,7 +1,7 @@
 require "digest"
 require "fileutils"
 require "json"
-require "open3"
+require "securerandom"
 require "tmpdir"
 require_relative "native_build"
 require_relative "runner"
@@ -112,10 +112,7 @@ module InstantRecord
 
       def initialize(toolchain:, target: :native)
         @toolchain = Toolchain.load(toolchain)
-        @target = target.to_sym
-        unless TARGETS.include?(@target)
-          raise ArgumentError, "Unknown FTS5 smoke target: #{target.inspect} (expected :native or :wasm)"
-        end
+        @target = normalize_target(target)
       end
 
       def run
@@ -127,45 +124,30 @@ module InstantRecord
 
       private
 
+      def normalize_target(target)
+        sym = (target.is_a?(Symbol) || target.is_a?(String)) && !target.empty? ? target.to_sym : nil
+        return sym if TARGETS.include?(sym)
+
+        raise ArgumentError, "Unknown FTS5 smoke target: #{target.inspect} (expected :native or :wasm)"
+      end
+
       def run_native
-        sqlite_src = @toolchain.fetch("SQLITE_SRC")
         cc = ENV.fetch("CC", "cc")
-        Dir.mktmpdir("instant-record-fts5-native-") do |dir|
-          runner = Runner.new(build_dir: dir)
-          sqlite_obj = cached_sqlite_object(
-            runner: runner,
-            key_prefix: "fts5-native",
-            cc: cc,
-            cflags: NativeBuild::SQLITE_CFLAGS,
-            sqlite_src: sqlite_src
-          )
-          smoke_c = File.join(dir, "smoke.c")
+        with_smoke_build(prefix: "fts5-native", cc: cc, cflags: NativeBuild::SQLITE_CFLAGS) do |dir:, runner:, sqlite_src:, sqlite_obj:, smoke_c:|
           binary = File.join(dir, "fts5_smoke")
-          File.write(smoke_c, SMOKE_C)
           runner.run([cc, "-O2", "-I#{sqlite_src}", smoke_c, sqlite_obj, "-lm", "-o", binary])
           parse_result(runner.run([binary]))
         end
       end
 
       def run_wasm
-        sqlite_src = @toolchain.fetch("SQLITE_SRC")
         clang = @toolchain.join("WASI_SDK", "bin/clang")
         node = Toolchain.which("node")
         raise BuildError, "node is required to execute the WASI FTS5 smoke binary" unless node
 
-        Dir.mktmpdir("instant-record-fts5-wasm-") do |dir|
-          runner = Runner.new(build_dir: dir)
-          sqlite_obj = cached_sqlite_object(
-            runner: runner,
-            key_prefix: "fts5-wasm",
-            cc: clang,
-            cflags: WasmBuild::WASI_CFLAGS + WasmBuild::SQLITE_CFLAGS,
-            sqlite_src: sqlite_src
-          )
-          smoke_c = File.join(dir, "smoke.c")
+        with_smoke_build(prefix: "fts5-wasm", cc: clang, cflags: WasmBuild::WASI_CFLAGS + WasmBuild::SQLITE_CFLAGS) do |dir:, runner:, sqlite_src:, sqlite_obj:, smoke_c:|
           wasm = File.join(dir, "fts5_smoke.wasm")
           js = File.join(dir, "run_wasi.mjs")
-          File.write(smoke_c, SMOKE_C)
           File.write(js, WASI_RUNNER_JS)
           runner.run([
             clang, *WasmBuild::WASI_CFLAGS, WasmBuild::WASM_OPT_LEVEL,
@@ -179,26 +161,53 @@ module InstantRecord
         end
       end
 
+      def with_smoke_build(prefix:, cc:, cflags:)
+        sqlite_src = @toolchain.fetch("SQLITE_SRC")
+        Dir.mktmpdir("instant-record-#{prefix}-") do |dir|
+          runner = Runner.new(build_dir: dir)
+          sqlite_obj = cached_sqlite_object(
+            runner: runner,
+            key_prefix: prefix,
+            cc: cc,
+            cflags: cflags,
+            sqlite_src: sqlite_src
+          )
+          smoke_c = File.join(dir, "smoke.c")
+          File.write(smoke_c, SMOKE_C)
+          yield(dir: dir, runner: runner, sqlite_src: sqlite_src, sqlite_obj: sqlite_obj, smoke_c: smoke_c)
+        end
+      end
+
       def cached_sqlite_object(runner:, key_prefix:, cc:, cflags:, sqlite_src:)
         sqlite_c = File.join(sqlite_src, "sqlite3.c")
+        raise BuildError, "Missing SQLite amalgamation source: #{sqlite_c}" unless File.file?(sqlite_c)
+
         cache = @toolchain["CACHE"]
         digest = Digest::SHA256.hexdigest([cc, *cflags, sqlite_c, File.size(sqlite_c)].join("\0"))[0, 16]
         out_dir = cache && !cache.empty? ? File.join(cache, "#{key_prefix}-#{digest}") : runner.build_dir
         FileUtils.mkdir_p(out_dir)
         obj = File.join(out_dir, "sqlite3.o")
-        unless File.exist?(obj)
-          tmp_obj = File.join(out_dir, "sqlite3.#{Process.pid}.o")
+        return obj if File.exist?(obj)
+
+        tmp_obj = File.join(out_dir, "sqlite3.#{Process.pid}.#{SecureRandom.hex(6)}.o")
+        begin
           runner.run([cc, *cflags, "-c", sqlite_c, "-o", tmp_obj])
           File.rename(tmp_obj, obj)
+        ensure
+          FileUtils.rm_f(tmp_obj)
         end
         obj
       end
 
       def parse_result(stdout)
-        parsed = JSON.parse(stdout.strip)
-        raise BuildError, "FTS5 smoke test returned #{parsed.inspect}" unless parsed["ok"] == true
+        parsed = JSON.parse(stdout.to_s.strip)
+        unless parsed.is_a?(Hash) && parsed["ok"] == true
+          raise BuildError, "FTS5 smoke test returned #{parsed.inspect}"
+        end
 
         parsed.transform_keys(&:to_sym).merge(target: @target)
+      rescue JSON::ParserError => e
+        raise BuildError, "FTS5 smoke test produced invalid JSON (#{e.message}): #{stdout.to_s.strip.inspect}"
       end
     end
   end
