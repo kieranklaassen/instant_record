@@ -140,7 +140,7 @@ public final class HybridTab: NSObject, ObservableObject {
     }
 
     private func tellRoutes() {
-        run("window.instantRecordHybrid?.routes(patterns)", ["patterns": site.routes.map(\.pattern)])
+        run("window.instantRecordHybrid?.routes(patterns)", ["patterns": site.routes.map { ["pattern": $0.pattern, "page": $0.page] as [String: Any] }])
     }
 
     private func moved() {
@@ -232,6 +232,9 @@ extension HybridTab: WKNavigationDelegate, WKUIDelegate {
         if let url = action.request.url, HybridNavigation.decide(url, server: server) == .stay { webView.load(action.request) }
         return nil
     }
+
+    // Before the page's images have come: it is already there to be tapped.
+    public func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) { moved() }
 
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         failure = nil

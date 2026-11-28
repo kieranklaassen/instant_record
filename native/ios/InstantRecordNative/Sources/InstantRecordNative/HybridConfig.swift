@@ -30,12 +30,21 @@ public struct HybridConfig: Equatable {
         public let screen: String?
         public let view: String?
         public let sheet: Bool
+        /// An address that stays a page though a later route would take it.
+        public var page = false
 
         private var parts: [Substring] { path.split(separator: "/") }
 
         /// The place's route at an address, with the address's own words and
         /// its query as params. A word in the path wins over the query.
         func route(for url: URL) -> Route? {
+            guard let params = params(for: url) else { return nil }
+            if let screen { return Route(screen, params) }
+            return view.map { Route.view($0, params) }
+        }
+
+        /// The params of an address that matches, page or place.
+        func params(for url: URL) -> [String: String]? {
             guard let parsed = URLComponents(url: url, resolvingAgainstBaseURL: true) else { return nil }
             let words = parsed.percentEncodedPath.split(separator: "/")
             guard words.count == parts.count else { return nil }
@@ -44,8 +53,7 @@ public struct HybridConfig: Equatable {
                 let word = word.removingPercentEncoding ?? String(word)
                 if part.hasPrefix(":") { params[String(part.dropFirst())] = word } else if String(part) != word { return nil }
             }
-            if let screen { return Route(screen, params) }
-            return view.map { Route.view($0, params) }
+            return params
         }
 
         /// The same match, for the page script, which must decide at once.
@@ -93,15 +101,16 @@ public struct HybridConfig: Equatable {
     /// The routes this app can open. An older app than the config leaves out
     /// those it lacks, and their addresses stay pages.
     func places(screens: Set<String>, views: Screens) -> [Place] {
-        routes.filter { $0.screen.map(screens.contains) ?? $0.view.map(views.has) ?? false }
+        routes.filter { $0.page || ($0.screen.map(screens.contains) ?? $0.view.map(views.has) ?? false) }
     }
 
     private static func place(_ from: [String: Any]) -> Place? {
         guard let path = from["path"] as? String, path.hasPrefix("/"), !path.hasPrefix("//") else { return nil }
         let screen = from["screen"] as? String, view = from["view"] as? String
-        // One or the other. Both is a mistake with no right reading.
-        guard (screen == nil) != (view == nil) else { return nil }
-        return Place(path: path, screen: screen, view: view, sheet: from["sheet"] as? Bool ?? false)
+        let page = from["page"] as? Bool ?? false
+        // One of the three. More is a mistake with no right reading.
+        guard [screen != nil, view != nil, page].filter({ $0 }).count == 1 else { return nil }
+        return Place(path: path, screen: screen, view: view, sheet: from["sheet"] as? Bool ?? false, page: page)
     }
 
     private static func tab(_ from: [String: Any], _ languages: [String]) -> Tab? {

@@ -62,10 +62,22 @@ class IosGeneratorTest < Rails::Generators::TestCase
 
     assert_file "native/ios/Shop/Shop/ShopApp.swift" do |app|
       assert_match 'Route("mailbox")', app
-      assert_match(/screens: \[.*"mailbox".*"thread".*\]/, app)
+      assert_match "screens: rubyScreens", app
     end
+    assert_file "native/ios/Shop/Shop/RubyScreens.swift", /\[.*"mailbox".*"thread".*\]/
     assert_file "native/ios/Shop/Shop/LibraryEngine.swift"
     assert_file "native/ios/Shop/Shop.xcodeproj/project.pbxproj", /linstant_record_app/
+  end
+
+  test "run again with --force, it leaves the app's own file and writes the rest" do
+    run_generator %w[Shop --hybrid --screen mailbox]
+    File.write(File.join(destination_root, "native/ios/Shop/Shop/ShopApp.swift"), "// mine")
+    File.write(File.join(destination_root, "native/ios/Shop/Shop/RubyScreens.swift"), "// old")
+
+    run_generator %w[Shop --hybrid --screen mailbox --force]
+
+    assert_file "native/ios/Shop/Shop/ShopApp.swift", "// mine"
+    assert_file "native/ios/Shop/Shop/RubyScreens.swift", /rubyScreens/
   end
 
   test "an app of neither kind is refused, and nothing is written" do

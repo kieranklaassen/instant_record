@@ -66,7 +66,11 @@ bin/rails generate instant_record:ios Shop --hybrid --screen catalog
 bin/rails "instant_record:native[iphonesimulator]"
 ```
 
-`--screen` names the first Ruby screen. The generated app lists every screen in `app/screens` at that moment as one a link may open. Run the generator again with `--force`, or edit the list in `ShopApp.swift`, after adding one.
+`--screen` names the first Ruby screen. The generated app lists every screen in `app/screens` at that moment as one a route may open, in `RubyScreens.swift`.
+
+## After adding a file
+
+Run the generator again with the same options and `--force` after adding a Ruby screen or a Swift file. It writes the Xcode project and `RubyScreens.swift` again. It never writes over `ShopApp.swift`, which is yours.
 
 ## While developing
 

@@ -61,7 +61,7 @@ enum HybridBridge {
       }
 
       let places = []
-      const opensNative = url => url.origin === location.origin && places.some(place => place.test(url.pathname))
+      const opensNative = url => url.origin === location.origin && places.find(place => place.pattern.test(url.pathname))?.page === false
 
       let canGoBack = false
       const mark = () => {
@@ -96,7 +96,7 @@ enum HybridBridge {
 
       window.instantRecordHybrid = {
         gather() { last = ""; gather() },
-        routes(patterns) { places = patterns.map(pattern => new RegExp(pattern)) },
+        routes(patterns) { places = patterns.map(place => ({ ...place, pattern: new RegExp(place.pattern) })) },
         back(can) { canGoBack = can; mark() },
         click(selector) { document.querySelector(selector)?.click() },
         visit(url, replace) {

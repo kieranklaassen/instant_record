@@ -15,10 +15,10 @@ struct <%= app_name %>App: App {
     @StateObject private var host: HybridHost
 
     init() {
-        // Views written in SwiftUI, for a tab or a route with `view:`<% if compiled? %>, or a
-        // Ruby screen's `swift "Name"`<% end %>:
-        //   views.register("Name") { props, actions in NameView(props: props) }
-        let views = Screens()
+        // Views written in SwiftUI, by the name Ruby or config/ruby_native.yml
+        // gives them, are registered here.
+        var views = Screens()
+        register(&views)
 
         let defaults = UserDefaults.standard
         let address = defaults.string(forKey: "server") ?? "<%= options[:server] %>"
@@ -31,7 +31,7 @@ struct <%= app_name %>App: App {
             AppHost.Store(database: folder.appending(path: "app.sqlite3").path, endpoint: address + "<%= mount_path %>")
         })
         app.start()
-        _host = StateObject(wrappedValue: HybridHost(server: server, app: app, screens: <%= screen_names.inspect %>) { UIApplication.shared.open($0) })
+        _host = StateObject(wrappedValue: HybridHost(server: server, app: app, screens: rubyScreens) { UIApplication.shared.open($0) })
 <% else -%>
         _host = StateObject(wrappedValue: HybridHost(server: server, views: views) { UIApplication.shared.open($0) })
 <% end -%>
@@ -40,4 +40,8 @@ struct <%= app_name %>App: App {
     var body: some Scene {
         WindowGroup { HybridView(host: host) }
     }
+}
+
+private func register(_ views: inout Screens) {
+    // views.register("Name") { props, actions in NameView(props: props) }
 }

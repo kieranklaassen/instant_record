@@ -23,7 +23,6 @@ public struct HybridView: View {
         TabView(selection: $host.selected) {
             ForEach(host.shown) { shown in
                 content(shown)
-                    .toolbar(tabBar(shown) ? .visible : .hidden, for: .tabBar)
                     .tabItem { Label(shown.tab.title, systemImage: shown.tab.icon) }
                     .badge(latest?.badge(for: shown.tab).map { Text(verbatim: $0) })
                     .tag(shown.id)
@@ -31,7 +30,11 @@ public struct HybridView: View {
         }
         .tint(tint)
         .environment(\.theme, theme)
-        .onChange(of: phase, initial: true) { _, now in if now == .active { host.front() } }
+        .onChange(of: phase, initial: true) { _, now in
+            if now == .active { host.front() }
+            // Also where no Ruby tab has been on show: a page may open a screen.
+            host.app?.front(now == .active)
+        }
     }
 
     @ViewBuilder private func content(_ shown: HybridHost.Shown) -> some View {
@@ -40,14 +43,11 @@ public struct HybridView: View {
         case .view(let name):
             NavigationStack { PlaceView(route: .view(name), host: host.app, site: host.site, views: host.views, pushed: false) }
         case .page(let page):
-            PageStack(page: page, host: host.app, site: host.site, views: host.views, theme: theme) { signals in
+            PageStack(page: page, host: host.app, site: host.site, views: host.views, theme: theme,
+                      tabs: host.shown.count, latest: latest) { signals in
                 if let signals, shown.id == host.selected { latest = signals }
             }
         }
-    }
-
-    private func tabBar(_ shown: HybridHost.Shown) -> Bool {
-        tabBarShows(tabs: host.shown.count, screen: shown.page == nil || shown.page?.path.isEmpty == false, signals: shown.page?.signals ?? latest)
     }
 
     private var tint: Color {
@@ -63,15 +63,23 @@ private struct PageStack: View {
     let site: HybridSite
     let views: Screens
     let theme: Theme
+    let tabs: Int
+    let latest: PageSignals?
     let changed: (PageSignals?) -> Void
 
+    private var bar: Bool { tabBarShows(tabs: tabs, screen: !page.path.isEmpty, signals: page.signals ?? latest) }
+
     var body: some View {
-        NavigationStack(path: $page.path) {
-            HybridPage(page: page)
-                .navigationDestination(for: Route.self) { PlaceView(route: $0, host: host, site: site, views: views) }
+        VStack(spacing: 0) {
+            if let host, page.path.contains(where: \.isScreen) { AppBanners(host: host, theme: theme) }
+            NavigationStack(path: $page.path) {
+                HybridPage(page: page)
+                    .navigationDestination(for: Route.self) { PlaceView(route: $0, host: host, site: site, views: views) }
+            }
         }
+        .toolbar(bar ? .visible : .hidden, for: .tabBar)
         .modifier(PageSheet(page: page, host: host, site: site, views: views, theme: theme))
-        .environment(\.opens, Opens(push: { page.path.append($0) }, sheet: { page.sheet = $0 }))
+        .environment(\.opens, Opens(push: { page.path.append($0) }, sheet: { page.sheet = $0 }, replace: { if !page.path.isEmpty { page.path[page.path.count - 1] = $0 } }))
         .onAppear { changed(page.signals) }
         .onChange(of: page.signals) { _, now in changed(now) }
         .onChange(of: page.path) { visited() }
@@ -92,13 +100,7 @@ private struct PageSheet: ViewModifier {
 
     func body(content: Content) -> some View {
         content.sheet(isPresented: Binding(get: { page.sheet != nil }, set: { if !$0 { page.sheet = nil } })) {
-            if let route = page.sheet {
-                if let host {
-                    SheetView(route: route, host: host, theme: theme)
-                } else {
-                    PlaceView(route: route, host: nil, site: site, views: views, pushed: false)
-                }
-            }
+            if let route = page.sheet { SheetView(route: route, host: host, site: site, views: views, theme: theme) }
         }
     }
 }

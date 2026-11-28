@@ -32,9 +32,19 @@ routes:
   - { path: "/places/:id",   view: MapView, sheet: true }
 ```
 
-`<a href="/products/7">` opens `ProductScreen` with `param("id")` as `"7"`. Words after a colon and the query become params. With `sheet: true` it comes up as a sheet. An app without the place, and a browser, follow the link.
+`<a href="/products/7">` opens `ProductScreen` with `param("id")` as `"7"`. Words after a colon and the query become params. With `sheet: true` it comes up as a sheet. The first route that matches decides, so name a page that a later route would take:
+
+```yaml
+routes:
+  - { path: "/products/new", page: true }
+  - { path: "/products/:id", screen: product }
+```
+
+An app without the place, and a browser, follow the link.
 
 Routes see taps on links, native buttons' `href` and `RubyNative.visit`. They do not see a redirect, a form's answer, or a visit a script makes, so those stay pages. Keep the page working.
+
+A menu item's `replace:` in a screen a page opened swaps that screen. It does not change database, as it does on the first screen.
 
 ## Inside a Ruby screen
 

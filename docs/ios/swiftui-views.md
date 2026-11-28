@@ -27,9 +27,41 @@ class ProductScreen < InstantRecord::Native::Screen
 end
 ```
 
-`bin/rails "instant_record:native[iphonesimulator]"` writes `InstantRecordContracts.swift` from the contract: a props struct, an observable state class and an enum of actions.
+The contract is optional. With one, Ruby checks the props, and the build writes Swift types for them.
 
 ## Write the view
+
+With the contract's types:
+
+```sh
+SWIFT_OUT=native/ios/Shop/Shop/InstantRecordContracts.swift bin/rails "instant_record:native[iphonesimulator]"
+```
+
+```swift
+// native/ios/Shop/Shop/ProductView.swift
+import InstantRecordNative
+import SwiftUI
+
+struct ProductView: View {
+    let props: ProductViewProps
+    let actions: TypedActions<ProductViewAction>
+
+    var body: some View {
+        Text(props.name)
+        Button("Buy") { actions.send(.buy) }
+    }
+}
+```
+
+Register it in `ShopApp.swift`, in `register`:
+
+```swift
+views.register(ProductViewProps.self) { props, actions in ProductView(props: props, actions: actions) }
+```
+
+Then run the generator again with `--force`, which adds the new files to the Xcode project.
+
+Without a contract, read props by name:
 
 ```swift
 struct ProductView: View {
@@ -41,19 +73,8 @@ struct ProductView: View {
         Button("Buy") { actions.perform("buy") }
     }
 }
-```
 
-Register it once, in the app's file:
-
-```swift
-var views = Screens()
 views.register("ProductView") { props, actions in ProductView(props: props, actions: actions) }
-```
-
-With a contract, register the generated type and get typed props:
-
-```swift
-views.register(ProductViewProps.self) { props, actions in ProductView(props: props, actions: actions) }
 ```
 
 | In Ruby | In Swift |

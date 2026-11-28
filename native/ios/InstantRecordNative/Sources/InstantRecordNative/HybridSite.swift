@@ -29,7 +29,9 @@ public final class HybridSite {
 
     func place(at url: URL) -> (route: Route, sheet: Bool)? {
         guard Origin(url) == Origin(server) else { return nil }
-        return routes.lazy.compactMap { place in place.route(for: url).map { ($0, place.sheet) } }.first
+        // The first that matches decides, also that it is a page.
+        guard let place = routes.first(where: { $0.params(for: url) != nil }) else { return nil }
+        return place.route(for: url).map { ($0, place.sheet) }
     }
 
     func watch(_ who: AnyObject, _ block: @escaping () -> Void) { changed[ObjectIdentifier(who)] = block }

@@ -89,6 +89,8 @@ public final class AppHost: ObservableObject {
     /// The server whose pages this app's screens can link to (`page:/orders`)
     /// and hold (`web`). A HybridHost sets it.
     public var site: HybridSite?
+    /// The screen the app was made with, whatever has since replaced it.
+    let home: String
 
     /// The SwiftUI views a screen can ask for by name.
     public let views: Screens
@@ -126,6 +128,7 @@ public final class AppHost: ObservableObject {
                 pace: SyncSchedule.Pace = SyncSchedule.Pace(), clock: Timekeeper = MainClock(), reachability: Reachability = NetworkPath()) {
         self.engine = engine
         self.root = root
+        home = root.screen
         self.views = views
         self.store = store
         self.transport = transport
@@ -170,6 +173,7 @@ public final class AppHost: ObservableObject {
     /// The app came to the front, or left it. In front it syncs at once and
     /// follows the server's events, which is how changes from elsewhere arrive.
     public func front(_ on: Bool) {
+        guard on != inFront else { return }
         schedule.front(on)
         inFront = on
         follow()

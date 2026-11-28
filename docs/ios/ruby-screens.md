@@ -41,7 +41,7 @@ end
 | `toolbar`, `bottom`, `field` | bar buttons, a pinned bar, a text box |
 | `more` | the next page of a long list |
 | `swift` | one of your [SwiftUI views](swiftui-views.md) |
-| `web` | one of your [Rails pages](rails-pages.md) |
+| `web` | one of your [Rails pages](rails-pages.md), in the room that is left: beside a list, not in one |
 
 ## Where a link goes
 

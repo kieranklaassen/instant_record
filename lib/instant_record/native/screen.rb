@@ -241,7 +241,8 @@ module InstantRecord
       end
 
       # A page Rails serves, among native elements: the part of a screen that
-      # ships with a deploy. Its bar is the screen's. Needs the network, and
+      # ships with a deploy. Its bar is the screen's. It fills what room is
+      # left, so it stands beside a list and not in one. Needs the network, and
       # an app that was given its server (HybridHost, or AppHost's `site`).
       def web(path)
         node = add("web")

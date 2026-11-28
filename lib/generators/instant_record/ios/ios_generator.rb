@@ -31,11 +31,19 @@ module InstantRecord
         raise Thor::Error, "Give --screen NAME for an app of Ruby screens, --hybrid for one of Rails pages, or both" unless compiled? || hybrid?
       end
 
+      # The app's own file is the developer's once written: it holds their
+      # views and their token. The rest is written again.
       def write_app
-        template hybrid? ? "HybridApp.swift.tt" : "App.swift.tt", "#{folder}/#{app_name}/#{app_name}App.swift"
+        app = "#{folder}/#{app_name}/#{app_name}App.swift"
+        template(hybrid? ? "HybridApp.swift.tt" : "App.swift.tt", app) unless File.exist?(File.join(destination_root, app))
         copy_file "Info.plist", "#{folder}/#{app_name}/Info.plist"
         return unless compiled?
 
+        create_file "#{folder}/#{app_name}/RubyScreens.swift", <<~SWIFT if hybrid?
+          /// The Ruby screens a route may open: those in app/screens when the
+          /// generator last ran. Written by instant_record:ios.
+          let rubyScreens: Set<String> = #{screen_names.inspect}
+        SWIFT
         copy_file "LibraryEngine.swift", "#{folder}/#{app_name}/LibraryEngine.swift"
         create_file "#{folder}/#{app_name}/#{app_name}-Bridging-Header.h", %(#include "instant_record_native.h"\n)
       end

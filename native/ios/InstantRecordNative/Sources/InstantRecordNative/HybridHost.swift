@@ -60,7 +60,8 @@ public final class HybridHost: ObservableObject {
     // A tab that is still listed keeps its web view, and where it was.
     private func show(_ config: HybridConfig) {
         site.use(config.places(screens: screens, views: views))
-        let drawn = config.screenTab(root: app?.root.screen)
+        let drawn = config.screenTab(root: app?.home)
+        let dropped = shown.compactMap(\.page)
         let entry = config.tabs.firstIndex { $0.path == config.entryPath }
         let before = Dictionary(shown.map { ($0.id, $0) }) { first, _ in first }
         var seen: [String: Int] = [:]
@@ -68,15 +69,20 @@ public final class HybridHost: ObservableObject {
             seen[kind + name, default: 0] += 1
             return "\(kind) \(name) \(seen[kind + name]!)"
         }
+        var entered = false
         shown = config.tabs.enumerated().map { n, tab in
             if n == drawn, let app { return Shown(id: id("screen", ""), tab: tab, kind: .screen(app)) }
             if let view = tab.view, views.has(view) { return Shown(id: id("view", view), tab: tab, kind: .view(view)) }
-            let id = id("page", tab.path)
-            // An entry that is no tab's own page is where the first begins.
-            let first = n == 0 && entry == nil ? config.entryPath : tab.path
+            // An entry that is no tab's own page is where the first page begins.
+            let first = entry == nil && !entered ? config.entryPath : tab.path
+            entered = true
+            let id = id("page", first)
             return Shown(id: id, tab: tab, kind: .page(before[id]?.page ?? HybridTab(site: site, path: first)))
         }
         self.config = config
+        // What a tab that is gone had opened is no longer on show.
+        let kept = Set(shown.compactMap(\.page).map(ObjectIdentifier.init))
+        for page in dropped where !kept.contains(ObjectIdentifier(page)) { app?.visited([], in: ObjectIdentifier(page)) }
         if !shown.contains(where: { $0.id == selected }) { selected = shown[entry ?? 0].id }
         for tab in shown where tab.tab.eager { tab.page?.load() }
     }

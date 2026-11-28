@@ -6,7 +6,6 @@ import SwiftUI
 public struct AppView: View {
     @ObservedObject private var host: AppHost
     @Environment(\.scenePhase) private var phase
-    @State private var showingNotices = false
     private let waiting: String
     private let theme: Theme
 
@@ -24,21 +23,17 @@ public struct AppView: View {
         // The status line sits over the navigation bar, not on it: as an
         // inset of the stack it was drawn across the bar's buttons.
         VStack(spacing: 0) {
-            banner
-            noticesBanner
+            AppBanners(host: host, theme: theme)
             NavigationStack(path: $host.path) {
                 // A first screen put in another's place starts afresh.
                 ScreenView(route: host.root, host: host, first: true, waiting: waiting)
                     .id(host.root)
                     .navigationDestination(for: Route.self) { PlaceView(route: $0, host: host, site: host.site, views: host.views) }
             }
-            .sheet(isPresented: $showingNotices) {
-                SyncNoticesSheet(host: host, theme: theme)
-            }
         }
         .background { theme.page?.ignoresSafeArea() }
         .sheet(isPresented: Binding(get: { host.sheet != nil }, set: { if !$0 { host.sheet = nil } })) {
-            if let route = host.sheet { SheetView(route: route, host: host, theme: theme) }
+            if let route = host.sheet { SheetView(route: route, host: host, site: host.site, views: host.views, theme: theme) }
         }
         .tint(theme.tint)
         .environment(\.theme, theme)
@@ -47,6 +42,22 @@ public struct AppView: View {
         .onChange(of: host.status.message) { _, now in
             if let now { AccessibilityNotification.Announcement(now).post() }
         }
+    }
+}
+
+/// What the app has to say over whatever is on show: what went wrong, that
+/// it is offline, what waits, and the writes that need a look.
+struct AppBanners: View {
+    @ObservedObject var host: AppHost
+    let theme: Theme
+    @State private var showingNotices = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            banner
+            noticesBanner
+        }
+        .sheet(isPresented: $showingNotices) { SyncNoticesSheet(host: host, theme: theme) }
     }
 
     @ViewBuilder private var banner: some View {
@@ -95,33 +106,75 @@ public struct AppView: View {
     }
 }
 
-/// A screen brought up as a sheet. One that Ruby draws gets a navigation
-/// stack, for its title and bar buttons. One that is a single Swift view is
-/// shown as it is: such a view brings its own bar, and a stack inside a
-/// stack is not allowed.
+/// A place brought up as a sheet, in a stack of its own, so that what it
+/// links to opens over it. A screen that is a single Swift view is shown as
+/// it is: such a view brings its own bar, and a stack inside a stack is not
+/// allowed.
 struct SheetView: View {
-    let route: Route
-    @ObservedObject var host: AppHost
+    let host: AppHost?
+    let site: HybridSite?
+    let views: Screens
     let theme: Theme
+    private final class Token: ObservableObject {}
+    @StateObject private var token = Token()
+    @State private var route: Route
+    @State private var path: [Route] = []
+    @State private var over: Route?
+
+    init(route: Route, host: AppHost?, site: HybridSite?, views: Screens, theme: Theme) {
+        _route = State(initialValue: route)
+        self.host = host
+        self.site = site
+        self.views = views
+        self.theme = theme
+    }
 
     var body: some View {
         Group {
-            if !route.isScreen {
-                PlaceView(route: route, host: host, site: host.site, views: host.views, pushed: false)
-            }
-            // Nothing until the screen is drawn: which of the two it is
-            // must not change under a view that holds what was typed.
-            else if host.screens[route] == nil {
-                Color.clear
-            } else if bare {
-                ScreenView(route: route, host: host, first: false)
+            if route.isScreen, let host {
+                RubySheet(route: route, host: host) { stack }
+            } else if route.viewName != nil {
+                place(route)
             } else {
-                NavigationStack { ScreenView(route: route, host: host, first: false) }
+                stack
             }
         }
         .tint(theme.tint)
         .environment(\.theme, theme)
+        .environment(\.opens, Opens(push: { path.append($0) }, sheet: { over = $0 }, replace: { if path.isEmpty { route = $0 } else { path[path.count - 1] = $0 } }))
         .presentationBackground(theme.page.map(AnyShapeStyle.init) ?? AnyShapeStyle(.background))
+        .sheet(isPresented: Binding(get: { over != nil }, set: { if !$0 { over = nil } })) {
+            // Erased, because the view is inside itself.
+            if let over { AnyView(SheetView(route: over, host: host, site: site, views: views, theme: theme)) }
+        }
+        .onChange(of: [route] + path + (over.map { [$0] } ?? [])) { _, now in host?.visited(now, in: ObjectIdentifier(token)) }
+        .onDisappear { host?.visited([], in: ObjectIdentifier(token)) }
+    }
+
+    private var stack: some View {
+        NavigationStack(path: $path) { place(route).navigationDestination(for: Route.self) { place($0) } }
+    }
+
+    private func place(_ route: Route) -> some View {
+        PlaceView(route: route, host: host, site: site, views: views)
+    }
+}
+
+/// A Ruby screen's sheet, which waits for Ruby to say which kind it is: that
+/// must not change under a view that holds what was typed.
+private struct RubySheet<Stack: View>: View {
+    let route: Route
+    @ObservedObject var host: AppHost
+    @ViewBuilder let stack: () -> Stack
+
+    var body: some View {
+        if host.screens[route] == nil {
+            Color.clear
+        } else if bare {
+            ScreenView(route: route, host: host, first: false)
+        } else {
+            stack()
+        }
     }
 
     private var bare: Bool {
@@ -343,7 +396,8 @@ struct NodeView: View {
     private var item: some View {
         Button(role: role) {
             if !node.prop("replace").isEmpty {
-                host.replace(with: Route(node.prop("replace"), node.params))
+                let route = Route(node.prop("replace"), node.params)
+                if let replace = opens.replace { replace(route) } else { host.replace(with: route) }
             } else if !node.prop("sheet").isEmpty {
                 let route = Route(node.prop("sheet"), node.params)
                 if let sheet = opens.sheet { sheet(route) } else { host.sheet = route }

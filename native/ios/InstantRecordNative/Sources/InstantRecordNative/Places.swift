@@ -28,6 +28,8 @@ public extension Route {
 struct Opens {
     var push: ((Route) -> Void)?
     var sheet: ((Route) -> Void)?
+    /// Puts a place in the top one's place. Without one, in the app's first.
+    var replace: ((Route) -> Void)?
 }
 
 private struct OpensKey: EnvironmentKey { static let defaultValue = Opens() }
@@ -55,7 +57,7 @@ struct PlaceView: View {
     let host: AppHost?
     let site: HybridSite?
     let views: Screens
-    /// Whether it lies over another, in a stack.
+    /// Whether it stands in a stack that gives it a bar.
     var pushed = true
 
     var body: some View {

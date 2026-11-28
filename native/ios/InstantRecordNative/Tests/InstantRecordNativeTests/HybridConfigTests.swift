@@ -139,4 +139,36 @@ final class HybridConfigTests: XCTestCase {
         XCTAssertEqual(engine.calls.filter { $0.hasPrefix("action thread") }.count, 1, "\(engine.calls)")
         XCTAssertNil(app.screens[thread])
     }
+
+    @MainActor func testTheFirstRouteThatMatchesDecidesAlsoThatItIsAPage() {
+        let site = HybridSite(server: server, data: .nonPersistent(), outside: { _ in })
+        site.use(places(#"[{"path":"/p/new","page":true},{"path":"/p/:id","screen":"p"}]"#))
+        XCTAssertNil(site.place(at: URL(string: "/p/new", relativeTo: server)!))
+        XCTAssertEqual(site.place(at: URL(string: "/p/7", relativeTo: server)!)?.route, Route("p", ["id": "7"]))
+        XCTAssertNil(site.place(at: URL(string: "http://evil.test/p/7")!))
+    }
+
+    @MainActor func testATabThatGoesTakesItsOpenScreensAlong() async {
+        let engine = FakeEngine()
+        let app = AppHost(engine: engine, root: Route("mailbox"), store: { _ in AppHost.Store(database: "d", endpoint: "e") }, exchange: { _ in "0\n" }, reachability: ManualReachability())
+        app.start()
+        var answer = #"200\#n{"tabs":[{"title":"A","path":"/a"},{"title":"B","path":"/b"}]}"#
+        let host = HybridHost(site: HybridSite(server: server, data: .nonPersistent(), outside: { _ in }), app: app, screens: [], views: Screens(), defaults: defaults(), exchange: { _ in answer })
+        await host.refresh()
+        app.visited([Route("thread")], in: ObjectIdentifier(host.shown[1].page!))
+        answer = #"200\#n{"tabs":[{"title":"A","path":"/a"}]}"#
+        await host.refresh()
+        engine.calls = []
+        app.perform("tap", on: Route("mailbox"))
+        app.settle()
+        XCTAssertFalse(engine.calls.contains { $0.hasPrefix("render thread") }, "\(engine.calls)")
+    }
+
+    @MainActor func testTheEntryOpensOnTheFirstLaunch() async {
+        let json = #"200\#n{"app":{"entry_path":"/welcome"},"tabs":[{"title":"A","path":"/"},{"title":"B","path":"/b"}]}"#
+        let host = HybridHost(site: HybridSite(server: server, data: .nonPersistent(), outside: { _ in }), app: nil, screens: [], views: Screens(), defaults: defaults(), exchange: { _ in json })
+        let bare = host.shown[0].page
+        await host.refresh()
+        XCTAssertFalse(host.shown[0].page === bare)
+    }
 }
