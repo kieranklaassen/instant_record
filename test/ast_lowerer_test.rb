@@ -1003,4 +1003,77 @@ class AstLowererTest < ActiveSupport::TestCase
       assert_includes File.read(File.join(custom_app, "lib/instant_record/host.rb")), "def self.custom? = true"
     end
   end
+
+  test "lowers edge syntax forms including empty parens, line continuations, heredocs, and spaced calls" do
+    assert_equal "a\n", AstLowerer.lower("browser_only() { a }\n")
+    assert_equal "a\n", AstLowerer.lower("browser_only(\n  # comment\n) { a }\n")
+    assert_equal "a\n", AstLowerer.lower("browser_only \\\n  do\n  a\nend\n")
+    assert_equal "true\n", AstLowerer.lower("InstantRecord . browser?\n")
+    assert_equal "true\n", AstLowerer.lower("InstantRecord\n  # comment\n  .browser?\n")
+    assert_equal "true\n", AstLowerer.lower("InstantRecord&.browser?\n")
+    assert_equal "true\n", AstLowerer.lower("InstantRecord::browser?\n")
+    assert_equal "include Syncable\n", AstLowerer.lower("include InstantRecord::\n  Syncable\n", rewrite_syncable_include: true)
+    assert_equal "include( Syncable )\n", AstLowerer.lower("include( ::InstantRecord::Syncable )\n", rewrite_syncable_include: true)
+    assert_equal "include(\n  # comment\n  Syncable\n)\n", AstLowerer.lower("include(\n  # comment\n  ::InstantRecord::\n  Syncable\n)\n", rewrite_syncable_include: true)
+
+    heredoc_def = ("# " + "x" * 80 + "\n") * 20 + "def foo = <<~EOF\n  \#{InstantRecord.browser? ? 1 : 2}\nEOF\n"
+    assert_equal ("# " + "x" * 80 + "\n") * 20 + "def foo = <<~EOF\n  \#{1}\nEOF\n", AstLowerer.lower(heredoc_def)
+
+    unicode_heredoc = ("# " + "x" * 80 + "\n") * 20 + "def foo = <<~日本語\n  \#{InstantRecord.browser? ? 1 : 2}\n日本語\n"
+    assert_equal ("# " + "x" * 80 + "\n") * 20 + "def foo = <<~日本語\n  \#{1}\n日本語\n", AstLowerer.lower(unicode_heredoc)
+
+    digit_heredoc = ("# " + "x" * 80 + "\n") * 20 + "puts(<<0)\n  \#{server_only { 1 }}\n0\n"
+    assert_equal ("# " + "x" * 80 + "\n") * 20 + "puts(<<0)\n  \#{nil}\n0\n", AstLowerer.lower(digit_heredoc)
+
+    digit_heredoc_def = ("# " + "x" * 80 + "\n") * 20 + "def foo = <<0\n  \#{InstantRecord.browser?}\n0\n"
+    assert_equal ("# " + "x" * 80 + "\n") * 20 + "def foo = <<0\n  \#{true}\n0\n", AstLowerer.lower(digit_heredoc_def)
+
+    begin_comment = "InstantRecord.\n=begin\nnote\n=end\nbrowser?\n"
+    assert_equal "true\n", AstLowerer.lower(begin_comment)
+
+    scoped_begin_comment = "server_only \\\n=begin\nnote\n=end\n do\n  x\nend\n"
+    assert_equal "", AstLowerer.lower(scoped_begin_comment)
+
+    browser_begin_comment = "browser_only \\\n=begin\nnote\n=end\n { x }\n"
+    assert_equal "x\n", AstLowerer.lower(browser_begin_comment)
+
+    combined_begin_comment = "InstantRecord.browser?\nserver_only \\\n=begin\nnote\n=end\n do\n  x\nend\n"
+    assert_equal "true\n", AstLowerer.lower(combined_begin_comment)
+  end
+
+  test "reindent_block handles fast-path and general-path boundary inputs" do
+    assert_equal "  a\n  b\n", AstLowerer.reindent_block("    a\n    b\n", target_indent: "  ")
+    assert_equal "\\1a\n\\1b\n", AstLowerer.reindent_block("    a\n    b\n", target_indent: "\\1")
+    assert_equal "\\&a\n\\&b\n", AstLowerer.reindent_block("    a\n    b\n", target_indent: "\\&")
+    assert_equal "  a\n\n  b\n", AstLowerer.reindent_block("    a\n   \n    b\n", target_indent: "  ")
+    assert_equal "  a \n  b\n", AstLowerer.reindent_block("    a \n    b\n", target_indent: "  ")
+    assert_equal "  a\n  b\n", AstLowerer.reindent_block("\t\ta\n\t\tb\n", target_indent: "  ")
+
+    deep = (" " * 40) + "a\n" + (" " * 42) + "b\n"
+    assert_equal "  a\n    b\n", AstLowerer.reindent_block(deep, target_indent: "  ")
+  end
+
+  test "handles binary, invalid UTF-8, CRLF, BOM, and non-ASCII-compatible encodings safely" do
+    binary = "# \xFF\xFE\nInstantRecord.browser?\n".b
+    lowered_binary = AstLowerer.lower(binary)
+    assert_equal Encoding::BINARY, lowered_binary.encoding
+    assert_equal "# \xFF\xFE\ntrue\n".b, lowered_binary
+
+    invalid_utf8 = "# \xFF\xFE\nInstantRecord.browser?\n".dup.force_encoding(Encoding::UTF_8)
+    lowered_invalid = AstLowerer.lower(invalid_utf8)
+    assert_equal Encoding::UTF_8, lowered_invalid.encoding
+    assert_equal "# \xFF\xFE\ntrue\n".b, lowered_invalid.b
+
+    invalid_utf8_noop = "# \xFF\xFE\nx = 1\n".dup.force_encoding(Encoding::UTF_8)
+    assert_same invalid_utf8_noop, AstLowerer.lower(invalid_utf8_noop)
+
+    crlf = "class A\r\n  server_only do\r\n    x = 1\r\n  end\r\n  browser_only do\r\n    y = 2\r\n  end\r\nend\r\n"
+    assert_equal "class A\r\n  y = 2\r\nend\r\n", AstLowerer.lower(crlf)
+
+    bom = "\xEF\xBB\xBFInstantRecord.browser? ? :a : :b\n"
+    assert_equal "\xEF\xBB\xBF:a\n", AstLowerer.lower(bom)
+
+    utf16 = "InstantRecord.browser?\n".encode(Encoding::UTF_16LE)
+    assert_same utf16, AstLowerer.lower(utf16)
+  end
 end
