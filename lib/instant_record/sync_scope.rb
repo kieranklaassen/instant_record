@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 require "digest"
 require "instant_record/syncable"
 require "instant_record/sync_partition"
@@ -189,6 +191,11 @@ module InstantRecord
       end
 
       def visible(model, identity, partition: nil)
+        if model.instant_record_sync_scope.nil? && model.instant_record_sync_partition.nil? &&
+           (visibility = model.instant_record_visibility)
+          return model.instance_exec(identity, &visibility)
+        end
+
         rows = model.instant_record_visible_to(token(identity))
         rows = apply_partition(model, rows, partition)
         both(model, rows, model.instant_record_visibility, identity)
@@ -232,27 +239,146 @@ module InstantRecord
       # revocation to one that did. Each event is a hash of its own, the
       # caller's to add to.
       def events_for(changes, identity, partition: nil)
-        current = visible_records(changes, identity, partition: partition)
-        payloads = current.keys.zip(InstantRecord.record_payloads(current.values)).to_h
+        rows = changes.is_a?(Array) ? changes : changes.to_a
+        len = rows.size
+        return [] if len == 0
+
         # Each logged type is looked up once per batch, and never kept past it:
         # a reload, a new rule or InstantRecord.sync shows in the next one.
-        models = Hash.new { |known, type| known[type] = ruled_model(type) }
-        logged = changes.select { |change| change.operation == "destroy" || models[change.record_type].nil? }
-        stamps = PayloadBatch.change_stamps(logged)
-        changes.map do |change|
-          if change.operation == "destroy" || models[change.record_type].nil?
-            next [change.id, PayloadBatch.event(change, stamps[change.id])]
+        models = {}
+        last_type = nil
+        last_model = false
+
+        ids = Array.new(len)
+        ops = Array.new(len)
+        types = Array.new(len)
+        record_ids = nil
+        logged_ids = nil
+        all_logged = true
+        ruled_ids = nil
+
+        i = 0
+        while i < len
+          change = rows[i]
+          id = change.id
+          op = change.operation
+          type = change.record_type
+          ids[i] = id
+          ops[i] = op
+          types[i] = type
+
+          if op == "destroy"
+            (logged_ids ||= []) << id unless all_logged
+          else
+            if type == last_type
+              model = last_model
+            else
+              model = models[type]
+              if model.nil?
+                model = ruled_model(type) || false
+                models[type] = model
+              end
+              last_type = type
+              last_model = model
+            end
+
+            if model
+              if all_logged
+                all_logged = false
+                logged_ids = ids[0, i] if i > 0
+                record_ids = Array.new(len)
+                ruled_ids = {}
+              end
+              rid = change.record_id
+              record_ids[i] = rid
+              (ruled_ids[type] ||= []) << rid
+            elsif !all_logged
+              (logged_ids ||= []) << id
+            end
           end
 
-          payload = payloads[[change.record_type, change.record_id]]
-          event =
-            if payload
-              payload.merge(operation: change.operation)
-            else
-              { type: change.record_type, id: change.record_id, operation: "destroy", version: 0, attributes: {} }
-            end
-          [change.id, event]
+          i += 1
         end
+
+        if all_logged
+          stamps = PayloadBatch.change_stamps_for_ids(ids)
+          has_stamps = !stamps.empty?
+          out = Array.new(len)
+          i = 0
+          while i < len
+            change = rows[i]
+            id = ids[i]
+            event = {
+              type: types[i],
+              id: change.record_id,
+              operation: ops[i],
+              version: change.version,
+              attributes: change.attributes_payload
+            }
+            if has_stamps && (stamp = stamps[id])
+              event[:hlc] = stamp
+            end
+            out[i] = [id, event]
+            i += 1
+          end
+          return out
+        end
+
+        payloads_by_type = visible_payloads(ruled_ids, models, identity, partition: partition)
+        stamps = logged_ids ? PayloadBatch.change_stamps_for_ids(logged_ids) : nil
+        has_stamps = stamps && !stamps.empty?
+
+        out = Array.new(len)
+        last_payload_type = nil
+        last_payload_map = nil
+        i = 0
+        while i < len
+          id = ids[i]
+          op = ops[i]
+          type = types[i]
+
+          if op == "destroy" || !models[type]
+            change = rows[i]
+            event = {
+              type: type,
+              id: change.record_id,
+              operation: op,
+              version: change.version,
+              attributes: change.attributes_payload
+            }
+            if has_stamps && (stamp = stamps[id])
+              event[:hlc] = stamp
+            end
+          else
+            if type == last_payload_type
+              by_id = last_payload_map
+            else
+              by_id = payloads_by_type[type]
+              last_payload_type = type
+              last_payload_map = by_id
+            end
+
+            rid = record_ids[i]
+            payload = by_id && by_id[rid]
+            event =
+              if payload
+                if payload.frozen? || payload.key?(:operation)
+                  copy = payload.dup
+                  copy[:operation] = op
+                  copy
+                else
+                  payload[:operation] = op
+                  payload
+                end
+              else
+                { type: type, id: rid, operation: "destroy", version: 0, attributes: {} }
+              end
+          end
+
+          out[i] = [id, event]
+          i += 1
+        end
+        out
       end
 
       private
@@ -288,20 +414,32 @@ module InstantRecord
         model if model.respond_to?(:instant_record_visibility) && model.instant_record_visibility
       end
 
-      # One query per `syncable_to` model in the batch.
-      def visible_records(changes, identity, partition: nil)
+      # One query per `syncable_to` model in the batch, routed through
+      # `InstantRecord.record_payloads(relation)` so plain relations use the
+      # direct result-row path without instantiating Active Record objects.
+      def visible_payloads(ruled_ids, models, identity, partition: nil)
         found = {}
-        changes.reject { |change| change.operation == "destroy" }.group_by(&:record_type).each do |type, list|
-          model = ruled_model(type)
-          next unless model
-
+        ruled_ids.each do |type, rids|
+          model = models[type]
+          rids.uniq!
+          list = nil
           model.connection_pool.with_connection do
             model.uncached do
-              visible(model, identity, partition: partition).where(model.primary_key => list.map(&:record_id).uniq).each do |record|
-                found[[type, record.id]] = record
-              end
+              relation = visible(model, identity, partition: partition).where(model.primary_key => rids)
+              list = InstantRecord.record_payloads(relation)
             end
           end
+          next if list.empty?
+
+          by_id = {}
+          j = 0
+          llen = list.size
+          while j < llen
+            payload = list[j]
+            by_id[payload[:id]] = payload
+            j += 1
+          end
+          found[type] = by_id
         end
         found
       end

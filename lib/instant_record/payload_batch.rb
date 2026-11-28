@@ -157,7 +157,7 @@ module InstantRecord
                     SyncMetadata.where(key: [k]).pluck(:key, :value)
                   end
                 else
-                  slice = unique_keys[i, slice_len]
+                  slice = (i == 0 && limit == total) ? unique_keys : unique_keys[i, slice_len]
                   if plain_sql_strings?(slice)
                     conn.select_rows("#{plain_in_prefix}#{slice.join("','")}')", "InstantRecord::SyncMetadata Pluck")
                   else
@@ -195,16 +195,40 @@ module InstantRecord
 
       # The stamps of many changes, by change id. A change that has none is left out.
       def change_stamps(changes)
-        return {} if changes.empty?
+        rows = changes.is_a?(Array) ? changes : changes.to_a
+        len = rows.size
+        return {} if len == 0
 
-        len = changes.size
         ids = Array.new(len)
+        i = 0
+        while i < len
+          ids[i] = rows[i].id
+          i += 1
+        end
+        change_stamps_for_ids(ids)
+      end
+
+      def change_stamps_for_ids(ids)
+        len = ids.size
+        return {} if len == 0
+
+        all_int_ids = true
+        i = 0
+        while i < len
+          id = ids[i]
+          unless id.is_a?(Integer) && id >= 0
+            all_int_ids = false
+            break
+          end
+          i += 1
+        end
+
+        return integer_change_stamps(ids) if all_int_ids
+
         key_list = Array.new(len)
         i = 0
         while i < len
-          id = changes[i].id
-          ids[i] = id
-          key_list[i] = "#{HLC::CHANGE_PREFIX}#{id}"
+          key_list[i] = "#{HLC::CHANGE_PREFIX}#{ids[i]}"
           i += 1
         end
 
@@ -449,6 +473,69 @@ module InstantRecord
       end
 
       private
+
+      def integer_change_stamps(ids)
+        unique_ids = ids.size > 1 ? ids.uniq : ids
+        total = unique_ids.size
+        prefix = HLC::CHANGE_PREFIX
+        prefix_len = prefix.bytesize
+        in_sep = "','#{prefix}"
+        result = {}
+        SyncMetadata.connection_pool.with_connection do |conn|
+          SyncMetadata.uncached do
+            table = conn.quote_table_name(SyncMetadata.table_name)
+            k_col = conn.quote_column_name("key")
+            v_col = conn.quote_column_name("value")
+            base_prefix = "SELECT #{k_col}, #{v_col} FROM #{table} WHERE #{k_col}"
+            in_prefix = "#{base_prefix} IN ('#{prefix}"
+
+            i = 0
+            while i < total
+              limit = i + SLICE
+              limit = total if limit > total
+              slice_len = limit - i
+              sql =
+                if slice_len == 1
+                  "#{base_prefix} = '#{prefix}#{unique_ids[i]}'"
+                else
+                  slice = (i == 0 && limit == total) ? unique_ids : unique_ids[i, slice_len]
+                  "#{in_prefix}#{slice.join(in_sep)}')"
+                end
+
+              rows = conn.select_rows(sql, "InstantRecord::SyncMetadata Pluck")
+              r = 0
+              rlen = rows.size
+              while r < rlen
+                pair = rows[r]
+                val = pair[1]
+                if val
+                  k = pair[0]
+                  klen = k.bytesize
+                  pos = prefix_len
+                  if klen > pos
+                    num = 0
+                    valid = true
+                    while pos < klen
+                      b = k.getbyte(pos)
+                      if b >= 48 && b <= 57
+                        num = num * 10 + (b - 48)
+                        pos += 1
+                      else
+                        valid = false
+                        break
+                      end
+                    end
+                    result[num] = val if valid
+                  end
+                end
+                r += 1
+              end
+              i = limit
+            end
+          end
+        end
+        result
+      end
 
       def attach_stamps!(payloads, keys)
         found = stamps(keys)
