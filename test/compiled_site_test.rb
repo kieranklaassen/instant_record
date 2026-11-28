@@ -323,6 +323,227 @@ class CompiledSiteTest < Minitest::Test
     assert_equal %w[Rails local], [get("/a"), get("/b")]
   end
 
+  def test_accepts_encoding_edge_cases
+    serve(island("/"))
+    cases = {
+      [nil, "br"] => false,
+      ["", "br"] => false,
+      ["gzip, deflate, br, zstd", "br"] => true,
+      ["gzip, deflate, br, zstd", "gzip"] => true,
+      ["BR", "br"] => true,
+      ["  Br \t , GZip ", "br"] => true,
+      ["  Br \t , GZip ", "gzip"] => true,
+      ["br;q=0", "br"] => false,
+      ["br; q=0.0", "br"] => false,
+      ["br; q=0.000", "br"] => false,
+      ["br; Q=0.", "br"] => false,
+      ["br; q=0.1", "br"] => true,
+      ["br; q=0.01", "br"] => true,
+      ["br; q=1", "br"] => true,
+      ["br; foo=bar; q=0", "br"] => false,
+      ["br; foo=bar; q=0.5", "br"] => true,
+      ["br; q=0; q=1", "br"] => false,
+      ["br;q=0, br;q=0.5", "br"] => true,
+      ["br; q=0.0 ; foo=1", "br"] => false,
+      ["br;q=00", "br"] => true,
+      ["br; q = 0", "br"] => true,
+      ["br;", "br"] => true,
+      ["x-br, br2, zbr", "br"] => false,
+      ["gzip, br;q=0", "gzip"] => true,
+      ["gzip, br;q=0", "br"] => false,
+      ["br, \xFF".b, "br"] => true,
+      ["gzip, \xFF".b, "br"] => false
+    }
+    cases.each do |(header, encoding), expected|
+      assert_equal expected, site.send(:accepts?, header, encoding), "#{header.inspect} / #{encoding.inspect}"
+    end
+  end
+
+  def test_precompressed_assets_304_ranges_head_and_frozen_env
+    dir = release("assets", island("/items"))
+    FileUtils.mkdir_p(File.join(dir, "assets"))
+    File.write(File.join(dir, "index.html.br"), "br-index")
+    File.write(File.join(dir, "index.html.gz"), "gz-index")
+    File.write(File.join(dir, "assets", "app.js"), "console.log('ok');")
+    File.write(File.join(dir, "assets", "bundle.js"), "raw-bundle")
+    File.write(File.join(dir, "assets", "bundle.js.br"), "br-bundle")
+    File.write(File.join(dir, "assets", "bundle.js.gz"), "gz-bundle")
+    File.write(File.join(dir, "assets", "plain"), "plain-text")
+    File.write(File.join(dir, "assets", "blob.unknown"), "raw-blob")
+    File.write(File.join(dir, "assets", "blob.unknown.br"), "br-blob")
+    point_at(dir)
+    site.ahead = 3
+
+    call = lambda do |path, headers = {}, method = "GET"|
+      env = Rack::MockRequest.env_for("https://browser.test#{path}", headers.merge("REQUEST_METHOD" => method))
+      env.freeze
+      status, resp_headers, body = site.call(env)
+      content = +""
+      body.each { |part| content << part }
+      body.close if body.respond_to?(:close)
+      [status, resp_headers, content, body]
+    end
+
+    # Precompressed HTML hit (.br), frozen env untouched, Iterator supports to_path
+    status, headers, content, body = call.call("/items", "HTTP_ACCEPT" => "text/html", "HTTP_ACCEPT_ENCODING" => "gzip, deflate, br")
+    assert_equal [200, "br-index", "br", "text/html", "accept-encoding", "no-cache"],
+      [status, content, headers["content-encoding"], headers["content-type"], headers["vary"], headers["cache-control"]]
+    assert_respond_to body, :to_path
+
+    # 304 Not Modified on precompressed HTML
+    status304, headers304, content304 = call.call("/items",
+      "HTTP_ACCEPT" => "text/html", "HTTP_ACCEPT_ENCODING" => "br", "HTTP_IF_MODIFIED_SINCE" => headers["last-modified"])
+    assert_equal [304, "", "accept-encoding", "no-cache"], [status304, content304, headers304["vary"], headers304["cache-control"]]
+    assert_nil headers304["content-encoding"]
+    assert_nil headers304["content-type"]
+
+    # Gzip fallback when br has q=0
+    status, headers, content = call.call("/assets/bundle.js", "HTTP_ACCEPT_ENCODING" => "gzip, br;q=0")
+    assert_equal [200, "gz-bundle", "gzip", "text/javascript"], [status, content, headers["content-encoding"], headers["content-type"]]
+
+    # Uncompressed asset when no .br/.gz exists
+    status, headers, content = call.call("/assets/app.js", "HTTP_ACCEPT_ENCODING" => "gzip, deflate, br, zstd")
+    assert_equal [200, "console.log('ok');", nil, "text/javascript"], [status, content, headers["content-encoding"], headers["content-type"]]
+
+    # Default MIME parity: text/plain uncompressed vs application/octet-stream precompressed
+    status, headers, _content = call.call("/assets/plain", "HTTP_ACCEPT_ENCODING" => "br")
+    assert_equal [200, "text/plain"], [status, headers["content-type"]]
+    status, headers, _content = call.call("/assets/blob.unknown", "HTTP_ACCEPT_ENCODING" => "br")
+    assert_equal [200, "application/octet-stream", "br"], [status, headers["content-type"], headers["content-encoding"]]
+
+    # Range request bypasses precompressed and serves 206 partial content
+    status, headers, content = call.call("/assets/bundle.js", "HTTP_ACCEPT_ENCODING" => "br", "HTTP_RANGE" => "bytes=0-2")
+    assert_equal [206, "raw", nil], [status, content, headers["content-encoding"]]
+    assert_equal "bytes 0-2/10", headers["content-range"]
+
+    # HEAD returns empty body with content-length preserved
+    status, headers, content = call.call("/assets/bundle.js", { "HTTP_ACCEPT_ENCODING" => "br" }, "HEAD")
+    assert_equal [200, "", "br", "9"], [status, content, headers["content-encoding"], headers["content-length"]]
+
+    # Path traversal stays confined to root
+    status, _headers, _content = call.call("/assets/../../etc/passwd", "HTTP_ACCEPT_ENCODING" => "br")
+    assert_equal 404, status
+
+    # 0-byte asset serves 200 with content-length 0
+    File.write(File.join(dir, "assets", "empty.js"), "")
+    status, headers, content = call.call("/assets/empty.js", "HTTP_ACCEPT_ENCODING" => "br")
+    assert_equal [200, "", "0", "text/javascript"], [status, content, headers["content-length"], headers["content-type"]]
+
+    # 304 on fingerprinted immutable asset preserves immutable cache-control
+    File.write(File.join(dir, "app-deadbeef.wasm"), "wasm-bytes")
+    status, headers, _content = call.call("/app-deadbeef.wasm", {})
+    assert_equal [200, "public, max-age=31536000, immutable"], [status, headers["cache-control"]]
+    status304, headers304, content304 = call.call("/app-deadbeef.wasm", "HTTP_IF_MODIFIED_SINCE" => headers["last-modified"])
+    assert_equal [304, "", "public, max-age=31536000, immutable", "accept-encoding"],
+      [status304, content304, headers304["cache-control"], headers304["vary"]]
+
+    # Non-regular file (directory) at an asset path returns 404
+    FileUtils.mkdir_p(File.join(dir, "assets", "subdir"))
+    status, _headers, _content = call.call("/assets/subdir", {})
+    assert_equal 404, status
+
+    # Unreadable precompressed file falls back to plain asset; unreadable plain asset returns 404
+    unless Process.uid.zero?
+      unreadable_br = File.join(dir, "assets", "fallback.js.br")
+      plain_fallback = File.join(dir, "assets", "fallback.js")
+      unreadable_plain = File.join(dir, "assets", "secret.js")
+      File.write(plain_fallback, "plain-fallback")
+      File.write(unreadable_br, "br-denied")
+      File.write(unreadable_plain, "secret")
+      begin
+        File.chmod(0, unreadable_br)
+        File.chmod(0, unreadable_plain)
+        status, headers, content = call.call("/assets/fallback.js", "HTTP_ACCEPT_ENCODING" => "br")
+        assert_equal [200, "plain-fallback", nil, "text/javascript"],
+          [status, content, headers["content-encoding"], headers["content-type"]]
+
+        status, _headers, _content = call.call("/assets/secret.js", "HTTP_ACCEPT_ENCODING" => "br")
+        assert_equal 404, status
+      ensure
+        File.chmod(0o644, unreadable_br)
+        File.chmod(0o644, unreadable_plain)
+      end
+    end
+  end
+
+  def test_host_matching_matches_rack_request_host
+    serve(island("/"))
+    backend = ->(_env) { [200, {}, ["Rails"]] }
+
+    check_parity = lambda do |host, env_overrides|
+      app = InstantRecord::CompiledSite.new(backend, host: host, root: @root, sync_path: "/instant_record")
+      env = {
+        "REQUEST_METHOD" => "GET",
+        "PATH_INFO" => "/",
+        "HTTP_ACCEPT" => "text/html",
+        "rack.url_scheme" => "https"
+      }.merge(env_overrides)
+      expected = Rack::Request.new(env).host == host ? "local" : "Rails"
+      _status, _headers, body = app.call(env)
+      actual = +""
+      body.each { |part| actual << part }
+      body.close if body.respond_to?(:close)
+      assert_equal expected, actual, "host=#{host.inspect} env=#{env_overrides.inspect}"
+    end
+
+    [
+      ["browser.test", { "HTTP_HOST" => "browser.test" }],
+      ["browser.test", { "HTTP_HOST" => "browser.test:443" }],
+      ["browser.test", { "HTTP_HOST" => "browser.test:8080" }],
+      ["browser.test", { "HTTP_HOST" => "browser.test:" }],
+      ["browser.test", { "HTTP_HOST" => "browser.test:abc" }],
+      ["browser.test", { "HTTP_HOST" => "other.test" }],
+      ["browser.test", { "HTTP_HOST" => "" }],
+      ["browser.test", { "SERVER_NAME" => "browser.test", "SERVER_PORT" => "443" }],
+      ["browser.test", { "SERVER_NAME" => "browser.test" }],
+      ["browser.test", { "SERVER_NAME" => "browser.test:80" }],
+      ["browser.test", { "SERVER_NAME" => "browser.test:" }],
+      ["browser.test", { "SERVER_NAME" => "browser.test:abc" }],
+      ["browser.test", { "SERVER_NAME" => "browser.test:80", "SERVER_PORT" => "443" }],
+      ["browser.test", { "SERVER_NAME" => "browser.test", "SERVER_PORT" => "" }],
+      ["browser.test", { "SERVER_NAME" => "other.test", "SERVER_PORT" => "443" }],
+      ["browser.test", { "HTTP_HOST" => "internal.local", "HTTP_X_FORWARDED_HOST" => "proxy.local, browser.test:443" }],
+      ["browser.test", { "HTTP_HOST" => "browser.test", "HTTP_X_FORWARDED_HOST" => "other.test" }],
+      ["browser.test", { "HTTP_HOST" => "internal.local", "HTTP_FORWARDED" => "for=1.2.3.4;host=browser.test" }],
+      ["[::1]", { "HTTP_HOST" => "[::1]" }],
+      ["[::1]", { "HTTP_HOST" => "[::1]:3000" }],
+      ["[::1]", { "HTTP_HOST" => "::1" }],
+      ["[::1]", { "SERVER_NAME" => "[::1]", "SERVER_PORT" => "3000" }],
+      ["[::1]", { "SERVER_NAME" => "[::1]:3000" }],
+      ["[::1]", { "SERVER_NAME" => "[::1]:abc" }]
+    ].each { |host, overrides| check_parity.call(host, overrides) }
+
+    previous_priority = Rack::Request.forwarded_priority
+    begin
+      Rack::Request.forwarded_priority = []
+      check_parity.call("browser.test", { "HTTP_HOST" => "browser.test", "HTTP_X_FORWARDED_HOST" => "other.test" })
+    ensure
+      Rack::Request.forwarded_priority = previous_priority
+    end
+  end
+
+  def test_indexed_routes_match_sequential_routes_for_many_patterns
+    routes = [
+      "/", "/dashboard", "/items", "/items/:id", "/items/:id/edit",
+      "/projects/:project_id/tasks/:id", "/projects/:project_id/files/*path",
+      "/docs/*rest", "/v/:id.json", "/f:x-y", "/:slug/settings",
+      "/café", "/café/:id", "/static:123"
+    ]
+    serve(island(*routes))
+    paths = [
+      "/", "//", "/dashboard", "/dashboard/", "/items", "/items/42", "/items/42/edit",
+      "/items/42/unknown", "/projects/1/tasks/9", "/projects/1/files/a/b/c",
+      "/docs/guide/intro", "/docs/a\nb", "/v/7.json", "/fhello-y", "/acme/settings",
+      "/café", "/café/99", "/static:123", "/static:456", "/admin/billing",
+      "/dashboard\n", "/items/a\nb"
+    ]
+    fresh_answers = paths.to_h { |p| [p, get(p)] }
+    site.ahead = 3
+    get("/") # settle cache
+    kept_answers = paths.to_h { |p| [p, get(p)] }
+    assert_equal fresh_answers, kept_answers
+  end
+
   private
 
   def parses
