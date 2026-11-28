@@ -30,7 +30,7 @@ public struct AppView: View {
                 // A first screen put in another's place starts afresh.
                 ScreenView(route: host.root, host: host, first: true, waiting: waiting)
                     .id(host.root)
-                    .navigationDestination(for: Route.self) { ScreenView(route: $0, host: host, first: false, waiting: waiting) }
+                    .navigationDestination(for: Route.self) { PlaceView(route: $0, host: host, site: host.site, views: host.views) }
             }
             .sheet(isPresented: $showingNotices) {
                 SyncNoticesSheet(host: host, theme: theme)
@@ -42,6 +42,7 @@ public struct AppView: View {
         }
         .tint(theme.tint)
         .environment(\.theme, theme)
+        .environment(\.opens, Opens(push: { host.path.append($0) }, sheet: { host.sheet = $0 }))
         .onChange(of: phase, initial: true) { _, now in host.front(now == .active) }
         .onChange(of: host.status.message) { _, now in
             if let now { AccessibilityNotification.Announcement(now).post() }
@@ -98,16 +99,19 @@ public struct AppView: View {
 /// stack, for its title and bar buttons. One that is a single Swift view is
 /// shown as it is: such a view brings its own bar, and a stack inside a
 /// stack is not allowed.
-private struct SheetView: View {
+struct SheetView: View {
     let route: Route
     @ObservedObject var host: AppHost
     let theme: Theme
 
     var body: some View {
         Group {
+            if !route.isScreen {
+                PlaceView(route: route, host: host, site: host.site, views: host.views, pushed: false)
+            }
             // Nothing until the screen is drawn: which of the two it is
             // must not change under a view that holds what was typed.
-            if host.screens[route] == nil {
+            else if host.screens[route] == nil {
                 Color.clear
             } else if bare {
                 ScreenView(route: route, host: host, first: false)
@@ -173,6 +177,7 @@ struct NodeView: View {
     /// nothing to send yet.
     var idle = false
     @Environment(\.theme) private var theme
+    @Environment(\.opens) private var opens
 
     var body: some View {
         switch node.kind {
@@ -190,6 +195,7 @@ struct NodeView: View {
         case "field": field
         case "more": more
         case "swift": swift
+        case "web": web
         default: EmptyView()
         }
     }
@@ -218,7 +224,7 @@ struct NodeView: View {
         let fields = under.filter { $0.kind == "field" }
         let blank = !fields.isEmpty && fields.allSatisfy { shown($0).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         return Group {
-            if content.allSatisfy({ ["list", "navigation", "swift"].contains($0.node.kind) }) {
+            if content.allSatisfy({ ["list", "navigation", "swift", "web"].contains($0.node.kind) }) {
                 each(content)
             } else {
                 VStack(alignment: .leading, spacing: 8) { each(content) }
@@ -339,9 +345,11 @@ struct NodeView: View {
             if !node.prop("replace").isEmpty {
                 host.replace(with: Route(node.prop("replace"), node.params))
             } else if !node.prop("sheet").isEmpty {
-                host.sheet = Route(node.prop("sheet"), node.params)
+                let route = Route(node.prop("sheet"), node.params)
+                if let sheet = opens.sheet { sheet(route) } else { host.sheet = route }
             } else if !node.prop("link").isEmpty {
-                host.path.append(Route(node.prop("link"), node.params))
+                let route = Route(node.prop("link"), node.params)
+                if let push = opens.push { push(route) } else { host.path.append(route) }
             } else {
                 host.perform(node.action, args: node.args, on: route)
             }
@@ -418,6 +426,12 @@ struct NodeView: View {
         } else {
             Label(NodeView.unregistered(node.text), systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
         }
+    }
+
+    // A Rails page among native elements, with no bar of its own.
+    @ViewBuilder private var web: some View {
+        PlaceView(route: .page(node.text), host: host, site: host.site, views: host.views, pushed: false)
+            .environment(\.embedded, true)
     }
 
     static func unregistered(_ name: String) -> String { "No Swift view is registered as \(name)" }

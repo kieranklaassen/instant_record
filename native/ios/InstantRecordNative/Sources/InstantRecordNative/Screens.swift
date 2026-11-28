@@ -19,6 +19,8 @@ public struct Screens {
         views[name] = { AnyView(view($0, $1)) }
     }
 
+    func has(_ name: String) -> Bool { views[name] != nil }
+
     func view(_ name: String, _ props: Props, _ actions: Actions) -> AnyView? {
         views[name]?(props, actions)
     }
@@ -67,6 +69,14 @@ public struct Props: Equatable {
         scalarLists = valueLists
     }
 
+    /// A view opened by its address has the address's params, all strings.
+    init(params: [String: String]) {
+        values = params.mapValues { Value(type: "string", text: $0) }
+        nestedObjects = [:]
+        lists = [:]
+        scalarLists = [:]
+    }
+
     public subscript(name: String) -> String { values[name]?.text ?? "" }
     public func bool(_ name: String) -> Bool { value(name, "bool") == "true" }
     public func int(_ name: String) -> Int { Int(value(name, "int") ?? "") ?? 0 }
@@ -85,10 +95,11 @@ public struct Props: Equatable {
 /// takes the same road as a tap on a Ruby-drawn button: the screen performs
 /// it, the screens are drawn again, and the write syncs.
 public struct Actions {
-    let host: AppHost
+    let host: AppHost?
     let route: Route
 
     public func perform(_ action: String, _ args: [String: String] = [:], values: [String: String] = [:]) {
-        host.perform(action, args: args, values: values, on: route)
+        // A view opened by its address has no Ruby screen behind it.
+        host?.perform(action, args: args, values: values, on: route)
     }
 }

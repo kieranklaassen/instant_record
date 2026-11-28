@@ -60,6 +60,9 @@ enum HybridBridge {
         return said
       }
 
+      let places = []
+      const opensNative = url => url.origin === location.origin && places.some(place => place.test(url.pathname))
+
       let canGoBack = false
       const mark = () => {
         // Only a real change is written: a write is a mutation, and the
@@ -93,6 +96,7 @@ enum HybridBridge {
 
       window.instantRecordHybrid = {
         gather() { last = ""; gather() },
+        routes(patterns) { places = patterns.map(pattern => new RegExp(pattern)) },
         back(can) { canGoBack = can; mark() },
         click(selector) { document.querySelector(selector)?.click() },
         visit(url, replace) {
@@ -113,6 +117,16 @@ enum HybridBridge {
       document.addEventListener("click", event => {
         const el = event.target?.closest?.("[data-native-haptic]")
         if (el) post({ type: "haptic", feedback: get(el, "haptic") || "success" })
+      }, true)
+
+      // Ahead of Turbo and Inertia, which would otherwise fetch the page.
+      window.addEventListener("click", event => {
+        const link = event.target?.closest?.("a[href]")
+        if (!link || event.defaultPrevented || event.button > 0 || link.dataset.turboMethod || link.dataset.method || link.hasAttribute("download")) return
+        if (link.getAttribute("href").startsWith("#") || !opensNative(new URL(link.href))) return
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        post({ type: "visit", url: link.href })
       }, true)
 
       mark()

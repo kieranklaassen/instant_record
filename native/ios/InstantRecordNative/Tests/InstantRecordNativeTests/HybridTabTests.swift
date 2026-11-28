@@ -8,9 +8,10 @@ import XCTest
 final class HybridTabTests: XCTestCase {
     private let server = URL(string: "http://localhost:3999")!
     private var opened: [URL] = []
+    private lazy var site = HybridSite(server: server, data: .nonPersistent()) { [weak self] in self?.opened.append($0) }
 
     private func page(_ html: String, at base: String = "http://localhost:3999/orders/1", guarded: Bool = true) -> HybridTab {
-        let tab = HybridTab(server: server, path: "/", data: .nonPersistent(), outside: { [weak self] in self?.opened.append($0) })
+        let tab = HybridTab(site: site, path: "/")
         if !guarded { tab.web.navigationDelegate = nil }
         tab.web.loadSimulatedRequest(URLRequest(url: URL(string: base)!), responseHTML: html)
         return tab
@@ -130,6 +131,53 @@ final class HybridTabTests: XCTestCase {
         XCTAssertEqual(opened.map(\.absoluteString), ["https://elsewhere.test/"])
         XCTAssertEqual(tab.web.url?.absoluteString, "http://localhost:3999/orders/1")
         XCTAssertNotEqual(tab.web.title, "ran")
+    }
+
+    func testALinkToANativePlaceOpensItAndOthersDoNot() async throws {
+        site.use([HybridConfig.Place(path: "/inbox/:thread", screen: "thread", view: nil, sheet: false),
+                  HybridConfig.Place(path: "/map", screen: nil, view: "Map", sheet: true)])
+        let tab = page(#"""
+        <body><a id="a" href="/inbox/a%20b?from=list">thread</a><a id="b" href="/map?at=1">map</a><a id="c" href="#x">x</a>
+        <script>window.fetched = 0; document.addEventListener("click", () => window.fetched++)</script></body>
+        """#)
+        try await wait("signals") { tab.signals != nil }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        _ = try await js(tab, "document.querySelector('#a').click()")
+        try await wait("the screen") { tab.path == [Route("thread", ["thread": "a b", "from": "list"])] }
+        _ = try await js(tab, "document.querySelector('#b').click()")
+        try await wait("the sheet") { tab.sheet == .view("Map", ["at": "1"]) }
+        let fetched = try await js(tab, "const before = window.fetched; document.querySelector('#c').click(); return [before, window.fetched]") as? [Int]
+        XCTAssertEqual(fetched, [0, 1], "Turbo and Inertia never hear of a native place's link, and hear of every other")
+        XCTAssertEqual(tab.path.count, 1)
+    }
+
+    func testARouteDeployedLaterIsKnownToAPageAlreadyOpen() async throws {
+        let tab = page(#"<body><a id="a" href="/map">map</a></body>"#)
+        try await wait("signals") { tab.signals != nil }
+        site.use([HybridConfig.Place(path: "/map", screen: nil, view: "Map", sheet: false)])
+        try await Task.sleep(nanoseconds: 100_000_000)
+        _ = try await js(tab, "document.querySelector('#a').click()")
+        try await wait("the view") { tab.path == [.view("Map")] }
+    }
+
+    func testTheGemsFloatingButtonAndTitleMenuAreRead() async throws {
+        let tab = page(#"""
+        <div data-native-fab="true" data-native-icon="plus" data-native-href="/new" data-native-color="#112233" hidden></div>
+        <div data-native-navbar="" hidden><div data-native-button="" data-native-position="title"><div data-native-menu-item="" data-native-title="All" data-native-href="/all"></div></div></div>
+        """#)
+        try await wait("signals") { tab.signals != nil }
+        XCTAssertEqual(tab.signals?.fab?.href, "/new")
+        XCTAssertEqual(tab.signals?.fab?.color, "#112233")
+        XCTAssertEqual(tab.signals?.navbar?.buttons.first?.inTitle, true)
+        XCTAssertEqual(tab.signals?.navbar?.buttons.first?.items.map(\.title), ["All"])
+    }
+
+    func testALinkToAnotherServerLeavesTheApp() async throws {
+        let tab = page(#"<body><a id="a" href="https://elsewhere.test/x">x</a></body>"#)
+        try await wait("signals") { tab.signals != nil }
+        _ = try await js(tab, "document.querySelector('#a').click()")
+        try await wait("the browser") { self.opened.map(\.absoluteString) == ["https://elsewhere.test/x"] }
+        XCTAssertEqual(tab.web.url?.path, "/orders/1")
     }
 
     func testTheAgentReadsAsRubyNativeToTheGem() {

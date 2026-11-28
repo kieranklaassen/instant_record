@@ -131,7 +131,8 @@ module InstantRecord
 
       # One line of a list. `id` is the record it shows, which is how the list
       # keeps its place when it is drawn again. `link` names the screen a tap
-      # opens over this one and `params` are handed to that screen, which
+      # opens over this one ("thread"), or a SwiftUI view ("swift:MapView") or
+      # a page Rails serves ("page:/orders/1") in its place, and `params` are handed to that screen, which
       # hears of it as `perform("open", ...)`.
       def row(id: "", link: "", params: Node.strings)
         node = add("row")
@@ -236,6 +237,15 @@ module InstantRecord
         node = add("swift")
         node.text = name
         inside(node) { yield } if block_given?
+        node
+      end
+
+      # A page Rails serves, among native elements: the part of a screen that
+      # ships with a deploy. Its bar is the screen's. Needs the network, and
+      # an app that was given its server (HybridHost, or AppHost's `site`).
+      def web(path)
+        node = add("web")
+        node.text = path
         node
       end
 

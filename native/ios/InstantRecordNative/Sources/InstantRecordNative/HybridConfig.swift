@@ -18,17 +18,53 @@ public struct HybridConfig: Equatable {
         /// The Ruby screen that draws the tab in an app that has it. Ruby
         /// Native's own apps ignore the key and load `path`.
         public let screen: String?
+        /// The SwiftUI view that draws it, in an app that registered it.
+        public let view: String?
+    }
+
+    /// An address that opens a native place in an app that has it, and is an
+    /// ordinary page in one that does not, and on the web.
+    public struct Place: Equatable {
+        /// "/orders/:id": a word after a colon is a param of the place.
+        public let path: String
+        public let screen: String?
+        public let view: String?
+        public let sheet: Bool
+
+        private var parts: [Substring] { path.split(separator: "/") }
+
+        /// The place's route at an address, with the address's own words and
+        /// its query as params. A word in the path wins over the query.
+        func route(for url: URL) -> Route? {
+            guard let parsed = URLComponents(url: url, resolvingAgainstBaseURL: true) else { return nil }
+            let words = parsed.percentEncodedPath.split(separator: "/")
+            guard words.count == parts.count else { return nil }
+            var params = Dictionary((parsed.queryItems ?? []).map { ($0.name, $0.value ?? "") }) { $1 }
+            for (part, word) in zip(parts, words) {
+                let word = word.removingPercentEncoding ?? String(word)
+                if part.hasPrefix(":") { params[String(part.dropFirst())] = word } else if String(part) != word { return nil }
+            }
+            if let screen { return Route(screen, params) }
+            return view.map { Route.view($0, params) }
+        }
+
+        /// The same match, for the page script, which must decide at once.
+        var pattern: String {
+            "^/" + parts.map { $0.hasPrefix(":") ? "[^/]+" : NSRegularExpression.escapedPattern(for: String($0)).replacingOccurrences(of: "/", with: "\\/") }.joined(separator: "/") + "/?$"
+        }
     }
 
     public let tabs: [Tab]
+    public let routes: [Place]
     public let entryPath: String
     public let tint: (light: UInt32, dark: UInt32)?
 
     /// The app as one page, for a server with no config.
-    static let bare = HybridConfig(tabs: [Tab(title: "Home", path: "/", icon: "house", key: "", badge: false, eager: false, screen: nil)], entryPath: "/", tint: nil)
+    static let bare = HybridConfig(tabs: [Tab(title: "Home", path: "/", icon: "house", key: "", badge: false, eager: false, screen: nil, view: nil)], routes: [], entryPath: "/", tint: nil)
 
-    private init(tabs: [Tab], entryPath: String, tint: (light: UInt32, dark: UInt32)?) {
+    private init(tabs: [Tab], routes: [Place], entryPath: String, tint: (light: UInt32, dark: UInt32)?) {
         self.tabs = tabs
+        self.routes = routes
         self.entryPath = entryPath
         self.tint = tint
     }
@@ -41,17 +77,31 @@ public struct HybridConfig: Equatable {
         guard let first = listed.first else { return nil }
         let entry = (object["app"] as? [String: Any])?["entry_path"] as? String ?? ""
         let appearance = object["appearance"] as? [String: Any]
-        self.init(tabs: listed, entryPath: entry.hasPrefix("/") ? entry : first.path, tint: Self.tint(appearance?["tint_color"]))
+        let routes = (object["routes"] as? [Any] ?? []).compactMap { ($0 as? [String: Any]).flatMap(Self.place) }
+        self.init(tabs: listed, routes: routes, entryPath: entry.hasPrefix("/") ? entry : first.path, tint: Self.tint(appearance?["tint_color"]))
     }
 
     public static func == (a: HybridConfig, b: HybridConfig) -> Bool {
-        a.tabs == b.tabs && a.entryPath == b.entryPath && a.tint?.light == b.tint?.light && a.tint?.dark == b.tint?.dark
+        a.tabs == b.tabs && a.routes == b.routes && a.entryPath == b.entryPath && a.tint?.light == b.tint?.light && a.tint?.dark == b.tint?.dark
     }
 
-    /// The tab a Ruby screen draws: the first whose screen this app has.
-    /// The compiled library opens one database at a time, so there is one.
-    func screenTab(registered: Set<String>) -> Int? {
-        tabs.firstIndex { $0.screen.map(registered.contains) ?? false }
+    /// The tab Ruby draws: the first that names the app's first screen.
+    func screenTab(root: String?) -> Int? {
+        tabs.firstIndex { $0.screen != nil && $0.screen == root }
+    }
+
+    /// The routes this app can open. An older app than the config leaves out
+    /// those it lacks, and their addresses stay pages.
+    func places(screens: Set<String>, views: Screens) -> [Place] {
+        routes.filter { $0.screen.map(screens.contains) ?? $0.view.map(views.has) ?? false }
+    }
+
+    private static func place(_ from: [String: Any]) -> Place? {
+        guard let path = from["path"] as? String, path.hasPrefix("/"), !path.hasPrefix("//") else { return nil }
+        let screen = from["screen"] as? String, view = from["view"] as? String
+        // One or the other. Both is a mistake with no right reading.
+        guard (screen == nil) != (view == nil) else { return nil }
+        return Place(path: path, screen: screen, view: view, sheet: from["sheet"] as? Bool ?? false)
     }
 
     private static func tab(_ from: [String: Any], _ languages: [String]) -> Tab? {
@@ -62,7 +112,7 @@ public struct HybridConfig: Equatable {
         return Tab(title: title ?? from["title"] as? String ?? "", path: path,
                    icon: icons["ios"] as? String ?? from["icon"] as? String ?? "circle",
                    key: from["key"] as? String ?? "", badge: from["badge"] as? Bool ?? false,
-                   eager: from["eager"] as? Bool ?? false, screen: from["screen"] as? String)
+                   eager: from["eager"] as? Bool ?? false, screen: from["screen"] as? String, view: from["view"] as? String)
     }
 
     private static func tint(_ value: Any?) -> (light: UInt32, dark: UInt32)? {
@@ -72,7 +122,7 @@ public struct HybridConfig: Equatable {
         return (light, dark)
     }
 
-    private static func hex(_ text: String) -> UInt32? {
+    static func hex(_ text: String) -> UInt32? {
         guard text.hasPrefix("#"), text.count == 7 else { return nil }
         return UInt32(text.dropFirst(), radix: 16)
     }

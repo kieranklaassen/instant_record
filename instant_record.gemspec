@@ -35,6 +35,7 @@ Gem::Specification.new do |spec|
     "compiled/web/{index.html,vite.config.js,package.json,package-lock.json}",
     "compiled/README.md",
     "compiled/toolchain.env.example",
+    "docs/ios/*.md",
     "native/ios/README.md",
     "native/ios/InstantRecordNative/Package.swift",
     "native/ios/InstantRecordNative/Sources/**/*.swift"

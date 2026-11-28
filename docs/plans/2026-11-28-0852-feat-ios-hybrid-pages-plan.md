@@ -57,6 +57,10 @@ A Ruby screen is compiled into the app binary, and so is a SwiftUI view. Outside
 
 **Making an app**
 
+- R13. Ruby screens, SwiftUI views and Rails pages open and hold each other: tabs by `screen:` and `view:`, links by `routes:`, and Ruby by `page:`, `swift:` and `web`. An app that lacks a place shows the page.
+- R14. The gem's floating button and title menu are drawn.
+- R15. Guides for all three and for mixing them are in `docs/ios`.
+
 - R12. `alert`, `confirm`, new-window links, a failed load and a dead page process are handled, so a confirmed delete works and a failure offers Retry.
 
 - R11. `bin/rails generate instant_record:ios Shop --hybrid` writes an app that builds with no compiled library. Adding `--screen` writes one with both.
@@ -69,7 +73,7 @@ A Ruby screen is compiled into the app binary, and so is a SwiftUI view. Outside
 
 ### Scope Boundaries
 
-- Not built: Advanced Mode (Turbo push stack, modals, `native_presentation_tag`), push, in-app purchase, scanner, OAuth and secure sessions, locale, keyboard, overscroll, review, floating button, anchored menus, Android, and the hosted build and deploy service.
+- Not built: Advanced Mode (Turbo push stack, modals, `native_presentation_tag`), push, in-app purchase, scanner, OAuth and secure sessions, locale, keyboard, overscroll, review, anchored menus, Android, and the hosted build and deploy service.
 - Not copied: Ruby Native's shell, which is not public.
 - Considered and not built: our own copies of the gem's helpers. The gem is MIT and maintained, and two definitions of one helper would collide.
 - Considered and not built: more than one `screen` tab. The compiled library opens one database at a time. A second registered one falls back to its `path`.
@@ -92,6 +96,7 @@ A Ruby screen is compiled into the app binary, and so is a SwiftUI view. Outside
 - KTD8. **Replace is `location.replace`, or Turbo's replace visit, called with arguments and never with interpolated text.** Swift validates the URL first.
 - KTD9. **Back marks history items, matched to the snapshot's URL.** The edge swipe is off, since it would not skip forms.
 - KTD10. **A config replaces the good copy only when it is a 200 with a usable tab,** kept per server.
+- KTD11. **A Route addresses all three kinds** (`thread`, `swift:Name`, `page:/path`), so `link:` and `sheet:` need no new compiler types. Screen names hold no colon.
 - KTD6. **Only same-origin, main-frame messages are accepted, checked in Swift.** Page-side checks can be bypassed.
 
 ### High-Level Technical Design
@@ -175,6 +180,14 @@ flowchart TB
   - Neither flag writes nothing and says which to give.
   - The Inbox project stays byte-identical.
 - **Verification:** `bundle exec rake test`, demo tests.
+
+### U6. Mixing the three
+
+- **Goal:** R13 and R14.
+- **Dependencies:** U3.
+- **Files:** `Places.swift`, `HybridSite.swift`, `AppHost.swift`, `ScreenView.swift` in the sources, `lib/instant_record/native/screen.rb`, `sig/instant_record/native.rbs`.
+- **Test scenarios:** a link to a route opens it before Turbo hears of it; an older app leaves out places it lacks; only Ruby's screens are asked of Ruby.
+- **Verification:** `swift test` and the simulator.
 
 ### U5. Docs and proof
 

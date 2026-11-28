@@ -16,21 +16,24 @@ public final class HybridTab: NSObject, ObservableObject {
     /// An address a page asked to share.
     @Published public var sharing: URL?
 
+    /// The native places this page opened over itself, oldest first.
+    @Published var path: [Route] = []
+    @Published var sheet: Route?
+
     public let web: WKWebView
-    let server: URL
-    private let path: String
-    private let outside: (URL) -> Void
+    private let site: HybridSite
+    private let start: String
+    private var server: URL { site.server }
     private var started = false
     private var asked: URL?
     private var watching: [NSKeyValueObservation] = []
     private let forms = NSHashTable<WKBackForwardListItem>.weakObjects()
 
-    init(server: URL, path: String, data: WKWebsiteDataStore = .default(), outside: @escaping (URL) -> Void) {
-        self.server = server
-        self.path = path
-        self.outside = outside
+    init(site: HybridSite, path: String) {
+        self.site = site
+        start = path
         let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = data
+        configuration.websiteDataStore = site.data
         configuration.applicationNameForUserAgent = Self.agent
         configuration.userContentController.addUserScript(
             WKUserScript(source: HybridBridge.script, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .page))
@@ -48,9 +51,15 @@ public final class HybridTab: NSObject, ObservableObject {
             web.observe(\.url) { [weak self] _, _ in DispatchQueue.main.async { self?.moved() } },
             web.observe(\.canGoBack) { [weak self] _, _ in DispatchQueue.main.async { self?.moved() } },
         ]
+        site.watch(self) { [weak self] in self?.tellRoutes() }
         #if DEBUG
         web.isInspectable = true
         #endif
+    }
+
+    deinit {
+        let site = site, id = ObjectIdentifier(self)
+        Task { @MainActor in site.unwatch(id) }
     }
 
     /// What the ruby_native gem's `native_app?`, `native_platform` and
@@ -64,26 +73,36 @@ public final class HybridTab: NSObject, ObservableObject {
     }
 
     /// Load the tab's first page, once.
-    func start() {
+    func load() {
         guard !started else { return }
         started = true
-        visit(path)
+        go(start)
     }
 
     public func retry() {
         failure = nil
-        if let asked { web.load(URLRequest(url: asked)) } else { visit(path) }
+        if let asked { web.load(URLRequest(url: asked)) } else { go(start) }
     }
 
     public func reload() {
         if failure == nil, web.url != nil { web.reload() } else { retry() }
     }
 
-    /// Go to an address, written as a page would write it.
-    func visit(_ href: String, replace: Bool = false) {
+    /// Go to an address, written as a page would write it: a native place
+    /// when the address is one's, and a page otherwise.
+    public func visit(_ href: String, replace: Bool = false) {
+        guard let url = URL(string: href, relativeTo: web.url ?? server)?.absoluteURL else { return }
+        if let place = site.place(at: url) {
+            if place.sheet { sheet = place.route } else { path.append(place.route) }
+            return
+        }
+        go(href, replace: replace)
+    }
+
+    private func go(_ href: String, replace: Bool = false) {
         guard let url = URL(string: href, relativeTo: web.url ?? server)?.absoluteURL else { return }
         switch HybridNavigation.decide(url, server: server) {
-        case .outside: outside(url)
+        case .outside: site.outside(url)
         case .refuse: break
         case .stay:
             asked = url
@@ -120,7 +139,12 @@ public final class HybridTab: NSObject, ObservableObject {
         return HybridNavigation.back(over: earlier.map(forms.contains)).map { earlier[$0] }
     }
 
+    private func tellRoutes() {
+        run("window.instantRecordHybrid?.routes(patterns)", ["patterns": site.routes.map(\.pattern)])
+    }
+
     private func moved() {
+        tellRoutes()
         canGoBack = target() != nil
         run("window.instantRecordHybrid?.back(can)", ["can": canGoBack])
         run("window.instantRecordHybrid?.gather()")
@@ -188,7 +212,7 @@ private final class Ears: NSObject, WKScriptMessageHandler {
 }
 
 extension HybridTab: WKNavigationDelegate, WKUIDelegate {
-    public func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+    public func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
         guard let url = action.request.url else { return decisionHandler(.cancel) }
         // No target frame is a new window, which this app has none of.
         let mainFrame = action.targetFrame?.isMainFrame ?? true
@@ -197,7 +221,7 @@ extension HybridTab: WKNavigationDelegate, WKUIDelegate {
             if mainFrame { asked = url }
             decisionHandler(.allow)
         case .outside:
-            outside(url)
+            site.outside(url)
             decisionHandler(.cancel)
         case .refuse: decisionHandler(.cancel)
         }
@@ -236,16 +260,16 @@ extension HybridTab: WKNavigationDelegate, WKUIDelegate {
     }
 
     #if os(iOS)
-    public func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+    public func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor @Sendable () -> Void) {
         ask(message, [("OK", .default, { _ in completionHandler() })], otherwise: completionHandler)
     }
 
-    public func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+    public func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor @Sendable (Bool) -> Void) {
         ask(message, [("Cancel", .cancel, { _ in completionHandler(false) }), ("OK", .default, { _ in completionHandler(true) })],
             otherwise: { completionHandler(false) })
     }
 
-    public func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (String?) -> Void) {
+    public func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping @MainActor @Sendable (String?) -> Void) {
         ask(prompt, field: defaultText ?? "", [("Cancel", .cancel, { _ in completionHandler(nil) }), ("OK", .default, { completionHandler($0.textFields?.first?.text) })],
             otherwise: { completionHandler(nil) })
     }

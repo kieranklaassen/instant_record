@@ -1,0 +1,43 @@
+import InstantRecordNative
+import SwiftUI
+
+/// <%= app_name %> on iPhone. Its tabs and pages come from Rails
+/// (config/ruby_native.yml), so a deploy changes them.<% if compiled? %> A tab or a route that
+/// names a Ruby screen is drawn by it, from the phone's own database.<% end %>
+///
+/// Launch arguments:
+///   -server <%= options[:server] %>   the Rails app
+<% if compiled? -%>
+///   -dev YES                          ask Rails for each Ruby screen: no rebuild after an edit
+<% end -%>
+@main
+struct <%= app_name %>App: App {
+    @StateObject private var host: HybridHost
+
+    init() {
+        // Views written in SwiftUI, for a tab or a route with `view:`<% if compiled? %>, or a
+        // Ruby screen's `swift "Name"`<% end %>:
+        //   views.register("Name") { props, actions in NameView(props: props) }
+        let views = Screens()
+
+        let defaults = UserDefaults.standard
+        let address = defaults.string(forKey: "server") ?? "<%= options[:server] %>"
+        guard let server = URL(string: address), server.host != nil else { fatalError("Not a server's address: \(address)") }
+<% if compiled? -%>
+        let folder = URL.applicationSupportDirectory
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let engine: Engine = defaults.bool(forKey: "dev") ? HTTPEngine(server: address + "<%= mount_path %>") : LibraryEngine()
+        let app = AppHost(engine: engine, root: Route("<%= options[:screen] %>"), views: views, store: { _ in
+            AppHost.Store(database: folder.appending(path: "app.sqlite3").path, endpoint: address + "<%= mount_path %>")
+        })
+        app.start()
+        _host = StateObject(wrappedValue: HybridHost(server: server, app: app, screens: <%= screen_names.inspect %>) { UIApplication.shared.open($0) })
+<% else -%>
+        _host = StateObject(wrappedValue: HybridHost(server: server, views: views) { UIApplication.shared.open($0) })
+<% end -%>
+    }
+
+    var body: some Scene {
+        WindowGroup { HybridView(host: host) }
+    }
+}

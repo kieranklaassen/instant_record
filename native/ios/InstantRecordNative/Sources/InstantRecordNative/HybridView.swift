@@ -35,17 +35,19 @@ public struct HybridView: View {
     }
 
     @ViewBuilder private func content(_ shown: HybridHost.Shown) -> some View {
-        if let screen = shown.screen {
-            AppView(host: screen, theme: theme)
-        } else if let page = shown.page {
-            HybridPage(page: page) { signals in
+        switch shown.kind {
+        case .screen(let app): AppView(host: app, theme: theme)
+        case .view(let name):
+            NavigationStack { PlaceView(route: .view(name), host: host.app, site: host.site, views: host.views, pushed: false) }
+        case .page(let page):
+            PageStack(page: page, host: host.app, site: host.site, views: host.views, theme: theme) { signals in
                 if let signals, shown.id == host.selected { latest = signals }
             }
         }
     }
 
     private func tabBar(_ shown: HybridHost.Shown) -> Bool {
-        tabBarShows(tabs: host.shown.count, screen: shown.screen != nil, signals: shown.page?.signals ?? latest)
+        tabBarShows(tabs: host.shown.count, screen: shown.page == nil || shown.page?.path.isEmpty == false, signals: shown.page?.signals ?? latest)
     }
 
     private var tint: Color {
@@ -54,33 +56,149 @@ public struct HybridView: View {
     }
 }
 
-/// One tab's page under its native bar.
-private struct HybridPage: View {
+/// A tab's page, with the native places it opens pushed over it.
+private struct PageStack: View {
     @ObservedObject var page: HybridTab
+    let host: AppHost?
+    let site: HybridSite
+    let views: Screens
+    let theme: Theme
     let changed: (PageSignals?) -> Void
+
+    var body: some View {
+        NavigationStack(path: $page.path) {
+            HybridPage(page: page)
+                .navigationDestination(for: Route.self) { PlaceView(route: $0, host: host, site: site, views: views) }
+        }
+        .modifier(PageSheet(page: page, host: host, site: site, views: views, theme: theme))
+        .environment(\.opens, Opens(push: { page.path.append($0) }, sheet: { page.sheet = $0 }))
+        .onAppear { changed(page.signals) }
+        .onChange(of: page.signals) { _, now in changed(now) }
+        .onChange(of: page.path) { visited() }
+        .onChange(of: page.sheet) { visited() }
+    }
+
+    private func visited() {
+        host?.visited(page.path + (page.sheet.map { [$0] } ?? []), in: ObjectIdentifier(page))
+    }
+}
+
+private struct PageSheet: ViewModifier {
+    @ObservedObject var page: HybridTab
+    let host: AppHost?
+    let site: HybridSite
+    let views: Screens
+    let theme: Theme
+
+    func body(content: Content) -> some View {
+        content.sheet(isPresented: Binding(get: { page.sheet != nil }, set: { if !$0 { page.sheet = nil } })) {
+            if let route = page.sheet {
+                if let host {
+                    SheetView(route: route, host: host, theme: theme)
+                } else {
+                    PlaceView(route: route, host: nil, site: site, views: views, pushed: false)
+                }
+            }
+        }
+    }
+}
+
+/// A page that a native stack, a sheet or a Ruby screen holds. What it opens
+/// goes where its holder's links go.
+struct PagePlace: View {
+    @StateObject private var page: HybridTab
+    private let pushed: Bool
+    @Environment(\.opens) private var opens
+    @Environment(\.embedded) private var embedded
+
+    init(site: HybridSite, path: String, pushed: Bool = true) {
+        _page = StateObject(wrappedValue: HybridTab(site: site, path: path))
+        self.pushed = pushed
+    }
+
+    var body: some View {
+        content
+            .onChange(of: page.path) { _, now in
+                if let route = now.last { page.path = []; opens.push?(route) }
+            }
+            .onChange(of: page.sheet) { _, now in
+                if let route = now { page.sheet = nil; opens.sheet?(route) }
+            }
+    }
+
+    @ViewBuilder private var content: some View {
+        if embedded {
+            HybridPage(page: page, bar: .none)
+        } else if pushed {
+            HybridPage(page: page, bar: .always)
+        } else {
+            NavigationStack { HybridPage(page: page, bar: .always) }
+        }
+    }
+}
+
+/// One page under its native bar.
+private struct HybridPage: View {
+    enum Bar { case asked, always, none }
+    @ObservedObject var page: HybridTab
+    /// `asked`: a bar when the page asks for one. `always`: also without,
+    /// for the way back. `none`: the holder's.
+    var bar = Bar.asked
+    @Environment(\.theme) private var theme
 
     private var navbar: PageSignals.Navbar? { page.failure == nil ? page.signals?.navbar : nil }
 
     var body: some View {
-        NavigationStack {
-            ZStack {
-                WebPage(page: page, pulls: page.signals?.navbar?.pullToRefresh ?? true).ignoresSafeArea()
-                if let failure = page.failure { failed(failure) }
+        Group {
+            if bar == .none {
+                content
+            } else {
+                content
+                    .navigationTitle(navbar?.title ?? page.web.title ?? "")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .navigationBarBackButtonHidden(page.canGoBack)
+                    .toolbar { if let navbar { items(navbar) } else if bar == .always { back } }
+                    .toolbar(navbar == nil && bar == .asked ? .hidden : .visible, for: .navigationBar)
+                    .modifier(TitleMenu(items: navbar?.buttons.first(where: \.inTitle)?.items ?? [], page: page))
             }
-            .navigationTitle(navbar?.title ?? "")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { if let navbar { items(navbar) } }
-            .toolbar(navbar == nil ? .hidden : .visible, for: .navigationBar)
         }
+        .overlay(alignment: .bottomTrailing) { fab }
         .overlay(alignment: .top) { toast }
         .sheet(isPresented: Binding(get: { page.sharing != nil }, set: { if !$0 { page.sharing = nil } })) {
             if let url = page.sharing { ShareSheet(url: url).presentationDetents([.medium, .large]) }
         }
-        .onAppear {
-            page.start()
-            changed(page.signals)
+        .onAppear { page.load() }
+    }
+
+    private var content: some View {
+        ZStack {
+            WebPage(page: page, pulls: bar != .none && page.signals?.navbar?.pullToRefresh ?? true)
+                .ignoresSafeArea(edges: bar == .none ? [] : .all)
+            if let failure = page.failure { failed(failure) }
         }
-        .onChange(of: page.signals) { _, now in changed(now) }
+    }
+
+    @ViewBuilder private var fab: some View {
+        if page.failure == nil, let fab = page.signals?.fab {
+            Button { page.tap(fab) } label: {
+                Group {
+                    if fab.title.isEmpty { Image(systemName: fab.icon) } else { Label(fab.title, systemImage: fab.icon) }
+                }
+                .font(.title3.weight(.semibold))
+                .padding(16)
+            }
+            .foregroundStyle(.white)
+            .background(fab.color.flatMap(HybridConfig.hex).map { Color(Theme.Shade(light: $0, dark: $0)) } ?? theme.tint, in: Capsule())
+            .shadow(radius: 6, y: 2)
+            .padding(16)
+            .accessibilityIdentifier("hybrid-fab")
+        }
+    }
+
+    @ToolbarContentBuilder private var back: some ToolbarContent {
+        ToolbarItem(placement: .topBarLeading) {
+            if page.canGoBack { Button { page.back() } label: { Label("Back", systemImage: "chevron.backward") } }
+        }
     }
 
     private func failed(_ why: String) -> some View {
@@ -112,16 +230,10 @@ private struct HybridPage: View {
     }
 
     @ToolbarContentBuilder private func items(_ navbar: PageSignals.Navbar) -> some ToolbarContent {
-        ToolbarItemGroup(placement: .topBarLeading) {
-            if page.canGoBack {
-                Button { page.back() } label: { Label("Back", systemImage: "chevron.backward") }
-            }
-            buttons(navbar.buttons.filter(\.leading))
-        }
-        ToolbarItem(placement: .principal) {
-            if navbar.segments.isEmpty {
-                Text(navbar.title).font(.headline).lineLimit(1)
-            } else {
+        back
+        ToolbarItemGroup(placement: .topBarLeading) { buttons(navbar.buttons.filter(\.leading)) }
+        if !navbar.segments.isEmpty {
+            ToolbarItem(placement: .principal) {
                 Picker(navbar.title, selection: segment(navbar.segments)) {
                     ForEach(Array(navbar.segments.enumerated()), id: \.offset) { Text($1.title).tag($0) }
                 }
@@ -130,7 +242,7 @@ private struct HybridPage: View {
             }
         }
         ToolbarItemGroup(placement: .topBarTrailing) {
-            buttons(navbar.buttons.filter { !$0.leading })
+            buttons(navbar.buttons.filter { !$0.leading && !$0.inTitle })
             if let submit = navbar.submit {
                 Button(submit.title.isEmpty ? "Save" : submit.title) { page.tap(submit) }.fontWeight(.semibold)
             }
@@ -144,30 +256,50 @@ private struct HybridPage: View {
     private func buttons(_ items: [PageSignals.Item]) -> some View {
         ForEach(Array(items.enumerated()), id: \.offset) { _, item in
             if item.share {
-                ShareLink(item: page.shared(item)) { label(item) }
+                ShareLink(item: page.shared(item)) { ItemLabel(item: item) }
             } else if item.items.isEmpty {
-                Button { page.tap(item) } label: { label(item) }
+                Button { page.tap(item) } label: { ItemLabel(item: item) }
                     .fontWeight(item.selected ? .bold : nil)
             } else {
-                Menu { choices(item.items) } label: { label(item) }
+                Menu { Choices(items: item.items, page: page) } label: { ItemLabel(item: item) }
             }
         }
     }
 
-    private func choices(_ items: [PageSignals.Item]) -> some View {
+}
+
+/// A menu's lines.
+private struct Choices: View {
+    let items: [PageSignals.Item]
+    let page: HybridTab
+
+    var body: some View {
         ForEach(Array(items.enumerated()), id: \.offset) { _, item in
             if item.share {
-                ShareLink(item: page.shared(item)) { label(item) }
+                ShareLink(item: page.shared(item)) { ItemLabel(item: item) }
             } else if item.selected {
-                Toggle(isOn: Binding(get: { true }, set: { _ in page.tap(item) })) { label(item) }
+                Toggle(isOn: Binding(get: { true }, set: { _ in page.tap(item) })) { ItemLabel(item: item) }
             } else {
-                Button(role: item.destructive ? .destructive : nil) { page.tap(item) } label: { label(item) }
+                Button(role: item.destructive ? .destructive : nil) { page.tap(item) } label: { ItemLabel(item: item) }
             }
         }
     }
+}
 
-    @ViewBuilder private func label(_ item: PageSignals.Item) -> some View {
+private struct ItemLabel: View {
+    let item: PageSignals.Item
+    var body: some View {
         if item.icon.isEmpty { Text(item.title) } else { Label(item.title, systemImage: item.icon) }
+    }
+}
+
+/// A menu on the bar's title, when the page puts one there.
+private struct TitleMenu: ViewModifier {
+    let items: [PageSignals.Item]
+    let page: HybridTab
+
+    func body(content: Content) -> some View {
+        if items.isEmpty { content } else { content.toolbarTitleMenu { Choices(items: items, page: page) } }
     }
 }
 

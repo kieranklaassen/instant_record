@@ -21,13 +21,15 @@ module InstantRecord
     # instant_record_native.h, and the folder whose `iphonesimulator`
     # subfolder holds the built libraries. `packages` are other Swift
     # packages the app links, each product's name with its path from
-    # `folder`: `packages: { "Feedback" => "../../feedback" }`.
+    # `folder`: `packages: { "Feedback" => "../../feedback" }`. With no
+    # `libraries` the app holds no compiled Ruby: its pages come from a server.
     class XcodeProject
-      def initialize(folder:, name:, bundle_id:, package:, headers:, libraries:, packages: {})
+      def initialize(folder:, name:, bundle_id:, package:, headers: nil, libraries: nil, packages: {})
         @folder = Pathname(folder)
         @name = name
         @bundle_id = bundle_id
         @packages = [["InstantRecordNative", package]] + packages.to_a
+        raise ArgumentError, "Give headers: and libraries: together" if headers.nil? != libraries.nil?
         @headers = headers
         @libraries = libraries
       end
@@ -46,7 +48,7 @@ module InstantRecord
       def pbxproj
         app = sources
         tests = ui_tests
-        others = ["#{@name}-Bridging-Header.h", "Info.plist"]
+        others = [("#{@name}-Bridging-Header.h" if @libraries), "Info.plist"].compact
 
         sections = [
           build_files_section(app, tests),
@@ -429,13 +431,19 @@ module InstantRecord
 
       def app_settings
         ["CODE_SIGN_STYLE = Automatic", "CURRENT_PROJECT_VERSION = 1", "GENERATE_INFOPLIST_FILE = YES",
-          %(HEADER_SEARCH_PATHS = "$(SRCROOT)/#{@headers}"), "INFOPLIST_FILE = #{@name}/Info.plist",
+          "INFOPLIST_FILE = #{@name}/Info.plist",
           "INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES", "INFOPLIST_KEY_UILaunchScreen_Generation = YES",
           "INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait",
-          %(LIBRARY_SEARCH_PATHS = "$(SRCROOT)/#{@libraries}/$(PLATFORM_NAME)"), "MARKETING_VERSION = 0.1",
-          %(OTHER_LDFLAGS = (\n\t"-linstant_record_app",\n\t"-lspinel_rt",\n)),
+          "MARKETING_VERSION = 0.1",
           %(PRODUCT_BUNDLE_IDENTIFIER = "#{@bundle_id}"), %(PRODUCT_NAME = "$(TARGET_NAME)"),
-          %(SWIFT_OBJC_BRIDGING_HEADER = "#{@name}/#{@name}-Bridging-Header.h"), "TARGETED_DEVICE_FAMILY = 1"]
+          "TARGETED_DEVICE_FAMILY = 1"] + (@libraries ? library_settings : [])
+      end
+
+      def library_settings
+        [%(HEADER_SEARCH_PATHS = "$(SRCROOT)/#{@headers}"),
+          %(LIBRARY_SEARCH_PATHS = "$(SRCROOT)/#{@libraries}/$(PLATFORM_NAME)"),
+          %(OTHER_LDFLAGS = (\n\t"-linstant_record_app",\n\t"-lspinel_rt",\n)),
+          %(SWIFT_OBJC_BRIDGING_HEADER = "#{@name}/#{@name}-Bridging-Header.h")]
       end
 
       def test_settings

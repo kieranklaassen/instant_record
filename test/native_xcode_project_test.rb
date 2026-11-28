@@ -46,6 +46,19 @@ class NativeXcodeProjectTest < ActiveSupport::TestCase
     end
   end
 
+  test "an app with no libraries links none, and headers and libraries come together" do
+    Dir.mktmpdir do |folder|
+      FileUtils.mkdir_p(File.join(folder, "Shop"))
+      File.write(File.join(folder, "Shop/ShopApp.swift"), "")
+      given = { folder: folder, name: "Shop", bundle_id: "com.example.Shop", package: "../pkg" }
+      pbxproj = InstantRecord::Native::XcodeProject.new(**given).pbxproj
+
+      assert_no_match(/Bridging|SEARCH_PATHS|OTHER_LDFLAGS/, pbxproj)
+      assert_unique_object_ids(pbxproj)
+      assert_raises(ArgumentError) { InstantRecord::Native::XcodeProject.new(**given, headers: "../h") }
+    end
+  end
+
   test "another package the app links is referenced by its path and linked by its product" do
     Dir.mktmpdir do |folder|
       FileUtils.mkdir_p(File.join(folder, "Shop"))

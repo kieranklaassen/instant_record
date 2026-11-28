@@ -61,6 +61,7 @@ class LettersScreen < InstantRecord::Native::Screen
           text "#{@box.letters.size} letters", tone: "secondary"
         end
         more "older:letters", query: "type=Letter&before_id=" + @box.letters.last.id unless @box.letters.empty?
+        web "/letters/summary"
         swift "LetterCount" do
           number "count", @box.letters.size
           flag "empty", @box.letters.empty?
