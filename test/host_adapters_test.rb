@@ -242,6 +242,237 @@ class HostAdaptersTest < ActiveSupport::TestCase
     refute host.blank_id?(plain.new("0193"))
   end
 
+  test "HostAdapters.for resolves built-in targets, custom adapters, and rejects unknown targets" do
+    assert_same HostAdapters::Wasm, HostAdapters.for(:wasm)
+    assert_same HostAdapters::Wasm, HostAdapters.for("wasm")
+    assert_equal :wasm, HostAdapters::Wasm.target
+
+    %i[native iphonesimulator iphoneos].each do |target|
+      assert_same HostAdapters::Native, HostAdapters.for(target)
+      assert_same HostAdapters::Native, HostAdapters.for(target.to_s)
+    end
+    assert_equal :native, HostAdapters::Native.target
+
+    custom = Struct.new(:install, :host_source).new(nil, "")
+    assert_same custom, HostAdapters.for(custom)
+
+    error = assert_raises(ArgumentError) { HostAdapters.for(:android) }
+    assert_equal "Unknown host adapter target: :android", error.message
+  end
+
+  test "Wasm and Native host_source share compiled host seams with target-specific channels and blank_id?" do
+    wasm_src = HostAdapters::Wasm.host_source
+    native_src = HostAdapters::Native.host_source
+
+    assert_same HostAdapters::Wasm::HOST_SOURCE, wasm_src
+    assert_same HostAdapters::Native::HOST_SOURCE, native_src
+    assert wasm_src.frozen?
+    assert native_src.frozen?
+    assert Prism.parse(wasm_src).success?
+    assert Prism.parse(native_src).success?
+
+    shared_body = ->(src) { src[/module Host\n(.*?)\n    # Compiled models/m, 1] }
+    wasm_shared = shared_body.call(wasm_src)
+    assert_includes wasm_shared, "def with_savepoint(&block)"
+    assert_equal wasm_shared, shared_body.call(native_src)
+
+    assert_includes wasm_src, "# Compiled wasm32-wasi host adapter (see Compiler::HostAdapters::Wasm)."
+    assert_includes wasm_src, "id.blank?"
+    assert_includes wasm_src, 'File.read("/host/#{name}")'
+    assert_includes wasm_src, 'File.write("/host/#{name}", body)'
+
+    assert_includes native_src, "# Compiled native host adapter (see Compiler::HostAdapters::Native)."
+    assert_includes native_src, "id.to_s.empty?"
+    assert_includes native_src, "NativeHost.ir_host_take(name)"
+    assert_includes native_src, "NativeHost.ir_host_give(name, body)"
+
+    [wasm_src, native_src].each do |src|
+      executed = []
+      sandbox = Module.new do
+        const_set(:Db, Module.new do
+          define_singleton_method(:exec) { |sql| executed << sql }
+        end)
+        module_eval(src)
+      end
+      sandbox.const_get(:InstantRecord).const_set(:DEFAULT_MOUNT_PATH, InstantRecord::DEFAULT_MOUNT_PATH)
+      host = sandbox.const_get(:InstantRecord)::Host
+
+      assert_equal true, host.browser?
+      assert_nil host.load_engine
+      assert_nil host.load_inertia_renderer
+      assert_nil host.load_branch_store
+      assert_nil host.install_active_job_guard
+      assert_nil host.resolve_syncable_model("Item")
+      assert_equal [], host.discover_syncable_models
+      assert_equal InstantRecord::DEFAULT_MOUNT_PATH, host.default_mount_path
+
+      assert_equal :ok, host.with_savepoint { :ok }
+      assert_equal ["SAVEPOINT ir_sp_1", "RELEASE SAVEPOINT ir_sp_1"], executed
+
+      executed.clear
+      error = assert_raises(RuntimeError) { host.with_savepoint { raise "boom" } }
+      assert_equal "boom", error.message
+      assert_equal ["SAVEPOINT ir_sp_2", "ROLLBACK TO SAVEPOINT ir_sp_2", "RELEASE SAVEPOINT ir_sp_2"], executed
+    end
+  end
+
+  test "Demo.fingerprint_stylesheets renames css files with a 10-character sha256 digest" do
+    Dir.mktmpdir do |app|
+      HostAdapters::Demo.fingerprint_stylesheets(app)
+
+      dir = File.join(app, "app/assets/stylesheets")
+      FileUtils.mkdir_p(dir)
+      css_a = "body { color: #111; }\n"
+      css_b = "h1 { font-size: 2rem; }\n"
+      File.write(File.join(dir, "application.css"), css_a)
+      File.write(File.join(dir, "reset.css"), css_b)
+      File.write(File.join(dir, "README.txt"), "keep\n")
+
+      HostAdapters::Demo.fingerprint_stylesheets(app)
+
+      digest_a = Digest::SHA256.hexdigest(css_a)[0, 10]
+      digest_b = Digest::SHA256.hexdigest(css_b)[0, 10]
+      assert_equal ["README.txt", "application-#{digest_a}.css", "reset-#{digest_b}.css"], Dir.children(dir).sort
+      assert_equal css_a, File.read(File.join(dir, "application-#{digest_a}.css"))
+      assert_equal css_b, File.read(File.join(dir, "reset-#{digest_b}.css"))
+    end
+  end
+
+  test "Demo.version_inbox_bundle versions inbox.js, is idempotent, and raises when target is missing" do
+    Dir.mktmpdir do |app|
+      bundle_path = File.join(app, "app/assets/builds/inbox.js")
+      view_path = File.join(app, "app/views/email/mailboxes/index.html.erb")
+      FileUtils.mkdir_p(File.dirname(bundle_path))
+      FileUtils.mkdir_p(File.dirname(view_path))
+
+      original_view = '<script src="<%= asset_path("inbox.js") %>"></script>' + "\n"
+      File.write(view_path, original_view)
+      HostAdapters::Demo.version_inbox_bundle(app)
+      assert_equal original_view, File.read(view_path)
+
+      bundle = "console.log('inbox');\n"
+      digest = Digest::SHA256.hexdigest(bundle)[0, 10]
+      File.write(bundle_path, bundle)
+
+      HostAdapters::Demo.version_inbox_bundle(app)
+      expected = %(<script src="/assets/inbox.js?v=#{digest}"></script>\n)
+      assert_equal expected, File.read(view_path)
+
+      HostAdapters::Demo.version_inbox_bundle(app)
+      assert_equal expected, File.read(view_path)
+
+      File.write(view_path, "<script src=\"/assets/other.js\"></script>\n")
+      error = assert_raises(BuildError) { HostAdapters::Demo.version_inbox_bundle(app) }
+      assert_equal "demo seam did not apply: app/views/email/mailboxes/index.html.erb", error.message
+    end
+  end
+
+  test "Demo.adapt_demo_views rewrites application layout and prefixes non-partial views with demo_scope" do
+    Dir.mktmpdir do |app|
+      layout_path = File.join(app, "app/views/layouts/application.html.erb")
+      other_layout_path = File.join(app, "app/views/layouts/mailer.html.erb")
+      slack_view_path = File.join(app, "app/views/slack/channels/show.html.erb")
+      email_view_path = File.join(app, "app/views/email/mailboxes/index.html.erb")
+      partial_path = File.join(app, "app/views/slack/channels/_message.html.erb")
+
+      [layout_path, other_layout_path, slack_view_path, email_view_path, partial_path].each do |p|
+        FileUtils.mkdir_p(File.dirname(p))
+      end
+
+      File.write(layout_path, <<~ERB)
+        <% demo = controller_path.split("/").first %>
+        <body class="demo-<%= controller_path.split("/").first %>">
+          <span class="micro-label">Local-first Rails demos —</span>
+          <a href="<%= source_path(page: controller_path, view: action_name) %>">Read live out of app.wasm — not a snippet</a>
+        </body>
+      ERB
+      File.write(other_layout_path, "<%= yield %>\n")
+      File.write(slack_view_path, "<h1>Slack</h1>\n")
+      File.write(email_view_path, "<h1>Email</h1>\n")
+      File.write(partial_path, "<p>msg</p>\n")
+
+      HostAdapters::Demo.adapt_demo_views(app)
+
+      assert_equal <<~ERB, File.read(layout_path)
+        <% demo = content_for(:demo_scope).to_s %>
+        <body class="demo-<%= content_for(:demo_scope) %>">
+          <span class="micro-label"><a href="/">All demos</a> ·</span>
+          <a href="/source">View the source for this build</a>
+        </body>
+      ERB
+      assert_equal "<%= yield %>\n", File.read(other_layout_path)
+      assert_equal "<% content_for(:demo_scope, \"slack\") %>\n<h1>Slack</h1>\n", File.read(slack_view_path)
+      assert_equal "<% content_for(:demo_scope, \"email\") %>\n<h1>Email</h1>\n", File.read(email_view_path)
+      assert_equal "<p>msg</p>\n", File.read(partial_path)
+    end
+  end
+
+  test "Demo.rewrite_server_url_helpers rewrites route helpers and literal paths and reports errors" do
+    marker = InstantRecord::NETWORK_MARKER
+    slack_rel = "app/helpers/slack_helper.rb"
+    auth_rel = "app/helpers/auth_helper.rb"
+
+    Dir.mktmpdir do |app|
+      slack_path = File.join(app, slack_rel)
+      auth_path = File.join(app, auth_rel)
+      FileUtils.mkdir_p(File.dirname(slack_path))
+
+      File.write(slack_path, <<~RUBY)
+        module SlackHelper
+          def reset_url = InstantRecord.server_url(slack_reset_path)
+          def custom_url = InstantRecord.server_url("/custom/path")
+          def untouched
+            [
+              InstantRecord.server_url(unknown_path),
+              InstantRecord.server_url(slack_reset_path, :extra),
+              InstantRecord.server_url(obj.slack_reset_path),
+              Other.server_url("/other")
+            ]
+          end
+        end
+      RUBY
+      File.write(auth_path, <<~RUBY)
+        module AuthHelper
+          def sign_in_url = ::InstantRecord.server_url(auth_session_path)
+          def sign_out_url = InstantRecord.server_url(auth_session_sign_out_path)
+        end
+      RUBY
+
+      HostAdapters::Demo.rewrite_server_url_helpers(app)
+
+      assert_equal <<~RUBY, File.read(slack_path)
+        module SlackHelper
+          def reset_url = "/slack/reset?#{marker}"
+          def custom_url = "/custom/path?#{marker}"
+          def untouched
+            [
+              InstantRecord.server_url(unknown_path),
+              InstantRecord.server_url(slack_reset_path, :extra),
+              InstantRecord.server_url(obj.slack_reset_path),
+              Other.server_url("/other")
+            ]
+          end
+        end
+      RUBY
+      assert_equal <<~RUBY, File.read(auth_path)
+        module AuthHelper
+          def sign_in_url = "/auth/session?#{marker}"
+          def sign_out_url = "/auth/session/sign_out?#{marker}"
+        end
+      RUBY
+    end
+
+    error = assert_raises(BuildError) do
+      rewrite(slack_rel, "module SlackHelper\n  def x = 1\nend\n") { |app| HostAdapters::Demo.rewrite_server_url_helpers(app) }
+    end
+    assert_equal "demo seam did not apply: #{slack_rel}: no InstantRecord.server_url calls rewritten", error.message
+
+    parse_error = assert_raises(BuildError) do
+      rewrite(auth_rel, "def (") { |app| HostAdapters::Demo.rewrite_server_url_helpers(app) }
+    end
+    assert_equal "Cannot parse #{auth_rel}", parse_error.message
+  end
+
   test "thread replies become an array in every matching ternary" do
     assert_equal "r = @thread_parent ? a.b(1).to_a : []\ns = @thread_parent   ?\n  'é☕'.c.to_a\n  : [ ]\n",
       coerce("r = @thread_parent ? a.b(1) : []\ns = @thread_parent   ?\n  'é☕'.c\n  : [ ]\n")
