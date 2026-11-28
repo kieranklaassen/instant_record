@@ -391,6 +391,122 @@ class WasmTreeTest < ActiveSupport::TestCase
     refute_includes demo_tree, "runtime/sidekiq_redis.rb"
   end
 
+  test "demo pruning still counts threading matches and newlines on pruned runtime files" do
+    files = {
+      "app/views/slack/channels/_sidebar.rb" => sidebar_fixture,
+      "runtime/action_text.rb" => "require \"timeout\"\nLOCK = Mutex.new\nThread.current\n",
+      "runtime/tep/server.rb" => "Fiber.yield\nline2\n"
+    }
+
+    demo_stats, demo_tree = build_tree(files, demo: true)
+    assert_equal({ touched: 3, pruned_lines: 5 }, demo_stats)
+    assert_equal "# Pruned for browser wasm (see WasmTree)\n#{WasmTree::PRUNED_STUBS.fetch('runtime/action_text.rb')}", demo_tree["runtime/action_text.rb"]
+    assert_equal "# Pruned for browser wasm (see WasmTree)\n", demo_tree["runtime/tep/server.rb"]
+  end
+
+  test "preserves binary non-ruby files, executable permissions, and UTF-8 ruby sources" do
+    Dir.mktmpdir do |dir|
+      source = File.join(dir, "emit")
+      target = File.join(dir, "tree")
+      binary = (0..255).to_a.pack("C*")
+
+      write_tree(source, minimal_files.merge(
+        "runtime/utf8_helper.rb" => "# café 🚀\nMutex.new\n",
+        "app/models/utf8_model.rb" => "# résumé\nclass Utf8Model\nend\n"
+      ))
+      FileUtils.mkdir_p(File.join(source, "public"))
+      File.binwrite(File.join(source, "public/blob.bin"), binary)
+
+      script_src = File.join(source, "bin/run_tool")
+      FileUtils.mkdir_p(File.dirname(script_src))
+      File.write(script_src, "#!/bin/sh\necho ok\n")
+      File.chmod(0o755, script_src)
+
+      stats = WasmTree.build(source: source, target: target, demo: false)
+      assert_equal({ touched: 2, pruned_lines: 0 }, stats)
+      assert_equal binary, File.binread(File.join(target, "public/blob.bin"))
+      assert_equal 0o755, File.stat(File.join(target, "bin/run_tool")).mode & 0o777
+      assert_equal "# café 🚀\nWasmMutex.new\n", File.read(File.join(target, "runtime/utf8_helper.rb"))
+      assert_equal "# résumé\nclass Utf8Model\nend\n", File.read(File.join(target, "app/models/utf8_model.rb"))
+    end
+  end
+
+  test "dereferences file and directory symlinks, guards cycles, and filters nested ignored directories" do
+    Dir.mktmpdir do |dir|
+      source = File.join(dir, "emit")
+      shared = File.join(dir, "shared")
+      target = File.join(dir, "tree")
+
+      write_tree(source, minimal_files.merge(
+        "app/test/nested_ignored.rb" => "ignored\n",
+        "runtime/build/nested_ignored.rb" => "ignored\n",
+        "runtime/.hidden.rb" => "Thread.new\n",
+        "runtime/.hidden_dir/inside.rb" => "Mutex.new\n"
+      ))
+      FileUtils.mkdir_p(File.join(shared, "dir"))
+      File.write(File.join(shared, "linked_file.rb"), "Queue.new\n")
+      File.write(File.join(shared, "dir/from_dir.rb"), "Fiber.yield\n")
+
+      File.symlink(File.join(shared, "linked_file.rb"), File.join(source, "runtime/linked_file.rb"))
+      File.symlink(File.join(shared, "dir"), File.join(source, "runtime/linked_dir"))
+      File.symlink(source, File.join(source, "runtime/cycle_back"))
+
+      stats = WasmTree.build(source: source, target: target, demo: false)
+      assert_equal({ touched: 3, pruned_lines: 0 }, stats)
+
+      linked_file = File.join(target, "runtime/linked_file.rb")
+      linked_dir_file = File.join(target, "runtime/linked_dir/from_dir.rb")
+      refute File.symlink?(linked_file)
+      refute File.symlink?(File.join(target, "runtime/linked_dir"))
+      assert_equal "WasmQueue.new\n", File.read(linked_file)
+      assert_equal "WasmFiber.yield\n", File.read(linked_dir_file)
+      refute File.exist?(File.join(target, "runtime/cycle_back"))
+      refute File.exist?(File.join(target, "app/test"))
+      refute File.exist?(File.join(target, "runtime/build"))
+      assert_equal "Thread.new\n", File.read(File.join(target, "runtime/.hidden.rb"))
+      assert_equal "Mutex.new\n", File.read(File.join(target, "runtime/.hidden_dir/inside.rb"))
+    end
+  end
+
+  test "pre-existing runtime/wasm_threads.rb in source is overwritten by WASM_THREADS_RB while counting threading touch" do
+    stats, tree = build_tree({
+      "runtime/wasm_threads.rb" => "Thread.current\n# stale copy\n"
+    })
+
+    assert_equal({ touched: 2, pruned_lines: 0 }, stats)
+    assert_equal WasmTree::WASM_THREADS_RB, tree["runtime/wasm_threads.rb"]
+  end
+
+  test "missing required files raise expected error classes referencing target path in canonical order" do
+    Dir.mktmpdir do |dir|
+      source = File.join(dir, "emit")
+      target = File.join(dir, "tree")
+
+      # Missing main_wasm.rb raises Errno::ENOENT mentioning target path
+      write_tree(source, minimal_files.merge("main_wasm.rb" => nil))
+      err = assert_raises(Errno::ENOENT) { WasmTree.build(source: source, target: target) }
+      assert_includes err.message, File.join(target, "main_wasm.rb")
+
+      # Missing runtime/message_digest.rb takes precedence over missing require line in boot.rb
+      FileUtils.rm_rf(source)
+      write_tree(source, minimal_files.merge("boot.rb" => "# no require\n", "runtime/message_digest.rb" => nil))
+      err = assert_raises(Errno::ENOENT) { WasmTree.build(source: source, target: target) }
+      assert_includes err.message, File.join(target, "runtime/message_digest.rb")
+
+      # Missing runtime/active_record/connection.rb raises BuildError mentioning target path
+      FileUtils.rm_rf(source)
+      write_tree(source, minimal_files.merge("runtime/active_record/connection.rb" => nil))
+      err = assert_raises(BuildError) { WasmTree.build(source: source, target: target) }
+      assert_equal "Expected #{File.join(target, 'runtime/active_record/connection.rb')}", err.message
+
+      # Missing sidebar in demo mode raises Errno::ENOENT mentioning target path
+      FileUtils.rm_rf(source)
+      write_tree(source, minimal_files)
+      err = assert_raises(Errno::ENOENT) { WasmTree.build(source: source, target: target, demo: true) }
+      assert_includes err.message, File.join(target, "app/views/slack/channels/_sidebar.rb")
+    end
+  end
+
   private
 
   def minimal_files
