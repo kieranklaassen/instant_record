@@ -142,6 +142,8 @@ namespace :instant_record do
       }
     )
     exit(status)
+  rescue InstantRecord::Compiler::BuildError, ArgumentError => e
+    abort e.message
   end
 
   desc "Verify the compiler toolchain, static AOT/32-bit compatibility, and schema lockfile upgrade ladder (optional target: wasm, native, iphonesimulator, iphoneos)"
@@ -181,17 +183,24 @@ namespace :instant_record do
   end
 
   value_flags = %w[--wasm --db --max-steps]
+  env_assignment = /\A\w+=/
 
   # A flag with a value takes the argument after it, even one that looks like a flag.
+  # Before `--`, NAME=value arguments are Rake ENV assignments rather than positional files.
   replay_arguments = lambda do |arguments|
     flags = {}
     positional = []
+    after_separator = false
     rest = arguments.dup
     while (arg = rest.shift)
-      if value_flags.include?(arg)
+      if arg == "--" && !after_separator
+        after_separator = true
+      elsif value_flags.include?(arg)
         flags[arg] = rest.shift unless rest.empty?
       elsif arg.start_with?("-")
         flags[arg] = true
+      elsif !after_separator && env_assignment.match?(arg)
+        next
       else
         positional << arg
       end
@@ -206,12 +215,14 @@ namespace :instant_record do
     replay = ->(arg) { arg.start_with?("instant_record:replay") }
     if ARGV.none?(&replay) && Rake.application.top_level_tasks.any?(&replay)
       # bin/rails took the task's name out of ARGV, and takes words for tasks: only flags without a value arrive.
-      extra = ARGV.drop_while { |arg| arg != "--" }.grep(/\A-/) - value_flags
+      extra = ARGV.drop_while { |arg| arg != "--" }.drop(1).grep(/\A-/) - value_flags
     else
       extra = ARGV.drop_while { |arg| !replay.call(arg) }.drop(1)
     end
     flags, positional = replay_arguments.call(extra)
-    extra.each { |arg| Rake::Task.define_task(arg.to_sym) {} unless Rake::Task.task_defined?(arg) }
+    (extra & Rake.application.top_level_tasks).each do |arg|
+      Rake::Task.define_task(arg.to_sym) {} unless Rake::Task.task_defined?(arg)
+    end
 
     trace_file = args[:file].to_s.empty? ? (positional[0] || ENV["TRACE"]) : args[:file]
     if trace_file.nil? || trace_file.empty?

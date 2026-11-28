@@ -57,6 +57,103 @@ class RakeTasksTest < ActiveSupport::TestCase
     end
   end
 
+  test "instant_record:mcp --build aborts cleanly on Compiler::BuildError" do
+    Dir.mktmpdir do |dir|
+      toolchain = File.join(dir, "toolchain.env")
+      File.write(toolchain, "TOOLS=#{dir}\n")
+      out, err, status = run_rake_task("instant_record:mcp", root: dir, toolchain: toolchain, arguments: %w[-- --build models], prepare: <<~RUBY)
+        InstantRecord::Compiler.define_singleton_method(:build_native) do |**|
+          raise InstantRecord::Compiler::BuildError, "simulated native build failure"
+        end
+      RUBY
+
+      output = out + err
+      refute status.success?
+      assert_includes output, "simulated native build failure"
+      refute_includes output, "from #{RAKE_FILE}"
+    end
+  end
+
+  test "run_rake_task ignores RAKEOPT from the caller environment" do
+    previous = ENV["RAKEOPT"]
+    ENV["RAKEOPT"] = "--dry-run"
+    Dir.mktmpdir do |dir|
+      out, err, status = run_rake_task("instant_record:replay", root: dir, toolchain: File.join(dir, "toolchain.env"), prepare: <<~RUBY)
+        Dir.chdir(#{dir.inspect})
+        File.write("Rakefile", <<~RAKEFILE)
+          task :ping do
+            puts "ran"
+          end
+        RAKEFILE
+        app = Rake::Application.new
+        Rake.application = app
+        app.init("rake", ["ping"])
+        app.load_rakefile
+        app.top_level
+        exit
+      RUBY
+
+      assert status.success?, out + err
+      assert_equal "ran\n", out
+    end
+  ensure
+    ENV["RAKEOPT"] = previous
+  end
+
+  test "instant_record:replay ignores Rake ENV assignments before -- and keeps filenames with = after --" do
+    cases = {
+      "ENV assignment without --" =>
+        [%w[instant_record:replay TRACE=a.irtrace], { trace_path: "a.irtrace", wasm_path: nil }, %w[TRACE=a.irtrace]],
+      "multiple ENV assignments before -- with flags after" =>
+        [%w[instant_record:replay TRACE=a.irtrace DB=env.db -- --json],
+         { trace_path: "a.irtrace", wasm_path: nil, db_path: "env.db", json: true },
+         %w[TRACE=a.irtrace DB=env.db -- --json]],
+      "filename with = after -- is positional" =>
+        [%w[instant_record:replay -- a=b.irtrace], { trace_path: "a=b.irtrace", wasm_path: nil }, %w[-- a=b.irtrace]],
+      "flag value with = after -- is kept" =>
+        [%w[instant_record:replay -- --wasm foo=bar.wasm a.irtrace],
+         { trace_path: "a.irtrace", wasm_path: "foo=bar.wasm" },
+         %w[-- --wasm foo=bar.wasm]]
+    }
+
+    Dir.mktmpdir do |dir|
+      out, err, status = run_rake_task("instant_record:replay", root: dir, toolchain: File.join(dir, "toolchain.env"), prepare: <<~RUBY)
+        require "instant_record/trace"
+
+        InstantRecord::Trace.define_singleton_method(:replay) do |**options|
+          $replayed = options
+          InstantRecord::Trace::Replayer::Result.new(ok: true, status: 0, stdout: "", stderr: "")
+        end
+        Dir.chdir(#{dir.inspect})
+        File.write("Rakefile", <<~RAKEFILE)
+          task :environment
+          load #{RAKE_FILE.inspect}
+        RAKEFILE
+        results = JSON.parse(#{JSON.generate(cases.values.map { |argv, _, forbidden| [argv, forbidden] }).inspect}).map do |argv, forbidden|
+          %w[TRACE WASM DB JSON MAX_STEPS STOP_ON_FAULT ALLOW_DIGEST_MISMATCH a foo].each { |name| ENV.delete(name) }
+          $replayed = nil
+          app = Rake::Application.new
+          Rake.application = app
+          ARGV.replace(argv)
+          app.init("rake", argv)
+          app.load_rakefile
+          app.top_level
+          { options: $replayed, defined: forbidden.select { |name| Rake::Task.task_defined?(name) } }
+        end
+        puts JSON.generate(results)
+        exit
+      RUBY
+
+      assert status.success?, out + err
+      results = parse(out, err, symbolize_names: true)
+      assert_equal cases.size, results.size, err
+      cases.each_with_index do |(name, (_argv, expected, _forbidden)), index|
+        assert_equal expected, results[index][:options].slice(*expected.keys), name
+        assert_empty results[index][:defined], "unexpected tasks defined for #{name}"
+      end
+    end
+  end
+
   test "instant_record:replay reads a flag before a rake argument before the environment before a positional wasm" do
     env = { "WASM" => "env.wasm", "TRACE" => "env.irtrace", "DB" => "env.db", "MAX_STEPS" => "9" }
     cases = {
@@ -206,6 +303,6 @@ class RakeTasksTest < ActiveSupport::TestCase
 
     # The caller's settings are not the task's.
     inherited = ENV.keys.grep(/\AINSTANT_RECORD_/).to_h { |name| [name, nil] }
-    Open3.capture3({ **inherited, "INSTANT_RECORD_TOOLCHAIN" => toolchain }, RbConfig.ruby, "-e", script, task_name, *arguments)
+    Open3.capture3({ **inherited, "RAKEOPT" => nil, "INSTANT_RECORD_TOOLCHAIN" => toolchain }, RbConfig.ruby, "-e", script, task_name, *arguments)
   end
 end
