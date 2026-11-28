@@ -40,7 +40,14 @@ class ReadTrackerScanTest < Minitest::Test
     "SELECT * FROM items WHERE owner = 'x' INTERSECT SELECT * FROM items",
     "SELECT * FROM items EXCEPT SELECT * FROM items WHERE owner = 'x'",
     "SELECT union_id FROM items WHERE owner = 'a UNION b' AND id IN (SELECT 1 EXCEPT SELECT 2)",
-    "SELECT * FROM items WHERE owner = 'x' AND \"union\" = 'é''EXCEPT'"
+    "SELECT * FROM items WHERE owner = 'x' AND \"union\" = 'é''EXCEPT'",
+    "SELECT * FROM 'x'a",
+    "SELECT * FROM items JOIN where AS items ON 1=1 WHERE items.owner = 'x'",
+    "SELECT * FROM items WHERE owner = 'a''b' ORDER BY id",
+    "SELECT * FROM items WHERE owner = 'café''日本' AND (a = 1 OR b = 2) ORDER BY id",
+    "SELECT * FROM items WHERE owner = $0 AND id = $1",
+    "SELECT * FROM items WHERE ('a' = 'a') AND owner = 'x'",
+    "SELECT * FROM items WHERE\0owner = 'x'\0"
   ].freeze
 
   # Binds that are the same text, or only look it, as another.
@@ -111,6 +118,153 @@ class ReadTrackerScanTest < Minitest::Test
 
     InstantRecord.sync(@model)
     assert_equal({ "items" => { "owner" => ["x"] } }, SCAN.send(:extract_outer_partitions, sql, ["items"], nil))
+  end
+
+  def test_repeated_record_sql_reflects_dynamic_partition_column_changes
+    sql = 'SELECT "items".* FROM "items" WHERE "items"."owner" = ? AND "items"."title" = ? ORDER BY "items"."id" LIMIT 10'
+
+    # Run repeatedly to exercise any internal query-plan caching.
+    4.times do |i|
+      binds = ["owner_#{i}", "title_#{i}"]
+      assert_equal track(REFERENCE, [[sql.dup, binds]]), track(SCAN, [[sql.dup, binds]])
+    end
+
+    # Swap partition_by dynamically from :owner to :title.
+    title_model = syncable_model("TitleMemo") { sync_window limit: 20, partition_by: :title }
+    InstantRecord.sync(title_model)
+    3.times do |i|
+      binds = ["owner_#{i}", "title_#{i}"]
+      expected = track(REFERENCE, [[sql.dup, binds]])
+      actual = track(SCAN, [[sql.dup, binds]])
+      assert_equal expected, actual
+      assert_equal({ "TitleMemo" => { "title" => ["title_#{i}"] } }, actual.first["partitions"])
+    end
+
+    # Remove syncable models completely.
+    InstantRecord.sync
+    assert_equal track(REFERENCE, [[sql.dup, ["maya", "hi"]]]), track(SCAN, [[sql.dup, ["maya", "hi"]]])
+  end
+
+  def test_repeated_record_sql_multi_query_and_cache_isolation
+    queries = [
+      ['SELECT "items".* FROM "items" WHERE "items"."owner" = ? AND "items"."id" IN (?, ?, ?) ORDER BY "items"."id"', ["café", "1", 2, "1"]],
+      ['SELECT "items".* FROM "items" WHERE "items"."owner" = ? AND (LOWER("items"."title") LIKE ? OR LOWER("items"."state") LIKE ?)', ["café", "%x%", "%y%"]],
+      ['SELECT "items".* FROM "items" WHERE "items"."owner" = $1 AND "items"."id" IN ($2, \'a\'\'b\', 42)', ["café", "日本"]],
+      ['SELECT "items".* FROM "items" WHERE "items"."owner" = \'café\'', nil],
+      ['SELECT "items".* FROM "items" INNER JOIN "labels" "l" ON "l"."item_id" = "items"."id" WHERE "items"."owner" = ? AND "l"."id" = ?', ["café", 7]],
+      ['SELECT "items".* FROM "items" WHERE "items"."owner" = ? OR "items"."title" = ?', ["theo", "urgent"]],
+      ['INSERT INTO "items" ("id", "owner") VALUES (?, ?)', ["9", "café"]]
+    ]
+
+    # Run each sequence multiple times (cold + cached) and verify exact parity,
+    # including encoding, frozenness, and order of partition values.
+    4.times do
+      assert_equal track(REFERENCE, queries.first(4)), track(SCAN, queries.first(4))
+      queries.each do |sql, binds|
+        mutable_sql = sql.dup
+        expected = track(REFERENCE, [[mutable_sql, binds]])
+        actual = track(SCAN, [[mutable_sql, binds]])
+        assert_equal expected, actual, sql
+        # Mutating caller string after record_sql must not affect subsequent calls.
+        mutable_sql.replace("UPDATE items SET owner = 'mutated'")
+      end
+    end
+  end
+
+  def test_repeated_record_sql_only_asks_models_for_non_id_columns
+    [
+      ['SELECT * FROM items WHERE id = ?', ["1"], 0],
+      ['SELECT * FROM items WHERE list_id IN (?, ?)', ["1", "2"], 0],
+      ['SELECT * FROM items WHERE title LIKE ?', ["%a%"], 0],
+      ['SELECT * FROM items WHERE owner = ?', ["maya"], 1],
+      ['SELECT * FROM items WHERE title = ? AND owner = ?', ["hi", "maya"], 1]
+    ].each do |sql, binds, expected_asks|
+      3.times do
+        asked = nil
+        SCAN.track do
+          asked = models_asked { SCAN.record_sql(sql.dup, binds) }
+        end
+        assert_equal expected_asks, asked, sql
+      end
+    end
+  end
+
+  def test_concurrent_record_sql_matches_reference
+    templates = [
+      'SELECT "items".* FROM "items" WHERE "items"."owner" = ? AND "items"."id" IN (?, ?)',
+      'SELECT "items".* FROM "items" WHERE "items"."owner" = ? ORDER BY "items"."id" DESC LIMIT ?',
+      'SELECT "items".* FROM "items" WHERE "items"."owner" = \'o\'\'connor\' AND "items"."id" = ?'
+    ]
+
+    # Precompute expected partition hashes from un-prepended reference.
+    expected_by_idx = 12.times.map do |i|
+      sql = templates[i % templates.length]
+      binds = ["owner_#{i}", "id_#{i}", "id_#{i + 1}"]
+      REFERENCE.send(:extract_outer_partitions, sql, ["items"], binds)
+    end
+
+    threads = 4.times.map do |t|
+      Thread.new do
+        25.times do |iter|
+          idx = (t * 3 + iter) % 12
+          sql = templates[idx % templates.length].dup
+          binds = ["owner_#{idx}", "id_#{idx}", "id_#{idx + 1}"]
+          got = SCAN.send(:extract_outer_partitions, sql, ["items"], binds)
+          raise "Mismatch for idx=#{idx}: #{got.inspect} != #{expected_by_idx[idx].inspect}" unless got == expected_by_idx[idx]
+
+          plan = SCAN.send(:compile_sql_plan, sql)
+          raise "Unexpected plan for #{sql.inspect}" unless plan.tables == ["items"] && plan.frozen?
+        end
+      end
+    end
+    threads.each(&:join)
+  end
+
+  def test_non_string_and_invalid_utf8_fallback
+    [nil, 123, :select, "SELECT * FROM items WHERE owner = 'x'\xFF", "\xC3SELECT * FROM items WHERE owner = 'x'",
+     "SELECT * FROM items WHERE owner = 'x'".b, "SELECT * FROM items WHERE owner = 'x'".encode("UTF-16LE")].each do |input|
+      assert_equal outcome { REFERENCE.track { REFERENCE.record_sql(input, nil) } },
+        outcome { SCAN.track { SCAN.record_sql(input, nil) } }, input.inspect
+    end
+
+    ["'a\xFFb'", "'abc'".b, "'abc'".encode("UTF-16LE"), nil, 42].each do |expr|
+      assert_same_answer(:resolve_value, expr, nil, 0)
+    end
+  end
+
+  def test_single_table_foreign_predicates_and_rebound_aliases_match_across_cached_calls
+    queries = [
+      ["SELECT items.* FROM items INNER JOIN (SELECT 1 AS item_id) sub ON sub.item_id = items.id WHERE sub.item_id = 1", nil],
+      ["SELECT * FROM items i LEFT JOIN (SELECT 1) sub ON 1=1 WHERE sub.owner = 'maya'", nil],
+      ["SELECT * FROM items i JOIN (SELECT 1) bar AS items ON 1=1 WHERE items.owner = 'x'", nil],
+      ["SELECT * FROM items i JOIN (SELECT 1) bar AS items ON 1=1 WHERE items.id = ?", [7]],
+      ["SELECT * FROM items JOIN set AS s ON s.id = items.id WHERE s.id = ?", [9]]
+    ]
+
+    queries.each do |sql, binds|
+      expected = track(REFERENCE, [[sql, binds]])
+      3.times do |attempt|
+        assert_equal expected, track(SCAN, [[sql, binds]]), "attempt #{attempt + 1} for #{sql.inspect}"
+      end
+    end
+  end
+
+  def test_doubled_quotes_before_where_stop_at_compound_keywords
+    doubled_20 = "''" * 20
+    doubled_16 = "''" * 16
+    queries = [
+      "SELECT 'a#{doubled_20}a', ( id = 1 UNION SELECT 2) FROM items WHERE x = 1",
+      "SELECT 'a#{doubled_16}a', 'id = 1 UNION x' FROM items WHERE x = 1",
+      "SELECT 'a#{doubled_20}a', ( id = 1 INTERSECT SELECT 2) FROM items WHERE x = 1",
+      "SELECT 'a#{doubled_20}a', ( id = 1 EXCEPT SELECT 2) FROM items WHERE x = 1"
+    ]
+
+    queries.each do |sql|
+      expected = track(REFERENCE, [[sql, nil]])
+      3.times do |attempt|
+        assert_equal expected, track(SCAN, [[sql, nil]]), "attempt #{attempt + 1} for #{sql.inspect}"
+      end
+    end
   end
 
   private
