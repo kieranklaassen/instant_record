@@ -8,6 +8,7 @@ module InstantRecord
     # identity assignments, and per-client clock skew.
     class FaultNetwork
       PARTITION_MODES = %i[online offline drop_post drop_get server_503 drop_after_apply].freeze
+      BOOTSTRAP_ABORT_MODES = %i[network_drop server_503 truncated_body].freeze
 
       ClientPolicy = Struct.new(:partition, :identity, :clock_skew, :bootstrap_abort, keyword_init: true)
 
@@ -24,7 +25,7 @@ module InstantRecord
 
       def register_client(client_id, identity: nil, clock_skew: 0.0, partition: :online)
         @policies[client_id.to_s] = ClientPolicy.new(
-          partition: partition,
+          partition: validate_partition_mode!(partition),
           identity: identity,
           clock_skew: clock_skew.to_f,
           bootstrap_abort: nil
@@ -36,9 +37,7 @@ module InstantRecord
       end
 
       def set_partition(client_id, mode)
-        sym = mode.to_sym
-        raise ArgumentError, "Unknown partition mode: #{mode}" unless PARTITION_MODES.include?(sym)
-
+        sym = validate_partition_mode!(mode)
         policy(client_id).partition = sym
       end
 
@@ -53,7 +52,8 @@ module InstantRecord
       # One-shot mid-bootstrap abort: :network_drop (status 0), :server_503 (503),
       # or :truncated_body (200 with truncated invalid JSON).
       def arm_bootstrap_abort(client_id, mode = :network_drop)
-        policy(client_id).bootstrap_abort = mode.to_sym
+        sym = validate_bootstrap_abort_mode!(mode)
+        policy(client_id).bootstrap_abort = sym
       end
 
       def heal_all!
@@ -129,6 +129,20 @@ module InstantRecord
       end
 
       private
+
+      def validate_partition_mode!(mode)
+        sym = mode.respond_to?(:to_sym) ? mode.to_sym : nil
+        raise ArgumentError, "Unknown partition mode: #{mode.inspect}" unless PARTITION_MODES.include?(sym)
+
+        sym
+      end
+
+      def validate_bootstrap_abort_mode!(mode)
+        sym = mode.respond_to?(:to_sym) ? mode.to_sym : nil
+        raise ArgumentError, "Unknown bootstrap abort mode: #{mode.inspect}" unless BOOTSTRAP_ABORT_MODES.include?(sym)
+
+        sym
+      end
 
       def record_exchange(client_id, verb, path, identity, fault:)
         reply = yield

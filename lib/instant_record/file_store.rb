@@ -43,7 +43,7 @@ module InstantRecord
 
     def initialize(root, chunk_size: nil)
       @root = File.expand_path(root.to_s)
-      @root_prefix = @root == "/" ? "/" : "#{@root}/"
+      @root_prefix = @root.end_with?("/") ? @root : "#{@root}/"
       @chunk_size = chunk_size.nil? ? nil : validate_chunk_size!(chunk_size)
       @files = Rack::Files.new(@root, {}, "application/octet-stream")
     end

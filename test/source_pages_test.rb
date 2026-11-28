@@ -158,8 +158,11 @@ class SourcePagesTest < ActiveSupport::TestCase
   test "write deduplicates reads of shared files like app/models/issue.rb across pages" do
     Dir.mktmpdir do |dir|
       read_counts = Hash.new(0)
+      file_singleton = File.singleton_class
+      had_own_read = file_singleton.method_defined?(:read, false)
       orig_read = File.method(:read)
-      File.singleton_class.define_method(:read) do |path, *args, **kwargs|
+      file_singleton.remove_method(:read) if had_own_read
+      file_singleton.define_method(:read) do |path, *args, **kwargs|
         read_counts[path.to_s] += 1
         orig_read.call(path, *args, **kwargs)
       end
@@ -173,8 +176,11 @@ class SourcePagesTest < ActiveSupport::TestCase
           pipeline_dir: PIPELINE_DIR
         )
       ensure
-        File.singleton_class.define_method(:read, orig_read)
+        file_singleton.remove_method(:read) if file_singleton.method_defined?(:read, false)
+        file_singleton.define_method(:read, orig_read) if had_own_read
       end
+
+      refute_includes File.singleton_methods(false), :read unless had_own_read
 
       issue_path = File.join(DEMO_DIR, "app/models/issue.rb")
       assert_equal 1, read_counts[issue_path], "Expected app/models/issue.rb to be read once across todo, instant, and console"
