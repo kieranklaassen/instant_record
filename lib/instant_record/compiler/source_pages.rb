@@ -66,7 +66,7 @@ module InstantRecord
         8 => ["on_discarded_change", MARKER_RE_DISC].freeze
       }.freeze
 
-      # Precomputed per-page file specs: [filename, [[label, root_kind, rel_path, shared], ...]]
+      # Precomputed per-page file specs: [filename, [[label, root_kind, rel_path, cache_key], ...]]
       PAGE_SPECS = begin
         raw_specs = {}
         counts = Hash.new(0)
@@ -111,7 +111,8 @@ module InstantRecord
         raw_specs.map do |key, files|
           specs = files.map do |triple|
             label, root_kind, rel_path = triple
-            [label, root_kind, rel_path, counts[triple] > 1].freeze
+            cache_key = counts[triple] > 1 ? [label, root_kind, rel_path].freeze : nil
+            [label, root_kind, rel_path, cache_key].freeze
           end.freeze
           ["#{key}.html".freeze, specs].freeze
         end.freeze
@@ -137,9 +138,9 @@ module InstantRecord
 
         PAGE_SPECS.each do |filename, specs|
           parts = [SOURCE_NOTE]
-          specs.each do |label, root_kind, rel_path, shared|
-            rendered = if shared
-                         section_cache[label] ||= render_section(label, resolve_path(root_kind, rel_path, app_root, demo_root, pipeline_root))
+          specs.each do |label, root_kind, rel_path, cache_key|
+            rendered = if cache_key
+                         section_cache[cache_key] ||= render_section(label, resolve_path(root_kind, rel_path, app_root, demo_root, pipeline_root))
                        else
                          render_section(label, resolve_path(root_kind, rel_path, app_root, demo_root, pipeline_root))
                        end

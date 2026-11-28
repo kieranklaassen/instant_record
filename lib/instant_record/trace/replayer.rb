@@ -59,7 +59,12 @@ module InstantRecord
         cmd << "--stop-on-fault" if @stop_on_fault
         cmd.push("--max-steps", @max_steps.to_s) if @max_steps
 
-        stdout, stderr, status = Open3.capture3(*cmd)
+        stdout, stderr, status =
+          begin
+            Open3.capture3(*cmd)
+          rescue Errno::ENOENT => e
+            raise Error, "Node executable not found (#{@node_bin}): #{e.message}"
+          end
         report = nil
         if @json && !stdout.strip.empty?
           begin
@@ -91,8 +96,13 @@ module InstantRecord
         search_roots.each do |dir|
           next unless File.directory?(dir)
 
-          candidates = Dir.glob(File.join(dir, "app*.wasm")).sort_by { |path| -File.mtime(path).to_f }
-          return candidates.first if candidates.any?
+          candidates = Dir.glob(File.join(dir, "app*.wasm")).filter_map do |path|
+            [path, -File.mtime(path).to_f]
+          rescue Errno::ENOENT
+            nil
+          end
+          best = candidates.min_by(&:last)
+          return best.first if best
         end
         nil
       end

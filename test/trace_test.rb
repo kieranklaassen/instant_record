@@ -374,7 +374,274 @@ class TraceTest < Minitest::Test
     end
   end
 
+  def test_replayer_raises_trace_error_for_missing_trace_wasm_or_node_bin
+    Dir.mktmpdir("irtrace-replayer-errors-") do |dir|
+      trace_path = File.join(dir, "sample.irtrace")
+      wasm_path = File.join(dir, "app-1.wasm")
+      empty_gem_root = Pathname(File.join(dir, "empty_gem"))
+      FileUtils.mkdir_p(empty_gem_root)
+
+      missing_trace = assert_raises(InstantRecord::Trace::Error) do
+        InstantRecord::Trace::Replayer.new(
+          trace_path: File.join(dir, "missing.irtrace"),
+          wasm_path: wasm_path
+        ).run
+      end
+      assert_includes missing_trace.message, "Trace file not found"
+
+      File.write(trace_path, "{}")
+
+      missing_explicit_wasm = assert_raises(InstantRecord::Trace::Error) do
+        InstantRecord::Trace::Replayer.new(
+          trace_path: trace_path,
+          wasm_path: File.join(dir, "missing.wasm")
+        ).run
+      end
+      assert_includes missing_explicit_wasm.message, "Could not find a compiled app-*.wasm module"
+
+      stub_singleton(InstantRecord::Trace::Replayer, :gem_root, -> { empty_gem_root }) do
+        missing_discovered_wasm = assert_raises(InstantRecord::Trace::Error) do
+          InstantRecord::Trace::Replayer.new(trace_path: trace_path, root: dir).run
+        end
+        assert_includes missing_discovered_wasm.message, "Could not find a compiled app-*.wasm module"
+      end
+
+      File.binwrite(wasm_path, "wasm")
+      missing_node_bin = File.join(dir, "no-such-node")
+      missing_node = assert_raises(InstantRecord::Trace::Error) do
+        InstantRecord::Trace::Replayer.new(
+          trace_path: trace_path,
+          wasm_path: wasm_path,
+          node_bin: missing_node_bin
+        ).run
+      end
+      assert_includes missing_node.message, "Node executable not found"
+      assert_includes missing_node.message, missing_node_bin
+    end
+  end
+
+  def test_replayer_builds_cli_flags_and_parses_json_stdout_and_exit_status
+    Dir.mktmpdir("irtrace-replayer-cli-") do |dir|
+      trace_path = File.join(dir, "sample.irtrace")
+      wasm_path = File.join(dir, "app-1.wasm")
+      db_path = File.join(dir, "state.sqlite3")
+      nm_dir = File.join(dir, "node_modules")
+      empty_gem_root = Pathname(File.join(dir, "empty_gem"))
+      File.write(trace_path, "{}")
+      File.binwrite(wasm_path, "wasm")
+      FileUtils.mkdir_p(nm_dir)
+      FileUtils.mkdir_p(empty_gem_root)
+
+      fake_status = Struct.new(:success?, :exitstatus)
+      captured_cmds = []
+
+      with_env("INSTANT_RECORD_WEB_NODE_MODULES", nil) do
+        stub_singleton(InstantRecord::Trace::Replayer, :gem_root, -> { empty_gem_root }) do
+          stub_singleton(Open3, :capture3, ->(*cmd) {
+            captured_cmds << cmd
+            ['{"ok":true,"executedSteps":3}', "", fake_status.new(true, 0)]
+          }) do
+            result = InstantRecord::Trace::Replayer.new(
+              trace_path: trace_path,
+              wasm_path: wasm_path,
+              db_path: db_path,
+              node_modules: [nm_dir],
+              json: true,
+              allow_digest_mismatch: true,
+              stop_on_fault: true,
+              max_steps: 7,
+              node_bin: "/custom/node"
+            ).run
+
+            assert result.ok?
+            assert_equal 0, result.status
+            assert_equal({ "ok" => true, "executedSteps" => 3 }, result.report)
+            assert_equal [
+              "/custom/node",
+              empty_gem_root.join("compiled/web/src/replay.js").to_s,
+              File.expand_path(trace_path),
+              "--wasm", File.expand_path(wasm_path),
+              "--db", File.expand_path(db_path),
+              "--node-modules", File.expand_path(nm_dir),
+              "--json",
+              "--allow-digest-mismatch",
+              "--stop-on-fault",
+              "--max-steps", "7"
+            ], captured_cmds.last
+          end
+
+          stub_singleton(Open3, :capture3, ->(*cmd) {
+            captured_cmds << cmd
+            ["not-valid-json{", "replay error", fake_status.new(false, 2)]
+          }) do
+            result = InstantRecord::Trace::Replayer.new(
+              trace_path: trace_path,
+              wasm_path: wasm_path,
+              json: true,
+              node_bin: "/custom/node"
+            ).run
+
+            refute result.ok?
+            assert_equal 2, result.status
+            assert_equal "replay error", result.stderr
+            assert_nil result.report
+            assert_equal [
+              "/custom/node",
+              empty_gem_root.join("compiled/web/src/replay.js").to_s,
+              File.expand_path(trace_path),
+              "--wasm", File.expand_path(wasm_path),
+              "--json"
+            ], captured_cmds.last
+          end
+
+          stub_singleton(Open3, :capture3, ->(*_cmd) {
+            ["   ", "killed by signal", fake_status.new(false, nil)]
+          }) do
+            result = InstantRecord::Trace::Replayer.new(
+              trace_path: trace_path,
+              wasm_path: wasm_path,
+              json: true,
+              node_bin: "/custom/node"
+            ).run
+
+            refute result.ok?
+            assert_equal 1, result.status
+            assert_nil result.report
+          end
+
+          stub_singleton(Open3, :capture3, ->(*_cmd) {
+            ['{"ok":true}', "", fake_status.new(true, 0)]
+          }) do
+            result = InstantRecord::Trace::Replayer.new(
+              trace_path: trace_path,
+              wasm_path: wasm_path,
+              json: false,
+              node_bin: "/custom/node"
+            ).run
+
+            assert result.ok?
+            assert_nil result.report
+          end
+        end
+      end
+    end
+  end
+
+  def test_replayer_discover_wasm_picks_newest_and_ignores_disappearing_files
+    Dir.mktmpdir("irtrace-discover-wasm-") do |dir|
+      root = File.join(dir, "app")
+      tmp_dist = File.join(root, "tmp/instant_record/compiled/web/dist")
+      pub_dist = File.join(root, "public/instant_record_compiled/current")
+      gem_root = Pathname(File.join(dir, "gem"))
+      gem_dist = gem_root.join("compiled/web/dist")
+      FileUtils.mkdir_p([tmp_dist, pub_dist, gem_dist])
+
+      trace_path = File.join(dir, "sample.irtrace")
+      File.write(trace_path, "{}")
+
+      older = File.join(tmp_dist, "app-older.wasm")
+      newer = File.join(tmp_dist, "app-newer.wasm")
+      vanishing = File.join(tmp_dist, "app-vanishing.wasm")
+      pub_wasm = File.join(pub_dist, "app-public.wasm")
+      gem_wasm = gem_dist.join("app-gem.wasm").to_s
+      [older, newer, vanishing, pub_wasm, gem_wasm].each { |p| File.binwrite(p, "wasm") }
+
+      now = Time.now
+      File.utime(now - 60, now - 60, older)
+      File.utime(now - 10, now - 10, newer)
+
+      stub_singleton(InstantRecord::Trace::Replayer, :gem_root, -> { gem_root }) do
+        orig_mtime = File.method(:mtime)
+        wrapped_mtime = lambda do |path|
+          if path == vanishing
+            File.unlink(path) if File.exist?(path)
+            raise Errno::ENOENT, path
+          end
+          orig_mtime.call(path)
+        end
+
+        stub_singleton(File, :mtime, wrapped_mtime) do
+          replayer = InstantRecord::Trace::Replayer.new(trace_path: trace_path, root: root)
+          assert_equal newer, replayer.instance_variable_get(:@wasm_path)
+        end
+
+        FileUtils.rm_rf(tmp_dist)
+        replayer = InstantRecord::Trace::Replayer.new(trace_path: trace_path, root: root)
+        assert_equal pub_wasm, replayer.instance_variable_get(:@wasm_path)
+
+        FileUtils.rm_rf(pub_dist)
+        replayer = InstantRecord::Trace::Replayer.new(trace_path: trace_path, root: root)
+        assert_equal gem_wasm, replayer.instance_variable_get(:@wasm_path)
+
+        FileUtils.rm_rf(gem_dist)
+        replayer = InstantRecord::Trace::Replayer.new(trace_path: trace_path, root: root)
+        assert_nil replayer.instance_variable_get(:@wasm_path)
+      end
+    end
+  end
+
+  def test_replayer_discover_node_modules_collects_and_deduplicates_sources
+    Dir.mktmpdir("irtrace-discover-nm-") do |dir|
+      root = File.join(dir, "app")
+      explicit_nm = File.join(dir, "explicit_nm")
+      env_nm = File.join(dir, "env_nm")
+      staged_nm = File.join(root, "tmp/instant_record/compiled/web/node_modules")
+      toolchain_nm = File.join(dir, "toolchain_nm")
+      gem_root = Pathname(File.join(dir, "gem"))
+      gem_nm = gem_root.join("compiled/web/node_modules").to_s
+      FileUtils.mkdir_p([explicit_nm, env_nm, staged_nm, toolchain_nm, gem_nm])
+
+      toolchain_file = File.join(dir, "toolchain.env")
+      File.write(toolchain_file, "WEB_NODE_MODULES=#{toolchain_nm}\n")
+      trace_path = File.join(dir, "sample.irtrace")
+      wasm_path = File.join(dir, "app.wasm")
+      File.write(trace_path, "{}")
+      File.binwrite(wasm_path, "wasm")
+
+      with_env("INSTANT_RECORD_WEB_NODE_MODULES", env_nm) do
+        stub_singleton(InstantRecord::Trace::Replayer, :gem_root, -> { gem_root }) do
+          replayer = InstantRecord::Trace::Replayer.new(
+            trace_path: trace_path,
+            wasm_path: wasm_path,
+            root: root,
+            toolchain: toolchain_file,
+            node_modules: [explicit_nm, File.join(dir, "missing_nm"), env_nm]
+          )
+
+          assert_equal [
+            File.expand_path(explicit_nm),
+            File.expand_path(env_nm),
+            File.expand_path(staged_nm),
+            File.expand_path(toolchain_nm),
+            File.expand_path(gem_nm)
+          ], replayer.instance_variable_get(:@node_modules)
+        end
+      end
+    end
+  end
+
   private
+
+  def stub_singleton(target, method_name, replacement)
+    singleton = target.singleton_class
+    had_own = singleton.method_defined?(method_name, false)
+    original = target.method(method_name)
+    singleton.remove_method(method_name) if had_own
+    singleton.define_method(method_name) { |*args, **kwargs, &block| replacement.call(*args, **kwargs, &block) }
+    yield
+  ensure
+    singleton.remove_method(method_name) if singleton.method_defined?(method_name, false)
+    singleton.define_method(method_name, original) if had_own
+  end
+
+  def with_env(key, value)
+    had_key = ENV.key?(key)
+    previous = ENV[key]
+    value.nil? ? ENV.delete(key) : ENV[key] = value
+    yield
+  ensure
+    had_key ? ENV[key] = previous : ENV.delete(key)
+  end
 
   def build_sample_sqlite_bytes
     Dir.mktmpdir("irtrace-src-") do |dir|

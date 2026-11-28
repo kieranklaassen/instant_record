@@ -425,7 +425,7 @@ class WasmTreeTest < ActiveSupport::TestCase
       stats = WasmTree.build(source: source, target: target, demo: false)
       assert_equal({ touched: 2, pruned_lines: 0 }, stats)
       assert_equal binary, File.binread(File.join(target, "public/blob.bin"))
-      assert_equal 0o755, File.stat(File.join(target, "bin/run_tool")).mode & 0o777
+      assert_equal 0o755 & ~File.umask, File.stat(File.join(target, "bin/run_tool")).mode & 0o777
       assert_equal "# café 🚀\nWasmMutex.new\n", File.read(File.join(target, "runtime/utf8_helper.rb"))
       assert_equal "# résumé\nclass Utf8Model\nend\n", File.read(File.join(target, "app/models/utf8_model.rb"))
     end

@@ -58,7 +58,7 @@ module InstantRecord
           trimmed = prefix.sub(%r{\A/+}, "").sub(%r{/+\z}, "")
           next if trimmed.empty?
 
-          slash = trimmed.rindex("/")
+          slash = trimmed.byterindex("/")
           parent = slash ? trimmed.byteslice(0, slash + 1).freeze : "".freeze
           child = slash ? trimmed.byteslice(slash + 1, trimmed.bytesize - slash - 1).freeze : trimmed.freeze
           (map[parent] ||= {})[child] = true

@@ -336,4 +336,17 @@ class FileStoreTest < Minitest::Test
       assert resolved.start_with?("#{@root}/"), "expected #{valid_key.inspect} to resolve inside root"
     end
   end
+
+  def test_root_prefix_does_not_double_slash_roots_ending_with_slash
+    root_store = InstantRecord::FileStore.new("/")
+    assert_equal "/", root_store.instance_variable_get(:@root_prefix)
+    assert_equal "/clip/one", root_store.path("clip/one")
+
+    expand = ->(path, *_rest) { path.to_s }
+    stub_singleton(File, :expand_path, expand) do
+      drive_store = InstantRecord::FileStore.new("C:/")
+      assert_equal "C:/", drive_store.instance_variable_get(:@root_prefix)
+      assert_equal "C:/clip/one", drive_store.path("clip/one")
+    end
+  end
 end

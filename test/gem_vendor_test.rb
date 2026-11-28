@@ -326,6 +326,16 @@ class GemVendorTest < ActiveSupport::TestCase
 
     deep = GemVendor.send(:excluded_dirs_by_prefix, %w[spec/ app/assets/ config/locales/custom/])
     assert_equal({ "" => { "spec" => true }, "app/" => { "assets" => true }, "config/locales/" => { "custom" => true } }, deep)
+
+    utf8 = GemVendor.send(:excluded_dirs_by_prefix, ["café/assets/", "café/résumé/dossiers/", "日本語/"])
+    assert_equal(
+      {
+        "café/" => { "assets" => true },
+        "café/résumé/" => { "dossiers" => true },
+        "" => { "日本語" => true }
+      },
+      utf8
+    )
   end
 
   test "HostAdapters::Base overrides and stubbed install take the disk fallback cleanly" do
