@@ -112,4 +112,48 @@ class CompiledReleaseTest < Minitest::Test
         [page.body, page["content-encoding"], page["content-type"], page["cache-control"]]
     end
   end
+
+  def test_publish_raises_build_error_when_workspace_dist_or_release_metadata_is_missing_or_invalid
+    Dir.mktmpdir do |dir|
+      root = Pathname(dir)
+
+      err = assert_raises(InstantRecord::Compiler::BuildError) { InstantRecord::Compiler.publish(root) }
+      assert_match(/workspace does not exist/i, err.message)
+      refute root.join("public/instant_record_compiled").exist?
+
+      workspace = root.join("tmp/instant_record/compiled")
+      FileUtils.mkdir_p(workspace)
+      err = assert_raises(InstantRecord::Compiler::BuildError) { InstantRecord::Compiler.publish(root) }
+      assert_match(/dist directory does not exist/i, err.message)
+      refute root.join("public/instant_record_compiled").exist?
+
+      dist = workspace.join("web/dist")
+      FileUtils.mkdir_p(dist)
+      err = assert_raises(InstantRecord::Compiler::BuildError) { InstantRecord::Compiler.publish(root) }
+      assert_match(/release metadata is missing/i, err.message)
+      refute root.join("public/instant_record_compiled").exist?
+
+      release_file = dist.join("instant-record-release.json")
+      release_file.write("{not valid json")
+      err = assert_raises(InstantRecord::Compiler::BuildError) { InstantRecord::Compiler.publish(root) }
+      assert_match(/Invalid compiled release JSON/i, err.message)
+
+      [
+        "[]",
+        "null",
+        "\"#{'a' * 64}\"",
+        JSON.generate({}),
+        JSON.generate(version: nil),
+        JSON.generate(version: 12345),
+        JSON.generate(version: "abc123"),
+        JSON.generate(version: "A" * 64),
+        JSON.generate(version: "../#{'a' * 61}")
+      ].each do |payload|
+        release_file.write(payload)
+        err = assert_raises(InstantRecord::Compiler::BuildError) { InstantRecord::Compiler.publish(root) }
+        assert_equal "Invalid compiled release version", err.message, "payload=#{payload.inspect}"
+      end
+      refute root.join("public/instant_record_compiled").exist?
+    end
+  end
 end

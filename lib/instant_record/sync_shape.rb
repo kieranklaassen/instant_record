@@ -28,6 +28,12 @@ module InstantRecord
       unless max_limit.is_a?(Integer) && max_limit >= limit && max_limit >= min_limit
         raise ArgumentError, "sync_shape max_limit must be an integer >= limit and min_limit (got #{max_limit.inspect})"
       end
+      if !fill_page_size.nil? && !(fill_page_size.is_a?(Integer) && fill_page_size.positive?)
+        raise ArgumentError, "sync_shape fill_page_size must be a positive integer (got #{fill_page_size.inspect})"
+      end
+      if !fill_budget_bytes.nil? && !(fill_budget_bytes.is_a?(Integer) && fill_budget_bytes.positive?)
+        raise ArgumentError, "sync_shape fill_budget_bytes must be a positive integer (got #{fill_budget_bytes.inspect})"
+      end
 
       @model = model
       @limit = limit
@@ -38,7 +44,7 @@ module InstantRecord
       @search = search
       @lookup = lookup
       @background_fill = !!background_fill
-      @fill_page_size = (fill_page_size || max_limit).to_i
+      @fill_page_size = fill_page_size || max_limit
       @fill_budget_bytes = fill_budget_bytes
     end
 
@@ -69,19 +75,29 @@ module InstantRecord
         relation = relation.instance_exec(search, &@search)
       end
       if before_at && before_id.present?
+        created_col, pk_col = @model.connection_pool.with_connection do |connection|
+          table = connection.quote_table_name(@model.table_name)
+          [
+            "#{table}.#{connection.quote_column_name('created_at')}",
+            "#{table}.#{connection.quote_column_name(pk)}"
+          ]
+        end
         # Before the OR: without an index, a row above the page fails at once.
-        relation = relation.where("created_at <= ?", before_at) if self.class.needs_range?(@model)
-        relation = relation.where("created_at < :at OR (created_at = :at AND #{pk} < :id)", at: before_at, id: before_id)
+        relation = relation.where("#{created_col} <= ?", before_at) if self.class.needs_range?(@model)
+        relation = relation.where("#{created_col} < :at OR (#{created_col} = :at AND #{pk_col} < :id)", at: before_at, id: before_id)
       end
 
       fetched = relation.order(created_at: :desc, pk => :desc).limit(size + 1).to_a
-      has_more = fetched.size > size
       roots = fetched.first(size)
       last = roots.last
-      next_before = last && {
-        created_at: last.created_at.utc.iso8601(InstantRecord::TIME_PRECISION),
-        id: last.id
-      }
+      next_before =
+        if last&.created_at
+          {
+            created_at: last.created_at.utc.iso8601(InstantRecord::TIME_PRECISION),
+            id: last.id
+          }
+        end
+      has_more = fetched.size > size && !next_before.nil?
       { records: expand(base, roots), has_more: has_more, next_before: next_before }
     end
 

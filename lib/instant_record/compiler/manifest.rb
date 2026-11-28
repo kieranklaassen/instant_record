@@ -17,7 +17,12 @@ module InstantRecord
       attr_reader :data
 
       def self.from_json(json_text)
-        new(JSON.parse(json_text))
+        parsed = JSON.parse(json_text)
+        raise BuildError, "Manifest JSON must be a JSON object" unless parsed.is_a?(Hash)
+
+        new(parsed)
+      rescue JSON::ParserError => e
+        raise BuildError, "Invalid manifest JSON: #{e.message}"
       end
 
       def self.read(path)
@@ -33,16 +38,42 @@ module InstantRecord
         path = File.join(source_root.to_s, CONFIG_FILE)
         return { include: empty_includes, server_routes: [] } unless File.file?(path)
 
-        raw = YAML.safe_load_file(path, permitted_classes: [Symbol]) || {}
+        raw = YAML.safe_load_file(path, permitted_classes: [Symbol])
+        raw = {} if raw.nil?
         raise BuildError, "#{CONFIG_FILE} must be a YAML mapping" unless raw.is_a?(Hash)
 
         base = normalize_overrides(raw)
-        if island && raw["islands"].is_a?(Hash)
-          island_section = raw["islands"][island.to_s] || raw["islands"][island.to_sym]
-          base = merge_overrides(base, normalize_overrides(island_section)) if island_section.is_a?(Hash)
+        if island
+          islands =
+            if raw.key?("islands") && !raw["islands"].nil?
+              raw["islands"]
+            elsif raw.key?(:islands)
+              raw[:islands]
+            end
+
+          unless islands.nil?
+            raise BuildError, "#{CONFIG_FILE} islands must be a YAML mapping" unless islands.is_a?(Hash)
+
+            island_key = island.to_s
+            island_sym = island.to_sym
+            island_section =
+              if islands.key?(island_key) && !islands[island_key].nil?
+                islands[island_key]
+              elsif islands.key?(island_sym)
+                islands[island_sym]
+              end
+
+            unless island_section.nil?
+              unless island_section.is_a?(Hash)
+                raise BuildError, "#{CONFIG_FILE} islands.#{island_key} must be a YAML mapping"
+              end
+
+              base = merge_overrides(base, normalize_overrides(island_section))
+            end
+          end
         end
         base
-      rescue Psych::SyntaxError => e
+      rescue Psych::Exception => e
         raise BuildError, "Invalid YAML in #{CONFIG_FILE}: #{e.message}"
       end
 
@@ -50,7 +81,18 @@ module InstantRecord
         result = { include: empty_includes, server_routes: [] }
         return result unless raw.is_a?(Hash)
 
-        inc = raw["include"] || raw[:include]
+        explicit_inc =
+          if raw.key?("include") && !raw["include"].nil?
+            raw["include"]
+          elsif raw.key?(:include)
+            raw[:include]
+          end
+
+        if !explicit_inc.nil? && !explicit_inc.is_a?(Hash)
+          raise BuildError, "include overrides must be a mapping (got #{explicit_inc.class})"
+        end
+
+        inc = explicit_inc
         if inc.nil? && (raw.keys.map(&:to_s) & INCLUDE_KEYS).any?
           inc = raw
         end
